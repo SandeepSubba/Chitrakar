@@ -144,6 +144,8 @@ export function App() {
       setCmyk(useCmyk);
       setSelected(null);
       setHasIcc(false);
+      setProofing(false);
+      setGamutWarn(false);
       shapeCount.current = 0;
       refresh(s);
       fitView();
@@ -556,6 +558,8 @@ export function App() {
       setCmyk(s.cmyk);
       setSelected(null);
       setHasIcc(s.has_cmyk_profile);
+      setProofing(false);
+      setGamutWarn(false);
       refresh(s);
       fitView();
     });
@@ -572,6 +576,20 @@ export function App() {
   };
 
   const [hasIcc, setHasIcc] = useState(false);
+  const [proofing, setProofing] = useState(false);
+  const [gamutWarn, setGamutWarn] = useState(false);
+
+  const applyProofing = (proof: boolean, gamut: boolean) => {
+    if (!session) return;
+    try {
+      session.set_proofing(proof, gamut);
+      setProofing(proof);
+      setGamutWarn(gamut);
+      refresh(session);
+    } catch (err) {
+      alert(`Soft proofing: ${err}`);
+    }
+  };
 
   const loadIccProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -607,19 +625,32 @@ export function App() {
             hidden
           />
         </label>
-        {cmyk && (
-          <label
-            className="file-button"
-            title="Load a CMYK press profile (ICC) for accurate ink preview"
-          >
-            {hasIcc ? "ICC ✓" : "ICC…"}
-            <input
-              type="file"
-              accept=".icc,.icm"
-              onChange={loadIccProfile}
-              hidden
-            />
-          </label>
+        <label
+          className="file-button"
+          title="Load a CMYK press profile (ICC) for ink preview and proofing"
+        >
+          {hasIcc ? "ICC ✓" : "ICC…"}
+          <input type="file" accept=".icc,.icm" onChange={loadIccProfile} hidden />
+        </label>
+        {hasIcc && (
+          <>
+            <button
+              className={proofing ? "toggled" : ""}
+              onClick={() => applyProofing(!proofing, false)}
+              title="Soft proof: preview what the press can reproduce"
+            >
+              Proof
+            </button>
+            <button
+              className={gamutWarn ? "toggled" : ""}
+              onClick={() =>
+                gamutWarn ? applyProofing(proofing, false) : applyProofing(true, true)
+              }
+              title="Mark out-of-gamut pixels grey"
+            >
+              Gamut
+            </button>
+          </>
         )}
         <button onClick={saveFile}>Save</button>
         <button onClick={exportPng}>Export PNG</button>
@@ -1007,7 +1038,7 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
             aria-label="Fill enabled"
           />
           Fill
-          {v.fill && (
+          {v.fill && !("Cmyk" in v.fill) && (
             <input
               type="color"
               value={colorToHex(v.fill)}
@@ -1019,6 +1050,24 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
             />
           )}
         </label>
+        {v.fill && "Cmyk" in v.fill && (
+          <>
+            {(["c", "m", "y", "k"] as const).map((ch) => {
+              const ink = (v.fill as { Cmyk: Record<string, number> }).Cmyk;
+              return slider(
+                `${ch.toUpperCase()} ink`,
+                ink[ch],
+                0,
+                1,
+                0.01,
+                (val) =>
+                  patch({
+                    fill: { Cmyk: { ...ink, [ch]: val } } as typeof v.fill,
+                  }),
+              );
+            })}
+          </>
+        )}
         <label className="row">
           <input
             type="checkbox"

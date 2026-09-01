@@ -53,6 +53,11 @@ pub struct Session {
     preview_inverse: Option<Command>,
     /// Total pixels re-rendered so far (observability for tests and tuning).
     pixels_recomputed: u64,
+    /// Soft-proofing (display-only): round-trip presented pixels through the
+    /// document's press profile, optionally marking out-of-gamut pixels.
+    proof_cms: Option<chitrakar_color::cms::ProofCms>,
+    soft_proof: bool,
+    gamut_warn: bool,
 }
 
 impl Session {
@@ -69,6 +74,9 @@ impl Session {
             stale: None,
             preview_inverse: None,
             pixels_recomputed: 0,
+            proof_cms: None,
+            soft_proof: false,
+            gamut_warn: false,
         }
     }
 
@@ -354,8 +362,58 @@ impl Session {
         self.doc
             .set_cmyk_profile(icc)
             .map_err(EngineError::BadCommand)?;
+        // An active proof must follow the new profile; otherwise rebuild lazily.
+        self.proof_cms = if self.soft_proof {
+            Some(
+                chitrakar_color::cms::ProofCms::new(self.doc.cmyk_profile_bytes().unwrap())
+                    .map_err(EngineError::BadCommand)?,
+            )
+        } else {
+            None
+        };
         self.mark_dirty(Bounds::Everything);
         Ok(())
+    }
+
+    /// Toggle display soft-proofing through the document's press profile.
+    /// Fails when proofing is requested without a loaded profile.
+    pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), EngineError> {
+        if proof && self.proof_cms.is_none() {
+            let Some(bytes) = self.doc.cmyk_profile_bytes() else {
+                return Err(EngineError::BadCommand(
+                    "soft proofing needs a CMYK profile loaded first".into(),
+                ));
+            };
+            self.proof_cms =
+                Some(chitrakar_color::cms::ProofCms::new(bytes).map_err(EngineError::BadCommand)?);
+        }
+        self.soft_proof = proof;
+        self.gamut_warn = gamut_warn;
+        // The composite is unchanged, but everything presented must re-encode.
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    /// Encode a region of the cached surface for display, applying the
+    /// soft-proof transform when enabled. `out` is the full-frame RGBA8
+    /// buffer (row stride = document width).
+    pub fn encode_present_region(&self, clip: ClipRect, out: &mut [u8]) {
+        let Some(surface) = &self.cache else {
+            return;
+        };
+        surface.encode_srgb8_region(clip, out);
+        if !self.soft_proof {
+            return;
+        }
+        let Some(proof) = &self.proof_cms else {
+            return;
+        };
+        let w = surface.width as usize;
+        for y in clip.y0..clip.y1 {
+            let row = (y as usize * w + clip.x0 as usize) * 4;
+            let end = (y as usize * w + clip.x1 as usize) * 4;
+            proof.proof_rgba8(&mut out[row..end], self.gamut_warn);
+        }
     }
 
     pub fn has_cmyk_profile(&self) -> bool {
@@ -693,6 +751,72 @@ mod tests {
         // Real presses can't print #00FFFF; profiled cyan is darker/bluer.
         assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
         assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn soft_proofing_changes_presented_pixels_only() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+
+        let mut session = Session::new(4, 4, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "blue",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+
+        // Proofing without a profile is refused.
+        assert!(session.set_proofing(true, false).is_err());
+        session.set_cmyk_profile(icc).unwrap();
+
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        let mut plain = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut plain);
+        assert_eq!(&plain[0..3], &[0, 0, 255]);
+
+        session.set_proofing(true, false).unwrap();
+        let mut proofed = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut proofed);
+        assert_ne!(&proofed[0..3], &[0, 0, 255], "press can't print pure blue");
+
+        session.set_proofing(true, true).unwrap();
+        let mut marked = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut marked);
+        assert_eq!(&marked[0..3], &[128, 128, 128], "gamut warning marks it");
+
+        // Export stays unproofed: proofing is a display transform.
+        let exported = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_eq!(exported, [0, 0, 255, 255]);
     }
 
     #[test]

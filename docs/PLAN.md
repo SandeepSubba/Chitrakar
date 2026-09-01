@@ -196,8 +196,11 @@ chitrakar/
 - CMYK document mode ✅ with press profiles ✅: documents carry an ICC press
   profile (persisted in .chitra as profiles/cmyk.icc, loadable in the UI);
   authored CMYK ink renders through it, naive formula as fallback; shapes
-  drawn in CMYK documents author real ink values. CMYK picker UI, soft
-  proofing + gamut warning pending.
+  drawn in CMYK documents author real ink values with C/M/Y/K ink sliders ✅.
+- Soft proofing ✅ + gamut warning ✅: display-only round trip through the
+  press profile at the presentation-encode step (exports stay unproofed);
+  out-of-gamut pixels mark neutral grey. Monitor profiles and rendering-
+  intent selection pending.
 - Export: PNG/JPEG (sRGB), TIFF (CMYK, profile embedded), SVG (vector layers),
   PDF (composite, profile embedded).
 

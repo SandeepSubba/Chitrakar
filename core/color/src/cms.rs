@@ -87,6 +87,106 @@ impl CmykCms {
     }
 }
 
+/// Soft-proofing transform: round-trips display pixels through a CMYK press
+/// profile (sRGB → press → sRGB) so the screen shows what the press can
+/// actually reproduce, with optional out-of-gamut marking.
+#[derive(Clone)]
+pub struct ProofCms {
+    to_press: Arc<TransformF32Executor>,
+    from_press: Arc<TransformF32Executor>,
+}
+
+impl std::fmt::Debug for ProofCms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProofCms")
+    }
+}
+
+/// Channel delta (0..=1) beyond which a round-tripped pixel counts as
+/// out-of-gamut for the warning overlay.
+const GAMUT_TOLERANCE: f32 = 0.04;
+/// Neutral grey painted over out-of-gamut pixels (Photoshop convention).
+const GAMUT_MARK: [u8; 3] = [128, 128, 128];
+
+impl ProofCms {
+    /// Parse ICC bytes; errors unless the profile's device space is CMYK.
+    pub fn new(icc: &[u8]) -> Result<Self, String> {
+        let profile = ColorProfile::new_from_slice(icc).map_err(|e| format!("{e:?}"))?;
+        if profile.color_space != DataColorSpace::Cmyk {
+            return Err(format!(
+                "profile device space is {:?}, expected CMYK",
+                profile.color_space
+            ));
+        }
+        let srgb = ColorProfile::new_srgb();
+        let to_press = srgb
+            .create_transform_f32(
+                Layout::Rgb,
+                &profile,
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        let from_press = profile
+            .create_transform_f32(
+                Layout::Rgba,
+                &srgb,
+                Layout::Rgb,
+                TransformOptions::default(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(Self {
+            to_press,
+            from_press,
+        })
+    }
+
+    /// Proof RGBA8 pixels in place. With `gamut_warn`, pixels whose
+    /// round-trip moves more than the tolerance are painted neutral grey
+    /// instead. Alpha is untouched.
+    pub fn proof_rgba8(&self, pixels: &mut [u8], gamut_warn: bool) {
+        // Chunked so temporaries stay small on big frames.
+        const CHUNK: usize = 16 * 1024;
+        let mut rgb = Vec::with_capacity(CHUNK * 3);
+        let mut press = vec![0f32; CHUNK * 4];
+        let mut back = vec![0f32; CHUNK * 3];
+        for chunk in pixels.chunks_mut(CHUNK * 4) {
+            let n = chunk.len() / 4;
+            rgb.clear();
+            for px in chunk.chunks_exact(4) {
+                rgb.extend_from_slice(&[
+                    px[0] as f32 / 255.0,
+                    px[1] as f32 / 255.0,
+                    px[2] as f32 / 255.0,
+                ]);
+            }
+            if self
+                .to_press
+                .transform(&rgb, &mut press[..n * 4])
+                .and_then(|_| {
+                    self.from_press
+                        .transform(&press[..n * 4], &mut back[..n * 3])
+                })
+                .is_err()
+            {
+                return; // leave pixels unproofed rather than corrupt them
+            }
+            for (i, px) in chunk.chunks_exact_mut(4).enumerate() {
+                let proofed = &back[i * 3..i * 3 + 3];
+                let out_of_gamut =
+                    (0..3).any(|k| (proofed[k] - rgb[i * 3 + k]).abs() > GAMUT_TOLERANCE);
+                if gamut_warn && out_of_gamut {
+                    px[0..3].copy_from_slice(&GAMUT_MARK);
+                } else {
+                    for k in 0..3 {
+                        px[k] = (proofed[k].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Display P3 profile bytes — used by tests and (later) for assigning
 /// well-known profiles without shipping .icc files.
 pub fn display_p3_profile_bytes() -> Vec<u8> {
@@ -125,6 +225,34 @@ mod tests {
         assert!(!normalize_rgba8_to_srgb(b"not an icc profile", &mut px));
         assert_eq!(px, [1, 2, 3, 4]);
         assert!(CmykCms::new(&display_p3_profile_bytes()).is_err());
+    }
+
+    /// Needs a real press profile (CHITRAKAR_TEST_CMYK_ICC), like the other
+    /// CMYK tests.
+    #[test]
+    fn soft_proof_clamps_saturated_colors_and_marks_gamut() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let proof = ProofCms::new(&icc).unwrap();
+
+        // Saturated blue is far outside a press gamut; near-white paper
+        // tone is reproducible.
+        let mut px = vec![0u8, 0, 255, 255, /**/ 240, 240, 238, 255];
+        proof.proof_rgba8(&mut px, false);
+        assert_ne!(&px[0..3], &[0, 0, 255], "saturated blue must shift");
+        assert_eq!(px[3], 255, "alpha untouched");
+        let paper_delta: i32 = (px[4] as i32 - 240).abs() + (px[5] as i32 - 240).abs();
+        assert!(paper_delta < 30, "printable tone survives: {:?}", &px[4..7]);
+
+        // Gamut warning paints the unprintable pixel grey.
+        let mut px = vec![0u8, 0, 255, 255];
+        proof.proof_rgba8(&mut px, true);
+        assert_eq!(&px[0..3], &[128, 128, 128], "gamut mark applied");
+
+        assert!(ProofCms::new(&display_p3_profile_bytes()).is_err());
     }
 
     /// Full CMYK verification needs a real press profile, which is not

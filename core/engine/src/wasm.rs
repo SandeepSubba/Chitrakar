@@ -96,13 +96,19 @@ impl WasmSession {
         if first_frame {
             self.frame = vec![0; expected];
         }
-        let (surface, dirty) = self.inner.render_cached().map_err(to_js)?;
+        let full = crate::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: self.width(),
+            y1: self.height(),
+        };
+        let (_, dirty) = self.inner.render_cached().map_err(to_js)?;
         let clip = match (dirty, first_frame) {
             (Some(clip), _) => clip,
             (None, false) => return Ok(Vec::new()),
-            (None, true) => surface_full_clip(surface),
+            (None, true) => full,
         };
-        surface.encode_srgb8_region(clip, &mut self.frame);
+        self.inner.encode_present_region(clip, &mut self.frame);
         Ok(vec![clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0])
     }
 
@@ -158,6 +164,12 @@ impl WasmSession {
         self.inner.set_cmyk_profile(icc.to_vec()).map_err(to_js)
     }
 
+    /// Toggle display soft-proofing (and gamut warning) through the press
+    /// profile.
+    pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), JsError> {
+        self.inner.set_proofing(proof, gamut_warn).map_err(to_js)
+    }
+
     #[wasm_bindgen(getter)]
     pub fn has_cmyk_profile(&self) -> bool {
         self.inner.has_cmyk_profile()
@@ -171,15 +183,6 @@ impl WasmSession {
     /// Render and encode as PNG (export).
     pub fn export_png(&self) -> Result<Vec<u8>, JsError> {
         self.inner.render_png().map_err(to_js)
-    }
-}
-
-fn surface_full_clip(surface: &crate::Surface) -> crate::ClipRect {
-    crate::ClipRect {
-        x0: 0,
-        y0: 0,
-        x1: surface.width,
-        y1: surface.height,
     }
 }
 
