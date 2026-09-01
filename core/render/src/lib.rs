@@ -171,7 +171,11 @@ fn shape_size(shape: &VectorShape) -> (f32, f32) {
     match shape {
         VectorShape::Rect { width, height } => (*width, *height),
         VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
-        VectorShape::Path { .. } => (0.0, 0.0),
+        // Path anchors are normalized to a (0,0) origin on creation; local
+        // size is their extent.
+        VectorShape::Path { points, .. } => points
+            .iter()
+            .fold((0.0f32, 0.0f32), |(w, h), p| (w.max(p[0]), h.max(p[1]))),
     }
 }
 
@@ -207,7 +211,21 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
         }
         kind => {
             let (w, h) = local_size(kind).unwrap();
-            transformed_bounds(node.transform, w, h)
+            let mut bounds = transformed_bounds(node.transform, w, h);
+            // Path strokes are centered on the line, so they overhang the
+            // anchor bounds (rect/ellipse strokes are inner bands and don't).
+            if let NodeKind::Vector {
+                shape: VectorShape::Path { .. },
+                stroke: Some(stroke),
+                ..
+            } = kind
+            {
+                let pad = stroke.width * node.transform.a.abs().max(node.transform.d.abs());
+                if let Bounds::Rect(x0, y0, x1, y1) = bounds {
+                    bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+                }
+            }
+            bounds
         }
     })
 }
@@ -404,7 +422,9 @@ fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
     Some(((x - t.e) / t.a, (y - t.f) / t.d))
 }
 
-/// Local-space coverage test for a shape (shape origin at 0,0).
+/// Local-space coverage test for a shape (shape origin at 0,0). Paths fill
+/// by the even-odd rule over their anchor polygon (open paths close
+/// implicitly, the SVG convention).
 fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     match shape {
         VectorShape::Rect { width, height } => x >= 0.0 && y >= 0.0 && x < *width && y < *height,
@@ -412,14 +432,56 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
             let (nx, ny) = ((x - rx) / rx, (y - ry) / ry);
             nx * nx + ny * ny <= 1.0
         }
-        // Path filling comes with the vector rasterizer proper.
-        VectorShape::Path { .. } => false,
+        VectorShape::Path { points, .. } => {
+            if points.len() < 3 {
+                return false;
+            }
+            let mut inside = false;
+            for i in 0..points.len() {
+                let a = points[i];
+                let b = points[(i + 1) % points.len()];
+                if (a[1] > y) != (b[1] > y) {
+                    let t = (y - a[1]) / (b[1] - a[1]);
+                    if x < a[0] + t * (b[0] - a[0]) {
+                        inside = !inside;
+                    }
+                }
+            }
+            inside
+        }
     }
 }
 
-/// Coverage of a shape's inner stroke band of the given width: inside the
-/// shape but not inside the shape shrunk by the stroke width.
+/// Distance from a point to a line segment.
+fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= 1e-12 {
+        0.0
+    } else {
+        (((px - a[0]) * dx + (py - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a[0] + t * dx, a[1] + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+/// Stroke coverage. Rects and ellipses use an inner band of the given width
+/// (bounds stay stable); paths use a stroke centered on the line so open
+/// paths render as line art.
 fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
+    if let VectorShape::Path { points, closed } = shape {
+        if points.len() < 2 {
+            return false;
+        }
+        let segments = if *closed {
+            points.len()
+        } else {
+            points.len() - 1
+        };
+        let half = width / 2.0;
+        return (0..segments)
+            .any(|i| segment_distance(x, y, points[i], points[(i + 1) % points.len()]) <= half);
+    }
     if !shape_covers(shape, x, y) {
         return false;
     }
@@ -436,7 +498,7 @@ fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
             let (nx, ny) = ((x - rx) / irx, (y - ry) / iry);
             nx * nx + ny * ny > 1.0
         }
-        VectorShape::Path { .. } => false,
+        VectorShape::Path { .. } => unreachable!(),
     }
 }
 
@@ -466,7 +528,18 @@ fn paint_shape(
     mask: Option<&Mask>,
 ) {
     let (w, h) = shape_size(shape);
-    let bbox = draw_bbox(t, w, h, dst, clip);
+    let mut bbox = draw_bbox(t, w, h, dst, clip);
+    // Centered path strokes overhang the anchor bounds.
+    if let (Some(sw), VectorShape::Path { .. }) = (stroke_width, shape) {
+        let pad = (sw * t.a.abs().max(t.d.abs())).ceil() as u32 + 1;
+        bbox = ClipRect {
+            x0: bbox.x0.saturating_sub(pad),
+            y0: bbox.y0.saturating_sub(pad),
+            x1: (bbox.x1 + pad).min(dst.width),
+            y1: (bbox.y1 + pad).min(dst.height),
+        }
+        .intersect(clip);
+    }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             // Sample at pixel centers; anti-aliasing arrives with the real
@@ -1276,6 +1349,111 @@ mod tests {
 
         assert_eq!(hit_test(&doc, 4.5, 4.5).unwrap(), Some(node));
         assert_eq!(hit_test(&doc, 1.0, 1.0).unwrap(), None);
+    }
+
+    #[test]
+    fn closed_path_fills_by_even_odd_and_hit_tests() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        // Concave arrowhead: (0,0) (16,8) (0,16) (6,8) — the notch at the
+        // left must stay empty under even-odd.
+        let mut node = Node::vector(
+            "arrow",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [16.0, 8.0], [0.0, 16.0], [6.0, 8.0]],
+                closed: true,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(2.0, 2.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        // Body of the arrow (doc space): local (10,8) -> doc (12,10).
+        assert_eq!(s.get(12, 10).to_srgb8(), [255, 0, 0, 255], "inside filled");
+        // The concave notch: local (2,8) -> doc (4,10) is outside the fill.
+        assert_eq!(s.get(4, 10).a, 0.0, "concave notch stays empty");
+        assert_eq!(s.get(19, 19).a, 0.0, "outside stays empty");
+
+        assert_eq!(hit_test(&doc, 12.0, 10.0).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 4.0, 10.0).unwrap(), None);
+        assert_eq!(
+            node_bounds(&doc, id).unwrap(),
+            Bounds::Rect(2.0, 2.0, 18.0, 18.0)
+        );
+    }
+
+    #[test]
+    fn open_path_strokes_as_centered_line_art() {
+        let mut doc = Document::new(24, 24, ColorMode::Rgb);
+        let root = doc.root();
+        // A "V" polyline, stroke only.
+        let mut node = Node::vector(
+            "v",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [8.0, 16.0], [16.0, 0.0]],
+                closed: false,
+            },
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(4.0, 4.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        // Bottom vertex local (8,16) -> doc (12,20): on the line.
+        assert_eq!(s.get(12, 20).to_srgb8(), [0, 255, 0, 255], "vertex stroked");
+        // Interior of the V (doc (12,8)) is far from both segments: empty.
+        assert_eq!(s.get(12, 8).a, 0.0, "V interior not filled");
+        // No implicit closing segment across the top for open paths.
+        assert_eq!(s.get(12, 4).a, 0.0, "open path has no closing edge");
+
+        assert_eq!(
+            hit_test(&doc, 12.0, 20.0).unwrap(),
+            Some(id),
+            "stroke clickable"
+        );
+        assert_eq!(hit_test(&doc, 12.0, 8.0).unwrap(), None);
+
+        // Bounds include the centered stroke's overhang.
+        let Bounds::Rect(x0, y0, _, y1) = node_bounds(&doc, id).unwrap() else {
+            panic!("expected rect bounds");
+        };
+        assert!(
+            x0 < 4.0 && y0 < 4.0 && y1 > 20.0,
+            "stroke overhang in bounds"
+        );
     }
 
     #[test]

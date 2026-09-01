@@ -19,7 +19,7 @@ import {
   sendPreview,
 } from "./engine";
 
-const TOOLS = ["Move", "Rect", "Ellipse"] as const;
+const TOOLS = ["Move", "Rect", "Ellipse", "Pen"] as const;
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
@@ -89,6 +89,8 @@ export function App() {
   const panDragRef = useRef<PanDrag | null>(null);
   const spaceRef = useRef(false);
   const shapeCount = useRef(0);
+  /** Pen tool: anchors of the path being drawn, in doc coordinates. */
+  const [penPoints, setPenPoints] = useState<[number, number][]>([]);
 
   const refresh = useCallback((s: WasmSession) => {
     const canvas = canvasRef.current;
@@ -192,8 +194,53 @@ export function App() {
     if (!session) return;
     toolDragRef.current = null;
     handleDragRef.current = null;
+    setPenPoints([]);
     if (session.cancel_preview()) refresh(session);
   }, [session, refresh]);
+
+  /** Commit the pen path being drawn: closed shapes get the current fill,
+   * open polylines get a stroke. Anchors normalize to a (0,0) origin with
+   * the offset carried by the node transform. */
+  const finishPath = useCallback(
+    (closed: boolean) => {
+      if (!session) return;
+      setPenPoints((pts) => {
+        if (pts.length < (closed ? 3 : 2)) return pts;
+        const minX = Math.min(...pts.map((p) => p[0]));
+        const minY = Math.min(...pts.map((p) => p[1]));
+        const points = pts.map(
+          (p) => [p[0] - minX, p[1] - minY] as [number, number],
+        );
+        shapeCount.current += 1;
+        run({
+          AddNode: {
+            parent: session.root_id,
+            index: topLevelCount(layers),
+            node: nodePayload(
+              `Path ${shapeCount.current}`,
+              {
+                Vector: {
+                  shape: { Path: { points, closed } },
+                  fill: closed
+                    ? cmyk
+                      ? hexToCmykColor(fill)
+                      : hexColor(fill)
+                    : null,
+                  stroke: closed
+                    ? null
+                    : { color: hexColor(fill), width: 4 },
+                },
+              },
+              minX,
+              minY,
+            ),
+          },
+        });
+        return [];
+      });
+    },
+    [session, layers, fill, cmyk, run],
+  );
 
   // Keyboard: undo/redo, space-to-pan, escape-to-cancel.
   useEffect(() => {
@@ -204,6 +251,9 @@ export function App() {
         else undo();
       }
       if (e.key === "Escape") cancelGesture();
+      if (e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
+        finishPath(false); // pen tool: finish as an open (stroked) path
+      }
       if (e.code === "Space" && !(e.target instanceof HTMLInputElement)) {
         spaceRef.current = true;
         e.preventDefault();
@@ -218,7 +268,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo, cancelGesture]);
+  }, [undo, redo, cancelGesture, finishPath]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
@@ -289,6 +339,21 @@ export function App() {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
+    if (tool === "Pen") {
+      // Clicking the first anchor again closes the path.
+      const closeRadius = 8 / view.zoom;
+      const first = penPoints[0];
+      if (
+        penPoints.length >= 3 &&
+        first &&
+        Math.hypot(x - first[0], y - first[1]) < closeRadius
+      ) {
+        finishPath(true);
+      } else {
+        setPenPoints((pts) => [...pts, [x, y]]);
+      }
+      return;
+    }
     const drag: ToolDrag = {
       tool,
       startX: x,
@@ -675,7 +740,10 @@ export function App() {
             <button
               key={t}
               className={t === tool ? "tool active" : "tool"}
-              onClick={() => setTool(t)}
+              onClick={() => {
+                setTool(t);
+                setPenPoints([]);
+              }}
               title={t}
             >
               {t[0]}
@@ -708,6 +776,21 @@ export function App() {
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
           />
+          {penPoints.length > 0 && (
+            <svg className="pen-overlay" aria-hidden="true">
+              <polyline
+                points={penPoints
+                  .map((p) => `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`)
+                  .join(" ")}
+              />
+              <circle
+                className="pen-first"
+                cx={view.x + penPoints[0][0] * view.zoom}
+                cy={view.y + penPoints[0][1] * view.zoom}
+                r={5}
+              />
+            </svg>
+          )}
           {selBounds && selBounds.length === 4 && (
             <div
               className="sel-overlay"

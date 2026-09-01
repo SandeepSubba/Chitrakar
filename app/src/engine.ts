@@ -17,7 +17,8 @@ export type AuthoredColor =
 
 export type VectorShape =
   | { Rect: { width: number; height: number } }
-  | { Ellipse: { rx: number; ry: number } };
+  | { Ellipse: { rx: number; ry: number } }
+  | { Path: { points: [number, number][]; closed: boolean } };
 
 export type Adjustment =
   | { BrightnessContrast: { brightness: number; contrast: number } }

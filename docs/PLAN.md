@@ -160,8 +160,12 @@ chitrakar/
 - Live gestures ✅: preview/commit/cancel in the engine — drags update the
   document each pointer move, history records one undo step per gesture,
   Escape cancels. Transforms support scale (shear/rotation with the GPU path).
-- Vector: rect/ellipse ✅ drawn interactively; polygon/path objects, gradient fills,
-  strokes pending.
+- Vector: rect/ellipse ✅ drawn interactively; polygon paths ✅ — even-odd
+  fill, centered stroke for open polylines (line art), hit testing and
+  stroke-aware bounds — drawn with the pen tool ✅ (click anchors, click the
+  first anchor to close as a filled shape, Enter finishes an open stroked
+  path, Escape abandons, dashed live preview). Bezier segments and anchor
+  editing pending; gradient fills pending.
 - Raster: place PNG/JPEG as RasterObject ✅ (content-addressed resource pool,
   pixels embedded as PNGs in .chitra, undoable placement, move + hit test);
   scale/rotate pending.
