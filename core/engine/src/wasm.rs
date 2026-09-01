@@ -211,6 +211,11 @@ impl WasmSession {
     pub fn export_png(&self) -> Result<Vec<u8>, JsError> {
         self.inner.render_png().map_err(to_js)
     }
+
+    /// Export as SVG markup.
+    pub fn export_svg(&self) -> Result<String, JsError> {
+        self.inner.export_svg().map_err(to_js)
+    }
 }
 
 fn to_js(e: crate::EngineError) -> JsError {

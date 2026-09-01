@@ -404,6 +404,11 @@ impl Session {
         Ok(chitrakar_render::render(&self.doc)?)
     }
 
+    /// Export vector layers (and embedded rasters/text) as SVG.
+    pub fn export_svg(&self) -> Result<String, EngineError> {
+        Ok(chitrakar_codecs::export_svg(&self.doc)?)
+    }
+
     /// Render and encode as PNG — used by export and tests.
     pub fn render_png(&self) -> Result<Vec<u8>, EngineError> {
         let surface = self.render()?;

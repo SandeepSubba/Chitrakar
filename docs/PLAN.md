@@ -218,8 +218,10 @@ chitrakar/
   press profile at the presentation-encode step (exports stay unproofed);
   out-of-gamut pixels mark neutral grey. Monitor profiles and rendering-
   intent selection pending.
-- Export: PNG/JPEG (sRGB), TIFF (CMYK, profile embedded), SVG (vector layers),
-  PDF (composite, profile embedded).
+- Export: PNG ✅ (sRGB composite), SVG ✅ (live vector markup — shapes,
+  paths, groups with opacity/blend, embedded rasters, text; CMYK colors
+  resolve through the press profile; adjustments/filters/masks noted as
+  omitted). JPEG, TIFF (CMYK, profile embedded), and PDF pending.
 
 ### Phase 4 — Mobile shells
 - Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.

@@ -6,8 +6,10 @@
 //! treated as sRGB, which matches the naive pipeline in `chitrakar-color`.
 
 pub mod container;
+pub mod svg;
 
 pub use container::{load_chitra, save_chitra, ContainerError};
+pub use svg::export_svg;
 
 use chitrakar_color::LinearRgba;
 use image::ImageFormat;

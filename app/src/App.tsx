@@ -761,6 +761,15 @@ export function App() {
     download(session.export_png(), "untitled.png", "image/png");
   };
 
+  const exportSvg = () => {
+    if (!session) return;
+    download(
+      new TextEncoder().encode(session.export_svg()),
+      "untitled.svg",
+      "image/svg+xml",
+    );
+  };
+
   const openFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -867,6 +876,7 @@ export function App() {
         )}
         <button onClick={saveFile}>Save</button>
         <button onClick={exportPng}>Export PNG</button>
+        <button onClick={exportSvg}>Export SVG</button>
         <span className="spacer" />
         <button onClick={undo} title="Ctrl+Z">
           Undo
