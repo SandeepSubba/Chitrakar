@@ -18,7 +18,7 @@ export type AuthoredColor =
 export type VectorShape =
   | { Rect: { width: number; height: number } }
   | { Ellipse: { rx: number; ry: number } }
-  | { Path: { points: [number, number][]; closed: boolean } };
+  | { Path: { points: [number, number][]; closed: boolean; smooth: boolean } };
 
 export type Adjustment =
   | { BrightnessContrast: { brightness: number; contrast: number } }
@@ -96,7 +96,8 @@ export type Command =
   | { SetKind: { id: NodeId; kind: NodeKind } }
   | { SetName: { id: NodeId; name: string } }
   | { SetMask: { id: NodeId; mask: Mask | null } }
-  | { MoveNode: { id: NodeId; parent: NodeId; index: number } };
+  | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
+  | { Batch: Command[] };
 
 /** Mirror of `chitrakar_engine::LayerInfo`. */
 export interface LayerInfo {

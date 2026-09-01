@@ -179,6 +179,34 @@ fn shape_size(shape: &VectorShape) -> (f32, f32) {
     }
 }
 
+/// Local bounding box (min x, min y, max x, max y). Unlike [`shape_size`]
+/// this keeps a negative min — a smooth path's spline can overshoot the
+/// anchors, including past the origin.
+fn local_bounds(shape: &VectorShape) -> (f32, f32, f32, f32) {
+    match shape {
+        VectorShape::Path { points, .. } => points.iter().fold(
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+            |(x0, y0, x1, y1), p| (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1])),
+        ),
+        _ => {
+            let (w, h) = shape_size(shape);
+            (0.0, 0.0, w, h)
+        }
+    }
+}
+
+/// Transformed doc-space bounds of a local box.
+fn transformed_local_bounds(t: Transform, lb: (f32, f32, f32, f32)) -> Bounds {
+    let xs = [t.a * lb.0 + t.e, t.a * lb.2 + t.e];
+    let ys = [t.d * lb.1 + t.f, t.d * lb.3 + t.f];
+    Bounds::Rect(
+        xs[0].min(xs[1]),
+        ys[0].min(ys[1]),
+        xs[0].max(xs[1]),
+        ys[0].max(ys[1]),
+    )
+}
+
 /// Transformed doc-space bounds of a local (0,0)-(w,h) box.
 fn transformed_bounds(t: Transform, w: f32, h: f32) -> Bounds {
     let xs = [t.e, t.a * w + t.e];
@@ -209,23 +237,22 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
             }
             acc
         }
-        kind => {
-            let (w, h) = local_size(kind).unwrap();
-            let mut bounds = transformed_bounds(node.transform, w, h);
+        NodeKind::Vector { shape, stroke, .. } => {
+            let flat = flatten_shape(shape);
+            let mut bounds = transformed_local_bounds(node.transform, local_bounds(flat.as_ref()));
             // Path strokes are centered on the line, so they overhang the
             // anchor bounds (rect/ellipse strokes are inner bands and don't).
-            if let NodeKind::Vector {
-                shape: VectorShape::Path { .. },
-                stroke: Some(stroke),
-                ..
-            } = kind
-            {
+            if let (VectorShape::Path { .. }, Some(stroke)) = (shape, stroke) {
                 let pad = stroke.width * node.transform.a.abs().max(node.transform.d.abs());
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
                 }
             }
             bounds
+        }
+        kind => {
+            let (w, h) = local_size(kind).unwrap();
+            transformed_bounds(node.transform, w, h)
         }
     })
 }
@@ -422,6 +449,63 @@ fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
     Some(((x - t.e) / t.a, (y - t.f) / t.d))
 }
 
+/// Expand a smooth path into its rendered polyline: a uniform Catmull-Rom
+/// spline through the anchors, sampled per segment. Everything else (and
+/// paths already polyline) borrows unchanged. Call once per operation, not
+/// per pixel.
+fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
+    use std::borrow::Cow;
+    let VectorShape::Path {
+        points,
+        closed,
+        smooth: true,
+    } = shape
+    else {
+        return Cow::Borrowed(shape);
+    };
+    let n = points.len();
+    if n < 3 {
+        return Cow::Borrowed(shape);
+    }
+    const STEPS: usize = 12;
+    let get = |i: isize| -> [f32; 2] {
+        if *closed {
+            points[i.rem_euclid(n as isize) as usize]
+        } else {
+            points[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    let segments = if *closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(segments * STEPS + 1);
+    for i in 0..segments {
+        let (p0, p1, p2, p3) = (
+            get(i as isize - 1),
+            get(i as isize),
+            get(i as isize + 1),
+            get(i as isize + 2),
+        );
+        for s in 0..STEPS {
+            let t = s as f32 / STEPS as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let f = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+        }
+    }
+    if !closed {
+        out.push(points[n - 1]);
+    }
+    Cow::Owned(VectorShape::Path {
+        points: out,
+        closed: *closed,
+        smooth: false,
+    })
+}
+
 /// Local-space coverage test for a shape (shape origin at 0,0). Paths fill
 /// by the even-odd rule over their anchor polygon (open paths close
 /// implicitly, the SVG convention).
@@ -469,7 +553,7 @@ fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
 /// (bounds stay stable); paths use a stroke centered on the line so open
 /// paths render as line art.
 fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
-    if let VectorShape::Path { points, closed } = shape {
+    if let VectorShape::Path { points, closed, .. } = shape {
         if points.len() < 2 {
             return false;
         }
@@ -527,8 +611,14 @@ fn paint_shape(
     stroke_width: Option<f32>,
     mask: Option<&Mask>,
 ) {
-    let (w, h) = shape_size(shape);
-    let mut bbox = draw_bbox(t, w, h, dst, clip);
+    // Smooth paths render as their flattened spline polyline.
+    let flat = flatten_shape(shape);
+    let shape = flat.as_ref();
+    let mut bbox =
+        match transformed_local_bounds(t, local_bounds(shape)).to_clip(dst.width, dst.height) {
+            Some(b) => b.intersect(clip),
+            None => return,
+        };
     // Centered path strokes overhang the anchor bounds.
     if let (Some(sw), VectorShape::Path { .. }) = (stroke_width, shape) {
         let pad = (sw * t.a.abs().max(t.d.abs())).ceil() as u32 + 1;
@@ -809,6 +899,8 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                 stroke,
             } => {
                 if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                    let flat = flatten_shape(shape);
+                    let shape = flat.as_ref();
                     let hit = if fill.is_some() {
                         shape_covers(shape, lx, ly)
                     } else if let Some(s) = stroke {
@@ -1362,6 +1454,7 @@ mod tests {
             VectorShape::Path {
                 points: vec![[0.0, 0.0], [16.0, 8.0], [0.0, 16.0], [6.0, 8.0]],
                 closed: true,
+                smooth: false,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -1396,6 +1489,78 @@ mod tests {
     }
 
     #[test]
+    fn smooth_path_bulges_past_the_straight_chord() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        // A wide triangle; smoothing the closed path should bow the long
+        // bottom edge outward (below the straight chord).
+        let make = |smooth| {
+            let mut node = Node::vector(
+                "tri",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [30.0, 0.0], [15.0, 20.0]],
+                    closed: true,
+                    smooth,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(RED);
+            }
+            Box::new(node)
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: make(false),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(5.0, 5.0),
+        })
+        .unwrap();
+        let sharp = render(&doc).unwrap();
+
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Path {
+                    points: vec![[0.0, 0.0], [30.0, 0.0], [15.0, 20.0]],
+                    closed: true,
+                    smooth: true,
+                },
+                fill: Some(RED),
+                stroke: None,
+            }),
+        })
+        .unwrap();
+        let smooth = render(&doc).unwrap();
+
+        // A probe between the straight edge (0,0)->(30,0) and outside it:
+        // doc (20, 3) is above y=5 line only reachable when the top edge
+        // bows upward — pick the left edge midpoint instead: chord from
+        // (0,0) to (15,20) passes through local (7.5,10) = doc (12.5,15);
+        // just outside it, local (5.5,10) = doc (10.5,15).
+        assert_eq!(sharp.get(10, 15).a, 0.0, "outside the straight chord");
+        assert!(
+            smooth.get(10, 15).a > 0.0,
+            "smooth spline bows past the chord"
+        );
+        // Both agree deep inside.
+        assert_eq!(sharp.get(20, 12).to_srgb8(), smooth.get(20, 12).to_srgb8());
+
+        // Bounds account for overshoot beyond the anchor box.
+        let Bounds::Rect(_, y0, _, y1) = node_bounds(&doc, id).unwrap() else {
+            panic!("rect bounds expected");
+        };
+        assert!(
+            y0 < 5.0 || y1 > 25.0,
+            "spline overshoot in bounds ({y0}..{y1})"
+        );
+    }
+
+    #[test]
     fn open_path_strokes_as_centered_line_art() {
         let mut doc = Document::new(24, 24, ColorMode::Rgb);
         let root = doc.root();
@@ -1405,6 +1570,7 @@ mod tests {
             VectorShape::Path {
                 points: vec![[0.0, 0.0], [8.0, 16.0], [16.0, 0.0]],
                 closed: false,
+                smooth: false,
             },
         );
         if let NodeKind::Vector { stroke, .. } = &mut node.kind {

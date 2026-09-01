@@ -58,11 +58,13 @@ pub enum VectorShape {
         rx: f32,
         ry: f32,
     },
-    /// Cubic-bezier path: flat list of anchor/control points. Replaced by a
-    /// proper path type when the pen tool lands (Phase 5).
+    /// Anchor polyline. With `smooth`, rendering interpolates a Catmull-Rom
+    /// spline through the anchors instead of straight segments.
     Path {
         points: Vec<[f32; 2]>,
         closed: bool,
+        #[serde(default)]
+        smooth: bool,
     },
 }
 

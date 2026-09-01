@@ -277,6 +277,18 @@ body {
   stroke-width: 1.5;
 }
 
+.anchor {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: grab;
+  touch-action: none;
+  z-index: 2;
+}
+
 .sel-overlay {
   position: absolute;
   border: 1px solid var(--accent);

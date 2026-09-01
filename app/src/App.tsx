@@ -223,7 +223,7 @@ export function App() {
               `Path ${shapeCount.current}`,
               {
                 Vector: {
-                  shape: { Path: { points, closed } },
+                  shape: { Path: { points, closed, smooth: false } },
                   fill: closed
                     ? cmyk
                       ? hexToCmykColor(fill)
@@ -575,6 +575,75 @@ export function App() {
     }
   };
 
+  /** Anchor editing: index of the path anchor being dragged, with the
+   * path's points and transform captured at drag start (each move derives
+   * from these, so renormalization never accumulates drift). */
+  const anchorDragRef = useRef<{
+    idx: number;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    t0: Transform;
+  } | null>(null);
+
+  const onAnchorPointerDown = (e: React.PointerEvent, idx: number) => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    e.stopPropagation();
+    anchorDragRef.current = {
+      idx,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onAnchorPointerMove = (e: React.PointerEvent) => {
+    const drag = anchorDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (!("Path" in drag.vector.shape)) return;
+    const [dx, dy] = docPoint(e);
+    const { t0 } = drag;
+    const path = drag.vector.shape.Path;
+    const pts = path.points.map((p) => [...p] as [number, number]);
+    pts[drag.idx] = [(dx - t0.e) / t0.a, (dy - t0.f) / t0.d];
+    // Keep anchors normalized to a (0,0) origin; the shift moves into the
+    // node transform so bounds and handles stay correct.
+    const minX = Math.min(...pts.map((p) => p[0]));
+    const minY = Math.min(...pts.map((p) => p[1]));
+    const norm = pts.map((p) => [p[0] - minX, p[1] - minY] as [number, number]);
+    preview({
+      Batch: [
+        {
+          SetKind: {
+            id: selected,
+            kind: {
+              Vector: {
+                ...drag.vector,
+                shape: {
+                  Path: { ...path, points: norm },
+                },
+              },
+            },
+          },
+        },
+        {
+          SetTransform: {
+            id: selected,
+            transform: {
+              ...t0,
+              e: t0.e + minX * t0.a,
+              f: t0.f + minY * t0.d,
+            },
+          },
+        },
+      ],
+    });
+  };
+
+  const onAnchorPointerUp = () => {
+    anchorDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const jumpHistory = (delta: number) => {
     if (!session || delta === 0) return;
     session.jump(delta);
@@ -845,6 +914,29 @@ export function App() {
               />
             </svg>
           )}
+          {session &&
+            selected !== null &&
+            selectedKind &&
+            typeof selectedKind === "object" &&
+            "Vector" in selectedKind &&
+            "Path" in selectedKind.Vector.shape &&
+            (() => {
+              const t = toTransform(session.transform_of(selected));
+              return selectedKind.Vector.shape.Path.points.map((p, i) => (
+                <div
+                  key={i}
+                  className="anchor"
+                  data-anchor={i}
+                  style={{
+                    left: view.x + (t.e + p[0] * t.a) * view.zoom - 5,
+                    top: view.y + (t.f + p[1] * t.d) * view.zoom - 5,
+                  }}
+                  onPointerDown={(e) => onAnchorPointerDown(e, i)}
+                  onPointerMove={onAnchorPointerMove}
+                  onPointerUp={onAnchorPointerUp}
+                />
+              ));
+            })()}
           {selBounds && selBounds.length === 4 && (
             <div
               className="sel-overlay"
@@ -1300,6 +1392,32 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
           slider("Stroke width", v.stroke.width, 1, 50, 1, (w) =>
             patch({ stroke: { ...v.stroke!, width: w } }),
           )}
+        {"Path" in v.shape &&
+          (() => {
+            const path = ("Path" in v.shape && v.shape.Path) as {
+              points: [number, number][];
+              closed: boolean;
+              smooth: boolean;
+            };
+            return (
+              <label className="row">
+                <input
+                  type="checkbox"
+                  checked={path.smooth}
+                  onChange={(e) =>
+                    onEdit(
+                      patch({
+                        shape: { Path: { ...path, smooth: e.target.checked } },
+                      }),
+                      false,
+                    )
+                  }
+                  aria-label="Smooth path"
+                />
+                Smooth
+              </label>
+            );
+          })()}
       </>
     );
   }
