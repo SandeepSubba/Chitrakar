@@ -1,0 +1,191 @@
+# Chitrakar — Architecture & Roadmap
+
+Chitrakar ("painter") is a modern, multiplatform photo + vector editing app built around
+two non-negotiable principles:
+
+1. **Non-destructive everything** — the document is a tree of live objects (shapes,
+   images, adjustments, filters, masks). Pixels are only ever *rendered*, never baked.
+   Any edit can be revisited or removed at any time.
+2. **Real color management** — documents can be RGB or CMYK, with ICC-profile-correct
+   import, display (soft proofing), and export. This is designed into the pixel
+   pipeline from day one, not bolted on.
+
+**Target platforms:** Windows, macOS, Linux, iPadOS, iOS, Android.
+
+---
+
+## 1. Tech stack
+
+| Piece | Choice | Why |
+|---|---|---|
+| Engine | **Rust** (`chitrakar-core` workspace) | Memory-safe, fast, compiles natively for all 6 targets *and* to WASM; one engine codebase forever. |
+| App shell | **Tauri 2** | Single shell framework covering desktop *and* iOS/Android; native menus, file dialogs, small binaries. |
+| UI | **TypeScript + React** (webview) | One UI codebase across all platforms; responsive layout adapts desktop ⇄ tablet ⇄ phone. |
+| GPU rendering | **wgpu** (vectors via **vello**, raster ops via compute shaders) | Portable over Vulkan/Metal/DX12/GLES — and over WebGPU when the engine runs as WASM. |
+| Color management | **ICC-based CMS**: `lcms2` (battle-tested) with `moxcms` (pure Rust) evaluated as the WASM-friendly alternative | Correct RGB/CMYK conversions, monitor profiles, soft proofing. |
+| Codecs | `image`/`zune` crates (PNG, JPEG, TIFF), `resvg`/`usvg` (SVG import), custom exporters | Pure Rust ⇒ works on every target including WASM. |
+
+### How the engine reaches the screen
+
+The engine is one Rust crate compiled two ways:
+
+- **WASM build (MVP path):** the engine runs *inside* the webview and renders through
+  WebGPU (fallback: WebGL2/canvas readback). UI ⇄ engine calls are plain in-process
+  bindings — no IPC serialization on the hot path. This works identically in every
+  Tauri shell and keeps one render path to debug.
+- **Native build (optimization path, later):** the same crate runs in the Tauri host
+  process rendering with wgpu directly to a native surface composited with the webview.
+  We switch per-platform only where WASM/WebGPU proves insufficient (likely candidates:
+  older Android webviews, very large documents).
+
+**Risk to validate first (Phase 0 spike):** WebGPU availability in each platform's
+webview (WKWebView on iOS, Android System WebView, WebView2, WebKitGTK). The fallback
+ladder (WebGL2 → software render + blit) must be proven before we commit the MVP to it.
+
+---
+
+## 2. Document model (the heart of the app)
+
+```
+Document
+├─ metadata: color mode (RGB | CMYK), working profile, dpi, dimensions
+├─ resources: embedded source images (immutable, content-addressed)
+└─ root: Group
+   ├─ VectorObject      — path/shape parameters, fills, strokes (all editable)
+   ├─ RasterObject      — reference to immutable source pixels + its own
+   │                       non-destructive edit stack (crop, transform, adjustments)
+   ├─ AdjustmentLayer   — curves, levels, HSL, exposure… applies to everything below
+   ├─ FilterEffect      — gaussian blur, sharpen… attached to an object or a group
+   ├─ Group             — nesting, blend mode, opacity, clipping
+   └─ Mask              — raster or vector mask attachable to any node
+```
+
+Key rules:
+
+- **Source pixels are immutable.** A RasterObject points at a resource; edits are
+  parameter stacks evaluated at render time.
+- **Rendering is a pull-based graph evaluation** with per-node caching: a node re-renders
+  only when its parameters or inputs change. Caches are tiled (e.g. 256×256 tiles) so
+  editing one region doesn't invalidate the whole canvas.
+- **Edits are commands.** Every mutation goes through a command object → free undo/redo,
+  and later a path to collaborative editing (commands are serializable).
+- **Working pixel format:** 32-bit float, premultiplied, linear light, in the document's
+  working space. Blending happens in linear; display transform is the last step.
+
+### File format: `.chitra`
+
+A ZIP container (same family as `.ora`/`.sketch`):
+
+```
+document.chitra
+├─ manifest.json     — versioned schema: full node tree + parameters
+├─ resources/        — original embedded images, untouched bytes
+├─ profiles/         — embedded ICC profiles
+└─ thumbnails/       — preview renders
+```
+
+Human-diffable manifest, originals preserved byte-for-byte, forward-compatible via
+schema version + "unknown node" passthrough (unknown future node types survive
+open→save round trips).
+
+---
+
+## 3. Color pipeline (RGB + CMYK)
+
+No GPU API understands CMYK — so the CMS is part of the engine, not the platform.
+
+```
+import:  decode → assign/honor embedded ICC profile → convert to working space
+edit:    all compositing in linear float, working space
+display: working space → monitor profile (or soft-proof: working → CMYK press
+         profile → monitor, with gamut warning overlay)
+export:  working space → target profile (sRGB PNG/JPEG, CMYK TIFF/PDF), profile embedded
+```
+
+- **RGB documents:** working space = linear form of the chosen profile (sRGB default;
+  Display P3 / Adobe RGB selectable).
+- **CMYK documents:** native CMYK values are preserved on objects where they were
+  authored (a "C:100 M:0 Y:0 K:0" fill stays those numbers); compositing happens in a
+  linear RGB proxy space with the document's press profile (e.g. FOGRA39, GRACoL)
+  driving display and export. This is the Affinity/Photoshop-style compromise that keeps
+  editing fast *and* output correct.
+- Soft proofing and per-document rendering intent (perceptual/relative colorimetric)
+  are first-class UI, not buried settings.
+
+---
+
+## 4. Repository layout
+
+```
+chitrakar/
+├─ core/                  # Rust workspace
+│  ├─ doc/                # document model, commands, undo, .chitra I/O
+│  ├─ render/             # render graph, tiling, wgpu/vello backends
+│  ├─ color/              # CMS wrapper, profiles, pixel formats
+│  ├─ codecs/             # import/export (PNG, JPEG, TIFF, SVG, PDF)
+│  └─ engine/             # public API: the one crate the shells embed
+│                         #   (cdylib for native, wasm-bindgen for WASM)
+├─ app/                   # TypeScript UI (React) — tools, panels, canvas host
+├─ shells/tauri/          # Tauri 2 config for desktop + iOS + Android
+└─ docs/                  # this plan, ADRs, format spec
+```
+
+---
+
+## 5. Roadmap
+
+### Phase 0 — Foundations & risk spikes (small)
+- Scaffold Rust workspace, Tauri 2 app, React UI, CI (fmt/clippy/test + desktop builds).
+- **Spike 1:** WASM engine + WebGPU triangle→texture inside Tauri webview on desktop,
+  iOS Simulator, Android emulator. Decide the fallback ladder with data.
+- **Spike 2:** lcms2 vs moxcms — round-trip sRGB↔FOGRA39 correctness + WASM size/speed.
+
+### Phase 1 — Core editor (vector + raster objects)
+- Document model, command/undo system, `.chitra` save/load.
+- Render graph with tiled caching; canvas with pan/zoom at 60fps.
+- Vector: rect/ellipse/polygon/path objects, solid & gradient fills, strokes.
+- Raster: place PNG/JPEG as RasterObject; move/scale/rotate non-destructively.
+- Layer panel: reorder, group, hide, opacity, blend modes (normal/multiply/screen first).
+- Selection + transform handles.
+
+### Phase 2 — Non-destructive power
+- Adjustment layers: brightness/contrast, levels, curves, HSL, exposure.
+- Filter effects: gaussian blur, sharpen (GPU compute).
+- Masks: raster masks (paintable) and vector masks; clipping groups.
+- Full undo/redo history panel.
+
+### Phase 3 — Color management & export
+- ICC import honoring embedded profiles; working-space conversion.
+- CMYK document mode, CMYK color picker, soft proofing + gamut warning.
+- Export: PNG/JPEG (sRGB), TIFF (CMYK, profile embedded), SVG (vector layers),
+  PDF (composite, profile embedded).
+
+### Phase 4 — Mobile shells
+- Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.
+- Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
+  brush tools).
+- Platform file integration (Files app, Android SAF, share sheets).
+
+### Phase 5 — Depth (ongoing)
+- Pen tool + full path editing; boolean operations on shapes.
+- Text objects (this is a large subsystem: shaping via `rustybuzz`/`parley`).
+- Brush engine for raster painting; healing/clone as non-destructive ops.
+- Live effects (drop shadow, outline), styles, symbols/components.
+- Later bets enabled by the architecture: collaboration (serializable commands),
+  plugin API (WASM sandboxed), web build (engine already compiles to WASM).
+
+---
+
+## 6. Guiding decisions (mini-ADRs)
+
+1. **One engine, two compilations (WASM + native)** — never fork the engine per platform.
+2. **Linear float compositing** — correctness first; 8-bit preview paths only as a
+   measured optimization.
+3. **Tiled, cached, pull-based rendering** — the non-negotiable for non-destructive
+   editing at interactive speed.
+4. **Immutable sources + parameter stacks + commands** — undo, history, and future
+   collaboration all fall out of this one choice.
+5. **ZIP+JSON container format** — inspectable, versionable, resilient; binary-only
+   formats are a trap at this stage.
+6. **UI in the webview, pixels in the engine** — the UI never touches pixel buffers;
+   it sends commands and displays engine-rendered textures.
