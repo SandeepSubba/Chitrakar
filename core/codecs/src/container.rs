@@ -31,7 +31,8 @@ struct Manifest {
     document: Document,
 }
 
-/// Serialize a document to `.chitra` bytes.
+/// Serialize a document to `.chitra` bytes. Resource pixels are stored as
+/// PNG entries under `resources/`; the manifest carries only their metadata.
 pub fn save_chitra(doc: &Document) -> Result<Vec<u8>, ContainerError> {
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
@@ -40,6 +41,19 @@ pub fn save_chitra(doc: &Document) -> Result<Vec<u8>, ContainerError> {
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())?;
     zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+    for (id, res) in doc.resources() {
+        if res.rgba8.is_empty() {
+            continue; // metadata-only entry (bytes were never restored)
+        }
+        let png = crate::encode_png(res.width, res.height, &res.rgba8)
+            .map_err(|e| ContainerError::Io(std::io::Error::other(e.to_string())))?;
+        // PNG is already compressed; recompressing wastes time.
+        zip.start_file(
+            format!("resources/{id}.png"),
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )?;
+        zip.write_all(&png)?;
+    }
     Ok(zip.finish()?.into_inner())
 }
 
@@ -56,7 +70,25 @@ pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
             supported: FORMAT_VERSION,
         });
     }
-    Ok(manifest.document)
+    let mut doc = manifest.document;
+    let entries: Vec<String> = zip.file_names().map(String::from).collect();
+    for name in entries {
+        let Some(id) = name
+            .strip_prefix("resources/")
+            .and_then(|n| n.strip_suffix(".png"))
+            .map(String::from)
+        else {
+            continue;
+        };
+        let mut png = Vec::new();
+        zip.by_name(&name)?.read_to_end(&mut png)?;
+        let img = crate::decode(&png)
+            .map_err(|e| ContainerError::Io(std::io::Error::other(e.to_string())))?;
+        // Silently ignores entries the manifest doesn't reference or whose
+        // size disagrees — the manifest is the source of truth.
+        doc.restore_resource_bytes(&id, img.rgba8);
+    }
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -86,6 +118,22 @@ mod tests {
         assert_eq!(restored.node_count(), 2);
         assert_eq!(restored.meta.color_mode, ColorMode::Cmyk);
         assert_eq!(restored.meta.width, 320);
+    }
+
+    #[test]
+    fn resources_roundtrip_through_container() {
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let rgba8 = vec![
+            10, 20, 30, 255, /**/ 40, 50, 60, 255, //
+            70, 80, 90, 200, /**/ 0, 0, 0, 0,
+        ];
+        let id = doc.add_resource(2, 2, rgba8.clone());
+
+        let bytes = save_chitra(&doc).unwrap();
+        let restored = load_chitra(&bytes).unwrap();
+        let res = restored.resource(&id).unwrap();
+        assert_eq!((res.width, res.height), (2, 2));
+        assert_eq!(res.rgba8, rgba8, "pixel bytes survive the PNG roundtrip");
     }
 
     #[test]

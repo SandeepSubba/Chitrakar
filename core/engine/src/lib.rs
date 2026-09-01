@@ -102,7 +102,7 @@ impl Session {
             return;
         };
         // Children are stored bottom-to-top; panels list top-to-bottom.
-        for &id in children.iter().rev() {
+        for (index, &id) in children.iter().enumerate().rev() {
             let Ok(node) = self.doc.node(id) else {
                 continue;
             };
@@ -117,12 +117,39 @@ impl Session {
                 },
                 visible: node.visible,
                 opacity: node.opacity,
+                blend: node.blend,
                 depth,
+                parent: group.0,
+                index,
+                sibling_count: children.len(),
             });
             if matches!(node.kind, NodeKind::Group) {
                 self.collect_layers(id, depth + 1, out);
             }
         }
+    }
+
+    /// Decode image bytes, pool them as a resource, and add a raster object
+    /// referencing them at the top of the root group (one undo step).
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<(), EngineError> {
+        let img =
+            chitrakar_codecs::decode(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let (width, height) = (img.width, img.height);
+        let resource_id = self.doc.add_resource(width, height, img.rgba8);
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        self.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(Node::raster(
+                name,
+                chitrakar_doc::RasterRef {
+                    resource_id,
+                    width,
+                    height,
+                },
+            )),
+        })
     }
 
     /// Topmost clickable node at a document-space point.
@@ -151,7 +178,9 @@ impl Session {
     }
 }
 
-/// One row of the UI layers panel.
+/// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
+/// the node's slot in its group (painter's order: index 0 = bottom) so the
+/// UI can issue reorder commands without mirroring the tree.
 #[derive(Debug, Clone, Serialize)]
 pub struct LayerInfo {
     pub id: u64,
@@ -159,7 +188,11 @@ pub struct LayerInfo {
     pub kind: &'static str,
     pub visible: bool,
     pub opacity: f32,
+    pub blend: chitrakar_doc::BlendMode,
     pub depth: u32,
+    pub parent: u64,
+    pub index: usize,
+    pub sibling_count: usize,
 }
 
 #[cfg(test)]

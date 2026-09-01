@@ -116,6 +116,31 @@ body {
   font-size: 0.8rem;
 }
 
+.layer-props {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.2rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.layer-props label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.layer-props select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem;
+}
+
 #engine-canvas {
   touch-action: none;
   cursor: crosshair;
@@ -158,15 +183,16 @@ body {
 
 .canvas-host {
   flex: 1;
-  display: grid;
-  place-items: center;
-  overflow: auto;
+  position: relative;
+  overflow: hidden;
   background: #141416;
 }
 
 #engine-canvas {
-  max-width: 90%;
-  max-height: 90%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
   background: #fff;
   box-shadow: 0 4px 24px rgb(0 0 0 / 0.5);
 }

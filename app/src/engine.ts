@@ -65,7 +65,8 @@ export type Command =
   | { SetOpacity: { id: NodeId; opacity: number } }
   | { SetVisible: { id: NodeId; visible: boolean } }
   | { SetBlendMode: { id: NodeId; blend: BlendMode } }
-  | { SetTransform: { id: NodeId; transform: Transform } };
+  | { SetTransform: { id: NodeId; transform: Transform } }
+  | { MoveNode: { id: NodeId; parent: NodeId; index: number } };
 
 /** Mirror of `chitrakar_engine::LayerInfo`. */
 export interface LayerInfo {
@@ -74,7 +75,12 @@ export interface LayerInfo {
   kind: "group" | "vector" | "raster" | "adjustment";
   visible: boolean;
   opacity: number;
+  blend: BlendMode;
   depth: number;
+  /** Slot in the parent group, painter's order (0 = bottom). */
+  parent: NodeId;
+  index: number;
+  sibling_count: number;
 }
 
 export const identity = (tx = 0, ty = 0): Transform => ({

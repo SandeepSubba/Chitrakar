@@ -89,6 +89,11 @@ impl WasmSession {
         Ok(vec![t.e, t.f])
     }
 
+    /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<(), JsError> {
+        self.inner.place_image(bytes, name).map_err(to_js)
+    }
+
     /// Serialize to `.chitra` bytes.
     pub fn save(&self) -> Result<Vec<u8>, JsError> {
         self.inner.save().map_err(to_js)

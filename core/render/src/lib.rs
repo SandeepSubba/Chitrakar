@@ -67,8 +67,14 @@ fn render_group(doc: &Document, group: NodeId, dst: &mut Surface) -> Result<(), 
                     fill_shape(dst, shape, t.e, t.f, color, node.blend);
                 }
             }
-            // Raster sources arrive with the codecs pipeline (Phase 1).
-            NodeKind::Raster(_) => {}
+            NodeKind::Raster(raster) => {
+                if let Some(res) = doc.resource(&raster.resource_id) {
+                    if !res.rgba8.is_empty() {
+                        let t = node.transform;
+                        draw_raster(dst, res, t.e, t.f, node.opacity, node.blend);
+                    }
+                }
+            }
             NodeKind::Adjustment(adj) => {
                 // An adjustment layer transforms everything composited below
                 // it, weighted by its opacity.
@@ -180,9 +186,49 @@ fn fill_shape(
     }
 }
 
-/// Topmost visible vector node whose filled shape covers the document-space
-/// point — the click target. Groups are traversed top-down; adjustments and
-/// (for now) rasters are not hit-testable.
+/// Blit a source image at an integer-ish translation (nearest sample; full
+/// affine sampling arrives with the GPU path).
+fn draw_raster(
+    dst: &mut Surface,
+    res: &chitrakar_doc::Resource,
+    tx: f32,
+    ty: f32,
+    opacity: f32,
+    mode: BlendMode,
+) {
+    // 8-bit sRGB → linear lookup table, built per blit (256 entries, cheap).
+    let mut lut = [0f32; 256];
+    for (v, out) in lut.iter_mut().enumerate() {
+        *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
+    }
+    let x0 = tx.floor().max(0.0) as u32;
+    let y0 = ty.floor().max(0.0) as u32;
+    let x1 = ((tx + res.width as f32).ceil().max(0.0) as u32).min(dst.width);
+    let y1 = ((ty + res.height as f32).ceil().max(0.0) as u32).min(dst.height);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let sx = (px as f32 + 0.5 - tx) as u32;
+            let sy = (py as f32 + 0.5 - ty) as u32;
+            if sx >= res.width || sy >= res.height {
+                continue;
+            }
+            let s = ((sy * res.width + sx) * 4) as usize;
+            let a = res.rgba8[s + 3] as f32 / 255.0 * opacity;
+            let src = LinearRgba {
+                r: lut[res.rgba8[s] as usize] * a,
+                g: lut[res.rgba8[s + 1] as usize] * a,
+                b: lut[res.rgba8[s + 2] as usize] * a,
+                a,
+            };
+            let i = (py * dst.width + px) as usize;
+            dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+        }
+    }
+}
+
+/// Topmost visible node whose filled shape or image bounds cover the
+/// document-space point — the click target. Groups are traversed top-down;
+/// adjustment layers are not hit-testable.
 pub fn hit_test(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
     hit_in_group(doc, doc.root(), x, y)
 }
@@ -202,6 +248,13 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
             NodeKind::Vector { shape, fill, .. } if fill.is_some() => {
                 let t = node.transform;
                 if shape_covers(shape, x - t.e, y - t.f) {
+                    return Ok(Some(child));
+                }
+            }
+            NodeKind::Raster(raster) => {
+                let t = node.transform;
+                let (lx, ly) = (x - t.e, y - t.f);
+                if lx >= 0.0 && ly >= 0.0 && lx < raster.width as f32 && ly < raster.height as f32 {
                     return Ok(Some(child));
                 }
             }
@@ -384,6 +437,43 @@ mod tests {
             (adjusted.r / base.r - 2.0).abs() < 1e-4,
             "+1 stop doubles linear light"
         );
+    }
+
+    #[test]
+    fn raster_object_renders_and_hit_tests() {
+        let mut doc = Document::new(8, 8, ColorMode::Rgb);
+        let root = doc.root();
+        // 2×2 image: opaque red, semi-transparent white bottom-right.
+        let rgba8 = vec![
+            255, 0, 0, 255, /**/ 255, 0, 0, 255, //
+            255, 0, 0, 255, /**/ 255, 255, 255, 128,
+        ];
+        let id = doc.add_resource(2, 2, rgba8);
+        let raster = chitrakar_doc::RasterRef {
+            resource_id: id,
+            width: 2,
+            height: 2,
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster("img", raster)),
+        })
+        .unwrap();
+        let node = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: node,
+            transform: Transform::translation(3.0, 3.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(3, 3).to_srgb8(), [255, 0, 0, 255]);
+        assert_eq!(s.get(4, 4).to_srgb8()[3], 128, "alpha preserved");
+        assert_eq!(s.get(0, 0).a, 0.0, "outside image untouched");
+
+        assert_eq!(hit_test(&doc, 4.5, 4.5).unwrap(), Some(node));
+        assert_eq!(hit_test(&doc, 1.0, 1.0).unwrap(), None);
     }
 
     #[test]

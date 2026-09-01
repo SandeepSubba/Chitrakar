@@ -146,13 +146,17 @@ chitrakar/
 ### Phase 1 — Core editor (vector + raster objects)
 - ✅ Document model, command/undo system, `.chitra` save/load (manifest-only container;
   embedded resources arrive with raster support).
-- Render graph with tiled caching; canvas with pan/zoom at 60fps.
-  *(current: full-frame CPU reference render + bbox-limited fills + hit testing)*
+- Render graph with tiled caching *(pending; current: full-frame CPU reference
+  render + bbox-limited fills + hit testing)*; canvas pan/zoom ✅ (wheel zoom
+  toward cursor, space/middle-drag pan, fit-to-window).
 - Vector: rect/ellipse ✅ drawn interactively; polygon/path objects, gradient fills,
   strokes pending.
-- Raster: place PNG/JPEG as RasterObject; move/scale/rotate non-destructively.
-- Layer panel: hide ✅, select ✅, delete ✅; reorder, group, opacity slider,
-  blend-mode picker pending (engine supports normal/multiply/screen already).
+- Raster: place PNG/JPEG as RasterObject ✅ (content-addressed resource pool,
+  pixels embedded as PNGs in .chitra, undoable placement, move + hit test);
+  scale/rotate pending.
+- Layer panel: hide ✅, select ✅, delete ✅, reorder ✅ (MoveNode command:
+  reorder + reparent with subtree-cycle protection), opacity slider ✅,
+  blend-mode picker ✅; grouping UI pending.
 - Selection ✅ (hit test + move tool); transform handles pending.
 
 ### Phase 2 — Non-destructive power
