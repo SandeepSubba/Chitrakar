@@ -130,6 +130,11 @@ impl WasmSession {
         Ok(vec![t.a, t.b, t.c, t.d, t.e, t.f])
     }
 
+    /// A node's kind parameters as JSON (see `Session::kind_json`).
+    pub fn kind_json(&self, id: f64) -> Result<String, JsError> {
+        self.inner.kind_json(NodeId(id as u64)).map_err(to_js)
+    }
+
     /// Doc-space bounds of a node as `[x, y, w, h]`; empty if it has none.
     pub fn bounds_of(&self, id: f64) -> Vec<f32> {
         self.inner

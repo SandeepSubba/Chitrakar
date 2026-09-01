@@ -141,6 +141,43 @@ body {
   padding: 0.2rem;
 }
 
+.layer-props .row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.layer-props input[type="color"] {
+  width: 2rem;
+  height: 1.4rem;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  margin-left: auto;
+}
+
+.add-adjustment {
+  background: none;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.2rem;
+  width: 3.4rem;
+}
+
+.panel .rename {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+}
+
 #engine-canvas {
   touch-action: none;
   cursor: crosshair;

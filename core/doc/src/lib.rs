@@ -7,7 +7,7 @@
 
 mod node;
 
-pub use node::{Adjustment, BlendMode, Node, NodeKind, RasterRef, Transform, VectorShape};
+pub use node::{Adjustment, BlendMode, Node, NodeKind, RasterRef, Stroke, Transform, VectorShape};
 
 use chitrakar_color::ColorMode;
 use serde::{Deserialize, Serialize};
@@ -267,6 +267,11 @@ impl Document {
                     kind: Box::new(prev),
                 })
             }
+            Command::SetName { id, name } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = std::mem::replace(&mut node.name, name);
+                Ok(Command::SetName { id, name: prev })
+            }
             Command::MoveNode { id, parent, index } => {
                 if id == self.root {
                     return Err(DocError::CannotRemoveRoot);
@@ -376,6 +381,10 @@ pub enum Command {
     SetKind {
         id: NodeId,
         kind: Box<NodeKind>,
+    },
+    SetName {
+        id: NodeId,
+        name: String,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).
@@ -650,6 +659,36 @@ mod tests {
             .unwrap_err(),
             DocError::MoveIntoOwnSubtree(group)
         );
+    }
+
+    #[test]
+    fn set_name_is_invertible() {
+        let mut doc = Document::new(10, 10, ColorMode::Rgb);
+        let mut history = History::default();
+        let root = doc.root();
+        history
+            .apply(
+                &mut doc,
+                Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: rect("old"),
+                },
+            )
+            .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        history
+            .apply(
+                &mut doc,
+                Command::SetName {
+                    id,
+                    name: "new".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(doc.node(id).unwrap().name, "new");
+        history.undo(&mut doc).unwrap();
+        assert_eq!(doc.node(id).unwrap().name, "old");
     }
 
     #[test]

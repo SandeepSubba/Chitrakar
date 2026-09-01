@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  Adjustment,
   BlendMode,
   Command,
   LayerInfo,
   NodeId,
+  NodeKind,
   Transform,
   WasmSession,
+  colorToHex,
   getWasmMemory,
   hexColor,
   initEngine,
@@ -402,17 +405,46 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
-  const addExposure = () => {
-    if (!session) return;
+  const ADJUSTMENT_PRESETS: Record<string, { name: string; adj: Adjustment }> = {
+    exposure: { name: "Exposure", adj: { Exposure: { stops: 0 } } },
+    "brightness-contrast": {
+      name: "Brightness/Contrast",
+      adj: { BrightnessContrast: { brightness: 0, contrast: 0 } },
+    },
+    "hue-saturation": {
+      name: "Hue/Saturation",
+      adj: {
+        HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0 },
+      },
+    },
+  };
+
+  const addAdjustment = (key: string) => {
+    const preset = ADJUSTMENT_PRESETS[key];
+    if (!session || !preset) return;
     run({
       AddNode: {
         parent: session.root_id,
         index: topLevelCount(layers),
-        node: nodePayload("Exposure +0.5", {
-          Adjustment: { Exposure: { stops: 0.5 } },
-        }),
+        node: nodePayload(preset.name, { Adjustment: preset.adj }),
       },
     });
+  };
+
+  /** Commit the running slider/drag gesture as one undo step. */
+  const endGesture = () => {
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  const [renaming, setRenaming] = useState<{ id: NodeId; value: string } | null>(
+    null,
+  );
+
+  const commitRename = () => {
+    if (renaming && renaming.value.trim()) {
+      run({ SetName: { id: renaming.id, name: renaming.value.trim() } });
+    }
+    setRenaming(null);
   };
 
   const deleteSelected = () => {
@@ -428,6 +460,21 @@ export function App() {
     session && selected !== null && resizable
       ? session.bounds_of(selected)
       : null;
+  let selectedKind: NodeKind | null = null;
+  if (session && selectedLayer) {
+    try {
+      selectedKind = JSON.parse(session.kind_json(selectedLayer.id)) as NodeKind;
+    } catch {
+      selectedKind = null;
+    }
+  }
+
+  const setKind = (kind: NodeKind, gesture: boolean) => {
+    if (!selectedLayer) return;
+    const cmd: Command = { SetKind: { id: selectedLayer.id, kind } };
+    if (gesture) preview(cmd);
+    else run(cmd);
+  };
 
   /** Reorder within the parent group: +1 raises toward the top. */
   const reorderSelected = (direction: 1 | -1) => {
@@ -583,9 +630,22 @@ export function App() {
         <aside className="panel" aria-label="Layers">
           <div className="panel-head">
             <h2>Layers</h2>
-            <button onClick={addExposure} title="Add exposure adjustment layer">
-              +FX
-            </button>
+            <select
+              className="add-adjustment"
+              value=""
+              onChange={(e) => addAdjustment(e.target.value)}
+              title="Add adjustment layer"
+              aria-label="Add adjustment layer"
+            >
+              <option value="" disabled>
+                +FX
+              </option>
+              {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
+                <option key={key} value={key}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
             <button
               onClick={() => reorderSelected(1)}
               disabled={
@@ -650,6 +710,13 @@ export function App() {
                   ))}
                 </select>
               </label>
+              {selectedKind && (
+                <KindProps
+                  kind={selectedKind}
+                  onEdit={setKind}
+                  onGestureEnd={endGesture}
+                />
+              )}
             </div>
           )}
           <ul>
@@ -671,7 +738,32 @@ export function App() {
                 >
                   {l.visible ? "👁" : "–"}
                 </button>
-                <span className={l.visible ? "" : "muted"}>{l.name}</span>
+                {renaming?.id === l.id ? (
+                  <input
+                    className="rename"
+                    value={renaming.value}
+                    autoFocus
+                    onChange={(e) =>
+                      setRenaming({ id: l.id, value: e.target.value })
+                    }
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") setRenaming(null);
+                    }}
+                    aria-label="Layer name"
+                  />
+                ) : (
+                  <span
+                    className={l.visible ? "" : "muted"}
+                    onDoubleClick={() =>
+                      setRenaming({ id: l.id, value: l.name })
+                    }
+                  >
+                    {l.name}
+                  </span>
+                )}
                 <span className="kind">{l.kind}</span>
               </li>
             ))}
@@ -687,6 +779,160 @@ export function App() {
 
 function topLevelCount(layers: LayerInfo[]): number {
   return layers.filter((l) => l.depth === 0).length;
+}
+
+interface KindPropsProps {
+  kind: NodeKind;
+  /** gesture=true routes through preview (live, uncommitted). */
+  onEdit: (kind: NodeKind, gesture: boolean) => void;
+  onGestureEnd: () => void;
+}
+
+/** Parameter editors for the selected node's kind — the panel that makes
+ * every layer's settings revisitable (the non-destructive contract). */
+function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
+  if (typeof kind !== "object") return null;
+
+  const slider = (
+    label: string,
+    value: number,
+    min: number,
+    max: number,
+    step: number,
+    set: (v: number) => NodeKind,
+  ) => (
+    <label key={label}>
+      {label} {value.toFixed(2)}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onEdit(set(Number(e.target.value)), true)}
+        onPointerUp={onGestureEnd}
+        onKeyUp={onGestureEnd}
+        onBlur={onGestureEnd}
+        aria-label={label}
+      />
+    </label>
+  );
+
+  if ("Adjustment" in kind) {
+    const adj = kind.Adjustment;
+    const wrap = (a: Adjustment): NodeKind => ({ Adjustment: a });
+    if ("Exposure" in adj) {
+      return slider("Stops", adj.Exposure.stops, -3, 3, 0.05, (v) =>
+        wrap({ Exposure: { stops: v } }),
+      );
+    }
+    if ("BrightnessContrast" in adj) {
+      const p = adj.BrightnessContrast;
+      return (
+        <>
+          {slider("Brightness", p.brightness, -1, 1, 0.01, (v) =>
+            wrap({ BrightnessContrast: { ...p, brightness: v } }),
+          )}
+          {slider("Contrast", p.contrast, -1, 1, 0.01, (v) =>
+            wrap({ BrightnessContrast: { ...p, contrast: v } }),
+          )}
+        </>
+      );
+    }
+    if ("HueSaturation" in adj) {
+      const p = adj.HueSaturation;
+      return (
+        <>
+          {slider("Hue", p.hue_degrees, -180, 180, 1, (v) =>
+            wrap({ HueSaturation: { ...p, hue_degrees: v } }),
+          )}
+          {slider("Saturation", p.saturation, -1, 1, 0.01, (v) =>
+            wrap({ HueSaturation: { ...p, saturation: v } }),
+          )}
+          {slider("Lightness", p.lightness, -1, 1, 0.01, (v) =>
+            wrap({ HueSaturation: { ...p, lightness: v } }),
+          )}
+        </>
+      );
+    }
+    return null;
+  }
+
+  if ("Vector" in kind) {
+    const v = kind.Vector;
+    const patch = (changes: Partial<typeof v>): NodeKind => ({
+      Vector: { ...v, ...changes },
+    });
+    return (
+      <>
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={v.fill !== null}
+            onChange={(e) =>
+              onEdit(
+                patch({ fill: e.target.checked ? hexColor("#6c8cff") : null }),
+                false,
+              )
+            }
+            aria-label="Fill enabled"
+          />
+          Fill
+          {v.fill && (
+            <input
+              type="color"
+              value={colorToHex(v.fill)}
+              onChange={(e) =>
+                onEdit(patch({ fill: hexColor(e.target.value) }), true)
+              }
+              onBlur={onGestureEnd}
+              aria-label="Fill color"
+            />
+          )}
+        </label>
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={v.stroke !== null}
+            onChange={(e) =>
+              onEdit(
+                patch({
+                  stroke: e.target.checked
+                    ? { color: hexColor("#1a1a1e"), width: 4 }
+                    : null,
+                }),
+                false,
+              )
+            }
+            aria-label="Stroke enabled"
+          />
+          Stroke
+          {v.stroke && (
+            <input
+              type="color"
+              value={colorToHex(v.stroke.color)}
+              onChange={(e) =>
+                onEdit(
+                  patch({
+                    stroke: { ...v.stroke!, color: hexColor(e.target.value) },
+                  }),
+                  true,
+                )
+              }
+              onBlur={onGestureEnd}
+              aria-label="Stroke color"
+            />
+          )}
+        </label>
+        {v.stroke &&
+          slider("Stroke width", v.stroke.width, 1, 50, 1, (w) =>
+            patch({ stroke: { ...v.stroke!, width: w } }),
+          )}
+      </>
+    );
+  }
+
+  return null;
 }
 
 function download(bytes: Uint8Array, name: string, type: string) {

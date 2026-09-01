@@ -256,11 +256,26 @@ fn render_group(
                 render_group(doc, child, &mut sub, clip)?;
                 composite(dst, &sub, node.opacity, node.blend, clip);
             }
-            NodeKind::Vector { shape, fill, .. } => {
+            NodeKind::Vector {
+                shape,
+                fill,
+                stroke,
+            } => {
                 if let Some(fill) = fill {
-                    let mut color = to_working(*fill);
-                    color = scale_alpha(color, node.opacity);
-                    fill_shape(dst, shape, node.transform, color, node.blend, clip);
+                    let color = scale_alpha(to_working(*fill), node.opacity);
+                    paint_shape(dst, shape, node.transform, color, node.blend, clip, None);
+                }
+                if let Some(stroke) = stroke {
+                    let color = scale_alpha(to_working(stroke.color), node.opacity);
+                    paint_shape(
+                        dst,
+                        shape,
+                        node.transform,
+                        color,
+                        node.blend,
+                        clip,
+                        Some(stroke.width),
+                    );
                 }
             }
             NodeKind::Raster(raster) => {
@@ -360,6 +375,29 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     }
 }
 
+/// Coverage of a shape's inner stroke band of the given width: inside the
+/// shape but not inside the shape shrunk by the stroke width.
+fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
+    if !shape_covers(shape, x, y) {
+        return false;
+    }
+    match shape {
+        VectorShape::Rect {
+            width: w,
+            height: h,
+        } => x < width || y < width || x >= w - width || y >= h - width,
+        VectorShape::Ellipse { rx, ry } => {
+            let (irx, iry) = ((rx - width).max(0.0), (ry - width).max(0.0));
+            if irx <= 0.0 || iry <= 0.0 {
+                return true;
+            }
+            let (nx, ny) = ((x - rx) / irx, (y - ry) / iry);
+            nx * nx + ny * ny > 1.0
+        }
+        VectorShape::Path { .. } => false,
+    }
+}
+
 fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> ClipRect {
     match transformed_bounds(t, w, h).to_clip(dst.width, dst.height) {
         Some(b) => b.intersect(clip),
@@ -372,13 +410,16 @@ fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> Cli
     }
 }
 
-fn fill_shape(
+/// Paint a shape's fill (stroke_width None) or its inner stroke band.
+#[allow(clippy::too_many_arguments)]
+fn paint_shape(
     dst: &mut Surface,
     shape: &VectorShape,
     t: Transform,
     color: LinearRgba,
     mode: BlendMode,
     clip: ClipRect,
+    stroke_width: Option<f32>,
 ) {
     let (w, h) = shape_size(shape);
     let bbox = draw_bbox(t, w, h, dst, clip);
@@ -389,7 +430,11 @@ fn fill_shape(
             let Some((x, y)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
                 return;
             };
-            if shape_covers(shape, x, y) {
+            let covered = match stroke_width {
+                None => shape_covers(shape, x, y),
+                Some(sw) => stroke_covers(shape, sw, x, y),
+            };
+            if covered {
                 let i = (py * dst.width + px) as usize;
                 dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
             }
@@ -457,10 +502,39 @@ fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
             let m = 2f32.powf(*stops);
             (r * m, g * m, b * m)
         }
-        // Full HSL math lands in Phase 2; lightness-only is enough to wire
-        // the pipeline.
-        Adjustment::HueSaturation { lightness, .. } => {
-            let f = |v: f32| (v + lightness).clamp(0.0, 1.0);
+        Adjustment::HueSaturation {
+            hue_degrees,
+            saturation,
+            lightness,
+        } => {
+            // Hue rotation (feColorMatrix hueRotate, Rec.709-ish weights).
+            let (sin, cos) = hue_degrees.to_radians().sin_cos();
+            let m = [
+                [
+                    0.213 + cos * 0.787 - sin * 0.213,
+                    0.715 - cos * 0.715 - sin * 0.715,
+                    0.072 - cos * 0.072 + sin * 0.928,
+                ],
+                [
+                    0.213 - cos * 0.213 + sin * 0.143,
+                    0.715 + cos * 0.285 + sin * 0.140,
+                    0.072 - cos * 0.072 - sin * 0.283,
+                ],
+                [
+                    0.213 - cos * 0.213 - sin * 0.787,
+                    0.715 - cos * 0.715 + sin * 0.715,
+                    0.072 + cos * 0.928 + sin * 0.072,
+                ],
+            ];
+            let (r, g, b) = (
+                m[0][0] * r + m[0][1] * g + m[0][2] * b,
+                m[1][0] * r + m[1][1] * g + m[1][2] * b,
+                m[2][0] * r + m[2][1] * g + m[2][2] * b,
+            );
+            // Saturation: scale distance from luminance; then lightness add.
+            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let s = 1.0 + saturation;
+            let f = |v: f32| (lum + (v - lum) * s + lightness).clamp(0.0, 1.0);
             (f(r), f(g), f(b))
         }
     };
@@ -491,9 +565,20 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                     return Ok(Some(hit));
                 }
             }
-            NodeKind::Vector { shape, fill, .. } if fill.is_some() => {
+            NodeKind::Vector {
+                shape,
+                fill,
+                stroke,
+            } => {
                 if let Some((lx, ly)) = to_local(node.transform, x, y) {
-                    if shape_covers(shape, lx, ly) {
+                    let hit = if fill.is_some() {
+                        shape_covers(shape, lx, ly)
+                    } else if let Some(s) = stroke {
+                        stroke_covers(shape, s.width, lx, ly)
+                    } else {
+                        false
+                    };
+                    if hit {
                         return Ok(Some(child));
                     }
                 }
@@ -787,6 +872,100 @@ mod tests {
 
         assert_eq!(hit_test(&doc, 4.5, 4.5).unwrap(), Some(node));
         assert_eq!(hit_test(&doc, 1.0, 1.0).unwrap(), None);
+    }
+
+    #[test]
+    fn stroke_paints_border_band_and_hit_tests() {
+        let mut doc = Document::new(12, 12, ColorMode::Rgb);
+        let root = doc.root();
+        // 10×10 rect with a 2px green inner stroke and no fill.
+        let mut node = Node::vector(
+            "outline",
+            VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+            },
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 2.0,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(0, 0).to_srgb8(), [0, 255, 0, 255], "border painted");
+        assert_eq!(s.get(5, 5).a, 0.0, "interior stays unfilled");
+
+        assert_eq!(
+            hit_test(&doc, 1.0, 1.0).unwrap(),
+            Some(id),
+            "stroke is clickable"
+        );
+        assert_eq!(
+            hit_test(&doc, 5.0, 5.0).unwrap(),
+            None,
+            "hollow center is not"
+        );
+    }
+
+    #[test]
+    fn hue_rotation_180_swaps_red_toward_cyan() {
+        let mut doc = Document::new(2, 2, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 2.0, 2.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "hue",
+                Adjustment::HueSaturation {
+                    hue_degrees: 180.0,
+                    saturation: 0.0,
+                    lightness: 0.0,
+                },
+            )),
+        })
+        .unwrap();
+        let px = render(&doc).unwrap().get(0, 0).to_srgb8();
+        assert!(
+            px[1] > px[0] && px[2] > px[0],
+            "180° hue turn makes red cyan-ish, got {px:?}"
+        );
+
+        // Saturation -1 must be fully grey (all channels equal).
+        let hue = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetKind {
+            id: hue,
+            kind: Box::new(NodeKind::Adjustment(Adjustment::HueSaturation {
+                hue_degrees: 0.0,
+                saturation: -1.0,
+                lightness: 0.0,
+            })),
+        })
+        .unwrap();
+        let px = render(&doc).unwrap().get(0, 0).to_srgb8();
+        assert!(
+            px[0] == px[1] && px[1] == px[2],
+            "desaturated to grey, got {px:?}"
+        );
     }
 
     #[test]

@@ -39,13 +39,18 @@ export interface Transform {
   f: number;
 }
 
+export interface Stroke {
+  color: AuthoredColor;
+  width: number;
+}
+
 export type NodeKind =
   | "Group"
   | {
       Vector: {
         shape: VectorShape;
         fill: AuthoredColor | null;
-        stroke: null;
+        stroke: Stroke | null;
       };
     }
   | { Adjustment: Adjustment };
@@ -66,6 +71,8 @@ export type Command =
   | { SetVisible: { id: NodeId; visible: boolean } }
   | { SetBlendMode: { id: NodeId; blend: BlendMode } }
   | { SetTransform: { id: NodeId; transform: Transform } }
+  | { SetKind: { id: NodeId; kind: NodeKind } }
+  | { SetName: { id: NodeId; name: string } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } };
 
 /** Mirror of `chitrakar_engine::LayerInfo`. */
@@ -119,6 +126,24 @@ export function hexColor(hex: string, alpha = 1): AuthoredColor {
       a: alpha,
     },
   };
+}
+
+/** Render an authored color as "#rrggbb" for a color input (alpha dropped). */
+export function colorToHex(color: AuthoredColor): string {
+  const c =
+    "Srgb" in color
+      ? color.Srgb
+      : // CMYK preview via the naive formula, mirroring the engine edge.
+        {
+          r: (1 - color.Cmyk.c) * (1 - color.Cmyk.k),
+          g: (1 - color.Cmyk.m) * (1 - color.Cmyk.k),
+          b: (1 - color.Cmyk.y) * (1 - color.Cmyk.k),
+        };
+  const h = (v: number) =>
+    Math.round(Math.min(1, Math.max(0, v)) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${h(c.r)}${h(c.g)}${h(c.b)}`;
 }
 
 let wasmReady: Promise<unknown> | null = null;

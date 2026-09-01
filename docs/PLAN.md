@@ -166,7 +166,13 @@ chitrakar/
   handles ✅ (anchored scaling); rotation handles pending.
 
 ### Phase 2 — Non-destructive power
-- Adjustment layers: brightness/contrast, levels, curves, HSL, exposure.
+- Adjustment layers: brightness/contrast ✅, exposure ✅, hue/saturation ✅
+  (feColorMatrix-style hue rotation + luminance-relative saturation) — all
+  re-editable via the properties panel with live slider preview, one undo
+  step per gesture. Levels and curves pending.
+- Vector styling ✅ first pass: fill and inner stroke (color + width),
+  editable on existing objects; stroke-only shapes hit-test on the band.
+  Gradients pending. Layer rename ✅ (SetName command, inline edit).
 - Filter effects: gaussian blur, sharpen (GPU compute).
 - Masks: raster masks (paintable) and vector masks; clipping groups.
 - Full undo/redo history panel.

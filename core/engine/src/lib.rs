@@ -90,6 +90,7 @@ impl Session {
             | Command::SetBlendMode { id, .. }
             | Command::SetTransform { id, .. }
             | Command::SetKind { id, .. }
+            | Command::SetName { id, .. }
             | Command::MoveNode { id, .. } => Some(*id),
         }
     }
@@ -306,6 +307,13 @@ impl Session {
 
     pub fn transform_of(&self, id: NodeId) -> Result<Transform, EngineError> {
         Ok(self.doc.node(id)?.transform)
+    }
+
+    /// A node's kind (shape, fill, stroke, adjustment parameters…) as JSON —
+    /// what a properties panel edits and sends back via `SetKind`.
+    pub fn kind_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.kind)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
     /// Doc-space bounds of a node as `[x, y, w, h]`, if it has any.
