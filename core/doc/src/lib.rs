@@ -178,6 +178,11 @@ impl Document {
             .find_map(|(p, kids)| kids.iter().position(|k| *k == id).map(|i| (*p, i)))
     }
 
+    /// The group containing a node; None for the root (or an unknown id).
+    pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
+        self.parent_and_index(id).map(|(p, _)| p)
+    }
+
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -347,7 +352,33 @@ impl Document {
                     index: old_index,
                 })
             }
+            Command::Batch(cmds) => {
+                let mut inverses = Vec::with_capacity(cmds.len());
+                for cmd in cmds {
+                    match self.apply(cmd) {
+                        Ok(inverse) => inverses.push(inverse),
+                        Err(e) => {
+                            // Roll back what already applied; these inverses
+                            // came from successful applies, so they succeed.
+                            for inverse in inverses.into_iter().rev() {
+                                let _ = self.apply(inverse);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                inverses.reverse();
+                Ok(Command::Batch(inverses))
+            }
         }
+    }
+
+    /// The id the next added node will get — lets callers build a [`Batch`]
+    /// that adds a node and immediately references it (e.g. grouping).
+    ///
+    /// [`Batch`]: Command::Batch
+    pub fn peek_next_id(&self) -> NodeId {
+        NodeId(self.next_id)
     }
 
     fn detach_subtree(&mut self, id: NodeId) -> Subtree {
@@ -449,6 +480,9 @@ pub enum Command {
         parent: NodeId,
         index: usize,
     },
+    /// Several commands applied atomically: all succeed, or the document is
+    /// rolled back to its state before the batch. One undo step.
+    Batch(Vec<Command>),
 }
 
 /// Linear undo/redo stacks of inverse commands.
@@ -745,6 +779,61 @@ mod tests {
         assert_eq!(doc.node(id).unwrap().name, "new");
         history.undo(&mut doc).unwrap();
         assert_eq!(doc.node(id).unwrap().name, "old");
+    }
+
+    #[test]
+    fn batch_applies_atomically_and_rolls_back_on_failure() {
+        let mut doc = Document::new(50, 50, ColorMode::Rgb);
+        let mut history = History::default();
+        let root = doc.root();
+
+        // A batch that adds a group and moves a new rect into it, using the
+        // predicted ids.
+        let group_id = doc.peek_next_id();
+        let rect_id = NodeId(group_id.0 + 1);
+        history
+            .apply(
+                &mut doc,
+                Command::Batch(vec![
+                    Command::AddNode {
+                        parent: root,
+                        index: 0,
+                        node: Box::new(Node::group("g")),
+                    },
+                    Command::AddNode {
+                        parent: root,
+                        index: 1,
+                        node: rect("r"),
+                    },
+                    Command::MoveNode {
+                        id: rect_id,
+                        parent: group_id,
+                        index: 0,
+                    },
+                ]),
+            )
+            .unwrap();
+        assert_eq!(doc.children_of(root).unwrap(), &[group_id]);
+        assert_eq!(doc.children_of(group_id).unwrap(), &[rect_id]);
+
+        // One undo unwinds the whole batch; redo replays it, ids intact.
+        history.undo(&mut doc).unwrap();
+        assert_eq!(doc.node_count(), 1);
+        history.redo(&mut doc).unwrap();
+        assert_eq!(doc.children_of(group_id).unwrap(), &[rect_id]);
+
+        // A failing step rolls the earlier steps back.
+        let before = doc.node_count();
+        let err = doc.apply(Command::Batch(vec![
+            Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect("orphan"),
+            },
+            Command::RemoveNode { id: NodeId(9999) },
+        ]));
+        assert!(err.is_err());
+        assert_eq!(doc.node_count(), before, "partial batch rolled back");
     }
 
     #[test]

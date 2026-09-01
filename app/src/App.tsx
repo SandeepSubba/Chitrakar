@@ -91,6 +91,9 @@ export function App() {
   const shapeCount = useRef(0);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
+  const [multiSel, setMultiSel] = useState<NodeId[]>([]);
+  const groupCount = useRef(0);
 
   const refresh = useCallback((s: WasmSession) => {
     const canvas = canvasRef.current;
@@ -538,6 +541,48 @@ export function App() {
     setSelected(null);
   };
 
+  /** All picked layers: primary selection plus ctrl-clicked extras. */
+  const selectionSet =
+    selected === null
+      ? multiSel
+      : [selected, ...multiSel.filter((id) => id !== selected)];
+
+  const groupSelection = () => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      groupCount.current += 1;
+      const id = session.group_nodes(
+        new Float64Array(selectionSet),
+        `Group ${groupCount.current}`,
+      );
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Group: ${err}`);
+    }
+  };
+
+  const ungroupSelection = () => {
+    if (!session || selected === null) return;
+    try {
+      session.ungroup_node(selected);
+      setSelected(null);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Ungroup: ${err}`);
+    }
+  };
+
+  const jumpHistory = (delta: number) => {
+    if (!session || delta === 0) return;
+    session.jump(delta);
+    setSelected(null);
+    setMultiSel([]);
+    refresh(session);
+  };
+
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
   const resizable =
     selectedLayer?.kind === "vector" || selectedLayer?.kind === "raster";
@@ -576,6 +621,15 @@ export function App() {
       },
     });
   };
+
+  let history: { past: string[]; future: string[] } = { past: [], future: [] };
+  if (session) {
+    try {
+      history = JSON.parse(session.history_json());
+    } catch {
+      // keep empty history on parse issues
+    }
+  }
 
   const setKind = (kind: NodeKind, gesture: boolean) => {
     if (!selectedLayer) return;
@@ -851,6 +905,20 @@ export function App() {
               ↓
             </button>
             <button
+              onClick={groupSelection}
+              disabled={selectionSet.length === 0}
+              title="Group selected layers (ctrl-click to select several)"
+            >
+              ⧉
+            </button>
+            <button
+              onClick={ungroupSelection}
+              disabled={selectedLayer?.kind !== "group"}
+              title="Ungroup selected group"
+            >
+              ⧎
+            </button>
+            <button
               onClick={deleteSelected}
               disabled={selected === null}
               title="Delete selected layer"
@@ -940,9 +1008,28 @@ export function App() {
             {layers.map((l) => (
               <li
                 key={l.id}
-                className={l.id === selected ? "selected" : ""}
+                className={
+                  l.id === selected
+                    ? "selected"
+                    : multiSel.includes(l.id)
+                      ? "multi"
+                      : ""
+                }
                 style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
-                onClick={() => setSelected(l.id)}
+                onClick={(e) => {
+                  if (e.ctrlKey || e.metaKey) {
+                    // Toggle in the multi-selection; primary stays put.
+                    if (l.id === selected) return;
+                    setMultiSel((prev) =>
+                      prev.includes(l.id)
+                        ? prev.filter((id) => id !== l.id)
+                        : [...prev, l.id],
+                    );
+                  } else {
+                    setSelected(l.id);
+                    setMultiSel([]);
+                  }
+                }}
               >
                 <button
                   className="visibility"
@@ -991,6 +1078,30 @@ export function App() {
               <li className="muted empty">Drag on the canvas to add shapes</li>
             )}
           </ul>
+          {(history.past.length > 0 || history.future.length > 0) && (
+            <div className="history" aria-label="History">
+              <h2>History</h2>
+              <ol>
+                {history.past.map((label, i) => (
+                  <li key={`p${i}`}>
+                    <button
+                      className={
+                        i === history.past.length - 1 ? "current" : undefined
+                      }
+                      onClick={() => jumpHistory(i + 1 - history.past.length)}
+                    >
+                      {label}
+                    </button>
+                  </li>
+                ))}
+                {history.future.map((label, i) => (
+                  <li key={`f${i}`} className="future">
+                    <button onClick={() => jumpHistory(i + 1)}>{label}</button>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </aside>
       </div>
     </div>

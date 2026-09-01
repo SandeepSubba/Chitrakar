@@ -196,7 +196,12 @@ chitrakar/
   filter's strength; invert supported; UI adds an inscribed ellipse mask
   with invert/remove. Paintable raster masks await the brush engine;
   on-canvas mask geometry editing and clipping groups pending.
-- Full undo/redo history panel.
+- Full undo/redo history panel ✅: every edit records a human-readable label
+  (from the forward command and the touched layer's name); the panel lists
+  past and undone-future edits and clicking jumps the document to that point.
+- Grouping ✅: Batch command (atomic multi-command with rollback, one undo
+  step); group ctrl-click-selected same-parent layers into a new group,
+  ungroup dissolves in place — both single history entries.
 
 ### Phase 3 — Color management & export
 - ICC import honoring embedded profiles ✅ (PNG/JPEG pixels tagged with an

@@ -125,6 +125,33 @@ impl WasmSession {
         serde_json::to_string(&self.inner.layers()).unwrap_or_else(|_| "[]".into())
     }
 
+    /// History labels as JSON `{past: [...oldest first], future: [...next
+    /// redo first]}`.
+    pub fn history_json(&self) -> String {
+        let (past, future) = self.inner.history_labels();
+        serde_json::to_string(&serde_json::json!({ "past": past, "future": future }))
+            .unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Move through history: negative undoes, positive redoes.
+    pub fn jump(&mut self, delta: i32) -> Result<(), JsError> {
+        self.inner.jump(delta).map_err(to_js)
+    }
+
+    /// Group same-parent nodes (one undo step); returns the group id.
+    pub fn group_nodes(&mut self, ids: Vec<f64>, name: &str) -> Result<f64, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .group_nodes(&ids, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Dissolve a group into its parent (one undo step).
+    pub fn ungroup_node(&mut self, id: f64) -> Result<(), JsError> {
+        self.inner.ungroup_node(NodeId(id as u64)).map_err(to_js)
+    }
+
     /// Topmost clickable node at a document-space point, or undefined.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<f64> {
         self.inner.hit_test(x, y).map(|id| id.0 as f64)

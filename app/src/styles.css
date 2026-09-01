@@ -110,6 +110,59 @@ body {
   background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+.panel li.multi {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.history {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.history h2 {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.history ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.history button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.78rem;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.history button:hover {
+  background: var(--border);
+}
+
+.history button.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.history li.future button {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .panel .kind {
   margin-left: auto;
   font-size: 0.7rem;

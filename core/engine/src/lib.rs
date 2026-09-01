@@ -41,16 +41,24 @@ impl From<chitrakar_doc::DocError> for EngineError {
     }
 }
 
+/// One recorded edit: the inverse that undoes it and a human-readable label
+/// for the history panel.
+struct HistoryEntry {
+    inverse: Command,
+    label: String,
+}
+
 /// An open document plus its edit history and cached composite.
 pub struct Session {
     doc: Document,
-    undo: Vec<Command>,
-    redo: Vec<Command>,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
     cache: Option<Surface>,
     /// Region of `cache` that must be recomputed before the next present.
     stale: Option<ClipRect>,
-    /// Inverse restoring the state before the current preview gesture.
-    preview_inverse: Option<Command>,
+    /// Inverse restoring the state before the current preview gesture, with
+    /// the label captured from the gesture's first command.
+    preview_inverse: Option<HistoryEntry>,
     /// Total pixels re-rendered so far (observability for tests and tuning).
     pixels_recomputed: u64,
     /// Soft-proofing (display-only): round-trip presented pixels through the
@@ -91,7 +99,7 @@ impl Session {
     /// The node a command touches, when knowable from the command alone.
     fn command_target(cmd: &Command) -> Option<NodeId> {
         match cmd {
-            Command::AddNode { .. } | Command::RestoreSubtree { .. } => None,
+            Command::AddNode { .. } | Command::RestoreSubtree { .. } | Command::Batch(_) => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
@@ -127,10 +135,12 @@ impl Session {
         // layer exists (before or after this command), fall back to
         // whole-canvas invalidation. Padded region rendering can refine this.
         let had_filter = self.doc.has_filter();
+        let batch = matches!(cmd, Command::Batch(_));
         let pre = self.bounds_of_target(Self::command_target(&cmd));
         let inverse = self.doc.apply(cmd)?;
         let post = self.bounds_of_target(Self::command_target(&inverse));
-        if had_filter || self.doc.has_filter() {
+        if batch || had_filter || self.doc.has_filter() {
+            // Batches touch several nodes; whole-canvas is the safe region.
             self.mark_dirty(Bounds::Everything);
         } else {
             self.mark_dirty(pre.union(post));
@@ -138,10 +148,46 @@ impl Session {
         Ok(inverse)
     }
 
+    /// Human-readable label for a command, read against the current document
+    /// (before the command applies, so names refer to the edited node).
+    fn describe(&self, cmd: &Command) -> String {
+        let name = |id: &NodeId| {
+            self.doc
+                .node(*id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|_| "layer".into())
+        };
+        match cmd {
+            Command::AddNode { node, .. } => format!("Add {}", node.name),
+            Command::RemoveNode { id } => format!("Delete {}", name(id)),
+            Command::RestoreSubtree { .. } => "Restore layer".into(),
+            Command::SetOpacity { id, .. } => format!("Opacity of {}", name(id)),
+            Command::SetVisible { id, visible } => {
+                format!("{} {}", if *visible { "Show" } else { "Hide" }, name(id))
+            }
+            Command::SetBlendMode { id, .. } => format!("Blend of {}", name(id)),
+            Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
+            Command::SetKind { id, .. } => format!("Edit {}", name(id)),
+            Command::SetName { id, .. } => format!("Rename {}", name(id)),
+            Command::SetMask { id, mask } => format!(
+                "{} mask on {}",
+                if mask.is_some() { "Set" } else { "Clear" },
+                name(id)
+            ),
+            Command::MoveNode { id, .. } => format!("Move {}", name(id)),
+            Command::Batch(_) => "Multiple edits".into(),
+        }
+    }
+
     pub fn apply(&mut self, cmd: Command) -> Result<(), EngineError> {
+        self.apply_labeled(cmd, None)
+    }
+
+    fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
         self.commit_preview(); // a stray preview must not leak into this edit
+        let label = label.unwrap_or_else(|| self.describe(&cmd));
         let inverse = self.apply_internal(cmd)?;
-        self.undo.push(inverse);
+        self.undo.push(HistoryEntry { inverse, label });
         self.redo.clear();
         Ok(())
     }
@@ -157,9 +203,10 @@ impl Session {
     /// [`commit_preview`](Self::commit_preview); the first preview of a
     /// gesture captures the inverse that undoes the whole gesture.
     pub fn preview(&mut self, cmd: Command) -> Result<(), EngineError> {
+        let label = self.describe(&cmd);
         let inverse = self.apply_internal(cmd)?;
         if self.preview_inverse.is_none() {
-            self.preview_inverse = Some(inverse);
+            self.preview_inverse = Some(HistoryEntry { inverse, label });
         }
         Ok(())
     }
@@ -172,8 +219,8 @@ impl Session {
     /// preview was active.
     pub fn commit_preview(&mut self) -> bool {
         match self.preview_inverse.take() {
-            Some(inverse) => {
-                self.undo.push(inverse);
+            Some(entry) => {
+                self.undo.push(entry);
                 self.redo.clear();
                 true
             }
@@ -185,8 +232,8 @@ impl Session {
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
         match self.preview_inverse.take() {
-            Some(inverse) => {
-                self.apply_internal(inverse)?;
+            Some(entry) => {
+                self.apply_internal(entry.inverse)?;
                 Ok(true)
             }
             None => Ok(false),
@@ -197,9 +244,12 @@ impl Session {
         self.commit_preview();
         match self.undo.pop() {
             None => Ok(false),
-            Some(inverse) => {
-                let redo = self.apply_internal(inverse)?;
-                self.redo.push(redo);
+            Some(entry) => {
+                let redo = self.apply_internal(entry.inverse)?;
+                self.redo.push(HistoryEntry {
+                    inverse: redo,
+                    label: entry.label,
+                });
                 Ok(true)
             }
         }
@@ -208,12 +258,118 @@ impl Session {
     pub fn redo(&mut self) -> Result<bool, EngineError> {
         match self.redo.pop() {
             None => Ok(false),
-            Some(cmd) => {
-                let inverse = self.apply_internal(cmd)?;
-                self.undo.push(inverse);
+            Some(entry) => {
+                let inverse = self.apply_internal(entry.inverse)?;
+                self.undo.push(HistoryEntry {
+                    inverse,
+                    label: entry.label,
+                });
                 Ok(true)
             }
         }
+    }
+
+    /// History labels for the panel: past edits oldest-first, then future
+    /// (undone) edits nearest-first. `undo_depth` marks the current position.
+    pub fn history_labels(&self) -> (Vec<String>, Vec<String>) {
+        (
+            self.undo.iter().map(|e| e.label.clone()).collect(),
+            self.redo.iter().rev().map(|e| e.label.clone()).collect(),
+        )
+    }
+
+    /// Move through history: negative = undo that many steps, positive =
+    /// redo. Stops early at either end.
+    pub fn jump(&mut self, delta: i32) -> Result<(), EngineError> {
+        for _ in 0..delta.unsigned_abs() {
+            let moved = if delta < 0 {
+                self.undo()?
+            } else {
+                self.redo()?
+            };
+            if !moved {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Group same-parent nodes into a new group at the topmost member's
+    /// position, as one undo step. Returns the group's id.
+    pub fn group_nodes(&mut self, ids: &[NodeId], name: &str) -> Result<NodeId, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing selected".into()));
+        }
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("cannot group the root".into()))?;
+        // All members must share the parent; order them bottom-to-top.
+        let siblings = self.doc.children_of(parent)?;
+        let mut ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "grouped layers must share a parent".into(),
+            ));
+        }
+        let top_index = siblings
+            .iter()
+            .position(|s| *s == *ordered.last().unwrap())
+            .unwrap();
+
+        let group_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index: top_index + 1,
+            node: Box::new(Node::group(name)),
+        }];
+        cmds.extend(
+            ordered
+                .drain(..)
+                .enumerate()
+                .map(|(i, id)| Command::MoveNode {
+                    id,
+                    parent: group_id,
+                    index: i,
+                }),
+        );
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Group into {name}")))?;
+        Ok(group_id)
+    }
+
+    /// Dissolve a group: its children move to its position in the parent,
+    /// the empty group is removed. One undo step.
+    pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
+        if !matches!(self.doc.node(id)?.kind, NodeKind::Group) {
+            return Err(EngineError::BadCommand("not a group".into()));
+        }
+        let label = format!("Ungroup {}", self.doc.node(id)?.name);
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot ungroup the root".into()))?;
+        let position = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .unwrap();
+        let children = self.doc.children_of(id)?.to_vec();
+        let mut cmds: Vec<Command> = children
+            .iter()
+            .enumerate()
+            .map(|(i, child)| Command::MoveNode {
+                id: *child,
+                parent,
+                index: position + i,
+            })
+            .collect();
+        cmds.push(Command::RemoveNode { id });
+        self.apply_labeled(Command::Batch(cmds), Some(label))
     }
 
     /// Present the current document state, re-rendering only what changed
@@ -675,6 +831,71 @@ mod tests {
         session.undo().unwrap();
         assert_eq!(session.document().node_count(), 1);
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn group_and_ungroup_are_single_undo_steps() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        let root = session.document().root();
+
+        let group = session.group_nodes(&[a, b], "duo").unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[group]);
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+
+        // One undo dissolves the grouping entirely.
+        session.undo().unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[a, b]);
+        session.redo().unwrap();
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+
+        session.ungroup_node(group).unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[a, b]);
+        assert!(session.document().node(group).is_err(), "group removed");
+        session.undo().unwrap();
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+
+        // Mixed-parent grouping is refused.
+        let c = add_rect(&mut session, "c", 4.0, 4.0);
+        assert!(session.group_nodes(&[a, c], "bad").is_err());
+    }
+
+    #[test]
+    fn history_labels_and_jump_walk_the_timeline() {
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "hero", 8.0, 8.0);
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+
+        let (past, future) = session.history_labels();
+        assert_eq!(past, vec!["Add hero", "Opacity of hero", "Hide hero"]);
+        assert!(future.is_empty());
+
+        // Jump back two steps: opacity restored, visibility restored.
+        session.jump(-2).unwrap();
+        assert_eq!(session.document().node(id).unwrap().opacity, 1.0);
+        assert!(session.document().node(id).unwrap().visible);
+        let (past, future) = session.history_labels();
+        assert_eq!(past, vec!["Add hero"]);
+        assert_eq!(future, vec!["Opacity of hero", "Hide hero"]);
+
+        // Jump forward one.
+        session.jump(1).unwrap();
+        assert_eq!(session.document().node(id).unwrap().opacity, 0.5);
+        assert_cache_matches_fresh(&mut session);
+
+        // Over-jumping clamps at the ends.
+        session.jump(-99).unwrap();
+        assert_eq!(session.document().node_count(), 1);
+        session.jump(99).unwrap();
+        assert!(!session.document().node(id).unwrap().visible);
     }
 
     #[test]
