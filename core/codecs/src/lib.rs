@@ -5,6 +5,10 @@
 //! this edge once the ICC engine lands (Phase 3); until then everything is
 //! treated as sRGB, which matches the naive pipeline in `chitrakar-color`.
 
+pub mod container;
+
+pub use container::{load_chitra, save_chitra, ContainerError};
+
 use chitrakar_color::LinearRgba;
 use image::ImageFormat;
 

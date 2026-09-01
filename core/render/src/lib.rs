@@ -131,6 +131,28 @@ fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode) {
     }
 }
 
+/// Local-space coverage test for a shape (shape origin at 0,0).
+fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
+    match shape {
+        VectorShape::Rect { width, height } => x >= 0.0 && y >= 0.0 && x < *width && y < *height,
+        VectorShape::Ellipse { rx, ry } => {
+            let (nx, ny) = ((x - rx) / rx, (y - ry) / ry);
+            nx * nx + ny * ny <= 1.0
+        }
+        // Path filling comes with the vector rasterizer proper.
+        VectorShape::Path { .. } => false,
+    }
+}
+
+/// Local-space bounds (min inclusive, max exclusive) of a shape.
+fn shape_bounds(shape: &VectorShape) -> (f32, f32) {
+    match shape {
+        VectorShape::Rect { width, height } => (*width, *height),
+        VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
+        VectorShape::Path { .. } => (0.0, 0.0),
+    }
+}
+
 fn fill_shape(
     dst: &mut Surface,
     shape: &VectorShape,
@@ -139,32 +161,54 @@ fn fill_shape(
     color: LinearRgba,
     mode: BlendMode,
 ) {
-    let covered: Box<dyn Fn(f32, f32) -> bool> = match shape {
-        VectorShape::Rect { width, height } => {
-            let (w, h) = (*width, *height);
-            Box::new(move |x, y| x >= 0.0 && y >= 0.0 && x < w && y < h)
-        }
-        VectorShape::Ellipse { rx, ry } => {
-            let (rx, ry) = (*rx, *ry);
-            Box::new(move |x, y| {
-                let (nx, ny) = ((x - rx) / rx, (y - ry) / ry);
-                nx * nx + ny * ny <= 1.0
-            })
-        }
-        // Path filling comes with the vector rasterizer proper.
-        VectorShape::Path { .. } => return,
-    };
-    for py in 0..dst.height {
-        for px in 0..dst.width {
+    // Only walk the pixels the shape's bounds can touch.
+    let (w, h) = shape_bounds(shape);
+    let x0 = (tx.floor().max(0.0)) as u32;
+    let y0 = (ty.floor().max(0.0)) as u32;
+    let x1 = ((tx + w).ceil().max(0.0) as u32).min(dst.width);
+    let y1 = ((ty + h).ceil().max(0.0) as u32).min(dst.height);
+    for py in y0..y1 {
+        for px in x0..x1 {
             // Sample at pixel centers; anti-aliasing arrives with the real
             // rasterizer (vello / analytic coverage).
             let (x, y) = (px as f32 + 0.5 - tx, py as f32 + 0.5 - ty);
-            if covered(x, y) {
+            if shape_covers(shape, x, y) {
                 let i = (py * dst.width + px) as usize;
                 dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
             }
         }
     }
+}
+
+/// Topmost visible vector node whose filled shape covers the document-space
+/// point — the click target. Groups are traversed top-down; adjustments and
+/// (for now) rasters are not hit-testable.
+pub fn hit_test(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    hit_in_group(doc, doc.root(), x, y)
+}
+
+fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    for &child in doc.children_of(group)?.iter().rev() {
+        let node = doc.node(child)?;
+        if !node.visible {
+            continue;
+        }
+        match &node.kind {
+            NodeKind::Group => {
+                if let Some(hit) = hit_in_group(doc, child, x, y)? {
+                    return Ok(Some(hit));
+                }
+            }
+            NodeKind::Vector { shape, fill, .. } if fill.is_some() => {
+                let t = node.transform;
+                if shape_covers(shape, x - t.e, y - t.f) {
+                    return Ok(Some(child));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
 }
 
 fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
@@ -340,5 +384,45 @@ mod tests {
             (adjusted.r / base.r - 2.0).abs() < 1e-4,
             "+1 stop doubles linear light"
         );
+    }
+
+    #[test]
+    fn hit_test_finds_topmost_shape() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("bottom", 10.0, 10.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect("top", 4.0, 4.0, RED),
+        })
+        .unwrap();
+        let (bottom, top) = {
+            let kids = doc.children_of(root).unwrap();
+            (kids[0], kids[1])
+        };
+        doc.apply(Command::SetTransform {
+            id: top,
+            transform: Transform::translation(6.0, 6.0),
+        })
+        .unwrap();
+
+        // Overlap region hits the top shape; elsewhere the bottom one.
+        assert_eq!(hit_test(&doc, 7.0, 7.0).unwrap(), Some(top));
+        assert_eq!(hit_test(&doc, 1.0, 1.0).unwrap(), Some(bottom));
+        assert_eq!(hit_test(&doc, 15.0, 15.0).unwrap(), None);
+
+        // Hidden shapes are not clickable.
+        doc.apply(Command::SetVisible {
+            id: top,
+            visible: false,
+        })
+        .unwrap();
+        assert_eq!(hit_test(&doc, 7.0, 7.0).unwrap(), Some(bottom));
     }
 }

@@ -45,6 +45,82 @@ body {
   font-size: 0.85rem;
 }
 
+.spacer {
+  flex: 1;
+}
+
+.topbar button,
+.file-button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.topbar button:hover,
+.file-button:hover {
+  background: var(--border);
+}
+
+.fill-swatch {
+  width: 2.2rem;
+  height: 2rem;
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.panel-head h2 {
+  flex: 1;
+}
+
+.panel-head button {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.panel-head button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.panel li.selected {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.panel .kind {
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.panel li.empty {
+  padding: 0.5rem 0.2rem;
+  font-size: 0.8rem;
+}
+
+#engine-canvas {
+  touch-action: none;
+  cursor: crosshair;
+}
+
 .workspace {
   display: flex;
   flex: 1;

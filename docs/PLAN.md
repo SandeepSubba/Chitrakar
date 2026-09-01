@@ -138,15 +138,22 @@ chitrakar/
 - ✅ Scaffold Rust workspace, Tauri 2 app, React UI, CI (fmt/clippy/test + desktop builds).
 - **Spike 1:** WASM engine + WebGPU triangle→texture inside Tauri webview on desktop,
   iOS Simulator, Android emulator. Decide the fallback ladder with data.
+  - ✅ *First half proven:* engine compiles to WASM (wasm-bindgen), runs in-browser,
+    renders to canvas via `putImageData`; full editor loop (draw/undo/hide/save)
+    verified headless in Chromium. WebGPU-in-webview per platform still open.
 - **Spike 2:** lcms2 vs moxcms — round-trip sRGB↔FOGRA39 correctness + WASM size/speed.
 
 ### Phase 1 — Core editor (vector + raster objects)
-- Document model, command/undo system, `.chitra` save/load.
+- ✅ Document model, command/undo system, `.chitra` save/load (manifest-only container;
+  embedded resources arrive with raster support).
 - Render graph with tiled caching; canvas with pan/zoom at 60fps.
-- Vector: rect/ellipse/polygon/path objects, solid & gradient fills, strokes.
+  *(current: full-frame CPU reference render + bbox-limited fills + hit testing)*
+- Vector: rect/ellipse ✅ drawn interactively; polygon/path objects, gradient fills,
+  strokes pending.
 - Raster: place PNG/JPEG as RasterObject; move/scale/rotate non-destructively.
-- Layer panel: reorder, group, hide, opacity, blend modes (normal/multiply/screen first).
-- Selection + transform handles.
+- Layer panel: hide ✅, select ✅, delete ✅; reorder, group, opacity slider,
+  blend-mode picker pending (engine supports normal/multiply/screen already).
+- Selection ✅ (hit test + move tool); transform handles pending.
 
 ### Phase 2 — Non-destructive power
 - Adjustment layers: brightness/contrast, levels, curves, HSL, exposure.

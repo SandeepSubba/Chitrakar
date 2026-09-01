@@ -9,6 +9,9 @@ shells/tauri/src-tauri/gen
 node_modules
 app/dist
 
+# Generated wasm-bindgen package (rebuilt by `npm run build:wasm`)
+app/src/wasm-pkg/
+
 # Editors / OS
 .DS_Store
 *.swp

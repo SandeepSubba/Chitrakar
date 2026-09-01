@@ -2,11 +2,16 @@
 //!
 //! The UI never touches pixel buffers or the document directly: it sends
 //! [`Command`]s (as values natively, as JSON over the WASM boundary) and
-//! receives rendered frames. wasm-bindgen bindings are added here in the
-//! Phase 0 WebGPU spike.
+//! receives rendered frames. The [`wasm`] module is the wasm-bindgen surface
+//! the webview UI drives.
+
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+use serde::Serialize;
 
 pub use chitrakar_color::ColorMode;
-pub use chitrakar_doc::{Command, Document, History, Node, NodeId};
+pub use chitrakar_doc::{Command, Document, History, Node, NodeId, NodeKind, Transform};
 pub use chitrakar_render::Surface;
 
 #[derive(Debug)]
@@ -77,12 +82,84 @@ impl Session {
         Ok(chitrakar_render::render(&self.doc)?)
     }
 
-    /// Render and encode as PNG — used by early UI plumbing and tests.
+    /// Render and encode as PNG — used by export and tests.
     pub fn render_png(&self) -> Result<Vec<u8>, EngineError> {
         let surface = self.render()?;
         chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
+
+    /// Flattened layer tree (depth-first, topmost layer first) for the UI's
+    /// layers panel.
+    pub fn layers(&self) -> Vec<LayerInfo> {
+        let mut out = Vec::new();
+        self.collect_layers(self.doc.root(), 0, &mut out);
+        out
+    }
+
+    fn collect_layers(&self, group: NodeId, depth: u32, out: &mut Vec<LayerInfo>) {
+        let Ok(children) = self.doc.children_of(group) else {
+            return;
+        };
+        // Children are stored bottom-to-top; panels list top-to-bottom.
+        for &id in children.iter().rev() {
+            let Ok(node) = self.doc.node(id) else {
+                continue;
+            };
+            out.push(LayerInfo {
+                id: id.0,
+                name: node.name.clone(),
+                kind: match &node.kind {
+                    NodeKind::Group => "group",
+                    NodeKind::Vector { .. } => "vector",
+                    NodeKind::Raster(_) => "raster",
+                    NodeKind::Adjustment(_) => "adjustment",
+                },
+                visible: node.visible,
+                opacity: node.opacity,
+                depth,
+            });
+            if matches!(node.kind, NodeKind::Group) {
+                self.collect_layers(id, depth + 1, out);
+            }
+        }
+    }
+
+    /// Topmost clickable node at a document-space point.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        chitrakar_render::hit_test(&self.doc, x, y).ok().flatten()
+    }
+
+    pub fn transform_of(&self, id: NodeId) -> Result<Transform, EngineError> {
+        Ok(self.doc.node(id)?.transform)
+    }
+
+    /// Serialize to `.chitra` container bytes.
+    pub fn save(&self) -> Result<Vec<u8>, EngineError> {
+        chitrakar_codecs::save_chitra(&self.doc).map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Open a `.chitra` container. The loaded document starts with a fresh
+    /// history (undo does not cross save boundaries for now).
+    pub fn load(bytes: &[u8]) -> Result<Self, EngineError> {
+        let doc = chitrakar_codecs::load_chitra(bytes)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        Ok(Self {
+            doc,
+            history: History::default(),
+        })
+    }
+}
+
+/// One row of the UI layers panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerInfo {
+    pub id: u64,
+    pub name: String,
+    pub kind: &'static str,
+    pub visible: bool,
+    pub opacity: f32,
+    pub depth: u32,
 }
 
 #[cfg(test)]
@@ -123,5 +200,55 @@ mod tests {
             session.apply_json("{nope"),
             Err(EngineError::BadCommand(_))
         ));
+    }
+
+    #[test]
+    fn layers_list_is_top_first_with_depth() {
+        let mut session = Session::new(8, 8, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("bottom group")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::group("nested")),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("top")),
+            })
+            .unwrap();
+
+        let layers = session.layers();
+        let names: Vec<_> = layers.iter().map(|l| (l.name.as_str(), l.depth)).collect();
+        assert_eq!(names, vec![("top", 0), ("bottom group", 0), ("nested", 1)]);
+    }
+
+    #[test]
+    fn save_load_roundtrip_via_chitra() {
+        let mut session = Session::new(32, 32, ColorMode::Cmyk);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("kept")),
+            })
+            .unwrap();
+
+        let bytes = session.save().unwrap();
+        let restored = Session::load(&bytes).unwrap();
+        assert_eq!(restored.document().node_count(), 2);
+        assert_eq!(restored.layers()[0].name, "kept");
     }
 }
