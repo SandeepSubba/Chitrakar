@@ -4,22 +4,27 @@ import {
   Command,
   LayerInfo,
   NodeId,
+  Transform,
   WasmSession,
+  getWasmMemory,
   hexColor,
-  identity,
   initEngine,
   nodePayload,
   sendCommand,
+  sendPreview,
 } from "./engine";
 
 const TOOLS = ["Move", "Rect", "Ellipse"] as const;
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
+const HANDLES = ["nw", "ne", "sw", "se"] as const;
+type Handle = (typeof HANDLES)[number];
 
 const DOC_WIDTH = 1280;
 const DOC_HEIGHT = 720;
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
+const MIN_SIZE = 2; // doc pixels, resize clamp
 
 interface View {
   zoom: number;
@@ -33,9 +38,17 @@ interface ToolDrag {
   startY: number;
   lastX: number;
   lastY: number;
-  /** Move tool: the node being dragged and its starting translation. */
+  moved: boolean;
+  /** Move tool: the node being dragged and its full starting transform. */
   target?: NodeId;
-  origin?: [number, number];
+  t0?: Transform;
+}
+
+interface HandleDrag {
+  corner: Handle;
+  id: NodeId;
+  t0: Transform;
+  b0: [number, number, number, number];
 }
 
 interface PanDrag {
@@ -44,6 +57,15 @@ interface PanDrag {
   viewX: number;
   viewY: number;
 }
+
+const toTransform = (v: ArrayLike<number>): Transform => ({
+  a: v[0],
+  b: v[1],
+  c: v[2],
+  d: v[3],
+  e: v[4],
+  f: v[5],
+});
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
@@ -56,7 +78,9 @@ export function App() {
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
+  const imgDataRef = useRef<ImageData | null>(null);
   const toolDragRef = useRef<ToolDrag | null>(null);
+  const handleDragRef = useRef<HandleDrag | null>(null);
   const panDragRef = useRef<PanDrag | null>(null);
   const spaceRef = useRef(false);
   const shapeCount = useRef(0);
@@ -65,8 +89,32 @@ export function App() {
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext("2d")!;
-      const pixels = new Uint8ClampedArray(s.render_rgba());
-      ctx.putImageData(new ImageData(pixels, s.width, s.height), 0, 0);
+      const dirty = s.render_frame();
+      if (
+        !imgDataRef.current ||
+        imgDataRef.current.width !== s.width ||
+        imgDataRef.current.height !== s.height
+      ) {
+        imgDataRef.current = new ImageData(s.width, s.height);
+      }
+      if (dirty.length === 4) {
+        // Zero-copy view into wasm memory; ImageData needs its own buffer.
+        const view = new Uint8ClampedArray(
+          getWasmMemory().buffer,
+          s.frame_ptr(),
+          s.frame_len(),
+        );
+        imgDataRef.current.data.set(view);
+        ctx.putImageData(
+          imgDataRef.current,
+          0,
+          0,
+          dirty[0],
+          dirty[1],
+          dirty[2],
+          dirty[3],
+        );
+      }
     }
     setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
   }, []);
@@ -74,10 +122,9 @@ export function App() {
   const fitView = useCallback(() => {
     const host = hostRef.current;
     if (!host) return;
-    const zoom = Math.min(
-      host.clientWidth / DOC_WIDTH,
-      host.clientHeight / DOC_HEIGHT,
-    ) * 0.9;
+    const zoom =
+      Math.min(host.clientWidth / DOC_WIDTH, host.clientHeight / DOC_HEIGHT) *
+      0.9;
     setView({
       zoom,
       x: (host.clientWidth - DOC_WIDTH * zoom) / 2,
@@ -117,6 +164,15 @@ export function App() {
     [session, refresh],
   );
 
+  const preview = useCallback(
+    (cmd: Command) => {
+      if (!session) return;
+      sendPreview(session, cmd);
+      refresh(session);
+    },
+    [session, refresh],
+  );
+
   const undo = useCallback(() => {
     if (session?.undo()) refresh(session);
   }, [session, refresh]);
@@ -124,7 +180,14 @@ export function App() {
     if (session?.redo()) refresh(session);
   }, [session, refresh]);
 
-  // Keyboard: undo/redo, space-to-pan.
+  const cancelGesture = useCallback(() => {
+    if (!session) return;
+    toolDragRef.current = null;
+    handleDragRef.current = null;
+    if (session.cancel_preview()) refresh(session);
+  }, [session, refresh]);
+
+  // Keyboard: undo/redo, space-to-pan, escape-to-cancel.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
@@ -132,6 +195,7 @@ export function App() {
         if (e.shiftKey) redo();
         else undo();
       }
+      if (e.key === "Escape") cancelGesture();
       if (e.code === "Space" && !(e.target instanceof HTMLInputElement)) {
         spaceRef.current = true;
         e.preventDefault();
@@ -146,7 +210,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo]);
+  }, [undo, redo, cancelGesture]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
@@ -176,7 +240,7 @@ export function App() {
   }, []);
 
   /** Pointer position in document pixels. */
-  const docPoint = (e: React.PointerEvent): [number, number] => {
+  const docPoint = (e: { clientX: number; clientY: number }): [number, number] => {
     const rect = canvasRef.current!.getBoundingClientRect();
     return [
       ((e.clientX - rect.left) / rect.width) * DOC_WIDTH,
@@ -217,7 +281,14 @@ export function App() {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
-    const drag: ToolDrag = { tool, startX: x, startY: y, lastX: x, lastY: y };
+    const drag: ToolDrag = {
+      tool,
+      startX: x,
+      startY: y,
+      lastX: x,
+      lastY: y,
+      moved: false,
+    };
     if (tool === "Move") {
       const hit = session.hit_test(x, y);
       if (hit === undefined) {
@@ -225,7 +296,7 @@ export function App() {
         return;
       }
       drag.target = hit;
-      drag.origin = session.translation_of(hit) as unknown as [number, number];
+      drag.t0 = toTransform(session.transform_of(hit));
       setSelected(hit);
     }
     toolDragRef.current = drag;
@@ -236,6 +307,20 @@ export function App() {
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
+    // Move tool: live preview while dragging.
+    if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
+      const dx = drag.lastX - drag.startX;
+      const dy = drag.lastY - drag.startY;
+      if (dx !== 0 || dy !== 0) {
+        drag.moved = true;
+        preview({
+          SetTransform: {
+            id: drag.target,
+            transform: { ...drag.t0, e: drag.t0.e + dx, f: drag.t0.f + dy },
+          },
+        });
+      }
+    }
   };
 
   const onCanvasPointerUp = () => {
@@ -243,15 +328,9 @@ export function App() {
     toolDragRef.current = null;
     if (!drag || !session) return;
 
-    if (drag.tool === "Move" && drag.target !== undefined && drag.origin) {
-      const [dx, dy] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
-      if (dx === 0 && dy === 0) return;
-      run({
-        SetTransform: {
-          id: drag.target,
-          transform: identity(drag.origin[0] + dx, drag.origin[1] + dy),
-        },
-      });
+    if (drag.tool === "Move") {
+      // The document already holds the previewed position; seal the gesture.
+      if (drag.moved && session.commit_preview()) refresh(session);
       return;
     }
 
@@ -260,7 +339,7 @@ export function App() {
     const y0 = Math.min(drag.startY, drag.lastY);
     const w = Math.abs(drag.lastX - drag.startX);
     const h = Math.abs(drag.lastY - drag.startY);
-    if (w < 2 || h < 2) return;
+    if (w < MIN_SIZE || h < MIN_SIZE) return;
     shapeCount.current += 1;
     const shape =
       drag.tool === "Rect"
@@ -278,6 +357,49 @@ export function App() {
         ),
       },
     });
+  };
+
+  // Resize handles: drag scales the node, anchored at the opposite corner.
+  const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
+    if (!session || selected === null) return;
+    e.stopPropagation();
+    const b = session.bounds_of(selected);
+    if (b.length !== 4) return;
+    handleDragRef.current = {
+      corner,
+      id: selected,
+      t0: toTransform(session.transform_of(selected)),
+      b0: [b[0], b[1], b[2], b[3]],
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onHandlePointerMove = (e: React.PointerEvent) => {
+    const drag = handleDragRef.current;
+    if (!drag || !session) return;
+    const [cx, cy] = docPoint(e);
+    const [bx, by, bw, bh] = drag.b0;
+    const west = drag.corner === "nw" || drag.corner === "sw";
+    const north = drag.corner === "nw" || drag.corner === "ne";
+    const newW = Math.max(MIN_SIZE, west ? bx + bw - cx : cx - bx);
+    const newH = Math.max(MIN_SIZE, north ? by + bh - cy : cy - by);
+    preview({
+      SetTransform: {
+        id: drag.id,
+        transform: {
+          ...drag.t0,
+          a: (drag.t0.a * newW) / bw,
+          d: (drag.t0.d * newH) / bh,
+          e: west ? bx + bw - newW : drag.t0.e,
+          f: north ? by + bh - newH : drag.t0.f,
+        },
+      },
+    });
+  };
+
+  const onHandlePointerUp = () => {
+    handleDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
   };
 
   const addExposure = () => {
@@ -300,6 +422,12 @@ export function App() {
   };
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  const resizable =
+    selectedLayer?.kind === "vector" || selectedLayer?.kind === "raster";
+  const selBounds =
+    session && selected !== null && resizable
+      ? session.bounds_of(selected)
+      : null;
 
   /** Reorder within the parent group: +1 raises toward the top. */
   const reorderSelected = (direction: 1 | -1) => {
@@ -429,6 +557,28 @@ export function App() {
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
           />
+          {selBounds && selBounds.length === 4 && (
+            <div
+              className="sel-overlay"
+              style={{
+                left: view.x + selBounds[0] * view.zoom,
+                top: view.y + selBounds[1] * view.zoom,
+                width: selBounds[2] * view.zoom,
+                height: selBounds[3] * view.zoom,
+              }}
+            >
+              {HANDLES.map((c) => (
+                <div
+                  key={c}
+                  className={`handle ${c}`}
+                  data-handle={c}
+                  onPointerDown={(e) => onHandlePointerDown(e, c)}
+                  onPointerMove={onHandlePointerMove}
+                  onPointerUp={onHandlePointerUp}
+                />
+              ))}
+            </div>
+          )}
         </main>
         <aside className="panel" aria-label="Layers">
           <div className="panel-head">
@@ -464,7 +614,8 @@ export function App() {
           {selectedLayer && (
             <div className="layer-props">
               <label>
-                Opacity {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
+                Opacity{" "}
+                {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
                 <input
                   type="range"
                   min={0}

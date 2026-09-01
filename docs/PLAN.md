@@ -146,9 +146,14 @@ chitrakar/
 ### Phase 1 — Core editor (vector + raster objects)
 - ✅ Document model, command/undo system, `.chitra` save/load (manifest-only container;
   embedded resources arrive with raster support).
-- Render graph with tiled caching *(pending; current: full-frame CPU reference
-  render + bbox-limited fills + hit testing)*; canvas pan/zoom ✅ (wheel zoom
-  toward cursor, space/middle-drag pan, fit-to-window).
+- Cached incremental rendering ✅: the engine keeps a composite cache, computes
+  dirty regions from node bounds per command, and re-renders/re-encodes only
+  those pixels (adjustment layers dirty everything below, by design). Per-node
+  tile caches refine this later. Canvas pan/zoom ✅ (wheel zoom toward cursor,
+  space/middle-drag pan, fit-to-window).
+- Live gestures ✅: preview/commit/cancel in the engine — drags update the
+  document each pointer move, history records one undo step per gesture,
+  Escape cancels. Transforms support scale (shear/rotation with the GPU path).
 - Vector: rect/ellipse ✅ drawn interactively; polygon/path objects, gradient fills,
   strokes pending.
 - Raster: place PNG/JPEG as RasterObject ✅ (content-addressed resource pool,
@@ -157,7 +162,8 @@ chitrakar/
 - Layer panel: hide ✅, select ✅, delete ✅, reorder ✅ (MoveNode command:
   reorder + reparent with subtree-cycle protection), opacity slider ✅,
   blend-mode picker ✅; grouping UI pending.
-- Selection ✅ (hit test + move tool); transform handles pending.
+- Selection ✅ (hit test + move tool with live preview); corner resize
+  handles ✅ (anchored scaling); rotation handles pending.
 
 ### Phase 2 — Non-destructive power
 - Adjustment layers: brightness/contrast, levels, curves, HSL, exposure.

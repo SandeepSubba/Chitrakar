@@ -122,15 +122,30 @@ export function hexColor(hex: string, alpha = 1): AuthoredColor {
 }
 
 let wasmReady: Promise<unknown> | null = null;
+let wasmMemory: WebAssembly.Memory | null = null;
 
 /** Idempotent engine module initialization. */
 export function initEngine(): Promise<unknown> {
-  wasmReady ??= init();
+  wasmReady ??= init().then((exports) => {
+    wasmMemory = (exports as { memory: WebAssembly.Memory }).memory;
+    return exports;
+  });
   return wasmReady;
+}
+
+/** Linear memory of the engine module (frames are read from it in place). */
+export function getWasmMemory(): WebAssembly.Memory {
+  if (!wasmMemory) throw new Error("engine not initialized");
+  return wasmMemory;
 }
 
 export { WasmSession };
 
 export function sendCommand(session: WasmSession, cmd: Command): void {
   session.apply(JSON.stringify(cmd));
+}
+
+/** Apply a command as part of a live drag gesture (see Session::preview). */
+export function sendPreview(session: WasmSession, cmd: Command): void {
+  session.preview(JSON.stringify(cmd));
 }

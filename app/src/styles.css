@@ -146,6 +146,48 @@ body {
   cursor: crosshair;
 }
 
+.sel-overlay {
+  position: absolute;
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1px solid #fff;
+  border-radius: 2px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.handle.nw {
+  left: -5px;
+  top: -5px;
+  cursor: nwse-resize;
+}
+
+.handle.ne {
+  right: -5px;
+  top: -5px;
+  cursor: nesw-resize;
+}
+
+.handle.sw {
+  left: -5px;
+  bottom: -5px;
+  cursor: nesw-resize;
+}
+
+.handle.se {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
 .workspace {
   display: flex;
   flex: 1;

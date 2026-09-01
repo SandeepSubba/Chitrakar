@@ -3,13 +3,23 @@
 //! Current state: a scalar CPU reference renderer that evaluates the scene
 //! graph bottom-up into a linear-float pixel buffer. It exists to pin down
 //! *correct* output; the wgpu/vello GPU backends (Phase 1) are validated
-//! against it. Tiling ([`tiles`]) is the invalidation granularity for the
-//! cached render graph.
+//! against it.
+//!
+//! Rendering is clip-aware: [`render_region`] recomputes only a rectangle of
+//! the surface, which is what makes the engine's cached incremental renders
+//! cheap. [`node_bounds`] reports the document-space area a node can affect,
+//! so edits map to small dirty regions. Tiling ([`tiles`]) will refine the
+//! invalidation granularity further.
+//!
+//! Transforms support translation and scale (`a`, `d`, `e`, `f`); shear and
+//! rotation (`b`, `c`) arrive with the GPU rasterizer.
 
 pub mod tiles;
 
 use chitrakar_color::{to_working, LinearRgba};
-use chitrakar_doc::{Adjustment, BlendMode, DocError, Document, NodeId, NodeKind, VectorShape};
+use chitrakar_doc::{
+    Adjustment, BlendMode, DocError, Document, NodeId, NodeKind, Transform, VectorShape,
+};
 
 /// A linear-light, premultiplied float pixel buffer.
 pub struct Surface {
@@ -35,16 +45,203 @@ impl Surface {
     pub fn to_srgb8(&self) -> Vec<u8> {
         self.pixels.iter().flat_map(|p| p.to_srgb8()).collect()
     }
+
+    /// Encode one clip region into an existing full-size RGBA8 buffer.
+    pub fn encode_srgb8_region(&self, clip: ClipRect, out: &mut [u8]) {
+        for y in clip.y0..clip.y1 {
+            for x in clip.x0..clip.x1 {
+                let i = (y * self.width + x) as usize;
+                out[i * 4..i * 4 + 4].copy_from_slice(&self.pixels[i].to_srgb8());
+            }
+        }
+    }
+
+    fn full_clip(&self) -> ClipRect {
+        ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: self.width,
+            y1: self.height,
+        }
+    }
 }
 
-/// Render a document to a full-size surface.
+/// Integer pixel rectangle, min inclusive / max exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipRect {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+impl ClipRect {
+    pub fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    pub fn intersect(&self, other: ClipRect) -> ClipRect {
+        ClipRect {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        }
+    }
+
+    pub fn union(&self, other: ClipRect) -> ClipRect {
+        ClipRect {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
+    }
+
+    pub fn area(&self) -> u64 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.x1 - self.x0) as u64 * (self.y1 - self.y0) as u64
+        }
+    }
+
+    /// Clamp a float rect (with padding for seam safety) onto a surface.
+    pub fn from_float(x0: f32, y0: f32, x1: f32, y1: f32, width: u32, height: u32) -> ClipRect {
+        ClipRect {
+            x0: (x0.floor() - 1.0).max(0.0) as u32,
+            y0: (y0.floor() - 1.0).max(0.0) as u32,
+            x1: ((x1.ceil() + 1.0).max(0.0) as u32).min(width),
+            y1: ((y1.ceil() + 1.0).max(0.0) as u32).min(height),
+        }
+    }
+}
+
+/// Document-space extent a node can affect when anything about it changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bounds {
+    /// Nothing on screen (e.g. an empty group).
+    None,
+    /// Float doc-space rect (x0, y0, x1, y1).
+    Rect(f32, f32, f32, f32),
+    /// The whole canvas (adjustment layers act on everything below).
+    Everything,
+}
+
+impl Bounds {
+    pub fn union(self, other: Bounds) -> Bounds {
+        match (self, other) {
+            (Bounds::Everything, _) | (_, Bounds::Everything) => Bounds::Everything,
+            (Bounds::None, b) | (b, Bounds::None) => b,
+            (Bounds::Rect(ax0, ay0, ax1, ay1), Bounds::Rect(bx0, by0, bx1, by1)) => {
+                Bounds::Rect(ax0.min(bx0), ay0.min(by0), ax1.max(bx1), ay1.max(by1))
+            }
+        }
+    }
+
+    pub fn to_clip(self, width: u32, height: u32) -> Option<ClipRect> {
+        match self {
+            Bounds::None => None,
+            Bounds::Everything => Some(ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: width,
+                y1: height,
+            }),
+            Bounds::Rect(x0, y0, x1, y1) => {
+                let c = ClipRect::from_float(x0, y0, x1, y1, width, height);
+                (!c.is_empty()).then_some(c)
+            }
+        }
+    }
+}
+
+/// Local size (width, height) of a node's own content, before its transform.
+fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
+    match kind {
+        NodeKind::Vector { shape, .. } => Some(shape_size(shape)),
+        NodeKind::Raster(r) => Some((r.width as f32, r.height as f32)),
+        NodeKind::Group | NodeKind::Adjustment(_) => None,
+    }
+}
+
+fn shape_size(shape: &VectorShape) -> (f32, f32) {
+    match shape {
+        VectorShape::Rect { width, height } => (*width, *height),
+        VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
+        VectorShape::Path { .. } => (0.0, 0.0),
+    }
+}
+
+/// Transformed doc-space bounds of a local (0,0)-(w,h) box.
+fn transformed_bounds(t: Transform, w: f32, h: f32) -> Bounds {
+    let xs = [t.e, t.a * w + t.e];
+    let ys = [t.f, t.d * h + t.f];
+    Bounds::Rect(
+        xs[0].min(xs[1]),
+        ys[0].min(ys[1]),
+        xs[0].max(xs[1]),
+        ys[0].max(ys[1]),
+    )
+}
+
+/// Doc-space extent of a node: leaf bounds through its transform; groups are
+/// the union of their children. Any adjustment layer in the subtree makes
+/// the answer [`Bounds::Everything`], because it acts on all content below.
+/// Visibility is ignored on purpose — toggling it dirties the same region.
+pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    let node = doc.node(id)?;
+    Ok(match &node.kind {
+        NodeKind::Adjustment(_) => Bounds::Everything,
+        NodeKind::Group => {
+            let mut acc = Bounds::None;
+            for &child in doc.children_of(id)? {
+                acc = acc.union(node_bounds(doc, child)?);
+                if acc == Bounds::Everything {
+                    break;
+                }
+            }
+            acc
+        }
+        kind => {
+            let (w, h) = local_size(kind).unwrap();
+            transformed_bounds(node.transform, w, h)
+        }
+    })
+}
+
+/// Render a document to a new full-size surface.
 pub fn render(doc: &Document) -> Result<Surface, DocError> {
     let mut surface = Surface::new(doc.meta.width, doc.meta.height);
-    render_group(doc, doc.root(), &mut surface)?;
+    let clip = surface.full_clip();
+    render_region(doc, &mut surface, clip)?;
     Ok(surface)
 }
 
-fn render_group(doc: &Document, group: NodeId, dst: &mut Surface) -> Result<(), DocError> {
+/// Recompute one region of a surface from scratch (clears it first). Pixels
+/// outside `clip` are untouched.
+pub fn render_region(
+    doc: &Document,
+    surface: &mut Surface,
+    clip: ClipRect,
+) -> Result<(), DocError> {
+    if clip.is_empty() {
+        return Ok(());
+    }
+    for y in clip.y0..clip.y1 {
+        let row = (y * surface.width) as usize;
+        surface.pixels[row + clip.x0 as usize..row + clip.x1 as usize]
+            .fill(LinearRgba::TRANSPARENT);
+    }
+    render_group(doc, doc.root(), surface, clip)
+}
+
+fn render_group(
+    doc: &Document,
+    group: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
     for &child in doc.children_of(group)? {
         let node = doc.node(child)?;
@@ -56,31 +253,32 @@ fn render_group(doc: &Document, group: NodeId, dst: &mut Surface) -> Result<(), 
                 // Isolate the group on its own surface so group opacity and
                 // blend apply to the composite, not per child.
                 let mut sub = Surface::new(dst.width, dst.height);
-                render_group(doc, child, &mut sub)?;
-                composite(dst, &sub, node.opacity, node.blend);
+                render_group(doc, child, &mut sub, clip)?;
+                composite(dst, &sub, node.opacity, node.blend, clip);
             }
             NodeKind::Vector { shape, fill, .. } => {
                 if let Some(fill) = fill {
                     let mut color = to_working(*fill);
                     color = scale_alpha(color, node.opacity);
-                    let t = node.transform;
-                    fill_shape(dst, shape, t.e, t.f, color, node.blend);
+                    fill_shape(dst, shape, node.transform, color, node.blend, clip);
                 }
             }
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
-                        let t = node.transform;
-                        draw_raster(dst, res, t.e, t.f, node.opacity, node.blend);
+                        draw_raster(dst, res, node.transform, node.opacity, node.blend, clip);
                     }
                 }
             }
             NodeKind::Adjustment(adj) => {
                 // An adjustment layer transforms everything composited below
                 // it, weighted by its opacity.
-                for px in dst.pixels.iter_mut() {
-                    let adjusted = apply_adjustment(adj, *px);
-                    *px = lerp(*px, adjusted, node.opacity);
+                for y in clip.y0..clip.y1 {
+                    for x in clip.x0..clip.x1 {
+                        let i = (y * dst.width + x) as usize;
+                        let adjusted = apply_adjustment(adj, dst.pixels[i]);
+                        dst.pixels[i] = lerp(dst.pixels[i], adjusted, node.opacity);
+                    }
                 }
             }
         }
@@ -131,10 +329,22 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     }
 }
 
-fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode) {
-    for (d, s) in dst.pixels.iter_mut().zip(&src.pixels) {
-        *d = blend_pixel(scale_alpha(*s, opacity), *d, mode);
+fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode, clip: ClipRect) {
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let i = (y * dst.width + x) as usize;
+            dst.pixels[i] = blend_pixel(scale_alpha(src.pixels[i], opacity), dst.pixels[i], mode);
+        }
     }
+}
+
+/// Map a doc-space point into a node's local space (inverse of its
+/// scale+translate transform). Degenerate scales map nowhere.
+fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
+    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+        return None;
+    }
+    Some(((x - t.e) / t.a, (y - t.f) / t.d))
 }
 
 /// Local-space coverage test for a shape (shape origin at 0,0).
@@ -150,34 +360,35 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     }
 }
 
-/// Local-space bounds (min inclusive, max exclusive) of a shape.
-fn shape_bounds(shape: &VectorShape) -> (f32, f32) {
-    match shape {
-        VectorShape::Rect { width, height } => (*width, *height),
-        VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
-        VectorShape::Path { .. } => (0.0, 0.0),
+fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> ClipRect {
+    match transformed_bounds(t, w, h).to_clip(dst.width, dst.height) {
+        Some(b) => b.intersect(clip),
+        None => ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        },
     }
 }
 
 fn fill_shape(
     dst: &mut Surface,
     shape: &VectorShape,
-    tx: f32,
-    ty: f32,
+    t: Transform,
     color: LinearRgba,
     mode: BlendMode,
+    clip: ClipRect,
 ) {
-    // Only walk the pixels the shape's bounds can touch.
-    let (w, h) = shape_bounds(shape);
-    let x0 = (tx.floor().max(0.0)) as u32;
-    let y0 = (ty.floor().max(0.0)) as u32;
-    let x1 = ((tx + w).ceil().max(0.0) as u32).min(dst.width);
-    let y1 = ((ty + h).ceil().max(0.0) as u32).min(dst.height);
-    for py in y0..y1 {
-        for px in x0..x1 {
+    let (w, h) = shape_size(shape);
+    let bbox = draw_bbox(t, w, h, dst, clip);
+    for py in bbox.y0..bbox.y1 {
+        for px in bbox.x0..bbox.x1 {
             // Sample at pixel centers; anti-aliasing arrives with the real
             // rasterizer (vello / analytic coverage).
-            let (x, y) = (px as f32 + 0.5 - tx, py as f32 + 0.5 - ty);
+            let Some((x, y)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
+                return;
+            };
             if shape_covers(shape, x, y) {
                 let i = (py * dst.width + px) as usize;
                 dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
@@ -186,29 +397,31 @@ fn fill_shape(
     }
 }
 
-/// Blit a source image at an integer-ish translation (nearest sample; full
-/// affine sampling arrives with the GPU path).
+/// Blit a source image through its transform (nearest sample; filtered
+/// sampling arrives with the GPU path).
 fn draw_raster(
     dst: &mut Surface,
     res: &chitrakar_doc::Resource,
-    tx: f32,
-    ty: f32,
+    t: Transform,
     opacity: f32,
     mode: BlendMode,
+    clip: ClipRect,
 ) {
     // 8-bit sRGB → linear lookup table, built per blit (256 entries, cheap).
     let mut lut = [0f32; 256];
     for (v, out) in lut.iter_mut().enumerate() {
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
     }
-    let x0 = tx.floor().max(0.0) as u32;
-    let y0 = ty.floor().max(0.0) as u32;
-    let x1 = ((tx + res.width as f32).ceil().max(0.0) as u32).min(dst.width);
-    let y1 = ((ty + res.height as f32).ceil().max(0.0) as u32).min(dst.height);
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let sx = (px as f32 + 0.5 - tx) as u32;
-            let sy = (py as f32 + 0.5 - ty) as u32;
+    let bbox = draw_bbox(t, res.width as f32, res.height as f32, dst, clip);
+    for py in bbox.y0..bbox.y1 {
+        for px in bbox.x0..bbox.x1 {
+            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
+                return;
+            };
+            if lx < 0.0 || ly < 0.0 {
+                continue;
+            }
+            let (sx, sy) = (lx as u32, ly as u32);
             if sx >= res.width || sy >= res.height {
                 continue;
             }
@@ -224,44 +437,6 @@ fn draw_raster(
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
         }
     }
-}
-
-/// Topmost visible node whose filled shape or image bounds cover the
-/// document-space point — the click target. Groups are traversed top-down;
-/// adjustment layers are not hit-testable.
-pub fn hit_test(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
-    hit_in_group(doc, doc.root(), x, y)
-}
-
-fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
-    for &child in doc.children_of(group)?.iter().rev() {
-        let node = doc.node(child)?;
-        if !node.visible {
-            continue;
-        }
-        match &node.kind {
-            NodeKind::Group => {
-                if let Some(hit) = hit_in_group(doc, child, x, y)? {
-                    return Ok(Some(hit));
-                }
-            }
-            NodeKind::Vector { shape, fill, .. } if fill.is_some() => {
-                let t = node.transform;
-                if shape_covers(shape, x - t.e, y - t.f) {
-                    return Ok(Some(child));
-                }
-            }
-            NodeKind::Raster(raster) => {
-                let t = node.transform;
-                let (lx, ly) = (x - t.e, y - t.f);
-                if lx >= 0.0 && ly >= 0.0 && lx < raster.width as f32 && ly < raster.height as f32 {
-                    return Ok(Some(child));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(None)
 }
 
 fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
@@ -297,11 +472,54 @@ fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
     }
 }
 
+/// Topmost visible node whose filled shape or image bounds cover the
+/// document-space point — the click target. Groups are traversed top-down;
+/// adjustment layers are not hit-testable.
+pub fn hit_test(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    hit_in_group(doc, doc.root(), x, y)
+}
+
+fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    for &child in doc.children_of(group)?.iter().rev() {
+        let node = doc.node(child)?;
+        if !node.visible {
+            continue;
+        }
+        match &node.kind {
+            NodeKind::Group => {
+                if let Some(hit) = hit_in_group(doc, child, x, y)? {
+                    return Ok(Some(hit));
+                }
+            }
+            NodeKind::Vector { shape, fill, .. } if fill.is_some() => {
+                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                    if shape_covers(shape, lx, ly) {
+                        return Ok(Some(child));
+                    }
+                }
+            }
+            NodeKind::Raster(raster) => {
+                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                    if lx >= 0.0
+                        && ly >= 0.0
+                        && lx < raster.width as f32
+                        && ly < raster.height as f32
+                    {
+                        return Ok(Some(child));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};
-    use chitrakar_doc::{Command, Node, Transform};
+    use chitrakar_doc::{Command, Node};
 
     fn filled_rect(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
         let mut node = Node::vector(
@@ -352,6 +570,98 @@ mod tests {
         assert_eq!(s.get(0, 0).a, 0.0);
         assert_eq!(s.get(3, 3).to_srgb8(), [255, 0, 0, 255]);
         assert_eq!(s.get(6, 6).a, 0.0);
+    }
+
+    #[test]
+    fn scaled_rect_renders_and_hit_tests_scaled() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 4.0, 4.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        // 2× scale, translated to (2,2): covers (2,2)-(10,10).
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: 2.0,
+                f: 2.0,
+            },
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(9, 9).to_srgb8(), [255, 0, 0, 255]);
+        assert_eq!(s.get(11, 11).a, 0.0);
+        assert_eq!(hit_test(&doc, 9.5, 9.5).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 10.5, 10.5).unwrap(), None);
+        assert_eq!(
+            node_bounds(&doc, id).unwrap(),
+            Bounds::Rect(2.0, 2.0, 10.0, 10.0)
+        );
+    }
+
+    #[test]
+    fn region_render_matches_full_render() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("a", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect(
+                "b",
+                10.0,
+                10.0,
+                AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 0.5,
+                },
+            ),
+        })
+        .unwrap();
+
+        let full = render(&doc).unwrap();
+
+        // Start from a surface with stale garbage in the region, re-render
+        // just that region, and compare against the full render.
+        let mut patched = render(&doc).unwrap();
+        let clip = ClipRect {
+            x0: 4,
+            y0: 4,
+            x1: 16,
+            y1: 16,
+        };
+        for y in clip.y0..clip.y1 {
+            for x in clip.x0..clip.x1 {
+                patched.pixels[(y * 32 + x) as usize] = LinearRgba {
+                    r: 9.0,
+                    g: 9.0,
+                    b: 9.0,
+                    a: 1.0,
+                };
+            }
+        }
+        render_region(&doc, &mut patched, clip).unwrap();
+        for y in 0..32 {
+            for x in 0..32 {
+                assert_eq!(patched.get(x, y), full.get(x, y), "pixel ({x},{y})");
+            }
+        }
     }
 
     #[test]
@@ -437,6 +747,9 @@ mod tests {
             (adjusted.r / base.r - 2.0).abs() < 1e-4,
             "+1 stop doubles linear light"
         );
+
+        // Bounds must report Everything once an adjustment is in the tree.
+        assert_eq!(node_bounds(&doc, root).unwrap(), Bounds::Everything);
     }
 
     #[test]

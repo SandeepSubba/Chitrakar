@@ -4,7 +4,9 @@
 //! Conventions across the boundary:
 //! - commands travel as serde-JSON strings of [`Command`](crate::Command);
 //! - node ids travel as `f64` (they are sequence numbers, far below 2^53);
-//! - pixels travel as sRGB RGBA8, ready for `putImageData`.
+//! - frames stay in wasm memory: `render_frame` re-encodes only the dirty
+//!   region into an internal RGBA8 buffer, exposed via `frame_ptr`/
+//!   `frame_len` for zero-copy reads from JS.
 
 use crate::{ColorMode, NodeId, Session};
 use wasm_bindgen::prelude::*;
@@ -12,6 +14,7 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen]
 pub struct WasmSession {
     inner: Session,
+    frame: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -25,6 +28,7 @@ impl WasmSession {
         };
         WasmSession {
             inner: Session::new(width, height, mode),
+            frame: Vec::new(),
         }
     }
 
@@ -32,6 +36,7 @@ impl WasmSession {
     pub fn open(bytes: &[u8]) -> Result<WasmSession, JsError> {
         Ok(WasmSession {
             inner: Session::load(bytes).map_err(to_js)?,
+            frame: Vec::new(),
         })
     }
 
@@ -59,6 +64,21 @@ impl WasmSession {
         self.inner.apply_json(command_json).map_err(to_js)
     }
 
+    /// Apply a command as a live drag preview (no history until commit).
+    pub fn preview(&mut self, command_json: &str) -> Result<(), JsError> {
+        self.inner.preview_json(command_json).map_err(to_js)
+    }
+
+    /// End the preview gesture as one undo step.
+    pub fn commit_preview(&mut self) -> bool {
+        self.inner.commit_preview()
+    }
+
+    /// Abort the preview gesture, restoring pre-gesture state.
+    pub fn cancel_preview(&mut self) -> Result<bool, JsError> {
+        self.inner.cancel_preview().map_err(to_js)
+    }
+
     pub fn undo(&mut self) -> Result<bool, JsError> {
         self.inner.undo().map_err(to_js)
     }
@@ -67,9 +87,31 @@ impl WasmSession {
         self.inner.redo().map_err(to_js)
     }
 
-    /// Full-frame render as sRGB RGBA8 (`width * height * 4` bytes).
-    pub fn render_rgba(&self) -> Result<Vec<u8>, JsError> {
-        Ok(self.inner.render().map_err(to_js)?.to_srgb8())
+    /// Re-render what changed since the last call into the internal RGBA8
+    /// frame. Returns the dirty rect `[x, y, w, h]`, or an empty array when
+    /// nothing changed. Read pixels via `frame_ptr`/`frame_len`.
+    pub fn render_frame(&mut self) -> Result<Vec<u32>, JsError> {
+        let expected = (self.width() * self.height() * 4) as usize;
+        let first_frame = self.frame.len() != expected;
+        if first_frame {
+            self.frame = vec![0; expected];
+        }
+        let (surface, dirty) = self.inner.render_cached().map_err(to_js)?;
+        let clip = match (dirty, first_frame) {
+            (Some(clip), _) => clip,
+            (None, false) => return Ok(Vec::new()),
+            (None, true) => surface_full_clip(surface),
+        };
+        surface.encode_srgb8_region(clip, &mut self.frame);
+        Ok(vec![clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0])
+    }
+
+    pub fn frame_ptr(&self) -> *const u8 {
+        self.frame.as_ptr()
+    }
+
+    pub fn frame_len(&self) -> usize {
+        self.frame.len()
     }
 
     /// Layers panel data: JSON array of `LayerInfo`, topmost first.
@@ -82,11 +124,18 @@ impl WasmSession {
         self.inner.hit_test(x, y).map(|id| id.0 as f64)
     }
 
-    /// Translation of a node as `[tx, ty]` (full affine over the boundary
-    /// once rotation/scale tools exist).
-    pub fn translation_of(&self, id: f64) -> Result<Vec<f32>, JsError> {
+    /// Full affine transform of a node as `[a, b, c, d, e, f]`.
+    pub fn transform_of(&self, id: f64) -> Result<Vec<f32>, JsError> {
         let t = self.inner.transform_of(NodeId(id as u64)).map_err(to_js)?;
-        Ok(vec![t.e, t.f])
+        Ok(vec![t.a, t.b, t.c, t.d, t.e, t.f])
+    }
+
+    /// Doc-space bounds of a node as `[x, y, w, h]`; empty if it has none.
+    pub fn bounds_of(&self, id: f64) -> Vec<f32> {
+        self.inner
+            .bounds_of(NodeId(id as u64))
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
     }
 
     /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
@@ -102,6 +151,15 @@ impl WasmSession {
     /// Render and encode as PNG (export).
     pub fn export_png(&self) -> Result<Vec<u8>, JsError> {
         self.inner.render_png().map_err(to_js)
+    }
+}
+
+fn surface_full_clip(surface: &crate::Surface) -> crate::ClipRect {
+    crate::ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: surface.width,
+        y1: surface.height,
     }
 }
 
