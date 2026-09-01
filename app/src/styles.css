@@ -157,6 +157,21 @@ body {
   margin-left: auto;
 }
 
+.mask-button {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.mask-button:hover {
+  background: var(--border);
+}
+
 .add-adjustment {
   background: none;
   color: var(--text);

@@ -180,7 +180,12 @@ chitrakar/
   incremental invalidation falls back to whole-canvas (neighborhood reads at
   region edges); padded region rendering and the GPU compute path refine
   this later.
-- Masks: raster masks (paintable) and vector masks; clipping groups.
+- Masks ✅ first pass: a mask attaches to any node — vector masks (hard shape
+  coverage) and raster masks (luminance × alpha, transform-sampled) modulate
+  a shape's/image's paint, a group's composite, and an adjustment's or
+  filter's strength; invert supported; UI adds an inscribed ellipse mask
+  with invert/remove. Paintable raster masks await the brush engine;
+  on-canvas mask geometry editing and clipping groups pending.
 - Full undo/redo history panel.
 
 ### Phase 3 — Color management & export

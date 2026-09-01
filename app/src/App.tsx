@@ -4,6 +4,7 @@ import {
   BlendMode,
   Command,
   LayerInfo,
+  Mask,
   NodeId,
   NodeKind,
   Transform,
@@ -468,13 +469,36 @@ export function App() {
       ? session.bounds_of(selected)
       : null;
   let selectedKind: NodeKind | null = null;
+  let selectedMask: Mask | null = null;
   if (session && selectedLayer) {
     try {
       selectedKind = JSON.parse(session.kind_json(selectedLayer.id)) as NodeKind;
+      selectedMask = JSON.parse(session.mask_json(selectedLayer.id)) as Mask | null;
     } catch {
       selectedKind = null;
     }
   }
+
+  /** Attach an ellipse mask inscribed in the layer's current bounds. */
+  const addMask = () => {
+    if (!session || !selectedLayer) return;
+    const b = session.bounds_of(selectedLayer.id);
+    if (b.length !== 4) return;
+    run({
+      SetMask: {
+        id: selectedLayer.id,
+        mask: {
+          kind: {
+            Vector: {
+              shape: { Ellipse: { rx: b[2] / 2, ry: b[3] / 2 } },
+              transform: { a: 1, b: 0, c: 0, d: 1, e: b[0], f: b[1] },
+            },
+          },
+          invert: false,
+        },
+      },
+    });
+  };
 
   const setKind = (kind: NodeKind, gesture: boolean) => {
     if (!selectedLayer) return;
@@ -724,6 +748,36 @@ export function App() {
                   onGestureEnd={endGesture}
                 />
               )}
+              {selectedMask === null ? (
+                <button className="mask-button" onClick={addMask}>
+                  Add ellipse mask
+                </button>
+              ) : (
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={selectedMask.invert}
+                    onChange={(e) =>
+                      run({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: { ...selectedMask!, invert: e.target.checked },
+                        },
+                      })
+                    }
+                    aria-label="Invert mask"
+                  />
+                  Invert mask
+                  <button
+                    className="mask-button"
+                    onClick={() =>
+                      run({ SetMask: { id: selectedLayer.id, mask: null } })
+                    }
+                  >
+                    Remove
+                  </button>
+                </label>
+              )}
             </div>
           )}
           <ul>
@@ -771,7 +825,10 @@ export function App() {
                     {l.name}
                   </span>
                 )}
-                <span className="kind">{l.kind}</span>
+                <span className="kind">
+                  {l.has_mask ? "◐ " : ""}
+                  {l.kind}
+                </span>
               </li>
             ))}
             {layers.length === 0 && (

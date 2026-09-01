@@ -91,6 +91,7 @@ impl Session {
             | Command::SetTransform { id, .. }
             | Command::SetKind { id, .. }
             | Command::SetName { id, .. }
+            | Command::SetMask { id, .. }
             | Command::MoveNode { id, .. } => Some(*id),
         }
     }
@@ -276,6 +277,7 @@ impl Session {
                 visible: node.visible,
                 opacity: node.opacity,
                 blend: node.blend,
+                has_mask: node.mask.is_some(),
                 depth,
                 parent: group.0,
                 index,
@@ -326,6 +328,12 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// A node's mask as JSON (`null` when unmasked) — edited via `SetMask`.
+    pub fn mask_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.mask)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Doc-space bounds of a node as `[x, y, w, h]`, if it has any.
     pub fn bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
         match chitrakar_render::node_bounds(&self.doc, id).ok()? {
@@ -369,6 +377,7 @@ pub struct LayerInfo {
     pub visible: bool,
     pub opacity: f32,
     pub blend: chitrakar_doc::BlendMode,
+    pub has_mask: bool,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,

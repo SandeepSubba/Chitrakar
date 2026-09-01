@@ -48,6 +48,22 @@ export type Filter =
   | { GaussianBlur: { sigma: number } }
   | { Sharpen: { sigma: number; amount: number } };
 
+export type MaskKind =
+  | { Vector: { shape: VectorShape; transform: Transform } }
+  | {
+      Raster: {
+        resource_id: string;
+        width: number;
+        height: number;
+        transform: Transform;
+      };
+    };
+
+export interface Mask {
+  kind: MaskKind;
+  invert: boolean;
+}
+
 export type NodeKind =
   | "Group"
   | {
@@ -78,6 +94,7 @@ export type Command =
   | { SetTransform: { id: NodeId; transform: Transform } }
   | { SetKind: { id: NodeId; kind: NodeKind } }
   | { SetName: { id: NodeId; name: string } }
+  | { SetMask: { id: NodeId; mask: Mask | null } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } };
 
 /** Mirror of `chitrakar_engine::LayerInfo`. */
@@ -88,6 +105,7 @@ export interface LayerInfo {
   visible: boolean;
   opacity: number;
   blend: BlendMode;
+  has_mask: boolean;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

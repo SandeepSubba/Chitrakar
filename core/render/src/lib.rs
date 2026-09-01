@@ -19,7 +19,8 @@ pub mod tiles;
 
 use chitrakar_color::{to_working, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, Filter, NodeId, NodeKind, Transform, VectorShape,
+    Adjustment, BlendMode, DocError, Document, Filter, Mask, MaskKind, NodeId, NodeKind, Transform,
+    VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -249,12 +250,16 @@ fn render_group(
         if !node.visible || node.opacity <= 0.0 {
             continue;
         }
+        let mask = node.mask.as_ref();
         match &node.kind {
             NodeKind::Group => {
-                // Isolate the group on its own surface so group opacity and
-                // blend apply to the composite, not per child.
+                // Isolate the group on its own surface so group opacity,
+                // blend, and mask apply to the composite, not per child.
                 let mut sub = Surface::new(dst.width, dst.height);
                 render_group(doc, child, &mut sub, clip)?;
+                if let Some(mask) = mask {
+                    apply_mask(doc, mask, &mut sub, clip);
+                }
                 composite(dst, &sub, node.opacity, node.blend, clip);
             }
             NodeKind::Vector {
@@ -264,40 +269,65 @@ fn render_group(
             } => {
                 if let Some(fill) = fill {
                     let color = scale_alpha(to_working(*fill), node.opacity);
-                    paint_shape(dst, shape, node.transform, color, node.blend, clip, None);
+                    paint_shape(
+                        dst,
+                        doc,
+                        shape,
+                        node.transform,
+                        color,
+                        node.blend,
+                        clip,
+                        None,
+                        mask,
+                    );
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(to_working(stroke.color), node.opacity);
                     paint_shape(
                         dst,
+                        doc,
                         shape,
                         node.transform,
                         color,
                         node.blend,
                         clip,
                         Some(stroke.width),
+                        mask,
                     );
                 }
             }
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
-                        draw_raster(dst, res, node.transform, node.opacity, node.blend, clip);
+                        draw_raster(
+                            dst,
+                            doc,
+                            res,
+                            node.transform,
+                            node.opacity,
+                            node.blend,
+                            clip,
+                            mask,
+                        );
                     }
                 }
             }
             NodeKind::Adjustment(adj) => {
                 // An adjustment layer transforms everything composited below
-                // it, weighted by its opacity.
+                // it, weighted by its opacity and mask coverage.
                 for y in clip.y0..clip.y1 {
                     for x in clip.x0..clip.x1 {
+                        let weight = node.opacity * coverage_at(doc, mask, x, y);
+                        if weight <= 0.0 {
+                            continue;
+                        }
                         let i = (y * dst.width + x) as usize;
                         let adjusted = apply_adjustment(adj, dst.pixels[i]);
-                        dst.pixels[i] = lerp(dst.pixels[i], adjusted, node.opacity);
+                        dst.pixels[i] = lerp(dst.pixels[i], adjusted, weight);
                     }
                 }
             }
-            NodeKind::Filter(filter) => apply_filter(filter, node.opacity, dst, clip),
+            NodeKind::Filter(filter) => apply_filter(doc, filter, node.opacity, mask, dst, clip),
         }
     }
     Ok(())
@@ -416,12 +446,14 @@ fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> Cli
 #[allow(clippy::too_many_arguments)]
 fn paint_shape(
     dst: &mut Surface,
+    doc: &Document,
     shape: &VectorShape,
     t: Transform,
     color: LinearRgba,
     mode: BlendMode,
     clip: ClipRect,
     stroke_width: Option<f32>,
+    mask: Option<&Mask>,
 ) {
     let (w, h) = shape_size(shape);
     let bbox = draw_bbox(t, w, h, dst, clip);
@@ -437,8 +469,12 @@ fn paint_shape(
                 Some(sw) => stroke_covers(shape, sw, x, y),
             };
             if covered {
+                let c = coverage_at(doc, mask, px, py);
+                if c <= 0.0 {
+                    continue;
+                }
                 let i = (py * dst.width + px) as usize;
-                dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
+                dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
             }
         }
     }
@@ -446,13 +482,16 @@ fn paint_shape(
 
 /// Blit a source image through its transform (nearest sample; filtered
 /// sampling arrives with the GPU path).
+#[allow(clippy::too_many_arguments)]
 fn draw_raster(
     dst: &mut Surface,
+    doc: &Document,
     res: &chitrakar_doc::Resource,
     t: Transform,
     opacity: f32,
     mode: BlendMode,
     clip: ClipRect,
+    mask: Option<&Mask>,
 ) {
     // 8-bit sRGB → linear lookup table, built per blit (256 entries, cheap).
     let mut lut = [0f32; 256];
@@ -472,8 +511,12 @@ fn draw_raster(
             if sx >= res.width || sy >= res.height {
                 continue;
             }
+            let cov = coverage_at(doc, mask, px, py);
+            if cov <= 0.0 {
+                continue;
+            }
             let s = ((sy * res.width + sx) * 4) as usize;
-            let a = res.rgba8[s + 3] as f32 / 255.0 * opacity;
+            let a = res.rgba8[s + 3] as f32 / 255.0 * opacity * cov;
             let src = LinearRgba {
                 r: lut[res.rgba8[s] as usize] * a,
                 g: lut[res.rgba8[s + 1] as usize] * a,
@@ -486,22 +529,85 @@ fn draw_raster(
     }
 }
 
+/// Mask coverage at a pixel center, in document space. 1.0 without a mask.
+fn coverage_at(doc: &Document, mask: Option<&Mask>, x: u32, y: u32) -> f32 {
+    let Some(mask) = mask else {
+        return 1.0;
+    };
+    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+    let c = match &mask.kind {
+        MaskKind::Vector { shape, transform } => match to_local(*transform, fx, fy) {
+            Some((lx, ly)) if shape_covers(shape, lx, ly) => 1.0,
+            _ => 0.0,
+        },
+        MaskKind::Raster {
+            resource_id,
+            transform,
+            ..
+        } => match (doc.resource(resource_id), to_local(*transform, fx, fy)) {
+            (Some(res), Some((lx, ly)))
+                if !res.rgba8.is_empty()
+                    && lx >= 0.0
+                    && ly >= 0.0
+                    && (lx as u32) < res.width
+                    && (ly as u32) < res.height =>
+            {
+                let i = ((ly as u32 * res.width + lx as u32) * 4) as usize;
+                let lum = |v: u8| chitrakar_color::srgb_to_linear(v as f32 / 255.0);
+                let luma = 0.2126 * lum(res.rgba8[i])
+                    + 0.7152 * lum(res.rgba8[i + 1])
+                    + 0.0722 * lum(res.rgba8[i + 2]);
+                luma * (res.rgba8[i + 3] as f32 / 255.0)
+            }
+            _ => 0.0,
+        },
+    };
+    if mask.invert {
+        1.0 - c
+    } else {
+        c
+    }
+}
+
+/// Multiply a surface region by a mask's coverage (used for group masks).
+fn apply_mask(doc: &Document, mask: &Mask, surface: &mut Surface, clip: ClipRect) {
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let c = coverage_at(doc, Some(mask), x, y);
+            if c < 1.0 {
+                let i = (y * surface.width + x) as usize;
+                surface.pixels[i] = scale_alpha(surface.pixels[i], c);
+            }
+        }
+    }
+}
+
 /// Run a filter layer over the accumulated composite below it, weighted by
-/// the layer's opacity.
-fn apply_filter(filter: &Filter, opacity: f32, dst: &mut Surface, clip: ClipRect) {
+/// the layer's opacity and mask coverage.
+fn apply_filter(
+    doc: &Document,
+    filter: &Filter,
+    opacity: f32,
+    mask: Option<&Mask>,
+    dst: &mut Surface,
+    clip: ClipRect,
+) {
     match filter {
         Filter::GaussianBlur { sigma } => {
-            let original = (opacity < 1.0).then(|| blur::snapshot(dst, clip));
+            let needs_mix = opacity < 1.0 || mask.is_some();
+            let original = needs_mix.then(|| blur::snapshot(dst, clip));
             blur::gaussian_blur(dst, clip, *sigma);
             if let Some(orig) = original {
-                mix_snapshot(dst, clip, &orig, |o, f| lerp(o, f, opacity));
+                mix_snapshot(dst, clip, &orig, |o, f, x, y| {
+                    lerp(o, f, opacity * coverage_at(doc, mask, x, y))
+                });
             }
         }
         Filter::Sharpen { sigma, amount } => {
             let original = blur::snapshot(dst, clip);
             blur::gaussian_blur(dst, clip, *sigma);
-            let amt = amount * opacity;
-            mix_snapshot(dst, clip, &original, |o, blurred| {
+            mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
+                let amt = amount * opacity * coverage_at(doc, mask, x, y);
                 // Unsharp mask; keep alpha, clamp premultiplied channels to it.
                 let un = |ov: f32, bv: f32, a: f32| (ov + amt * (ov - bv)).clamp(0.0, a.max(0.0));
                 LinearRgba {
@@ -521,14 +627,14 @@ fn mix_snapshot(
     dst: &mut Surface,
     clip: ClipRect,
     original: &[LinearRgba],
-    f: impl Fn(LinearRgba, LinearRgba) -> LinearRgba,
+    f: impl Fn(LinearRgba, LinearRgba, u32, u32) -> LinearRgba,
 ) {
     let w = (clip.x1 - clip.x0) as usize;
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
             let i = (y * dst.width + x) as usize;
             let s = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
-            dst.pixels[i] = f(original[s], dst.pixels[i]);
+            dst.pixels[i] = f(original[s], dst.pixels[i], x, y);
         }
     }
 }
@@ -884,6 +990,136 @@ mod tests {
 
         // Bounds must report Everything once an adjustment is in the tree.
         assert_eq!(node_bounds(&doc, root).unwrap(), Bounds::Everything);
+    }
+
+    fn ellipse_mask(cx: f32, cy: f32, rx: f32, ry: f32, invert: bool) -> Mask {
+        Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx, ry },
+                transform: Transform::translation(cx - rx, cy - ry),
+            },
+            invert,
+        }
+    }
+
+    #[test]
+    fn vector_mask_hides_shape_outside_and_invert_flips_it() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        // Ellipse mask centered on the canvas: center shows, corners hide.
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(ellipse_mask(10.0, 10.0, 6.0, 6.0, false))),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(10, 10).to_srgb8(), [255, 0, 0, 255], "center visible");
+        assert_eq!(s.get(1, 1).a, 0.0, "corner masked out");
+
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(ellipse_mask(10.0, 10.0, 6.0, 6.0, true))),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(10, 10).a, 0.0, "inverted: center hidden");
+        assert_eq!(s.get(1, 1).to_srgb8(), [255, 0, 0, 255], "corner visible");
+    }
+
+    #[test]
+    fn masked_adjustment_applies_only_inside_mask() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect(
+                "bg",
+                20.0,
+                20.0,
+                AuthoredColor::Srgb {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment("exp", Adjustment::Exposure { stops: 1.0 })),
+        })
+        .unwrap();
+        let adj = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetMask {
+            id: adj,
+            mask: Some(Box::new(ellipse_mask(10.0, 10.0, 5.0, 5.0, false))),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        let inside = s.get(10, 10);
+        let outside = s.get(1, 1);
+        assert!(
+            (inside.r / outside.r - 2.0).abs() < 1e-3,
+            "exposure only where masked in ({} vs {})",
+            inside.r,
+            outside.r
+        );
+    }
+
+    #[test]
+    fn raster_mask_uses_luminance() {
+        let mut doc = Document::new(4, 4, ColorMode::Rgb);
+        let root = doc.root();
+        // 2×2 mask: white / black in the top row → show / hide.
+        let mask_px = vec![
+            255, 255, 255, 255, /**/ 0, 0, 0, 255, //
+            255, 255, 255, 255, /**/ 0, 0, 0, 255,
+        ];
+        let mask_id = doc.add_resource(2, 2, mask_px);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 4.0, 4.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Raster {
+                    resource_id: mask_id,
+                    width: 2,
+                    height: 2,
+                    // Scale the 2×2 mask over the 4×4 canvas.
+                    transform: Transform {
+                        a: 2.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: 2.0,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(0, 0).to_srgb8(), [255, 0, 0, 255], "white shows");
+        assert_eq!(s.get(3, 0).a, 0.0, "black hides");
     }
 
     #[test]

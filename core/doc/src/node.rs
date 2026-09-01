@@ -124,6 +124,34 @@ pub struct Stroke {
     pub width: f32,
 }
 
+/// A non-destructive mask attachable to any node: it modulates the node's
+/// output (a group's composite, a shape's paint, an adjustment's or filter's
+/// strength) by per-pixel coverage. Mask geometry lives in document space,
+/// independent of the node's own transform.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Mask {
+    pub kind: MaskKind,
+    /// Flip coverage: masked-out becomes masked-in.
+    pub invert: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MaskKind {
+    /// Hard-edged coverage from a shape (1 inside, 0 outside).
+    Vector {
+        shape: VectorShape,
+        transform: Transform,
+    },
+    /// Greyscale coverage from an image resource: luminance × alpha
+    /// (white shows, black hides), sampled through the transform.
+    Raster {
+        resource_id: String,
+        width: u32,
+        height: u32,
+        transform: Transform,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
@@ -132,6 +160,8 @@ pub struct Node {
     pub opacity: f32,
     pub visible: bool,
     pub blend: BlendMode,
+    #[serde(default)]
+    pub mask: Option<Mask>,
 }
 
 impl Node {
@@ -143,6 +173,7 @@ impl Node {
             opacity: 1.0,
             visible: true,
             blend: BlendMode::Normal,
+            mask: None,
         }
     }
 

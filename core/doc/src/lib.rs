@@ -8,7 +8,8 @@
 mod node;
 
 pub use node::{
-    Adjustment, BlendMode, Filter, Node, NodeKind, RasterRef, Stroke, Transform, VectorShape,
+    Adjustment, BlendMode, Filter, Mask, MaskKind, Node, NodeKind, RasterRef, Stroke, Transform,
+    VectorShape,
 };
 
 use chitrakar_color::ColorMode;
@@ -283,6 +284,14 @@ impl Document {
                 let prev = std::mem::replace(&mut node.name, name);
                 Ok(Command::SetName { id, name: prev })
             }
+            Command::SetMask { id, mask } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = std::mem::replace(&mut node.mask, mask.map(|m| *m));
+                Ok(Command::SetMask {
+                    id,
+                    mask: prev.map(Box::new),
+                })
+            }
             Command::MoveNode { id, parent, index } => {
                 if id == self.root {
                     return Err(DocError::CannotRemoveRoot);
@@ -396,6 +405,11 @@ pub enum Command {
     SetName {
         id: NodeId,
         name: String,
+    },
+    /// Attach, replace, or clear (None) a node's mask.
+    SetMask {
+        id: NodeId,
+        mask: Option<Box<Mask>>,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).
@@ -700,6 +714,51 @@ mod tests {
         assert_eq!(doc.node(id).unwrap().name, "new");
         history.undo(&mut doc).unwrap();
         assert_eq!(doc.node(id).unwrap().name, "old");
+    }
+
+    #[test]
+    fn set_mask_attaches_and_undoes() {
+        let mut doc = Document::new(10, 10, ColorMode::Rgb);
+        let mut history = History::default();
+        let root = doc.root();
+        history
+            .apply(
+                &mut doc,
+                Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: rect("r"),
+                },
+            )
+            .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        let mask = Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx: 5.0, ry: 5.0 },
+                transform: Transform::default(),
+            },
+            invert: false,
+        };
+        history
+            .apply(
+                &mut doc,
+                Command::SetMask {
+                    id,
+                    mask: Some(Box::new(mask.clone())),
+                },
+            )
+            .unwrap();
+        assert_eq!(doc.node(id).unwrap().mask.as_ref(), Some(&mask));
+
+        history
+            .apply(&mut doc, Command::SetMask { id, mask: None })
+            .unwrap();
+        assert!(doc.node(id).unwrap().mask.is_none());
+        history.undo(&mut doc).unwrap();
+        assert_eq!(doc.node(id).unwrap().mask.as_ref(), Some(&mask));
+        history.undo(&mut doc).unwrap();
+        assert!(doc.node(id).unwrap().mask.is_none());
     }
 
     #[test]
