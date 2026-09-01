@@ -135,7 +135,7 @@ chitrakar/
 ## 5. Roadmap
 
 ### Phase 0 — Foundations & risk spikes (small)
-- Scaffold Rust workspace, Tauri 2 app, React UI, CI (fmt/clippy/test + desktop builds).
+- ✅ Scaffold Rust workspace, Tauri 2 app, React UI, CI (fmt/clippy/test + desktop builds).
 - **Spike 1:** WASM engine + WebGPU triangle→texture inside Tauri webview on desktop,
   iOS Simulator, Android emulator. Decide the fallback ladder with data.
 - **Spike 2:** lcms2 vs moxcms — round-trip sRGB↔FOGRA39 correctness + WASM size/speed.

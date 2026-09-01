@@ -1,0 +1,14 @@
+[package]
+name = "chitrakar-engine"
+description = "Public engine API embedded by the app shells (native + WASM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+chitrakar-render.workspace = true
+chitrakar-codecs.workspace = true
+serde_json.workspace = true

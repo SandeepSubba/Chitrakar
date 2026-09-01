@@ -1,0 +1,27 @@
+# Own workspace: building this crate needs platform system libraries
+# (webkit2gtk on Linux etc.), which the core workspace must stay free of.
+[workspace]
+
+[package]
+name = "chitrakar-shell"
+description = "Tauri 2 shell for desktop, iOS, and Android"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/SandeepSubba/Chitrakar"
+
+[lib]
+name = "chitrakar_shell"
+# staticlib for iOS, cdylib for Android, rlib for the desktop binary.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chitrakar-engine = { path = "../../../core/engine" }

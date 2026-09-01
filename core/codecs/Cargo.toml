@@ -1,0 +1,12 @@
+[package]
+name = "chitrakar-codecs"
+description = "Import/export codecs (PNG, JPEG now; TIFF, SVG, PDF later)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-color.workspace = true
+thiserror.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

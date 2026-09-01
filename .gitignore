@@ -1,0 +1,16 @@
+# Rust
+/target
+shells/tauri/src-tauri/target
+
+# Tauri generated mobile projects
+shells/tauri/src-tauri/gen
+
+# Node
+node_modules
+app/dist
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
