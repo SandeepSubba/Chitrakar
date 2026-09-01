@@ -145,6 +145,10 @@ chitrakar/
   - ✅ *First half proven:* engine compiles to WASM (wasm-bindgen), runs in-browser,
     renders to canvas via `putImageData`; full editor loop (draw/undo/hide/save)
     verified headless in Chromium. WebGPU-in-webview per platform still open.
+  - ✅ *Native wgpu proven headless* (docs/spikes/gpu-rendering.md): wgpu 23 on
+    llvmpipe software Vulkan renders pixel-correct at ~3ms per 1280×720
+    draw+readback — the GPU backend is developable and CI-testable against
+    the CPU reference renderer.
 - **Spike 2:** ✅ lcms2 vs moxcms — **moxcms chosen** (compiles to wasm where
   lcms2's C core cannot, ~4.4× faster, matches lcms2 within 1/255 on RGB and
   CMYK press-profile transforms). Full numbers: docs/spikes/color-management.md.
