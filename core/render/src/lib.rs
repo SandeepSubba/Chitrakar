@@ -15,6 +15,7 @@
 //! rotation (`b`, `c`) arrive with the GPU rasterizer.
 
 pub mod blur;
+pub mod text;
 pub mod tiles;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
@@ -163,6 +164,7 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
     match kind {
         NodeKind::Vector { shape, .. } => Some(shape_size(shape)),
         NodeKind::Raster(r) => Some((r.width as f32, r.height as f32)),
+        NodeKind::Text(spec) => Some(text::measure(spec)),
         NodeKind::Group | NodeKind::Adjustment(_) | NodeKind::Filter(_) => None,
     }
 }
@@ -373,6 +375,16 @@ fn render_group(
                 }
             }
             NodeKind::Filter(filter) => apply_filter(doc, filter, node.opacity, mask, dst, clip),
+            NodeKind::Text(spec) => draw_text(
+                dst,
+                doc,
+                spec,
+                node.transform,
+                node.opacity,
+                node.blend,
+                clip,
+                mask,
+            ),
         }
     }
     Ok(())
@@ -812,6 +824,50 @@ fn mix_snapshot(
     }
 }
 
+/// Rasterize a text block at natural size and blit its coverage through the
+/// node transform (nearest sample, like rasters).
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    dst: &mut Surface,
+    doc: &Document,
+    spec: &chitrakar_doc::TextSpec,
+    t: Transform,
+    opacity: f32,
+    mode: BlendMode,
+    clip: ClipRect,
+    mask: Option<&Mask>,
+) {
+    let raster = text::rasterize(spec);
+    let color = resolve_color(doc, spec.fill);
+    let bbox =
+        match transformed_local_bounds(t, (0.0, 0.0, raster.width as f32, raster.height as f32))
+            .to_clip(dst.width, dst.height)
+        {
+            Some(b) => b.intersect(clip),
+            None => return,
+        };
+    for py in bbox.y0..bbox.y1 {
+        for px in bbox.x0..bbox.x1 {
+            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
+                return;
+            };
+            if lx < 0.0 || ly < 0.0 {
+                continue;
+            }
+            let c = raster.sample(lx as u32, ly as u32);
+            if c <= 0.0 {
+                continue;
+            }
+            let cov = coverage_at(doc, mask, px, py);
+            if cov <= 0.0 {
+                continue;
+            }
+            let i = (py * dst.width + px) as usize;
+            dst.pixels[i] = blend_pixel(scale_alpha(color, c * opacity * cov), dst.pixels[i], mode);
+        }
+    }
+}
+
 fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
     if px.a <= 0.0 {
         return px;
@@ -920,6 +976,14 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                         && lx < raster.width as f32
                         && ly < raster.height as f32
                     {
+                        return Ok(Some(child));
+                    }
+                }
+            }
+            NodeKind::Text(spec) => {
+                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                    let (w, h) = text::measure(spec);
+                    if lx >= 0.0 && ly >= 0.0 && lx < w && ly < h {
                         return Ok(Some(child));
                     }
                 }
@@ -1486,6 +1550,77 @@ mod tests {
             node_bounds(&doc, id).unwrap(),
             Bounds::Rect(2.0, 2.0, 18.0, 18.0)
         );
+    }
+
+    #[test]
+    fn text_object_renders_ink_and_hit_tests() {
+        let mut doc = Document::new(200, 80, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "label",
+                chitrakar_doc::TextSpec {
+                    text: "Hi".into(),
+                    size: 48.0,
+                    fill: RED,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(10.0, 10.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        let ink: u32 = (0..80)
+            .flat_map(|y| (0..200).map(move |x| (x, y)))
+            .filter(|&(x, y)| s.get(x, y).a > 0.5)
+            .count() as u32;
+        assert!(ink > 100, "glyphs left substantial ink, got {ink} px");
+        // Ink is red (the fill), and confined to the text bounds.
+        let Bounds::Rect(bx0, by0, bx1, by1) = node_bounds(&doc, id).unwrap() else {
+            panic!("rect bounds");
+        };
+        assert!(bx0 >= 9.0 && by0 >= 9.0 && bx1 < 200.0 && by1 < 80.0);
+        for y in 0..80 {
+            for x in 0..200 {
+                if s.get(x, y).a > 0.0 {
+                    let px = s.get(x, y).to_srgb8();
+                    assert!(px[0] >= px[1] && px[0] >= px[2], "ink is red");
+                    assert!(
+                        (x as f32) >= bx0 - 1.0
+                            && (x as f32) <= bx1 + 1.0
+                            && (y as f32) >= by0 - 1.0
+                            && (y as f32) <= by1 + 1.0,
+                        "ink inside bounds"
+                    );
+                }
+            }
+        }
+
+        // The block's box is the click target.
+        assert_eq!(hit_test(&doc, bx0 + 2.0, by0 + 2.0).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 190.0, 70.0).unwrap(), None);
+
+        // Editing the text through SetKind grows the bounds (live object).
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Text(chitrakar_doc::TextSpec {
+                text: "Hi there".into(),
+                size: 48.0,
+                fill: RED,
+            })),
+        })
+        .unwrap();
+        let Bounds::Rect(_, _, wider, _) = node_bounds(&doc, id).unwrap() else {
+            panic!("rect bounds");
+        };
+        assert!(wider > bx1, "longer text widens bounds");
     }
 
     #[test]

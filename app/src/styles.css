@@ -191,6 +191,17 @@ body {
   gap: 0.2rem;
 }
 
+.layer-props textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem;
+  font: inherit;
+  font-size: 0.8rem;
+  resize: vertical;
+}
+
 .layer-props select {
   background: var(--bg);
   color: var(--text);

@@ -437,6 +437,7 @@ impl Session {
                     NodeKind::Raster(_) => "raster",
                     NodeKind::Adjustment(_) => "adjustment",
                     NodeKind::Filter(_) => "filter",
+                    NodeKind::Text(_) => "text",
                 },
                 visible: node.visible,
                 opacity: node.opacity,

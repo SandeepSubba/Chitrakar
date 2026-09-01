@@ -9,3 +9,4 @@ repository.workspace = true
 [dependencies]
 chitrakar-doc.workspace = true
 chitrakar-color.workspace = true
+ab_glyph = "0.2"

@@ -19,7 +19,7 @@ import {
   sendPreview,
 } from "./engine";
 
-const TOOLS = ["Move", "Rect", "Ellipse", "Pen"] as const;
+const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Text"] as const;
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
@@ -342,6 +342,29 @@ export function App() {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
+    if (tool === "Text") {
+      shapeCount.current += 1;
+      run({
+        AddNode: {
+          parent: session.root_id,
+          index: topLevelCount(layers),
+          node: nodePayload(
+            `Text ${shapeCount.current}`,
+            {
+              Text: {
+                text: "Text",
+                size: 48,
+                fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+              },
+            },
+            x,
+            y,
+          ),
+        },
+      });
+      setTool("Move");
+      return;
+    }
     if (tool === "Pen") {
       // Clicking the first anchor again closes the path.
       const closeRadius = 8 / view.zoom;
@@ -654,7 +677,9 @@ export function App() {
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
   const resizable =
-    selectedLayer?.kind === "vector" || selectedLayer?.kind === "raster";
+    selectedLayer?.kind === "vector" ||
+    selectedLayer?.kind === "raster" ||
+    selectedLayer?.kind === "text";
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
@@ -1302,6 +1327,41 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
       );
     }
     return null;
+  }
+
+  if ("Text" in kind) {
+    const t = kind.Text;
+    return (
+      <>
+        <label>
+          Text
+          <textarea
+            value={t.text}
+            rows={2}
+            onChange={(e) =>
+              onEdit({ Text: { ...t, text: e.target.value } }, true)
+            }
+            onBlur={onGestureEnd}
+            aria-label="Text content"
+          />
+        </label>
+        {slider("Size", t.size, 8, 200, 1, (v) => ({
+          Text: { ...t, size: v },
+        }))}
+        <label className="row">
+          Color
+          <input
+            type="color"
+            value={colorToHex(t.fill)}
+            onChange={(e) =>
+              onEdit({ Text: { ...t, fill: hexColor(e.target.value) } }, true)
+            }
+            onBlur={onGestureEnd}
+            aria-label="Text color"
+          />
+        </label>
+      </>
+    );
   }
 
   if ("Vector" in kind) {

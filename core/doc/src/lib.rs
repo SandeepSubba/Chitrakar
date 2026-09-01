@@ -8,8 +8,8 @@
 mod node;
 
 pub use node::{
-    Adjustment, BlendMode, Filter, Mask, MaskKind, Node, NodeKind, RasterRef, Stroke, Transform,
-    VectorShape,
+    Adjustment, BlendMode, Filter, Mask, MaskKind, Node, NodeKind, RasterRef, Stroke, TextSpec,
+    Transform, VectorShape,
 };
 
 use chitrakar_color::ColorMode;

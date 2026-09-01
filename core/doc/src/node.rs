@@ -107,6 +107,16 @@ pub enum Filter {
     Sharpen { sigma: f32, amount: f32 },
 }
 
+/// A live text object: the string and styling are the document state,
+/// glyphs rasterize at render time (nothing is ever baked).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextSpec {
+    pub text: String,
+    /// Font size in document pixels (ascent-to-descent scale).
+    pub size: f32,
+    pub fill: AuthoredColor,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Group,
@@ -118,6 +128,7 @@ pub enum NodeKind {
     Raster(RasterRef),
     Adjustment(Adjustment),
     Filter(Filter),
+    Text(TextSpec),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -200,6 +211,10 @@ impl Node {
 
     pub fn filter(name: &str, filter: Filter) -> Self {
         Self::base(name, NodeKind::Filter(filter))
+    }
+
+    pub fn text(name: &str, spec: TextSpec) -> Self {
+        Self::base(name, NodeKind::Text(spec))
     }
 
     pub fn adjustment(name: &str, adjustment: Adjustment) -> Self {

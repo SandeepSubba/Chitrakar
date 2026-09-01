@@ -225,7 +225,12 @@ chitrakar/
 
 ### Phase 5 — Depth (ongoing)
 - Pen tool + full path editing; boolean operations on shapes.
-- Text objects (this is a large subsystem: shaping via `rustybuzz`/`parley`).
+- Text objects ✅ first pass: live TextSpec nodes (string, size, color as
+  document state; glyphs rasterize at render time via ab_glyph + bundled
+  DejaVu Sans, kerned per-glyph layout with newline support), blitted through
+  the node transform with mask/opacity/blend support; Text tool click-places,
+  panel edits content/size/color with gesture preview; resize handles work.
+  Proper shaping (`rustybuzz`/`parley`), font choice, and weights pending.
 - Brush engine for raster painting; healing/clone as non-destructive ops.
 - Live effects (drop shadow, outline), styles, symbols/components.
 - Later bets enabled by the architecture: collaboration (serializable commands),

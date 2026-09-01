@@ -65,6 +65,12 @@ export interface Mask {
   invert: boolean;
 }
 
+export interface TextSpec {
+  text: string;
+  size: number;
+  fill: AuthoredColor;
+}
+
 export type NodeKind =
   | "Group"
   | {
@@ -75,7 +81,8 @@ export type NodeKind =
       };
     }
   | { Adjustment: Adjustment }
-  | { Filter: Filter };
+  | { Filter: Filter }
+  | { Text: TextSpec };
 
 export interface NodePayload {
   name: string;
@@ -103,7 +110,7 @@ export type Command =
 export interface LayerInfo {
   id: NodeId;
   name: string;
-  kind: "group" | "vector" | "raster" | "adjustment" | "filter";
+  kind: "group" | "vector" | "raster" | "adjustment" | "filter" | "text";
   visible: boolean;
   opacity: number;
   blend: BlendMode;
