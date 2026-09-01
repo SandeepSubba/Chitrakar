@@ -221,7 +221,10 @@ chitrakar/
 - Export: PNG ✅ (sRGB composite), SVG ✅ (live vector markup — shapes,
   paths, groups with opacity/blend, embedded rasters, text; CMYK colors
   resolve through the press profile; adjustments/filters/masks noted as
-  omitted). JPEG, TIFF (CMYK, profile embedded), and PDF pending.
+  omitted), CMYK TIFF ✅ (composite separated into ink through the press
+  profile, composited over paper white, 4-channel TIFF with that profile
+  embedded; refuses rather than guessing when no profile is loaded).
+  JPEG and PDF pending.
 
 ### Phase 4 — Mobile shells
 - Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.

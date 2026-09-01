@@ -16,3 +16,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Container format. Default features pull native compression stacks that
 # don't build on wasm32; deflate alone is pure Rust.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tiff = "0.9"

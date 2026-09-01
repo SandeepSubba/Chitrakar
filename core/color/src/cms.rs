@@ -187,6 +187,56 @@ impl ProofCms {
     }
 }
 
+/// sRGB → CMYK separation through a press profile: the transform print
+/// export needs, turning composite color into the ink values a press lays
+/// down.
+#[derive(Clone)]
+pub struct RgbToCmyk {
+    transform: Arc<TransformF32Executor>,
+}
+
+impl std::fmt::Debug for RgbToCmyk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RgbToCmyk")
+    }
+}
+
+impl RgbToCmyk {
+    /// Parse ICC bytes; errors unless the profile's device space is CMYK.
+    pub fn new(icc: &[u8]) -> Result<Self, String> {
+        let profile = ColorProfile::new_from_slice(icc).map_err(|e| format!("{e:?}"))?;
+        if profile.color_space != DataColorSpace::Cmyk {
+            return Err(format!(
+                "profile device space is {:?}, expected CMYK",
+                profile.color_space
+            ));
+        }
+        let srgb = ColorProfile::new_srgb();
+        let transform = srgb
+            .create_transform_f32(
+                Layout::Rgb,
+                &profile,
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(Self { transform })
+    }
+
+    /// Separate non-linear sRGB triples (0..=1) into 8-bit CMYK quads.
+    pub fn separate(&self, srgb: &[f32]) -> Result<Vec<u8>, String> {
+        let pixels = srgb.len() / 3;
+        let mut ink = vec![0f32; pixels * 4];
+        self.transform
+            .transform(srgb, &mut ink)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(ink
+            .into_iter()
+            .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect())
+    }
+}
+
 /// Display P3 profile bytes — used by tests and (later) for assigning
 /// well-known profiles without shipping .icc files.
 pub fn display_p3_profile_bytes() -> Vec<u8> {

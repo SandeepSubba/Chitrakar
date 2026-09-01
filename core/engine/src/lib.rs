@@ -433,6 +433,19 @@ impl Session {
         Ok(chitrakar_render::render(&self.doc)?)
     }
 
+    /// Export the composite as a CMYK TIFF separated through — and with —
+    /// the document's press profile. Requires a loaded profile.
+    pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, EngineError> {
+        let Some(icc) = self.doc.cmyk_profile_bytes() else {
+            return Err(EngineError::BadCommand(
+                "CMYK TIFF export needs a press profile: load an ICC first".into(),
+            ));
+        };
+        let surface = self.render()?;
+        chitrakar_codecs::export_cmyk_tiff(&surface.pixels, surface.width, surface.height, icc)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Export vector layers (and embedded rasters/text) as SVG.
     pub fn export_svg(&self) -> Result<String, EngineError> {
         Ok(chitrakar_codecs::export_svg(&self.doc)?)

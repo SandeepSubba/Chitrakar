@@ -216,6 +216,11 @@ impl WasmSession {
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)
     }
+
+    /// Export a print-ready CMYK TIFF (needs a loaded press profile).
+    pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_cmyk_tiff().map_err(to_js)
+    }
 }
 
 fn to_js(e: crate::EngineError) -> JsError {

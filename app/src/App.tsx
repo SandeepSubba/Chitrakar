@@ -761,6 +761,15 @@ export function App() {
     download(session.export_png(), "untitled.png", "image/png");
   };
 
+  const exportTiff = () => {
+    if (!session) return;
+    try {
+      download(session.export_cmyk_tiff(), "untitled.tif", "image/tiff");
+    } catch (err) {
+      alert(`CMYK TIFF export: ${err}`);
+    }
+  };
+
   const exportSvg = () => {
     if (!session) return;
     download(
@@ -877,6 +886,14 @@ export function App() {
         <button onClick={saveFile}>Save</button>
         <button onClick={exportPng}>Export PNG</button>
         <button onClick={exportSvg}>Export SVG</button>
+        {hasIcc && (
+          <button
+            onClick={exportTiff}
+            title="Print-ready CMYK TIFF, separated through the loaded press profile"
+          >
+            Export TIFF
+          </button>
+        )}
         <span className="spacer" />
         <button onClick={undo} title="Ctrl+Z">
           Undo

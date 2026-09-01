@@ -592,6 +592,17 @@ await page.click('button[title="Soft proof: preview what the press can reproduce
 await page.waitForTimeout(300);
 px = await canvasPixel(100, 100);
 assert(px[2] === 255, "proof off restores true pixels");
+
+// 9e. Print handoff: CMYK TIFF export separated through the profile.
+const [tiffDl] = await Promise.all([
+  page.waitForEvent("download"),
+  page.click("text=Export TIFF"),
+]);
+const tiffBytes = await readFile(await tiffDl.path());
+const marker = tiffBytes.subarray(0, 2).toString("latin1");
+assert(marker === "II" || marker === "MM", `TIFF byte-order marker (${marker})`);
+assert(tiffBytes.includes(iccBytes.subarray(0, 256)), "press profile embedded in TIFF");
+assert(tiffBytes.length > 10000, `TIFF carries pixel data (${tiffBytes.length} bytes)`);
 }
 
 await page.screenshot({ path: "editor.png" });

@@ -7,9 +7,11 @@
 
 pub mod container;
 pub mod svg;
+pub mod tiff_export;
 
 pub use container::{load_chitra, save_chitra, ContainerError};
 pub use svg::export_svg;
+pub use tiff_export::{export_cmyk_tiff, TiffError};
 
 use chitrakar_color::LinearRgba;
 use image::ImageFormat;
