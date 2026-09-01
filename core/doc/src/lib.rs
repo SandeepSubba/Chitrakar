@@ -7,7 +7,9 @@
 
 mod node;
 
-pub use node::{Adjustment, BlendMode, Node, NodeKind, RasterRef, Stroke, Transform, VectorShape};
+pub use node::{
+    Adjustment, BlendMode, Filter, Node, NodeKind, RasterRef, Stroke, Transform, VectorShape,
+};
 
 use chitrakar_color::ColorMode;
 use serde::{Deserialize, Serialize};
@@ -162,6 +164,15 @@ impl Document {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Whether any filter layer exists. Filters read pixel neighborhoods, so
+    /// while one is present, incremental invalidation falls back to
+    /// whole-canvas (a region render could sample stale surroundings).
+    pub fn has_filter(&self) -> bool {
+        self.nodes
+            .values()
+            .any(|n| matches!(n.kind, NodeKind::Filter(_)))
     }
 
     /// Apply a command, returning its inverse (for undo).

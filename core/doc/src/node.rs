@@ -94,6 +94,17 @@ pub enum Adjustment {
     },
 }
 
+/// Non-destructive convolution filters; like adjustments they apply at
+/// render time to everything composited below the layer. Unlike adjustments
+/// they read pixel neighborhoods, so their invalidation is whole-canvas.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Filter {
+    /// `sigma` is the Gaussian standard deviation in document pixels.
+    GaussianBlur { sigma: f32 },
+    /// Unsharp mask: original + amount × (original − blur(sigma)).
+    Sharpen { sigma: f32, amount: f32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Group,
@@ -104,6 +115,7 @@ pub enum NodeKind {
     },
     Raster(RasterRef),
     Adjustment(Adjustment),
+    Filter(Filter),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,6 +163,10 @@ impl Node {
 
     pub fn raster(name: &str, raster: RasterRef) -> Self {
         Self::base(name, NodeKind::Raster(raster))
+    }
+
+    pub fn filter(name: &str, filter: Filter) -> Self {
+        Self::base(name, NodeKind::Filter(filter))
     }
 
     pub fn adjustment(name: &str, adjustment: Adjustment) -> Self {

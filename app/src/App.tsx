@@ -405,17 +405,24 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
-  const ADJUSTMENT_PRESETS: Record<string, { name: string; adj: Adjustment }> = {
-    exposure: { name: "Exposure", adj: { Exposure: { stops: 0 } } },
+  const ADJUSTMENT_PRESETS: Record<string, { name: string; kind: NodeKind }> = {
+    exposure: { name: "Exposure", kind: { Adjustment: { Exposure: { stops: 0 } } } },
     "brightness-contrast": {
       name: "Brightness/Contrast",
-      adj: { BrightnessContrast: { brightness: 0, contrast: 0 } },
+      kind: { Adjustment: { BrightnessContrast: { brightness: 0, contrast: 0 } } },
     },
     "hue-saturation": {
       name: "Hue/Saturation",
-      adj: {
-        HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0 },
+      kind: {
+        Adjustment: {
+          HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0 },
+        },
       },
+    },
+    blur: { name: "Gaussian Blur", kind: { Filter: { GaussianBlur: { sigma: 4 } } } },
+    sharpen: {
+      name: "Sharpen",
+      kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
     },
   };
 
@@ -426,7 +433,7 @@ export function App() {
       AddNode: {
         parent: session.root_id,
         index: topLevelCount(layers),
-        node: nodePayload(preset.name, { Adjustment: preset.adj }),
+        node: nodePayload(preset.name, preset.kind),
       },
     });
   };
@@ -852,6 +859,29 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
           {slider("Lightness", p.lightness, -1, 1, 0.01, (v) =>
             wrap({ HueSaturation: { ...p, lightness: v } }),
           )}
+        </>
+      );
+    }
+    return null;
+  }
+
+  if ("Filter" in kind) {
+    const filter = kind.Filter;
+    if ("GaussianBlur" in filter) {
+      return slider("Blur sigma", filter.GaussianBlur.sigma, 0, 50, 0.5, (v) => ({
+        Filter: { GaussianBlur: { sigma: v } },
+      }));
+    }
+    if ("Sharpen" in filter) {
+      const p = filter.Sharpen;
+      return (
+        <>
+          {slider("Sharpen sigma", p.sigma, 0.5, 20, 0.5, (v) => ({
+            Filter: { Sharpen: { ...p, sigma: v } },
+          }))}
+          {slider("Amount", p.amount, 0, 3, 0.05, (v) => ({
+            Filter: { Sharpen: { ...p, amount: v } },
+          }))}
         </>
       );
     }

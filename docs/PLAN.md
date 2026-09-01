@@ -173,7 +173,13 @@ chitrakar/
 - Vector styling ✅ first pass: fill and inner stroke (color + width),
   editable on existing objects; stroke-only shapes hit-test on the band.
   Gradients pending. Layer rename ✅ (SetName command, inline edit).
-- Filter effects: gaussian blur, sharpen (GPU compute).
+- Filter effects: gaussian blur ✅ and sharpen (unsharp mask) ✅ as
+  non-destructive layers — CPU path uses three iterated box blurs
+  (O(pixels) per pass, W3C feGaussianBlur approximation) in premultiplied
+  linear; parameters live-edit via the panel. While any filter layer exists,
+  incremental invalidation falls back to whole-canvas (neighborhood reads at
+  region edges); padded region rendering and the GPU compute path refine
+  this later.
 - Masks: raster masks (paintable) and vector masks; clipping groups.
 - Full undo/redo history panel.
 

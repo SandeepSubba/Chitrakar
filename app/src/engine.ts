@@ -44,6 +44,10 @@ export interface Stroke {
   width: number;
 }
 
+export type Filter =
+  | { GaussianBlur: { sigma: number } }
+  | { Sharpen: { sigma: number; amount: number } };
+
 export type NodeKind =
   | "Group"
   | {
@@ -53,7 +57,8 @@ export type NodeKind =
         stroke: Stroke | null;
       };
     }
-  | { Adjustment: Adjustment };
+  | { Adjustment: Adjustment }
+  | { Filter: Filter };
 
 export interface NodePayload {
   name: string;
@@ -79,7 +84,7 @@ export type Command =
 export interface LayerInfo {
   id: NodeId;
   name: string;
-  kind: "group" | "vector" | "raster" | "adjustment";
+  kind: "group" | "vector" | "raster" | "adjustment" | "filter";
   visible: boolean;
   opacity: number;
   blend: BlendMode;

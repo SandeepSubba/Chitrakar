@@ -14,11 +14,12 @@
 //! Transforms support translation and scale (`a`, `d`, `e`, `f`); shear and
 //! rotation (`b`, `c`) arrive with the GPU rasterizer.
 
+pub mod blur;
 pub mod tiles;
 
 use chitrakar_color::{to_working, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, NodeId, NodeKind, Transform, VectorShape,
+    Adjustment, BlendMode, DocError, Document, Filter, NodeId, NodeKind, Transform, VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -161,7 +162,7 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
     match kind {
         NodeKind::Vector { shape, .. } => Some(shape_size(shape)),
         NodeKind::Raster(r) => Some((r.width as f32, r.height as f32)),
-        NodeKind::Group | NodeKind::Adjustment(_) => None,
+        NodeKind::Group | NodeKind::Adjustment(_) | NodeKind::Filter(_) => None,
     }
 }
 
@@ -192,7 +193,7 @@ fn transformed_bounds(t: Transform, w: f32, h: f32) -> Bounds {
 pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     let node = doc.node(id)?;
     Ok(match &node.kind {
-        NodeKind::Adjustment(_) => Bounds::Everything,
+        NodeKind::Adjustment(_) | NodeKind::Filter(_) => Bounds::Everything,
         NodeKind::Group => {
             let mut acc = Bounds::None;
             for &child in doc.children_of(id)? {
@@ -296,6 +297,7 @@ fn render_group(
                     }
                 }
             }
+            NodeKind::Filter(filter) => apply_filter(filter, node.opacity, dst, clip),
         }
     }
     Ok(())
@@ -480,6 +482,53 @@ fn draw_raster(
             };
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+        }
+    }
+}
+
+/// Run a filter layer over the accumulated composite below it, weighted by
+/// the layer's opacity.
+fn apply_filter(filter: &Filter, opacity: f32, dst: &mut Surface, clip: ClipRect) {
+    match filter {
+        Filter::GaussianBlur { sigma } => {
+            let original = (opacity < 1.0).then(|| blur::snapshot(dst, clip));
+            blur::gaussian_blur(dst, clip, *sigma);
+            if let Some(orig) = original {
+                mix_snapshot(dst, clip, &orig, |o, f| lerp(o, f, opacity));
+            }
+        }
+        Filter::Sharpen { sigma, amount } => {
+            let original = blur::snapshot(dst, clip);
+            blur::gaussian_blur(dst, clip, *sigma);
+            let amt = amount * opacity;
+            mix_snapshot(dst, clip, &original, |o, blurred| {
+                // Unsharp mask; keep alpha, clamp premultiplied channels to it.
+                let un = |ov: f32, bv: f32, a: f32| (ov + amt * (ov - bv)).clamp(0.0, a.max(0.0));
+                LinearRgba {
+                    r: un(o.r, blurred.r, o.a),
+                    g: un(o.g, blurred.g, o.a),
+                    b: un(o.b, blurred.b, o.a),
+                    a: o.a,
+                }
+            });
+        }
+    }
+}
+
+/// Combine each region pixel (currently holding the filtered result) with
+/// its snapshot original.
+fn mix_snapshot(
+    dst: &mut Surface,
+    clip: ClipRect,
+    original: &[LinearRgba],
+    f: impl Fn(LinearRgba, LinearRgba) -> LinearRgba,
+) {
+    let w = (clip.x1 - clip.x0) as usize;
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let i = (y * dst.width + x) as usize;
+            let s = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+            dst.pixels[i] = f(original[s], dst.pixels[i]);
         }
     }
 }
@@ -835,6 +884,115 @@ mod tests {
 
         // Bounds must report Everything once an adjustment is in the tree.
         assert_eq!(node_bounds(&doc, root).unwrap(), Bounds::Everything);
+    }
+
+    #[test]
+    fn blur_layer_bleeds_past_shape_edges() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 8.0, 8.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(12.0, 12.0),
+        })
+        .unwrap();
+
+        let crisp = render(&doc).unwrap();
+        assert_eq!(crisp.get(10, 16).a, 0.0, "outside the rect before blur");
+
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::filter(
+                "blur",
+                chitrakar_doc::Filter::GaussianBlur { sigma: 3.0 },
+            )),
+        })
+        .unwrap();
+        let blurred = render(&doc).unwrap();
+        assert!(blurred.get(10, 16).a > 0.0, "blur bleeds outward");
+        assert!(
+            blurred.get(15, 16).r < crisp.get(15, 16).r,
+            "edge softened inside too"
+        );
+        assert_eq!(
+            node_bounds(&doc, root).unwrap(),
+            Bounds::Everything,
+            "filters invalidate the whole canvas"
+        );
+    }
+
+    #[test]
+    fn sharpen_boosts_edge_contrast_without_touching_flat_areas() {
+        let mut doc = Document::new(24, 24, ColorMode::Rgb);
+        let root = doc.root();
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        // Full-canvas grey with a brighter square in the middle.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("bg", 24.0, 24.0, grey),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect(
+                "sq",
+                8.0,
+                8.0,
+                AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.8,
+                    b: 0.8,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let sq = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: sq,
+            transform: Transform::translation(8.0, 8.0),
+        })
+        .unwrap();
+        let before = render(&doc).unwrap();
+
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::filter(
+                "sharpen",
+                chitrakar_doc::Filter::Sharpen {
+                    sigma: 1.5,
+                    amount: 1.0,
+                },
+            )),
+        })
+        .unwrap();
+        let after = render(&doc).unwrap();
+
+        // Just inside the bright square's edge gets brighter; the flat
+        // far-away background stays put.
+        assert!(
+            after.get(9, 12).r > before.get(9, 12).r + 1e-3,
+            "edge overshoot inside the square"
+        );
+        assert!(
+            (after.get(2, 2).r - before.get(2, 2).r).abs() < 1e-4,
+            "flat region unchanged"
+        );
     }
 
     #[test]

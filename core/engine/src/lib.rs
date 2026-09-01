@@ -113,10 +113,19 @@ impl Session {
     /// Apply a command to the document, computing the dirty region from the
     /// target's bounds before and after. Returns the inverse.
     fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
+        // Filters read pixel neighborhoods, so a partial region re-render
+        // would sample stale surroundings at its edges: while any filter
+        // layer exists (before or after this command), fall back to
+        // whole-canvas invalidation. Padded region rendering can refine this.
+        let had_filter = self.doc.has_filter();
         let pre = self.bounds_of_target(Self::command_target(&cmd));
         let inverse = self.doc.apply(cmd)?;
         let post = self.bounds_of_target(Self::command_target(&inverse));
-        self.mark_dirty(pre.union(post));
+        if had_filter || self.doc.has_filter() {
+            self.mark_dirty(Bounds::Everything);
+        } else {
+            self.mark_dirty(pre.union(post));
+        }
         Ok(inverse)
     }
 
@@ -262,6 +271,7 @@ impl Session {
                     NodeKind::Vector { .. } => "vector",
                     NodeKind::Raster(_) => "raster",
                     NodeKind::Adjustment(_) => "adjustment",
+                    NodeKind::Filter(_) => "filter",
                 },
                 visible: node.visible,
                 opacity: node.opacity,
@@ -508,6 +518,37 @@ mod tests {
             recomputed < 1500,
             "moving an 8×8 rect recomputed {recomputed} pixels on a 512×512 canvas"
         );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cache_stays_correct_with_a_filter_layer_present() {
+        let mut session = Session::new(48, 48, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "r", 12.0, 12.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 2.0 },
+                )),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        // An edit below the filter must invalidate the whole canvas —
+        // the blur halo far from the rect has to update too.
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        session.undo().unwrap();
         assert_cache_matches_fresh(&mut session);
     }
 
