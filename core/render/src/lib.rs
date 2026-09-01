@@ -59,6 +59,15 @@ impl Surface {
         }
     }
 
+    /// Copy one region's pixels from another surface of the same size.
+    pub fn copy_region_from(&mut self, src: &Surface, clip: ClipRect) {
+        for y in clip.y0..clip.y1 {
+            let row = (y * self.width) as usize;
+            let (a, b) = (row + clip.x0 as usize, row + clip.x1 as usize);
+            self.pixels[a..b].copy_from_slice(&src.pixels[a..b]);
+        }
+    }
+
     fn full_clip(&self) -> ClipRect {
         ClipRect {
             x0: 0,
@@ -257,6 +266,24 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
             transformed_bounds(node.transform, w, h)
         }
     })
+}
+
+/// How far, in pixels, the document's filter stack can carry a change:
+/// the summed sample reach of every filter layer (sequential filters
+/// compound). A region render whose clip is padded by this much computes
+/// correct values for the unpadded interior even next to stale surroundings.
+pub fn filter_reach(doc: &Document) -> u32 {
+    doc.nodes()
+        .map(|(_, node)| match &node.kind {
+            NodeKind::Filter(Filter::GaussianBlur { sigma })
+            | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
+                // Three iterated box blurs reach ~3 * box radius ≈ 2.9σ;
+                // round up generously.
+                (sigma * 3.0).ceil() as u32 + 2
+            }
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Render a document to a new full-size surface.

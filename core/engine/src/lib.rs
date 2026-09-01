@@ -54,6 +54,8 @@ pub struct Session {
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
     cache: Option<Surface>,
+    /// Reused scratch surface for padded region renders under filters.
+    scratch: Option<Surface>,
     /// Region of `cache` that must be recomputed before the next present.
     stale: Option<ClipRect>,
     /// Inverse restoring the state before the current preview gesture, with
@@ -79,6 +81,7 @@ impl Session {
             undo: Vec::new(),
             redo: Vec::new(),
             cache: None,
+            scratch: None,
             stale: None,
             preview_inverse: None,
             pixels_recomputed: 0,
@@ -130,20 +133,27 @@ impl Session {
     /// Apply a command to the document, computing the dirty region from the
     /// target's bounds before and after. Returns the inverse.
     fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
-        // Filters read pixel neighborhoods, so a partial region re-render
-        // would sample stale surroundings at its edges: while any filter
-        // layer exists (before or after this command), fall back to
-        // whole-canvas invalidation. Padded region rendering can refine this.
-        let had_filter = self.doc.has_filter();
         let batch = matches!(cmd, Command::Batch(_));
         let pre = self.bounds_of_target(Self::command_target(&cmd));
         let inverse = self.doc.apply(cmd)?;
         let post = self.bounds_of_target(Self::command_target(&inverse));
-        if batch || had_filter || self.doc.has_filter() {
+        if batch {
             // Batches touch several nodes; whole-canvas is the safe region.
             self.mark_dirty(Bounds::Everything);
         } else {
-            self.mark_dirty(pre.union(post));
+            // Filters read pixel neighborhoods, so a change also affects
+            // pixels within the filter stack's reach of it. Grow the dirty
+            // region by that reach rather than invalidating everything;
+            // render_cached additionally computes a padded margin so the
+            // reported region's own values are correct.
+            let mut bounds = pre.union(post);
+            let reach = chitrakar_render::filter_reach(&self.doc) as f32;
+            if reach > 0.0 {
+                if let Bounds::Rect(x0, y0, x1, y1) = bounds {
+                    bounds = Bounds::Rect(x0 - reach, y0 - reach, x1 + reach, y1 + reach);
+                }
+            }
+            self.mark_dirty(bounds);
         }
         Ok(inverse)
     }
@@ -387,11 +397,30 @@ impl Session {
             self.cache = Some(Surface::new(w, h));
             self.stale = Some(full);
         }
-        let cache = self.cache.as_mut().unwrap();
         match self.stale.take() {
             Some(clip) => {
-                chitrakar_render::render_region(&self.doc, cache, clip)?;
-                self.pixels_recomputed += clip.area();
+                // Filters sample neighbors: a region render is only correct
+                // deeper than the filter stack's reach inside its own edge.
+                // So compute a padded region in scratch and copy back just
+                // the exact region — the padding ring, whose values clamp
+                // against stale surroundings, is discarded.
+                let pad = chitrakar_render::filter_reach(&self.doc);
+                if pad == 0 {
+                    let cache = self.cache.as_mut().unwrap();
+                    chitrakar_render::render_region(&self.doc, cache, clip)?;
+                    self.pixels_recomputed += clip.area();
+                } else {
+                    let compute = ClipRect {
+                        x0: clip.x0.saturating_sub(pad),
+                        y0: clip.y0.saturating_sub(pad),
+                        x1: (clip.x1 + pad).min(w),
+                        y1: (clip.y1 + pad).min(h),
+                    };
+                    let scratch = self.scratch.get_or_insert_with(|| Surface::new(w, h));
+                    chitrakar_render::render_region(&self.doc, scratch, compute)?;
+                    self.cache.as_mut().unwrap().copy_region_from(scratch, clip);
+                    self.pixels_recomputed += compute.area();
+                }
                 Ok((self.cache.as_ref().unwrap(), Some(clip)))
             }
             None => Ok((self.cache.as_ref().unwrap(), None)),
@@ -781,8 +810,9 @@ mod tests {
             .unwrap();
         assert_cache_matches_fresh(&mut session);
 
-        // An edit below the filter must invalidate the whole canvas —
-        // the blur halo far from the rect has to update too.
+        // An edit below the filter still produces a pixel-exact cache: the
+        // dirty region grows by the filter's reach and the compute region
+        // is padded further, so blur halos update correctly.
         session
             .apply(Command::SetTransform {
                 id: rect,
@@ -792,6 +822,42 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
 
         session.undo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn filter_edits_render_incrementally_not_whole_canvas() {
+        let mut session = Session::new(512, 512, ColorMode::Rgb);
+        let small = add_rect(&mut session, "small", 8.0, 8.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 3.0 },
+                )),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+
+        let before = session.pixels_recomputed();
+        session
+            .apply(Command::SetTransform {
+                id: small,
+                transform: Transform::translation(4.0, 4.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let recomputed = session.pixels_recomputed() - before;
+
+        // Whole canvas would be 262144; the padded region is a small
+        // fraction of that even with a σ=3 blur in the stack.
+        assert!(
+            recomputed < 20_000,
+            "moving an 8×8 rect under a blur recomputed {recomputed} px of 262144"
+        );
         assert_cache_matches_fresh(&mut session);
     }
 

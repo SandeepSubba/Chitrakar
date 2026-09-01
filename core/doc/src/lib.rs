@@ -203,13 +203,17 @@ impl Document {
         self.nodes.len()
     }
 
-    /// Whether any filter layer exists. Filters read pixel neighborhoods, so
-    /// while one is present, incremental invalidation falls back to
-    /// whole-canvas (a region render could sample stale surroundings).
+    /// Whether any filter layer exists (filters read pixel neighborhoods,
+    /// which constrains incremental invalidation — see the engine).
     pub fn has_filter(&self) -> bool {
         self.nodes
             .values()
             .any(|n| matches!(n.kind, NodeKind::Filter(_)))
+    }
+
+    /// Iterate all nodes (unordered).
+    pub fn nodes(&self) -> impl Iterator<Item = (&NodeId, &Node)> {
+        self.nodes.iter()
     }
 
     /// Apply a command, returning its inverse (for undo).

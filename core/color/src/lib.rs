@@ -80,15 +80,20 @@ impl LinearRgba {
 
     /// Convert back to 8-bit non-linear sRGB with straight alpha (display /
     /// export edge). Values are clamped.
+    ///
+    /// Pixels whose alpha quantizes to zero encode as transparent black:
+    /// un-premultiplying by a near-zero alpha amplifies float dust into
+    /// arbitrary color, which is both meaningless (nothing is shown) and
+    /// non-deterministic — the same invisible pixel could encode differently
+    /// depending on rounding upstream.
     pub fn to_srgb8(self) -> [u8; 4] {
-        let unpremul = |v: f32| if self.a > 0.0 { v / self.a } else { 0.0 };
+        let alpha = (self.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if alpha == 0 {
+            return [0, 0, 0, 0];
+        }
+        let unpremul = |v: f32| v / self.a;
         let enc = |v: f32| (linear_to_srgb(unpremul(v).clamp(0.0, 1.0)) * 255.0).round() as u8;
-        [
-            enc(self.r),
-            enc(self.g),
-            enc(self.b),
-            (self.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-        ]
+        [enc(self.r), enc(self.g), enc(self.b), alpha]
     }
 }
 
@@ -143,6 +148,29 @@ mod tests {
             let px = LinearRgba::from_srgb8(v, v, v, 255);
             assert_eq!(px.to_srgb8(), [v, v, v, 255]);
         }
+    }
+
+    #[test]
+    fn invisible_pixels_encode_as_transparent_black() {
+        // Float dust left by e.g. a blur tail: alpha rounds to 0, so the
+        // color channels must not be amplified into junk by unpremultiply.
+        let dust = LinearRgba {
+            r: 1e-9,
+            g: 5e-10,
+            b: 2e-9,
+            a: 1e-9,
+        };
+        assert_eq!(dust.to_srgb8(), [0, 0, 0, 0]);
+        assert_eq!(LinearRgba::TRANSPARENT.to_srgb8(), [0, 0, 0, 0]);
+        // Just-visible alpha still encodes its color.
+        let faint = LinearRgba {
+            r: 0.5 * 0.01,
+            g: 0.0,
+            b: 0.0,
+            a: 0.01,
+        };
+        let out = faint.to_srgb8();
+        assert!(out[3] > 0 && out[0] > 100, "faint but real pixel: {out:?}");
     }
 
     #[test]
