@@ -59,6 +59,13 @@ pub struct Document {
     /// separate files in the .chitra container and are restored on load.
     #[serde(default)]
     resources: HashMap<String, Resource>,
+    /// CMYK press profile bytes (stored as profiles/cmyk.icc in the
+    /// container) and the parsed transform. Authored CMYK values render
+    /// through this when set; the naive preview formula otherwise.
+    #[serde(skip)]
+    cmyk_profile_bytes: Option<Vec<u8>>,
+    #[serde(skip)]
+    cmyk_cms: Option<chitrakar_color::CmykCms>,
 }
 
 /// An immutable source image (8-bit sRGB RGBA). The original bytes a raster
@@ -90,7 +97,31 @@ impl Document {
             children,
             next_id: 1,
             resources: HashMap::new(),
+            cmyk_profile_bytes: None,
+            cmyk_cms: None,
         }
+    }
+
+    /// Set the document's CMYK press profile. Fails (leaving the previous
+    /// profile in place) unless the bytes parse as a CMYK ICC profile.
+    pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), String> {
+        let cms = chitrakar_color::CmykCms::new(&icc)?;
+        self.cmyk_profile_bytes = Some(icc);
+        self.cmyk_cms = Some(cms);
+        Ok(())
+    }
+
+    pub fn clear_cmyk_profile(&mut self) {
+        self.cmyk_profile_bytes = None;
+        self.cmyk_cms = None;
+    }
+
+    pub fn cmyk_profile_bytes(&self) -> Option<&[u8]> {
+        self.cmyk_profile_bytes.as_deref()
+    }
+
+    pub fn cmyk_cms(&self) -> Option<&chitrakar_color::CmykCms> {
+        self.cmyk_cms.as_ref()
     }
 
     /// Add pixel bytes to the resource pool, returning their content id.

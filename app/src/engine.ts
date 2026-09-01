@@ -151,6 +151,27 @@ export function hexColor(hex: string, alpha = 1): AuthoredColor {
   };
 }
 
+/** Parse "#rrggbb" into CMYK ink values (naive device conversion) — how
+ * colors are authored in CMYK documents so a press profile can drive their
+ * rendering and export. */
+export function hexToCmykColor(hex: string, alpha = 1): AuthoredColor {
+  const n = parseInt(hex.slice(1), 16);
+  const r = ((n >> 16) & 0xff) / 255;
+  const g = ((n >> 8) & 0xff) / 255;
+  const b = (n & 0xff) / 255;
+  const k = 1 - Math.max(r, g, b);
+  const den = 1 - k;
+  return {
+    Cmyk: {
+      c: den > 0 ? (1 - r - k) / den : 0,
+      m: den > 0 ? (1 - g - k) / den : 0,
+      y: den > 0 ? (1 - b - k) / den : 0,
+      k,
+      a: alpha,
+    },
+  };
+}
+
 /** Render an authored color as "#rrggbb" for a color input (alpha dropped). */
 export function colorToHex(color: AuthoredColor): string {
   const c =

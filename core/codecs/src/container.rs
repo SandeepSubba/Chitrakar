@@ -54,8 +54,14 @@ pub fn save_chitra(doc: &Document) -> Result<Vec<u8>, ContainerError> {
         )?;
         zip.write_all(&png)?;
     }
+    if let Some(icc) = doc.cmyk_profile_bytes() {
+        zip.start_file(CMYK_PROFILE_PATH, SimpleFileOptions::default())?;
+        zip.write_all(icc)?;
+    }
     Ok(zip.finish()?.into_inner())
 }
+
+const CMYK_PROFILE_PATH: &str = "profiles/cmyk.icc";
 
 /// Load a document from `.chitra` bytes.
 pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
@@ -87,6 +93,12 @@ pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
         // Silently ignores entries the manifest doesn't reference or whose
         // size disagrees — the manifest is the source of truth.
         doc.restore_resource_bytes(&id, img.rgba8);
+    }
+    if let Ok(mut entry) = zip.by_name(CMYK_PROFILE_PATH) {
+        let mut icc = Vec::new();
+        entry.read_to_end(&mut icc)?;
+        // Best effort: a profile that no longer parses is dropped.
+        let _ = doc.set_cmyk_profile(icc);
     }
     Ok(doc)
 }
@@ -134,6 +146,24 @@ mod tests {
         let res = restored.resource(&id).unwrap();
         assert_eq!((res.width, res.height), (2, 2));
         assert_eq!(res.rgba8, rgba8, "pixel bytes survive the PNG roundtrip");
+    }
+
+    /// Needs a real CMYK press profile; see CHITRAKAR_TEST_CMYK_ICC in
+    /// chitrakar-color's cms tests.
+    #[test]
+    fn cmyk_profile_roundtrips_through_container() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let mut doc = Document::new(8, 8, ColorMode::Cmyk);
+        doc.set_cmyk_profile(icc.clone()).unwrap();
+
+        let bytes = save_chitra(&doc).unwrap();
+        let restored = load_chitra(&bytes).unwrap();
+        assert_eq!(restored.cmyk_profile_bytes(), Some(icc.as_slice()));
+        assert!(restored.cmyk_cms().is_some(), "transform rebuilt on load");
     }
 
     #[test]

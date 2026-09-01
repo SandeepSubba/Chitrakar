@@ -17,7 +17,7 @@
 pub mod blur;
 pub mod tiles;
 
-use chitrakar_color::{to_working, LinearRgba};
+use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
     Adjustment, BlendMode, DocError, Document, Filter, Mask, MaskKind, NodeId, NodeKind, Transform,
     VectorShape,
@@ -268,7 +268,7 @@ fn render_group(
                 stroke,
             } => {
                 if let Some(fill) = fill {
-                    let color = scale_alpha(to_working(*fill), node.opacity);
+                    let color = scale_alpha(resolve_color(doc, *fill), node.opacity);
                     paint_shape(
                         dst,
                         doc,
@@ -282,7 +282,7 @@ fn render_group(
                     );
                 }
                 if let Some(stroke) = stroke {
-                    let color = scale_alpha(to_working(stroke.color), node.opacity);
+                    let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
                     paint_shape(
                         dst,
                         doc,
@@ -331,6 +331,16 @@ fn render_group(
         }
     }
     Ok(())
+}
+
+/// Authored color → working space: CMYK goes through the document's press
+/// profile when one is set; everything else (and profileless CMYK) uses the
+/// device formulas in `chitrakar_color`.
+fn resolve_color(doc: &Document, color: AuthoredColor) -> LinearRgba {
+    if let (AuthoredColor::Cmyk { c, m, y, k, a }, Some(cms)) = (color, doc.cmyk_cms()) {
+        return cms.to_working(c, m, y, k, a);
+    }
+    to_working(color)
 }
 
 fn scale_alpha(px: LinearRgba, s: f32) -> LinearRgba {

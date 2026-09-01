@@ -5,6 +5,10 @@
 //! encoded spaces (sRGB now; ICC-profile-driven transforms in Phase 3) happens
 //! only at the pipeline edges: import, display, and export.
 
+pub mod cms;
+
+pub use cms::CmykCms;
+
 use serde::{Deserialize, Serialize};
 
 /// The color mode of a document. CMYK documents composite in a linear RGB

@@ -141,7 +141,9 @@ chitrakar/
   - ✅ *First half proven:* engine compiles to WASM (wasm-bindgen), runs in-browser,
     renders to canvas via `putImageData`; full editor loop (draw/undo/hide/save)
     verified headless in Chromium. WebGPU-in-webview per platform still open.
-- **Spike 2:** lcms2 vs moxcms — round-trip sRGB↔FOGRA39 correctness + WASM size/speed.
+- **Spike 2:** ✅ lcms2 vs moxcms — **moxcms chosen** (compiles to wasm where
+  lcms2's C core cannot, ~4.4× faster, matches lcms2 within 1/255 on RGB and
+  CMYK press-profile transforms). Full numbers: docs/spikes/color-management.md.
 
 ### Phase 1 — Core editor (vector + raster objects)
 - ✅ Document model, command/undo system, `.chitra` save/load (manifest-only container;
@@ -189,8 +191,13 @@ chitrakar/
 - Full undo/redo history panel.
 
 ### Phase 3 — Color management & export
-- ICC import honoring embedded profiles; working-space conversion.
-- CMYK document mode, CMYK color picker, soft proofing + gamut warning.
+- ICC import honoring embedded profiles ✅ (PNG/JPEG pixels tagged with an
+  RGB profile normalize to sRGB at the decode edge via moxcms).
+- CMYK document mode ✅ with press profiles ✅: documents carry an ICC press
+  profile (persisted in .chitra as profiles/cmyk.icc, loadable in the UI);
+  authored CMYK ink renders through it, naive formula as fallback; shapes
+  drawn in CMYK documents author real ink values. CMYK picker UI, soft
+  proofing + gamut warning pending.
 - Export: PNG/JPEG (sRGB), TIFF (CMYK, profile embedded), SVG (vector layers),
   PDF (composite, profile embedded).
 

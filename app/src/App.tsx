@@ -12,6 +12,7 @@ import {
   colorToHex,
   getWasmMemory,
   hexColor,
+  hexToCmykColor,
   initEngine,
   nodePayload,
   sendCommand,
@@ -142,6 +143,7 @@ export function App() {
       setSession(s);
       setCmyk(useCmyk);
       setSelected(null);
+      setHasIcc(false);
       shapeCount.current = 0;
       refresh(s);
       fitView();
@@ -355,7 +357,15 @@ export function App() {
         index: topLevelCount(layers),
         node: nodePayload(
           `${drag.tool} ${shapeCount.current}`,
-          { Vector: { shape, fill: hexColor(fill), stroke: null } },
+          {
+            Vector: {
+              shape,
+              // CMYK documents author ink values so the press profile
+              // (and later export) drives their rendering.
+              fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+              stroke: null,
+            },
+          },
           x0,
           y0,
         ),
@@ -545,6 +555,7 @@ export function App() {
       setSession(s);
       setCmyk(s.cmyk);
       setSelected(null);
+      setHasIcc(s.has_cmyk_profile);
       refresh(s);
       fitView();
     });
@@ -557,6 +568,23 @@ export function App() {
     file.arrayBuffer().then((buf) => {
       session.place_image(new Uint8Array(buf), file.name);
       refresh(session);
+    });
+  };
+
+  const [hasIcc, setHasIcc] = useState(false);
+
+  const loadIccProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.arrayBuffer().then((buf) => {
+      try {
+        session.set_cmyk_profile(new Uint8Array(buf));
+        setHasIcc(true);
+        refresh(session);
+      } catch (err) {
+        alert(`Could not use ICC profile: ${err}`);
+      }
     });
   };
 
@@ -579,6 +607,20 @@ export function App() {
             hidden
           />
         </label>
+        {cmyk && (
+          <label
+            className="file-button"
+            title="Load a CMYK press profile (ICC) for accurate ink preview"
+          >
+            {hasIcc ? "ICC ✓" : "ICC…"}
+            <input
+              type="file"
+              accept=".icc,.icm"
+              onChange={loadIccProfile}
+              hidden
+            />
+          </label>
+        )}
         <button onClick={saveFile}>Save</button>
         <button onClick={exportPng}>Export PNG</button>
         <span className="spacer" />

@@ -153,6 +153,16 @@ impl WasmSession {
         self.inner.place_image(bytes, name).map_err(to_js)
     }
 
+    /// Set the CMYK press profile from ICC bytes.
+    pub fn set_cmyk_profile(&mut self, icc: &[u8]) -> Result<(), JsError> {
+        self.inner.set_cmyk_profile(icc.to_vec()).map_err(to_js)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_cmyk_profile(&self) -> bool {
+        self.inner.has_cmyk_profile()
+    }
+
     /// Serialize to `.chitra` bytes.
     pub fn save(&self) -> Result<Vec<u8>, JsError> {
         self.inner.save().map_err(to_js)

@@ -16,6 +16,8 @@ use image::ImageFormat;
 pub enum CodecError {
     #[error("failed to decode image: {0}")]
     Decode(#[from] image::ImageError),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("unsupported export format: {0}")]
     UnsupportedFormat(String),
 }
@@ -37,13 +39,26 @@ impl SourceImage {
     }
 }
 
-/// Decode PNG or JPEG bytes (format sniffed from content).
+/// Decode PNG or JPEG bytes (format sniffed from content). An embedded ICC
+/// profile is honored: pixels are normalized to sRGB at this edge, so the
+/// engine holds exactly one internal encoding.
 pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
-    let img = image::load_from_memory(bytes)?.to_rgba8();
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let mut decoder = reader.into_decoder()?;
+    let icc = image::ImageDecoder::icc_profile(&mut decoder)
+        .ok()
+        .flatten();
+    let img = image::DynamicImage::from_decoder(decoder)?.to_rgba8();
+    let (width, height) = (img.width(), img.height());
+    let mut rgba8 = img.into_raw();
+    if let Some(icc) = icc {
+        // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
+        chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
+    }
     Ok(SourceImage {
-        width: img.width(),
-        height: img.height(),
-        rgba8: img.into_raw(),
+        width,
+        height,
+        rgba8,
     })
 }
 
@@ -75,6 +90,26 @@ mod tests {
         let decoded = decode(&png).unwrap();
         assert_eq!((decoded.width, decoded.height), (2, 2));
         assert_eq!(decoded.rgba8, pixels);
+    }
+
+    #[test]
+    fn embedded_icc_profile_is_honored_on_import() {
+        use image::ImageEncoder;
+        // Encode a PNG tagged as Display P3.
+        let pixels = vec![200u8, 100, 50, 255];
+        let mut png_p3 = std::io::Cursor::new(Vec::new());
+        let mut enc = image::codecs::png::PngEncoder::new(&mut png_p3);
+        enc.set_icc_profile(chitrakar_color::cms::display_p3_profile_bytes())
+            .unwrap();
+        enc.write_image(&pixels, 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+
+        // The same pixel untagged decodes verbatim; tagged, it converts.
+        let plain = decode(&encode_png(1, 1, &pixels).unwrap()).unwrap();
+        assert_eq!(plain.rgba8, pixels);
+        let tagged = decode(&png_p3.into_inner()).unwrap();
+        assert_ne!(tagged.rgba8, pixels, "P3-tagged pixels must be normalized");
+        assert_eq!(tagged.rgba8[3], 255, "alpha preserved");
     }
 
     #[test]

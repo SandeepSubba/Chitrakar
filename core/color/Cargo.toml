@@ -8,3 +8,7 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+# Pure-Rust ICC engine. Chosen over lcms2 in the Phase 0 spike: compiles to
+# wasm32 (lcms2's C core does not), ~4x faster on bulk transforms, and
+# matches lcms2 within 1/255 (see docs/spikes/color-management.md).
+moxcms = "0.9"

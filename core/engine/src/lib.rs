@@ -348,6 +348,20 @@ impl Session {
         }
     }
 
+    /// Set the CMYK press profile authored CMYK colors render through.
+    /// Not a command: like resources, it is document setup, not an edit.
+    pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), EngineError> {
+        self.doc
+            .set_cmyk_profile(icc)
+            .map_err(EngineError::BadCommand)?;
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    pub fn has_cmyk_profile(&self) -> bool {
+        self.doc.cmyk_cms().is_some()
+    }
+
     /// Serialize to `.chitra` container bytes.
     pub fn save(&self) -> Result<Vec<u8>, EngineError> {
         chitrakar_codecs::save_chitra(&self.doc).map_err(|e| EngineError::BadCommand(e.to_string()))
@@ -635,6 +649,50 @@ mod tests {
         let layers = session.layers();
         let names: Vec<_> = layers.iter().map(|l| (l.name.as_str(), l.depth)).collect();
         assert_eq!(names, vec![("top", 0), ("bottom group", 0), ("nested", 1)]);
+    }
+
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn cmyk_fill_renders_through_press_profile_when_set() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+
+        let mut session = Session::new(4, 4, ColorMode::Cmyk);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "cyan",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Cmyk {
+                c: 1.0,
+                m: 0.0,
+                y: 0.0,
+                k: 0.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+
+        let naive = session.render().unwrap().get(0, 0).to_srgb8();
+        session.set_cmyk_profile(icc).unwrap();
+        let profiled = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_ne!(naive, profiled, "profile must change CMYK rendering");
+        // Real presses can't print #00FFFF; profiled cyan is darker/bluer.
+        assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
+        assert_cache_matches_fresh(&mut session);
     }
 
     #[test]
