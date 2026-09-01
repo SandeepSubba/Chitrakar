@@ -17,3 +17,4 @@ app/src/wasm-pkg/
 *.swp
 .idea/
 .vscode/
+e2e/out/

@@ -43,6 +43,28 @@ jobs:
       # Runs build:wasm (wasm-pack) first, then tsc + vite.
       - run: npm run build
 
+  e2e:
+    name: Browser smoke suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
   shell:
     name: Tauri shell (check, Linux)
     runs-on: ubuntu-latest

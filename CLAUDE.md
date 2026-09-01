@@ -49,9 +49,11 @@ CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
 license-clean to commit.
 
-There's also a Playwright smoke suite (~78 pixel-level assertions driving
-the built app in headless Chromium) that has caught real bugs; it lives
-outside the repo so far — ask the user before porting or extending it.
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~78 pixel-level
+assertions driving the built app in headless Chromium; it has caught real
+bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
+UI behavior changes. Env: `CHITRAKAR_CHROMIUM` (browser path override),
+`CHITRAKAR_TEST_CMYK_ICC` (enables the press-profile/proofing steps).
 
 ## Working agreement
 
