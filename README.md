@@ -25,7 +25,16 @@ npm run dev        # dev server on :5173
 # Tauri desktop shell (needs the Tauri Linux/macOS/Windows prerequisites:
 # https://v2.tauri.app/start/prerequisites/)
 cd shells/tauri/src-tauri && cargo check
+
+# Desktop app: dev window / installable bundles (deb, rpm, AppImage on
+# Linux; dmg on macOS; msi/nsis on Windows)
+cd shells/tauri/src-tauri
+../../../app/node_modules/.bin/tauri dev
+../../../app/node_modules/.bin/tauri build
 ```
+
+Tagging `v*` (or manually dispatching the "Release builds" workflow) builds
+installers for Windows, macOS (Intel + Apple Silicon), and Linux in CI.
 
 Repository layout: `core/` (Rust engine workspace) · `app/` (shared UI) ·
 `shells/tauri/` (desktop + mobile shells) · `docs/` (plan, ADRs).

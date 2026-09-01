@@ -136,6 +136,10 @@ chitrakar/
 
 ### Phase 0 — Foundations & risk spikes (small)
 - ✅ Scaffold Rust workspace, Tauri 2 app, React UI, CI (fmt/clippy/test + desktop builds).
+- ✅ Desktop packaging: app icons generated for every platform, bundling enabled
+  (deb/rpm/AppImage, dmg, msi/nsis), a Linux .deb built and inspected locally,
+  and a release workflow producing installers for Windows, macOS (Intel +
+  Apple Silicon), and Linux on version tags or manual dispatch.
 - **Spike 1:** WASM engine + WebGPU triangle→texture inside Tauri webview on desktop,
   iOS Simulator, Android emulator. Decide the fallback ladder with data.
   - ✅ *First half proven:* engine compiles to WASM (wasm-bindgen), runs in-browser,
