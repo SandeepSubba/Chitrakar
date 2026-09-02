@@ -145,6 +145,9 @@ export interface TextSpec {
   /** Italic: the face's oblique twin when one is registered, else a
    * lean the rasterizer synthesizes. */
   italic: boolean;
+  /** A line under each line of text, and one through it. */
+  underline: boolean;
+  strike: boolean;
 }
 
 export interface GradientStop {

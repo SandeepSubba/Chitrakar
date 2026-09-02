@@ -667,6 +667,17 @@ impl<'a> Page<'a> {
                     );
                 }
                 self.content.push_str("ET\n");
+                // Underline and strike-through: bands in the same colour.
+                for [x0, y0, x1, y1] in &typeset.decorations {
+                    let _ = writeln!(
+                        self.content,
+                        "{} {} {} {} re f",
+                        num(*x0),
+                        num(*y0),
+                        num(x1 - x0),
+                        num(y1 - y0)
+                    );
+                }
             }
             NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                 unreachable!("not live: see is_live")
@@ -1733,6 +1744,17 @@ mod tests {
             content_of(&pdf).contains("1 0 0.2 -1 "),
             "the lean is in the text matrix"
         );
+        // An underline is a band after the glyphs, in the text's colour.
+        let mut spec = chitrakar_doc::TextSpec::new("Under", 20.0, BLUE);
+        spec.underline = true;
+        let mut lined = Document::new(200, 60, chitrakar_color::ColorMode::Rgb);
+        add(&mut lined, chitrakar_doc::Node::text("u", spec), [5.0, 5.0]);
+        let content = content_of(&export_pdf_document(&lined).unwrap());
+        let (et, band) = (
+            content.find("ET\n").unwrap(),
+            content.rfind(" re f\n").unwrap(),
+        );
+        assert!(band > et, "the band follows the glyphs: {content}");
         assert!(
             pdf.len() < 60_000,
             "the face travels as a subset: {} bytes for the whole file",

@@ -1569,6 +1569,47 @@ assert(
     await page.click('button[aria-label="Italic"]');
     await page.waitForTimeout(300);
     assert(Math.abs((await tilt()) ?? 9) < 1, "and again stands the stems up");
+    // Underline adds ink below the letters; strike-through adds ink
+    // without reaching lower; both come off again.
+    const inkRows = () =>
+      page.evaluate(([a, b, c, d]) => {
+        const el = document.getElementById("engine-canvas");
+        const s = Number(el.dataset.frameScale) || 1;
+        const ox = Number(el.dataset.originX) || 0;
+        const oy = Number(el.dataset.originY) || 0;
+        [a, c] = [a, c].map((v) => Math.round(ox + v * s));
+        [b, d] = [b, d].map((v) => Math.round(oy + v * s));
+        const w = c - a;
+        const img = el.getContext("2d").getImageData(a, b, w, d - b).data;
+        let last = -1;
+        let count = 0;
+        for (let i = 0; i < img.length; i += 4) {
+          if (img[i + 3] > 0) {
+            last = Math.floor(i / 4 / w);
+            count++;
+          }
+        }
+        return [last / s, count];
+      }, [700, 540, 1320, 740]);
+    const [bottom, plainInk] = await inkRows();
+    await page.click('button[aria-label="Underline"]');
+    await page.waitForTimeout(300);
+    const [underBottom, underInk] = await inkRows();
+    assert(
+      underBottom > bottom + 2 && underInk > plainInk,
+      `underline reaches below the letters (${bottom} -> ${underBottom})`,
+    );
+    await page.click('button[aria-label="Underline"]');
+    await page.click('button[aria-label="Strike-through"]');
+    await page.waitForTimeout(300);
+    const [struckBottom, struckInk] = await inkRows();
+    assert(
+      Math.abs(struckBottom - bottom) < 1.5 && struckInk > plainInk,
+      `strike-through adds ink without reaching lower (${struckBottom} vs ${bottom})`,
+    );
+    await page.click('button[aria-label="Strike-through"]');
+    await page.waitForTimeout(300);
+    assert((await inkRows())[1] === plainInk, "and both come off again");
   }
   // A font loaded from a file joins the list and dresses the picked block.
   await page.locator('input[accept=".ttf,.otf"]').setInputFiles("public/fonts/DejaVuSerif.ttf");

@@ -265,6 +265,12 @@ pub struct TextSpec {
     /// is registered, and leaned by the rasterizer when none is.
     #[serde(default)]
     pub italic: bool,
+    /// A line under each line of text, and one through it, drawn by the
+    /// rasterizer in the block's colour at sizes relative to the em.
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strike: bool,
 }
 
 fn one() -> f32 {
@@ -285,6 +291,8 @@ impl TextSpec {
             width: 0.0,
             font: String::new(),
             italic: false,
+            underline: false,
+            strike: false,
         }
     }
 

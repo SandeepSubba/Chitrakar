@@ -76,8 +76,9 @@ without reading anything else.*
   File › Load font… registers any TrueType/OpenType file for the page's
   lifetime, a Bold toggle swaps a face for its "… Bold" twin, an Italic
   toggle sets it in its "… Oblique"/"… Italic" twin when one is registered
-  (Sans Mono's is shipped) and leans the outlines itself when none is, and
-  a saved
+  (Sans Mono's is shipped) and leans the outlines itself when none is,
+  underline and strike-through toggles draw their bands per line (and
+  travel into SVG as text-decoration and PDF as rectangles), and a saved
   `.chitra` carries the faces its text is set in (all but the bundled one)
   under `fonts/`, registering them on open, so a document reads the same
   wherever it is opened next —
@@ -110,9 +111,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~160),
+- **Verify before committing:** `cargo test --workspace` (~171),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~316 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~319 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -123,9 +124,10 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: underline/strike-through, text on a path, and another
-     review pass over the last stretch of commits (each pass so far has
-     found real defects).
+  3. Depth: text on a path, on-canvas text editing (a caret in the
+     block rather than the panel's textarea), and another review pass
+     over the last stretch of commits (each pass so far has found real
+     defects).
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

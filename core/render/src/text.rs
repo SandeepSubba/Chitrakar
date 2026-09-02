@@ -274,6 +274,52 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
     (glyphs, pen.max(0.0))
 }
 
+/// Where a line's start sits, given the block's alignment and the room a
+/// lean takes: the x its first glyph's origin lands on.
+fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
+    let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
+    l.room.0
+        + match spec.align {
+            chitrakar_doc::TextAlign::Left => 0.0,
+            chitrakar_doc::TextAlign::Center => slack / 2.0,
+            chitrakar_doc::TextAlign::Right => slack,
+        }
+}
+
+/// The bands an underline and a strike-through paint, `[x0, y0, x1, y1]`
+/// in raster pixels at `scale`: one per line of text that has any
+/// width, under its baseline or through its x-height, as thick as a
+/// twentieth of the em and never thinner than a pixel.
+fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<[f32; 4]> {
+    if !spec.underline && !spec.strike {
+        return Vec::new();
+    }
+    let fonts = fonts_for(spec);
+    let px = spec.size.max(0.1) * scale;
+    let font = fonts.font.as_scaled(px);
+    let em = px * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled();
+    let thickness = (em * 0.05).max(1.0);
+    let step = line_step(&font, spec);
+    let mut bands = Vec::new();
+    for (line_no, width) in l.widths.iter().enumerate() {
+        if *width <= 0.0 {
+            continue;
+        }
+        let baseline = line_no as f32 * step + font.ascent();
+        let x0 = line_start(spec, l, line_no);
+        let x1 = x0 + width;
+        if spec.underline {
+            let y0 = baseline + em * 0.1;
+            bands.push([x0, y0, x1, y0 + thickness]);
+        }
+        if spec.strike {
+            let y0 = baseline - em * 0.3;
+            bands.push([x0, y0, x1, y0 + thickness]);
+        }
+    }
+    bands
+}
+
 /// The file behind the face a block draws with, for an exporter that
 /// embeds it, and what an embedder needs to know: the name the face was
 /// registered under, its units per em, the ascent-to-descent height in
@@ -319,6 +365,9 @@ pub struct PlacedText {
     pub em: f32,
     pub lean: f32,
     pub glyphs: Vec<PlacedGlyph>,
+    /// Underline and strike-through bands, `[x0, y0, x1, y1]` in document
+    /// pixels, to draw in the block's colour.
+    pub decorations: Vec<[f32; 4]>,
 }
 
 /// The name of the face a block draws with.
@@ -356,13 +405,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
     for (line_no, line) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
         let (shaped, _) = shape_line(line, spec, 1.0);
-        let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
-        let start = l.room.0
-            + match spec.align {
-                chitrakar_doc::TextAlign::Left => 0.0,
-                chitrakar_doc::TextAlign::Center => slack / 2.0,
-                chitrakar_doc::TextAlign::Right => slack,
-            };
+        let start = line_start(spec, &l, line_no);
         for (i, g) in shaped.iter().enumerate() {
             // The glyph's text runs from its cluster to the next cluster
             // that differs, so a ligature keeps both its letters and the
@@ -400,6 +443,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         },
         em: px * upem / fonts.font.height_unscaled(),
         lean: if synthesized_lean(spec) { SLANT } else { 0.0 },
+        decorations: decoration_bands(spec, &l, 1.0),
         glyphs,
     }
 }
@@ -609,16 +653,9 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     for (line_no, line) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
         let (glyphs, _) = shape_line(line, spec, scale);
-        let line_w = l.widths[line_no];
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
-        let slack = w - l.room.0 - l.room.1 - line_w;
-        let start = l.room.0
-            + match spec.align {
-                chitrakar_doc::TextAlign::Left => 0.0,
-                chitrakar_doc::TextAlign::Center => slack / 2.0,
-                chitrakar_doc::TextAlign::Right => slack,
-            };
+        let start = line_start(spec, &l, line_no);
         for g in glyphs {
             let glyph = g.id.with_scale_and_position(
                 spec.size.max(0.1) * scale,
@@ -639,6 +676,23 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
                         coverage[i] = coverage[i].max(c);
                     }
                 });
+            }
+        }
+    }
+    // Underline and strike-through: solid bands, clipped to the raster,
+    // that also draw the space a line is spaced with.
+    for [x0, y0, x1, y1] in decoration_bands(spec, &l, scale) {
+        let (cx0, cx1) = (
+            (x0.round().max(0.0)) as u32,
+            (x1.round().max(0.0) as u32).min(width),
+        );
+        let (cy0, cy1) = (
+            (y0.round().max(0.0)) as u32,
+            (y1.round().max(0.0) as u32).min(height),
+        );
+        for y in cy0..cy1 {
+            for x in cx0..cx1 {
+                coverage[(y * width + x) as usize] = 1.0;
             }
         }
     }
@@ -1112,6 +1166,57 @@ mod tests {
         // A synthesized italic reports its lean; an oblique face does not.
         block.italic = true;
         assert_eq!(placed(&block).lean, SLANT);
+    }
+
+    #[test]
+    fn underline_and_strike_through_paint_bands_the_glyphs_do_not() {
+        let plain = spec("Hello\nhi", 24.0);
+        let base = rasterize(&plain);
+        let mut lined = plain.clone();
+        lined.underline = true;
+        let under = rasterize(&lined);
+        assert_eq!(
+            (under.width, under.height),
+            (base.width, base.height),
+            "the block's size is the same"
+        );
+        assert_eq!(measure(&lined), measure(&plain));
+        // Under the first line's baseline, where 'Hello' has no
+        // descender, a full-width band appears.
+        let laid = set(&plain);
+        let y = (laid.ascent + laid.em * 0.1 + 0.5) as u32;
+        let inked = |r: &TextRaster, y: u32| (0..r.width).filter(|&x| r.sample(x, y) > 0.5).count();
+        let (first_w, second_w) = (laid.lines[0].1, laid.lines[1].1);
+        assert!(
+            inked(&base, y) < (first_w * 0.2) as usize,
+            "little ink there before"
+        );
+        assert!(
+            inked(&under, y) as f32 >= first_w * 0.95,
+            "a band as wide as the line ({} of {first_w})",
+            inked(&under, y)
+        );
+        // The second line gets its own, only as wide as itself.
+        let y2 = (laid.ascent + laid.step + laid.em * 0.1 + 0.5) as u32;
+        let band2 = inked(&under, y2) as f32;
+        assert!(
+            band2 >= second_w * 0.95 && band2 < first_w * 0.8,
+            "{band2} vs {second_w}"
+        );
+        // Strike-through crosses the x-height instead.
+        let mut struck = plain.clone();
+        struck.strike = true;
+        let through = rasterize(&struck);
+        let ys = (laid.ascent - laid.em * 0.3 + 0.5) as u32;
+        assert!(inked(&through, ys) as f32 >= first_w * 0.95);
+        assert!(
+            inked(&through, y) == inked(&base, y),
+            "and leaves the underline's row alone"
+        );
+        // Exporters get the same bands.
+        let typeset = placed(&lined);
+        assert_eq!(typeset.decorations.len(), 2);
+        assert!((typeset.decorations[0][2] - typeset.decorations[0][0] - first_w).abs() < 1e-3);
     }
 
     #[test]

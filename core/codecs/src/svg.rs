@@ -210,6 +210,12 @@ fn write_children(
                 } else {
                     ""
                 };
+                let decoration = match (spec.underline, spec.strike) {
+                    (true, true) => r#" text-decoration="underline line-through""#,
+                    (true, false) => r#" text-decoration="underline""#,
+                    (false, true) => r#" text-decoration="line-through""#,
+                    (false, false) => "",
+                };
                 let (anchor, x) = match spec.align {
                     chitrakar_doc::TextAlign::Left => ("", block.inset),
                     chitrakar_doc::TextAlign::Center => {
@@ -221,7 +227,7 @@ fn write_children(
                 };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{anchor}{common} fill="{}" xml:space="preserve">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{decoration}{anchor}{common} fill="{}" xml:space="preserve">"#,
                     if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {
@@ -599,6 +605,24 @@ mod tests {
         assert!(
             block.contains(r#"<tspan x="45.00""#),
             "centred in the 90px block: {block}"
+        );
+        let struck = {
+            let mut spec = chitrakar_doc::TextSpec::new("x", 20.0, RED);
+            spec.underline = true;
+            spec.strike = true;
+            spec
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::text("t4", struck)),
+        })
+        .unwrap();
+        assert!(
+            export_svg(&doc)
+                .unwrap()
+                .contains(r#" text-decoration="underline line-through""#),
+            "decorations ride on the text element"
         );
         assert!(
             block.matches("<tspan").count() >= 2 && block.contains(">the quick<"),

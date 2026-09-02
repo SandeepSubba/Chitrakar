@@ -1089,6 +1089,8 @@ export function App() {
                 width: 0,
                 font: "",
                 italic: false,
+                underline: false,
+                strike: false,
               },
             },
             x,
@@ -4349,6 +4351,24 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
             onClick={() => onEdit({ Text: { ...t, italic: !t.italic } }, false)}
           >
             <em>I</em>
+          </button>
+          <button
+            className={t.underline ? "active" : undefined}
+            title="Underline"
+            aria-label="Underline"
+            aria-pressed={!!t.underline}
+            onClick={() => onEdit({ Text: { ...t, underline: !t.underline } }, false)}
+          >
+            <u>U</u>
+          </button>
+          <button
+            className={t.strike ? "active" : undefined}
+            title="Strike-through"
+            aria-label="Strike-through"
+            aria-pressed={!!t.strike}
+            onClick={() => onEdit({ Text: { ...t, strike: !t.strike } }, false)}
+          >
+            <s>S</s>
           </button>
           <select
             id="text-font"
