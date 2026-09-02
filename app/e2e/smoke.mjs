@@ -2775,6 +2775,43 @@ assert(
     (await page.getAttribute('button[aria-label="Move"]', "class")).includes("active"),
     "and hands the Move tool back",
   );
+  // 8x14b. Opacity and blend reach every picked layer at once.
+  await page.keyboard.press("Escape");
+  await page.mouse.move(...at(560, 380));
+  await page.mouse.down();
+  await page.mouse.move(...at(80, 80), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
+    "both layers picked",
+  );
+  await page.locator('input[aria-label="Layer opacity"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "0.4");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const [faded, alsoFaded] = [await canvasPixel(160, 320), await canvasPixel(450, 115)];
+  assert(
+    Math.abs(faded[3] - 102) < 8 && Math.abs(alsoFaded[3] - 102) < 8,
+    `the slider faded both (${faded[3]}, ${alsoFaded[3]})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(160, 320))[3] === 255 && (await canvasPixel(450, 115))[3] === 255,
+    "and one undo brings both back",
+  );
+  // Clicking a member of a multi-selection keeps the whole of it, so
+  // let go of both before picking the one to alt-drag.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.mouse.click(...at(160, 320));
+  await page.waitForTimeout(200);
+
   // 8x15. Alt-dragging a layer takes a copy and leaves the original.
   await page.mouse.move(...at(160, 320));
   await page.mouse.down({ button: "left" });

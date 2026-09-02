@@ -38,7 +38,8 @@ without reading anything else.*
   shapes with union/subtract/intersect/exclude into a compound path that
   can carry holes, opacity/blend,
   rename, lock (a locked layer is drawn but neither picked nor moved from
-  the canvas), labelled history with jump-to-state.
+  the canvas), labelled history with jump-to-state. Opacity and blend
+  reach every picked layer at once, in one entry.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK, and the crop tool
@@ -139,9 +140,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~185),
+- **Verify before committing:** `cargo test --workspace` (~186),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~369 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~372 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

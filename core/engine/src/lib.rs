@@ -964,6 +964,40 @@ impl Session {
         self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
     }
 
+    /// Set the opacity of several layers as one undo step.
+    pub fn set_opacity_of(&mut self, ids: &[NodeId], opacity: f32) -> Result<(), EngineError> {
+        self.set_each(ids, "Opacity", |id| Command::SetOpacity { id, opacity })
+    }
+
+    /// Set the blend mode of several layers as one undo step.
+    pub fn set_blend_of(
+        &mut self,
+        ids: &[NodeId],
+        blend: chitrakar_doc::BlendMode,
+    ) -> Result<(), EngineError> {
+        self.set_each(ids, "Blend", |id| Command::SetBlendMode { id, blend })
+    }
+
+    /// The same edit on every layer named, in one entry called after
+    /// what was changed and what it was changed on.
+    fn set_each(
+        &mut self,
+        ids: &[NodeId],
+        what: &str,
+        make: impl Fn(NodeId) -> Command,
+    ) -> Result<(), EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing to change".into()));
+        }
+        let label = if ids.len() == 1 {
+            format!("{what} of {}", self.doc.node(ids[0])?.name)
+        } else {
+            format!("{what} of {} layers", ids.len())
+        };
+        let cmds = ids.iter().map(|id| make(*id)).collect();
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
     /// Mirror layers about their shared box — left for right, or top for
     /// bottom — as one undo step. The box is the union of the picked
     /// layers' document-space bounds, so a pair flips as a pair and a
@@ -3441,6 +3475,46 @@ mod tests {
         assert!(session
             .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
             .is_err());
+    }
+
+    #[test]
+    fn opacity_and_blend_reach_every_picked_layer_at_once() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        session.set_opacity_of(&[a, b], 0.25).unwrap();
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| (l.opacity - 0.25).abs() < 1e-6));
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Opacity of 2 layers")
+        );
+        session
+            .set_blend_of(&[a, b], chitrakar_doc::BlendMode::Multiply)
+            .unwrap();
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| l.blend == chitrakar_doc::BlendMode::Multiply));
+        assert!(session.undo().unwrap());
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| l.blend == chitrakar_doc::BlendMode::Normal));
+        assert!(session.undo().unwrap());
+        assert!(
+            session.layers().iter().all(|l| l.opacity == 1.0),
+            "both back at once"
+        );
+        // One layer says so by name.
+        session.set_opacity_of(&[a], 0.5).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Opacity of a")
+        );
+        assert!(session.set_opacity_of(&[], 0.5).is_err());
     }
 
     #[test]

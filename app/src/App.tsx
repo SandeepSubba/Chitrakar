@@ -2916,11 +2916,21 @@ export function App() {
     });
   };
 
+  /** Opacity and blend reach every picked layer, not only the one whose
+   * properties the panel happens to be showing — one history entry for
+   * the lot, named after how many it touched. */
   const commitOpacity = () => {
-    if (opacityDraft !== null && selectedLayer) {
-      run({ SetOpacity: { id: selectedLayer.id, opacity: opacityDraft } });
+    if (opacityDraft !== null && session && selectionSet.length > 0) {
+      session.set_opacity_of(new Float64Array(selectionSet), opacityDraft);
+      refresh(session);
     }
     setOpacityDraft(null);
+  };
+
+  const setBlendOfSelection = (blend: BlendMode) => {
+    if (!session || selectionSet.length === 0) return;
+    session.set_blend_of(new Float64Array(selectionSet), blend);
+    refresh(session);
   };
 
   /** The document's name as a file's: trimmed, and never empty. */
@@ -4254,12 +4264,7 @@ export function App() {
                 <select
                   value={selectedLayer.blend}
                   onChange={(e) =>
-                    run({
-                      SetBlendMode: {
-                        id: selectedLayer.id,
-                        blend: e.target.value as BlendMode,
-                      },
-                    })
+                    setBlendOfSelection(e.target.value as BlendMode)
                   }
                   aria-label="Blend mode"
                 >

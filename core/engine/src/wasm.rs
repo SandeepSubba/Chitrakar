@@ -209,6 +209,21 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Set the opacity of several layers as one undo step.
+    pub fn set_opacity_of(&mut self, ids: Vec<f64>, opacity: f32) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.set_opacity_of(&ids, opacity).map_err(to_js)
+    }
+
+    /// Set the blend mode of several layers as one undo step; `blend` is
+    /// the mode's name, as the document spells it.
+    pub fn set_blend_of(&mut self, ids: Vec<f64>, blend: &str) -> Result<(), JsError> {
+        let blend = serde_json::from_str(&format!("\"{blend}\""))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.set_blend_of(&ids, blend).map_err(to_js)
+    }
+
     /// Mirror layers about their shared box, left for right when
     /// `horizontal`, else top for bottom (see `Session::flip_nodes`).
     pub fn flip_nodes(&mut self, ids: Vec<f64>, horizontal: bool) -> Result<(), JsError> {
