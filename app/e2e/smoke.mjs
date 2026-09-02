@@ -191,6 +191,10 @@ assert(
   (await page.locator('input[aria-label^="Gradient stop"][type="color"]').count()) === 3,
   "a third stop appeared",
 );
+assert(
+  (await page.locator(".grad-stop").count()) === 1,
+  "and it gets a knob on the canvas between the two ends",
+);
 const midNow = await canvasPixel(250, 200);
 assert(
   midNow.every((v, i) => Math.abs(v - midBefore[i]) <= 1),
@@ -226,6 +230,32 @@ assert(
 assert(
   await page.isDisabled('button[aria-label="Remove gradient stop 1"]'),
   "the last two stops cannot be removed",
+);
+
+// The ramp is also draggable where it is seen: the line and its knobs sit
+// on the canvas, and dragging an end re-aims the gradient.
+assert(
+  (await page.locator(".grad-handle").count()) === 2,
+  "a linear gradient shows an end knob at each end",
+);
+const beforeAim = await canvasPixel(115, 200);
+const fromKnob = page.locator('[data-grad="from"]');
+const fk = await fromKnob.boundingBox();
+await fromKnob.hover();
+await page.mouse.down();
+await page.mouse.move(fk.x + 160, fk.y + 5, { steps: 6 });
+await page.mouse.up();
+await page.waitForTimeout(250);
+const afterAim = await canvasPixel(115, 200);
+assert(
+  JSON.stringify(afterAim) !== JSON.stringify(beforeAim),
+  `dragging the start knob re-aimed the ramp (${beforeAim} -> ${afterAim})`,
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+assert(
+  JSON.stringify(await canvasPixel(115, 200)) === JSON.stringify(beforeAim),
+  "and the drag undoes as one step",
 );
 
 // Radial: first stop at the centre, last at the rim.

@@ -514,6 +514,35 @@ body {
   touch-action: none;
 }
 
+/* Gradient geometry: hollow knobs so they read as controls over artwork
+   rather than as part of it, and a dashed line for the ramp's axis. */
+.grad-line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.grad-handle,
+.grad-stop {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 3;
+}
+
+.grad-stop {
+  width: 8px;
+  height: 8px;
+  margin: 1px;
+  border-width: 1.5px;
+}
+
 .curve-handle {
   position: absolute;
   width: 8px;

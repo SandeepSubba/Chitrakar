@@ -1045,6 +1045,88 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** Gradient geometry on the canvas: the ends of a linear ramp, the centre
+   * and rim of a radial one, and each stop's position along the line.
+   * Coordinates are the gradient's own — the shape's box, normalized — so
+   * dragging maps the cursor back through the layer and its box. */
+  const gradDragRef = useRef<{
+    part: "from" | "to" | "centre" | "radius" | number;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+  } | null>(null);
+
+  /** A pointer position in gradient coordinates: 0..1 across the selected
+   * layer's own bounding box. */
+  const gradPoint = (e: { clientX: number; clientY: number }): [number, number] => {
+    const [px, py] = layerPoint(e);
+    if (!session || selected === null || !selLocal) return [0, 0];
+    const inv = inverseOf(toTransform(session.transform_of(selected)));
+    const [lx, ly] = inv ? inv(px, py) : [px, py];
+    const [x0, y0, x1, y1] = selLocal;
+    const span = (a: number, b: number) => (Math.abs(b - a) < 1e-6 ? 1 : b - a);
+    return [(lx - x0) / span(x0, x1), (ly - y0) / span(y0, y1)];
+  };
+
+  const onGradHandleDown = (
+    e: React.PointerEvent,
+    part: "from" | "to" | "centre" | "radius" | number,
+  ) => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    e.stopPropagation();
+    gradDragRef.current = {
+      part,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onGradHandleMove = (e: React.PointerEvent) => {
+    const drag = gradDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const g = drag.vector.gradient;
+    if (!g) return;
+    const [u, v] = gradPoint(e);
+    let next = g;
+    if ("Linear" in g) {
+      const lin = g.Linear;
+      if (drag.part === "from") next = { Linear: { ...lin, from: [u, v] } };
+      else if (drag.part === "to") next = { Linear: { ...lin, to: [u, v] } };
+      else if (typeof drag.part === "number") {
+        // Project the cursor onto the ramp's line: a stop only has a
+        // position along it, not a position in the plane.
+        const [dx, dy] = [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]];
+        const len2 = dx * dx + dy * dy;
+        const t =
+          len2 < 1e-9
+            ? 0
+            : ((u - lin.from[0]) * dx + (v - lin.from[1]) * dy) / len2;
+        const stops = lin.stops.map((st, i) =>
+          i === drag.part ? { ...st, offset: Math.min(1, Math.max(0, t)) } : st,
+        );
+        next = { Linear: { ...lin, stops } };
+      }
+    } else {
+      const rad = g.Radial;
+      if (drag.part === "centre") next = { Radial: { ...rad, center: [u, v] } };
+      else if (drag.part === "radius") {
+        const r = Math.hypot(u - rad.center[0], v - rad.center[1]);
+        next = { Radial: { ...rad, radius: Math.max(0.02, r) } };
+      }
+    }
+    preview({
+      SetKind: {
+        id: selected,
+        kind: { Vector: { ...drag.vector, gradient: next } },
+      },
+    });
+  };
+
+  const onGradHandleUp = () => {
+    gradDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const onCurveHandleUp = () => {
     handleDragRef.current = null;
     if (session?.commit_preview()) refresh(session);
@@ -1076,6 +1158,8 @@ export function App() {
    * handles sit on the corners they actually move. */
   let selQuad: [number, number][] | null = null;
   let selLocal: [number, number, number, number] | null = null;
+  /** Maps a point in the selected layer's own space to screen. */
+  let selToScreen: ((x: number, y: number) => [number, number]) | null = null;
   if (session && selected !== null && resizable) {
     const lb = session.local_bounds_of(selected);
     if (lb.length === 4) {
@@ -1090,6 +1174,7 @@ export function App() {
         view.x + (t.a * x + t.c * y + t.e) * view.zoom,
         view.y + (t.b * x + t.d * y + t.f) * view.zoom,
       ];
+      selToScreen = toScreen;
       selQuad = [
         toScreen(lb[0], lb[1]),
         toScreen(lb[2], lb[1]),
@@ -1577,6 +1662,82 @@ export function App() {
                       onPointerMove={onRotatePointerMove}
                       onPointerUp={onRotatePointerUp}
                     />
+                  </>
+                );
+              })()}
+              {/* Gradient geometry, dragged where it is seen rather than
+                  through sliders in the panel. */}
+              {(() => {
+                const kind = selectedKind;
+                if (!selToScreen || !selLocal || kind === null) return null;
+                if (typeof kind !== "object" || !("Vector" in kind)) return null;
+                const g = kind.Vector.gradient;
+                if (!g) return null;
+                const [x0, y0, x1, y1] = selLocal;
+                const at = (u: number, v: number) =>
+                  selToScreen!(x0 + u * (x1 - x0), y0 + v * (y1 - y0));
+                const knob = (
+                  key: string,
+                  p: [number, number],
+                  part: "from" | "to" | "centre" | "radius" | number,
+                  cls: string,
+                ) => (
+                  <div
+                    key={key}
+                    className={cls}
+                    data-grad={key}
+                    style={{ left: p[0] - 5, top: p[1] - 5 }}
+                    onPointerDown={(e) => onGradHandleDown(e, part)}
+                    onPointerMove={onGradHandleMove}
+                    onPointerUp={onGradHandleUp}
+                  />
+                );
+                if ("Linear" in g) {
+                  const { from, to, stops } = g.Linear;
+                  const [a, b] = [at(from[0], from[1]), at(to[0], to[1])];
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line
+                          className="grad-line"
+                          x1={a[0]}
+                          y1={a[1]}
+                          x2={b[0]}
+                          y2={b[1]}
+                        />
+                      </svg>
+                      {knob("from", a, "from", "grad-handle")}
+                      {knob("to", b, "to", "grad-handle")}
+                      {stops.slice(1, -1).map((st, i) =>
+                        knob(
+                          `stop${i + 1}`,
+                          at(
+                            from[0] + (to[0] - from[0]) * st.offset,
+                            from[1] + (to[1] - from[1]) * st.offset,
+                          ),
+                          i + 1,
+                          "grad-stop",
+                        ),
+                      )}
+                    </>
+                  );
+                }
+                const { center, radius } = g.Radial;
+                const c = at(center[0], center[1]);
+                const rim = at(center[0] + radius, center[1]);
+                return (
+                  <>
+                    <svg className="sel-outline" aria-hidden="true">
+                      <line
+                        className="grad-line"
+                        x1={c[0]}
+                        y1={c[1]}
+                        x2={rim[0]}
+                        y2={rim[1]}
+                      />
+                    </svg>
+                    {knob("centre", c, "centre", "grad-handle")}
+                    {knob("radius", rim, "radius", "grad-handle")}
                   </>
                 );
               })()}
