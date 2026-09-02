@@ -1441,17 +1441,50 @@ impl Session {
         self.doc.cmyk_cms().is_some()
     }
 
-    /// Serialize to `.chitra` container bytes.
+    /// Serialize to `.chitra` container bytes. The faces the document's
+    /// text is set in travel inside it, so it reads the same wherever it
+    /// is opened next — all but the bundled face, which every build has.
     pub fn save(&self) -> Result<Vec<u8>, EngineError> {
-        chitrakar_codecs::save_chitra(&self.doc).map_err(|e| EngineError::BadCommand(e.to_string()))
+        let names = self.fonts_used();
+        let fonts: Vec<(&str, &[u8])> = names
+            .iter()
+            .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
+            .collect();
+        chitrakar_codecs::save_chitra_with_fonts(&self.doc, &fonts)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The faces this document's text blocks name, each once, in the
+    /// order they sort. Names nothing answers to are listed too: they are
+    /// what the file asks for, whether or not this process can oblige.
+    pub fn fonts_used(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .doc
+            .nodes()
+            .filter_map(|(_, n)| match &n.kind {
+                NodeKind::Text(spec) if !spec.font.is_empty() => Some(spec.font.clone()),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Open a `.chitra` container. The loaded document starts with a fresh
-    /// history (undo does not cross save boundaries for now).
+    /// history (undo does not cross save boundaries for now). Fonts the
+    /// file carries are registered for names this process does not know
+    /// yet; a face already loaded keeps precedence, and one that will not
+    /// parse is passed over so the document still opens.
     pub fn load(bytes: &[u8]) -> Result<Self, EngineError> {
-        let doc = chitrakar_codecs::load_chitra(bytes)
+        let opened = chitrakar_codecs::load_chitra_with_fonts(bytes)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-        Ok(Self::from_document(doc))
+        for (name, bytes) in opened.fonts {
+            if !chitrakar_render::text::has_font(&name) {
+                let _ = chitrakar_render::text::register_font(&name, bytes);
+            }
+        }
+        Ok(Self::from_document(opened.doc))
     }
 }
 
@@ -2906,5 +2939,114 @@ mod tests {
         assert_eq!(restored.document().node_count(), 2);
         assert_eq!(restored.layers()[0].name, "kept");
         assert_cache_matches_fresh(&mut restored);
+    }
+
+    fn text_in(font: &str) -> Node {
+        let mut spec = chitrakar_doc::TextSpec::new(
+            "Carried",
+            24.0,
+            AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        spec.font = font.to_string();
+        Node::text("t", spec)
+    }
+
+    #[test]
+    fn the_fonts_text_is_set_in_travel_inside_the_chitra() {
+        const BOLD: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        Session::register_font("Carried Face", BOLD.to_vec()).unwrap();
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let root = session.document().root();
+        for (i, face) in [
+            "Carried Face",
+            "DejaVu Sans",
+            "Nobody Has This",
+            "Carried Face",
+        ]
+        .iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(text_in(face)),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            session.fonts_used(),
+            ["Carried Face", "DejaVu Sans", "Nobody Has This"]
+        );
+
+        let bytes = session.save().unwrap();
+        let opened = chitrakar_codecs::load_chitra_with_fonts(&bytes).unwrap();
+        let names: Vec<&str> = opened.fonts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Carried Face"],
+            "only a face this process holds is carried: not the bundled one, not one it never saw"
+        );
+        assert_eq!(opened.fonts[0].1, BOLD, "and it is carried whole");
+        let without = chitrakar_codecs::save_chitra(session.document()).unwrap();
+        assert!(
+            bytes.len() > without.len() + 100_000,
+            "the file grew by the (deflated) face: {} over {} bytes",
+            bytes.len(),
+            without.len()
+        );
+    }
+
+    #[test]
+    fn opening_a_chitra_registers_the_fonts_it_carries() {
+        const SERIF: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSerif.ttf");
+        let name = "Only In The File";
+        assert!(!Session::font_names().iter().any(|n| n == name));
+        let mut doc = chitrakar_doc::Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(text_in(name)),
+        })
+        .unwrap();
+        let bytes = chitrakar_codecs::save_chitra_with_fonts(
+            &doc,
+            &[(name, SERIF), ("Broken Face", b"not a font")],
+        )
+        .unwrap();
+
+        let session = Session::load(&bytes).unwrap();
+        assert!(
+            Session::font_names().iter().any(|n| n == name),
+            "the carried face is offered by name after the open"
+        );
+        assert!(
+            !Session::font_names().iter().any(|n| n == "Broken Face"),
+            "a face that will not parse is passed over, and the document still opened"
+        );
+        // The text now renders in the carried serif rather than the
+        // bundled sans: set the same text in the bundled face and the ink
+        // lands differently.
+        let carried = session.render().unwrap().pixels;
+        let mut plain = Session::new(64, 64, ColorMode::Rgb);
+        let root = plain.document().root();
+        plain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(text_in("")),
+            })
+            .unwrap();
+        assert_ne!(
+            carried,
+            plain.render().unwrap().pixels,
+            "the carried face is the one drawn"
+        );
     }
 }

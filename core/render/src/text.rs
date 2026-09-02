@@ -22,12 +22,14 @@ pub const DEFAULT_FONT: &str = "DejaVu Sans";
 /// the process — a font, once registered, is never taken away, which is
 /// what lets the readers be handed out as plain references.
 pub struct Fonts {
+    bytes: &'static [u8],
     font: FontRef<'static>,
     face: rustybuzz::Face<'static>,
 }
 
 fn parse(bytes: &'static [u8]) -> Result<Fonts, String> {
     Ok(Fonts {
+        bytes,
         font: FontRef::try_from_slice(bytes).map_err(|e| e.to_string())?,
         face: rustybuzz::Face::from_slice(bytes, 0).ok_or("not a font the shaper can read")?,
     })
@@ -53,6 +55,26 @@ pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
         .map_err(|_| "font registry poisoned")?
         .insert(name.to_string(), fonts);
     Ok(())
+}
+
+/// Whether a face answers to `name` — the bundled one always does.
+pub fn has_font(name: &str) -> bool {
+    name.is_empty()
+        || name == DEFAULT_FONT
+        || registry()
+            .read()
+            .map(|r| r.contains_key(name))
+            .unwrap_or(false)
+}
+
+/// The file a registered face was read from, so a document can carry it.
+/// The bundled face is not offered: every build has it, so there is
+/// nothing to carry.
+pub fn font_bytes(name: &str) -> Option<&'static [u8]> {
+    if name.is_empty() || name == DEFAULT_FONT {
+        return None;
+    }
+    registry().read().ok()?.get(name).map(|f| f.bytes)
 }
 
 /// Every face that can be named: the bundled one first, then the rest in

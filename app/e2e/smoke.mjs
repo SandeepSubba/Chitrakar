@@ -1446,6 +1446,30 @@ assert(
       (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVuSerif",
     "a loaded font file is offered under its own name and applied",
   );
+  // The face travels inside the saved document: a fresh page — its own
+  // engine, a registry that has never seen the file — opens the .chitra
+  // and finds the text set in it, with the face on offer by name.
+  {
+    const [saved] = await Promise.all([
+      page.waitForEvent("download"),
+      (await menuItem("File", "Save")).click(),
+    ]);
+    const path = await saved.path();
+    const fresh = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+    await fresh.goto("http://localhost:8123/");
+    await fresh.waitForSelector("#engine-canvas");
+    await fresh.waitForTimeout(500);
+    await fresh.locator('input[accept=".chitra"]').setInputFiles(path);
+    await fresh.waitForTimeout(600);
+    await fresh.locator(".panel ul li", { hasText: "Text" }).click();
+    await fresh.waitForTimeout(200);
+    assert(
+      (await fresh.locator('select[aria-label="Font"] option', { hasText: "DejaVuSerif" }).count()) === 1 &&
+        (await fresh.locator('select[aria-label="Font"]').inputValue()) === "DejaVuSerif",
+      "the loaded face travelled inside the .chitra to a page that never loaded it",
+    );
+    await fresh.close();
+  }
   await page.selectOption('select[aria-label="Font"]', "DejaVu Sans");
   await page.waitForTimeout(300);
   assert(

@@ -29,18 +29,62 @@ pub enum ContainerError {
 struct Manifest {
     format_version: u32,
     document: Document,
+    /// Faces the document's text is set in, carried under `fonts/` so it
+    /// reads the same wherever it is opened. Additive: an older reader
+    /// ignores the field and the entries alike.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fonts: Vec<EmbeddedFont>,
+}
+
+/// One face inside the container: the name text blocks set themselves in,
+/// and the entry holding its file. The entry is numbered rather than named
+/// after the face so any name, however it is spelled, makes a valid path.
+#[derive(Serialize, Deserialize)]
+struct EmbeddedFont {
+    name: String,
+    file: String,
+}
+
+/// A font to carry: the name text blocks know it by, and its file.
+pub type FontFile<'a> = (&'a str, &'a [u8]);
+
+/// What comes out of a container: the document, and the fonts that came
+/// with it, for the caller to make available before rendering.
+pub struct Opened {
+    pub doc: Document,
+    pub fonts: Vec<(String, Vec<u8>)>,
 }
 
 /// Serialize a document to `.chitra` bytes. Resource pixels are stored as
 /// PNG entries under `resources/`; the manifest carries only their metadata.
 pub fn save_chitra(doc: &Document) -> Result<Vec<u8>, ContainerError> {
+    save_chitra_with_fonts(doc, &[])
+}
+
+/// [`save_chitra`], carrying `fonts` inside the container as well.
+pub fn save_chitra_with_fonts(
+    doc: &Document,
+    fonts: &[FontFile],
+) -> Result<Vec<u8>, ContainerError> {
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         document: doc.clone(),
+        fonts: fonts
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| EmbeddedFont {
+                name: name.to_string(),
+                file: format!("fonts/{i}.ttf"),
+            })
+            .collect(),
     };
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())?;
     zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+    for (entry, (_, bytes)) in manifest.fonts.iter().zip(fonts) {
+        zip.start_file(&entry.file, SimpleFileOptions::default())?;
+        zip.write_all(bytes)?;
+    }
     for (id, res) in doc.resources() {
         if res.rgba8.is_empty() {
             continue; // metadata-only entry (bytes were never restored)
@@ -63,8 +107,14 @@ pub fn save_chitra(doc: &Document) -> Result<Vec<u8>, ContainerError> {
 
 const CMYK_PROFILE_PATH: &str = "profiles/cmyk.icc";
 
-/// Load a document from `.chitra` bytes.
+/// Load a document from `.chitra` bytes, leaving any fonts it carries
+/// inside.
 pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
+    load_chitra_with_fonts(bytes).map(|o| o.doc)
+}
+
+/// Load a document and the fonts it carries from `.chitra` bytes.
+pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     let mut zip = ZipArchive::new(Cursor::new(bytes))?;
     let mut manifest_json = String::new();
     zip.by_name(MANIFEST_PATH)?
@@ -100,7 +150,18 @@ pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
         // Best effort: a profile that no longer parses is dropped.
         let _ = doc.set_cmyk_profile(icc);
     }
-    Ok(doc)
+    let mut fonts = Vec::new();
+    for font in manifest.fonts {
+        // A listed face whose file is missing is left out rather than
+        // failing the open; its text falls back to the bundled face.
+        let Ok(mut entry) = zip.by_name(&font.file) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        fonts.push((font.name, bytes));
+    }
+    Ok(Opened { doc, fonts })
 }
 
 #[cfg(test)]
@@ -164,6 +225,49 @@ mod tests {
         let restored = load_chitra(&bytes).unwrap();
         assert_eq!(restored.cmyk_profile_bytes(), Some(icc.as_slice()));
         assert!(restored.cmyk_cms().is_some(), "transform rebuilt on load");
+    }
+
+    #[test]
+    fn fonts_travel_inside_the_container() {
+        let mut doc = Document::new(8, 8, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "t",
+                chitrakar_doc::TextSpec::new(
+                    "hi",
+                    12.0,
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+            )),
+        })
+        .unwrap();
+        let face = b"not really a font, but the container does not care".to_vec();
+        let bytes = save_chitra_with_fonts(&doc, &[("A Face / with odd name", &face)]).unwrap();
+
+        let opened = load_chitra_with_fonts(&bytes).unwrap();
+        assert_eq!(opened.doc.node_count(), 2);
+        assert_eq!(opened.fonts.len(), 1);
+        assert_eq!(opened.fonts[0].0, "A Face / with odd name");
+        assert_eq!(opened.fonts[0].1, face, "the file comes back byte for byte");
+        assert!(
+            load_chitra(&bytes).is_ok(),
+            "the plain loader reads the same file"
+        );
+
+        let plain = save_chitra(&doc).unwrap();
+        assert!(load_chitra_with_fonts(&plain).unwrap().fonts.is_empty());
+        assert!(
+            !String::from_utf8_lossy(&plain).contains("\"fonts\""),
+            "a document without fonts writes no fonts field"
+        );
     }
 
     #[test]

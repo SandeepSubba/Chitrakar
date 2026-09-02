@@ -2408,6 +2408,8 @@ export function App() {
   const openDocumentBytes = (bytes: Uint8Array) => {
     try {
       const s = WasmSession.open(bytes);
+      // Faces the file carried are registered by the open; offer them.
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
       setSession(s);
       setDocumentSize(s.width, s.height);
       setCmyk(s.cmyk);
@@ -2506,9 +2508,9 @@ export function App() {
 
   /** Register a font file under its own name, offer it in the Text panel,
    * and set the picked text layer in it — which is what loading one is
-   * usually for. A font stays for the page's lifetime; it is not part of
-   * the document, so a .chitra opened elsewhere falls back to the bundled
-   * face until the same file is loaded there. */
+   * usually for. A font stays for the page's lifetime, and a saved .chitra
+   * carries the faces its text is set in, so the document reads the same
+   * wherever it is opened next. */
   const loadFont = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -4042,8 +4044,11 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
         {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
           Text: { ...t, letter_spacing: v },
         }))}
-        <label className="row">
-          Font
+        {/* A row of its own rather than one label around both controls:
+            a label labels one control, and a toggle sharing it would be
+            what the label points at. */}
+        <div className="row">
+          <label htmlFor="text-font">Font</label>
           {(() => {
             // A face and its "… Bold" twin, when the registry has both:
             // the toggle just swaps the name, which is all bold is here.
@@ -4068,6 +4073,7 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
             );
           })()}
           <select
+            id="text-font"
             value={t.font || fonts[0]}
             onChange={(e) => onEdit({ Text: { ...t, font: e.target.value } }, false)}
             aria-label="Font"
@@ -4078,7 +4084,7 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
               </option>
             ))}
           </select>
-        </label>
+        </div>
         {/* Zero is a block that fits its text; anything else wraps to it. */}
         {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
           Text: { ...t, width: v },
