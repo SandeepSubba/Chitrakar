@@ -1196,3 +1196,27 @@ body {
   opacity: 0.7;
   white-space: nowrap;
 }
+
+/* The lock sits beside the eye and is built like it; an unlocked one is
+   faint until the row is hovered, a locked one always shows. */
+.lock-toggle {
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  opacity: 0;
+}
+.panel li:hover .lock-toggle,
+.panel li.selected .lock-toggle,
+.lock-toggle[aria-pressed="true"] {
+  opacity: 1;
+}
+.lock-toggle[aria-pressed="true"] {
+  color: var(--accent);
+}

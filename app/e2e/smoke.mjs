@@ -2622,6 +2622,42 @@ assert(
     (await names()).join() === beforeSvg.join() && (await canvasPixel(30, 25))[3] === 0,
     "one undo takes the whole drawing back",
   );
+
+  // 8x12. Locking: a locked layer is not picked on the canvas and offers
+  // no handles; unlocking gives it back.
+  await page.click('button[aria-label="Move"]');
+  await page.mouse.click(...at(200, 175));
+  await page.waitForTimeout(200);
+  assert((await page.locator(".handle").count()) > 0, "the rect is picked and handled to begin with");
+  await page.click('button[aria-label="Lock layer"]');
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Escape");
+  await page.mouse.click(...at(200, 175));
+  await page.waitForTimeout(200);
+  assert((await page.locator(".sel-outline").count()) === 0, "a click on a locked layer picks nothing");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".sel-outline").count()) >= 1 && (await page.locator(".handle").count()) === 0,
+    "picked from the panel it shows its outline but no handles",
+  );
+  await page.click('button[aria-label="Unlock layer"]');
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Escape");
+  await page.mouse.click(...at(200, 175));
+  await page.waitForTimeout(200);
+  assert((await page.locator(".handle").count()) > 0, "unlocked, it is picked and handled again");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  // A drop that carries a row out from under the pointer swallows the
+  // click that follows it — but only that one: the next click picks.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 1,
+    "a row still picks after an earlier drag",
+  );
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

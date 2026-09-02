@@ -305,6 +305,12 @@ impl Document {
                 node.visible = visible;
                 Ok(Command::SetVisible { id, visible: prev })
             }
+            Command::SetLocked { id, locked } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = node.locked;
+                node.locked = locked;
+                Ok(Command::SetLocked { id, locked: prev })
+            }
             Command::SetBlendMode { id, blend } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = node.blend;
@@ -520,6 +526,11 @@ pub enum Command {
     SetVisible {
         id: NodeId,
         visible: bool,
+    },
+    /// Keep a layer from being picked or moved on the canvas.
+    SetLocked {
+        id: NodeId,
+        locked: bool,
     },
     SetBlendMode {
         id: NodeId,

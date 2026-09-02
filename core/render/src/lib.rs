@@ -2400,7 +2400,8 @@ fn hit_in_group(
 ) -> Result<Option<NodeId>, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
         let node = doc.node(child)?;
-        if !node.visible {
+        // Locked layers are not there to be picked, their contents included.
+        if !node.visible || node.locked {
             continue;
         }
         match &node.kind {

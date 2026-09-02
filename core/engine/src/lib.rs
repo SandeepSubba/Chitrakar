@@ -186,8 +186,9 @@ impl Session {
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
-            // needs repainting when they change.
-            | Command::SetGuides { .. } => None,
+            // needs repainting when they change; nor does a lock.
+            | Command::SetGuides { .. }
+            | Command::SetLocked { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
@@ -265,6 +266,9 @@ impl Session {
             Command::SetOpacity { id, .. } => format!("Opacity of {}", name(id)),
             Command::SetVisible { id, visible } => {
                 format!("{} {}", if *visible { "Show" } else { "Hide" }, name(id))
+            }
+            Command::SetLocked { id, locked } => {
+                format!("{} {}", if *locked { "Lock" } else { "Unlock" }, name(id))
             }
             Command::SetBlendMode { id, .. } => format!("Blend of {}", name(id)),
             Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
@@ -1377,6 +1381,7 @@ impl Session {
                 blend: node.blend,
                 has_mask: node.mask.is_some(),
                 has_effects: !node.effects.is_empty(),
+                locked: node.locked,
                 depth,
                 parent: group.0,
                 index,
@@ -1696,6 +1701,7 @@ pub struct LayerInfo {
     pub blend: chitrakar_doc::BlendMode,
     pub has_mask: bool,
     pub has_effects: bool,
+    pub locked: bool,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,
@@ -3336,6 +3342,48 @@ mod tests {
         assert!(session
             .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
             .is_err());
+    }
+
+    #[test]
+    fn a_locked_layer_is_not_picked_on_the_canvas() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let under = add_rect(&mut session, "under", 60.0, 60.0);
+        let over = add_rect(&mut session, "over", 30.0, 30.0);
+        assert_eq!(session.hit_test(10.0, 10.0), Some(over));
+        session
+            .apply(Command::SetLocked {
+                id: over,
+                locked: true,
+            })
+            .unwrap();
+        assert_eq!(
+            session.hit_test(10.0, 10.0),
+            Some(under),
+            "the pick falls through a locked layer"
+        );
+        assert!(session.layers().iter().any(|l| l.id == over.0 && l.locked));
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Lock over")
+        );
+        assert_eq!(session.render().unwrap().get(10, 10).a, 1.0, "still drawn");
+        // A locked group hides its contents from the pick too.
+        let group = session.group_nodes(&[under], "g").unwrap();
+        session
+            .apply(Command::SetLocked {
+                id: group,
+                locked: true,
+            })
+            .unwrap();
+        assert_eq!(session.hit_test(50.0, 50.0), None);
+        assert!(session.undo().unwrap() && session.undo().unwrap() && session.undo().unwrap());
+        assert_eq!(
+            session.hit_test(10.0, 10.0),
+            Some(over),
+            "undone, it is picked again"
+        );
+        let bytes = session.save().unwrap();
+        assert!(Session::load(&bytes).is_ok());
     }
 
     #[test]

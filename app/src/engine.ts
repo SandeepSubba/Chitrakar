@@ -199,6 +199,7 @@ export type Command =
   | { RemoveNode: { id: NodeId } }
   | { SetOpacity: { id: NodeId; opacity: number } }
   | { SetVisible: { id: NodeId; visible: boolean } }
+  | { SetLocked: { id: NodeId; locked: boolean } }
   | { SetBlendMode: { id: NodeId; blend: BlendMode } }
   | { SetTransform: { id: NodeId; transform: Transform } }
   | { SetKind: { id: NodeId; kind: NodeKind } }
@@ -219,6 +220,8 @@ export interface LayerInfo {
   blend: BlendMode;
   has_mask: boolean;
   has_effects: boolean;
+  /** Cannot be picked or moved on the canvas. */
+  locked: boolean;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

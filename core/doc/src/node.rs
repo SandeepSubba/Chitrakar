@@ -386,6 +386,10 @@ pub struct Node {
     /// like everything else: the layer's own pixels are untouched.
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// A locked layer cannot be picked or moved on the canvas; it still
+    /// renders and can still be reached through the panel. Additive.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// A live effect attached to a layer. Effects are rendered from the layer's
@@ -469,6 +473,7 @@ impl Node {
             blend: BlendMode::Normal,
             mask: None,
             effects: Vec::new(),
+            locked: false,
         }
     }
 

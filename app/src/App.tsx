@@ -122,7 +122,15 @@ function seedHandles(
   });
 }
 
-const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Brush", "Text", "Crop"] as const;
+const TOOLS = [
+  "Move",
+  "Rect",
+  "Ellipse",
+  "Pen",
+  "Brush",
+  "Text",
+  "Crop",
+] as const;
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
  * called Move here. */
@@ -245,30 +253,44 @@ function draftDb(): Promise<IDBDatabase | null> {
 async function putDraft(bytes: Uint8Array): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  db.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).put(bytes, "current");
+  db.transaction(DRAFT_STORE, "readwrite")
+    .objectStore(DRAFT_STORE)
+    .put(bytes, "current");
 }
 async function getDraft(): Promise<Uint8Array | null> {
   const db = await draftDb();
   if (!db) return null;
   return new Promise((resolve) => {
-    const req = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE).get("current");
-    req.onsuccess = () => resolve(req.result instanceof Uint8Array ? req.result : null);
+    const req = db
+      .transaction(DRAFT_STORE)
+      .objectStore(DRAFT_STORE)
+      .get("current");
+    req.onsuccess = () =>
+      resolve(req.result instanceof Uint8Array ? req.result : null);
     req.onerror = () => resolve(null);
   });
 }
 async function clearDraft(): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  db.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).delete("current");
+  db.transaction(DRAFT_STORE, "readwrite")
+    .objectStore(DRAFT_STORE)
+    .delete("current");
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
   if (target instanceof HTMLTextAreaElement) return true;
   if (target instanceof HTMLElement && target.isContentEditable) return true;
   if (!(target instanceof HTMLInputElement)) return false;
-  return ["text", "number", "search", "email", "url", "tel", "password"].includes(
-    target.type,
-  );
+  return [
+    "text",
+    "number",
+    "search",
+    "email",
+    "url",
+    "tel",
+    "password",
+  ].includes(target.type);
 }
 
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
@@ -294,7 +316,11 @@ const DOC_PRESETS: [string, number, number, number][] = [
 /** Units the rulers and the geometry fields can read in. Pixels are the
  * document's own; the others go through its resolution. */
 type Units = "px" | "mm" | "in";
-const UNIT_LABELS: Record<Units, string> = { px: "Pixels", mm: "Millimetres", in: "Inches" };
+const UNIT_LABELS: Record<Units, string> = {
+  px: "Pixels",
+  mm: "Millimetres",
+  in: "Inches",
+};
 /** How many of the unit one document pixel is. */
 function perPixel(units: Units, dpi: number): number {
   return units === "px" ? 1 : units === "mm" ? 25.4 / dpi : 1 / dpi;
@@ -399,7 +425,6 @@ interface Guides {
 /** Thickness of the rulers, in CSS pixels. */
 const RULER = 18;
 
-
 /** A guide the user placed, mirroring `chitrakar_doc::Guide`. */
 type DocGuide = { Vertical: number } | { Horizontal: number };
 
@@ -487,7 +512,9 @@ export function App() {
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
   /** Which top-level menu is open, if any. */
-  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "view" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "view" | null>(
+    null,
+  );
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
   const iccInputRef = useRef<HTMLInputElement>(null);
@@ -538,7 +565,9 @@ export function App() {
   const [recoverable, setRecoverable] = useState<Uint8Array | null>(null);
   const [saveTick, setSaveTick] = useState(0);
   useEffect(() => {
-    getDraft().then((bytes) => bytes && bytes.length > 0 && setRecoverable(bytes));
+    getDraft().then(
+      (bytes) => bytes && bytes.length > 0 && setRecoverable(bytes),
+    );
   }, []);
   useEffect(() => {
     // Nothing to keep until there is something on the page: the empty
@@ -574,12 +603,17 @@ export function App() {
         try {
           const res = await fetch(url);
           if (!res.ok) return;
-          WasmSession.register_font(name, new Uint8Array(await res.arrayBuffer()));
+          WasmSession.register_font(
+            name,
+            new Uint8Array(await res.arrayBuffer()),
+          );
         } catch {
           // A face that will not load is simply not offered.
         }
       }),
-    ).then(() => setFontNames(JSON.parse(WasmSession.font_names()) as string[]));
+    ).then(() =>
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]),
+    );
   }, [session]);
 
   /** Alignment guides drawn while a drag is snapped to something. */
@@ -595,54 +629,60 @@ export function App() {
     at: number;
   } | null>(null);
   /** The crop frame being dragged, in host coordinates: [x0, y0, x1, y1]. */
-  const [cropRect, setCropRect] = useState<[number, number, number, number] | null>(
-    null,
-  );
+  const [cropRect, setCropRect] = useState<
+    [number, number, number, number] | null
+  >(null);
   /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
   const [multiSel, setMultiSel] = useState<NodeId[]>([]);
   const groupCount = useRef(0);
 
-  const refresh = useCallback((s: WasmSession) => {
-    setSaveTick((n) => n + 1);
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext("2d")!;
-      const dirty = s.render_frame();
+  const refresh = useCallback(
+    (s: WasmSession) => {
+      setSaveTick((n) => n + 1);
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext("2d")!;
+        const dirty = s.render_frame();
+        if (
+          !imgDataRef.current ||
+          imgDataRef.current.width !== s.frame_width() ||
+          imgDataRef.current.height !== s.frame_height()
+        ) {
+          imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
+        }
+        if (dirty.length === 4) {
+          // Zero-copy view into wasm memory; ImageData needs its own buffer.
+          const view = new Uint8ClampedArray(
+            getWasmMemory().buffer,
+            s.frame_ptr(),
+            s.frame_len(),
+          );
+          imgDataRef.current.data.set(view);
+          ctx.putImageData(
+            imgDataRef.current,
+            0,
+            0,
+            dirty[0],
+            dirty[1],
+            dirty[2],
+            dirty[3],
+          );
+        }
+      }
+      setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
+      setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
+      // The page's size is document state like anything else — undoing a
+      // crop changes it — so it is read back here rather than only being
+      // written where a crop or a new document sets it.
       if (
-        !imgDataRef.current ||
-        imgDataRef.current.width !== s.frame_width() ||
-        imgDataRef.current.height !== s.frame_height()
+        s.width !== docSizeRef.current[0] ||
+        s.height !== docSizeRef.current[1]
       ) {
-        imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
+        setDocumentSize(s.width, s.height);
       }
-      if (dirty.length === 4) {
-        // Zero-copy view into wasm memory; ImageData needs its own buffer.
-        const view = new Uint8ClampedArray(
-          getWasmMemory().buffer,
-          s.frame_ptr(),
-          s.frame_len(),
-        );
-        imgDataRef.current.data.set(view);
-        ctx.putImageData(
-          imgDataRef.current,
-          0,
-          0,
-          dirty[0],
-          dirty[1],
-          dirty[2],
-          dirty[3],
-        );
-      }
-    }
-    setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
-    setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
-    // The page's size is document state like anything else — undoing a
-    // crop changes it — so it is read back here rather than only being
-    // written where a crop or a new document sets it.
-    if (s.width !== docSizeRef.current[0] || s.height !== docSizeRef.current[1]) {
-      setDocumentSize(s.width, s.height);
-    }
-  }, [setDocumentSize]);
+    },
+    [setDocumentSize],
+  );
 
   const fitView = useCallback(() => {
     const host = hostRef.current;
@@ -679,7 +719,11 @@ export function App() {
     setView((v) => {
       const k = Math.min(8, Math.max(0.05, zoom)) / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
-      return { zoom: v.zoom * k, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+      return {
+        zoom: v.zoom * k,
+        x: cx - (cx - v.x) * k,
+        y: cy - (cy - v.y) * k,
+      };
     });
   }, []);
 
@@ -744,7 +788,11 @@ export function App() {
       // Only a selection the step took away — a delete undone, an add
       // redone — is pointed at what came back.
       setSelected((prev) =>
-        prev !== null && alive.has(prev) ? prev : touched === undefined ? null : touched,
+        prev !== null && alive.has(prev)
+          ? prev
+          : touched === undefined
+            ? null
+            : touched,
       );
       setMultiSel((prev) => prev.filter((id) => alive.has(id)));
       refresh(s);
@@ -803,7 +851,13 @@ export function App() {
               {
                 Vector: {
                   shape: {
-                    Path: { points, closed, smooth: false, handles: [], subpaths: [] },
+                    Path: {
+                      points,
+                      closed,
+                      smooth: false,
+                      handles: [],
+                      subpaths: [],
+                    },
                   },
                   fill: closed
                     ? cmyk
@@ -833,7 +887,8 @@ export function App() {
       // A single letter is a tool switch, but only when it isn't being typed
       // into something: a text layer's content is edited in a textarea and a
       // layer is renamed in an input, and both contain the letters below.
-      const typing = isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
+      const typing =
+        isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
       if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const shortcut = TOOL_KEYS[e.key.toLowerCase()];
         if (shortcut) {
@@ -941,7 +996,10 @@ export function App() {
   /** Pointer position in document pixels. The canvas covers the whole
    * viewport, so the page's position within it is the view, not the
    * element's box. */
-  const docPoint = (e: { clientX: number; clientY: number }): [number, number] => {
+  const docPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
     const rect = canvasRef.current!.getBoundingClientRect();
     return [
       (e.clientX - rect.left - view.x) / view.zoom,
@@ -977,7 +1035,11 @@ export function App() {
 
   /** A displacement carried into a layer's parent space: a vector, so only
    * the linear part of the space applies. */
-  const layerVector = (id: NodeId, dx: number, dy: number): [number, number] => {
+  const layerVector = (
+    id: NodeId,
+    dx: number,
+    dy: number,
+  ): [number, number] => {
     if (!session) return [dx, dy];
     const t = toTransform(session.parent_space_of(id));
     const det = t.a * t.d - t.b * t.c;
@@ -1119,7 +1181,8 @@ export function App() {
   };
 
   /** Commit the guide list, as one history entry. */
-  const setGuidesDoc = (next: DocGuide[]) => run({ SetGuides: { guides: next } });
+  const setGuidesDoc = (next: DocGuide[]) =>
+    run({ SetGuides: { guides: next } });
 
   /** Start dragging a guide: out of a ruler when `index` is null, or an
    * existing one when it is not. The pointer is followed on the window so
@@ -1142,9 +1205,7 @@ export function App() {
     // Dropping a guide back on a ruler is how one is thrown away, so the
     // gesture has to know where the rulers are.
     const overRuler = (ev: { clientX: number; clientY: number }) =>
-      vertical
-        ? ev.clientX - rect.left < RULER
-        : ev.clientY - rect.top < RULER;
+      vertical ? ev.clientX - rect.left < RULER : ev.clientY - rect.top < RULER;
     setGuideDrag({ vertical, index, at: positionOf(e) });
     const onMove = (ev: PointerEvent) =>
       setGuideDrag((g) => (g ? { ...g, at: positionOf(ev) } : g));
@@ -1325,7 +1386,8 @@ export function App() {
       // layers', in document space, before the delta is carried into the
       // layer's own space. Ctrl (or Cmd) drags free of it.
       let [mx, my] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
-      const snapping = drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
+      const snapping =
+        drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
       const next: Guides = { x: [], y: [] };
       if (snapping) {
         const tol = SNAP_PX / view.zoom;
@@ -1339,7 +1401,9 @@ export function App() {
       }
       // Only re-render when the guides actually change: this runs on every
       // pointer sample.
-      setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
+      setGuides((g) =>
+        g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next,
+      );
       // The delta is in document space; each layer wants it in its own
       // parent's, which differ once groups turn or scale.
       const moves = translateAll(drag.moving ?? [], mx, my);
@@ -1549,10 +1613,15 @@ export function App() {
   };
 
   const ADJUSTMENT_PRESETS: Record<string, { name: string; kind: NodeKind }> = {
-    exposure: { name: "Exposure", kind: { Adjustment: { Exposure: { stops: 0 } } } },
+    exposure: {
+      name: "Exposure",
+      kind: { Adjustment: { Exposure: { stops: 0 } } },
+    },
     "brightness-contrast": {
       name: "Brightness/Contrast",
-      kind: { Adjustment: { BrightnessContrast: { brightness: 0, contrast: 0 } } },
+      kind: {
+        Adjustment: { BrightnessContrast: { brightness: 0, contrast: 0 } },
+      },
     },
     "hue-saturation": {
       name: "Hue/Saturation",
@@ -1566,7 +1635,13 @@ export function App() {
       name: "Levels",
       kind: {
         Adjustment: {
-          Levels: { in_black: 0, in_white: 1, gamma: 1, out_black: 0, out_white: 1 },
+          Levels: {
+            in_black: 0,
+            in_white: 1,
+            gamma: 1,
+            out_black: 0,
+            out_white: 1,
+          },
         },
       },
     },
@@ -1583,7 +1658,10 @@ export function App() {
         },
       },
     },
-    blur: { name: "Gaussian Blur", kind: { Filter: { GaussianBlur: { sigma: 4 } } } },
+    blur: {
+      name: "Gaussian Blur",
+      kind: { Filter: { GaussianBlur: { sigma: 4 } } },
+    },
     sharpen: {
       name: "Sharpen",
       kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
@@ -1607,7 +1685,9 @@ export function App() {
         // Pick the adjustment itself, so its controls are right there.
         const rows = JSON.parse(session.layers_json()) as LayerInfo[];
         const at = rows.findIndex((l) => l.id === group);
-        const inside = rows.slice(at + 1).find((l) => l.parent === group && l.kind !== "group");
+        const inside = rows
+          .slice(at + 1)
+          .find((l) => l.parent === group && l.kind !== "group");
         setSelected(inside ? inside.id : group);
         setMultiSel([]);
         refresh(session);
@@ -1630,9 +1710,10 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
-  const [renaming, setRenaming] = useState<{ id: NodeId; value: string } | null>(
-    null,
-  );
+  const [renaming, setRenaming] = useState<{
+    id: NodeId;
+    value: string;
+  } | null>(null);
 
   /** Dragging a row of the layers list to reorder: which layer, the row
    * under the pointer and where it would land relative to it. Pointer
@@ -1651,12 +1732,21 @@ export function App() {
     where: "above" | "below" | "into";
   } | null>(null);
   const layerListRef = useRef<HTMLUListElement>(null);
-  /** Set while a drag just ended, so the click that follows the release
-   * does not also pick the row. */
-  const layerDragDone = useRef(false);
+  /** When a drag last ended, so the click the release brings with it does
+   * not also pick the row. Timed rather than a flag that waits to be
+   * cleared: a drop can move the row out from under the pointer, and then
+   * no click follows at all — a flag left standing would eat someone's
+   * next click, minutes later. */
+  const layerDragDone = useRef(0);
   const onRowPointerDown = (e: React.PointerEvent, id: NodeId) => {
     if (e.button !== 0 || renaming) return;
-    layerDragRef.current = { id, startY: e.clientY, active: false, over: null, where: "above" };
+    layerDragRef.current = {
+      id,
+      startY: e.clientY,
+      active: false,
+      over: null,
+      where: "above",
+    };
     const onMove = (ev: PointerEvent) => {
       const drag = layerDragRef.current;
       if (!drag) return;
@@ -1666,7 +1756,9 @@ export function App() {
       }
       let over: NodeId | null = null;
       let where: "above" | "below" | "into" = "above";
-      for (const row of layerListRef.current?.querySelectorAll<HTMLLIElement>("li[data-id]") ?? []) {
+      for (const row of layerListRef.current?.querySelectorAll<HTMLLIElement>(
+        "li[data-id]",
+      ) ?? []) {
         const r = row.getBoundingClientRect();
         if (ev.clientY < r.top || ev.clientY >= r.bottom) continue;
         over = Number(row.dataset.id);
@@ -1674,7 +1766,11 @@ export function App() {
         // The middle of a group's row drops into it; the edges of any
         // row drop beside it.
         where =
-          row.dataset.kind === "group" && t > 0.3 && t < 0.7 ? "into" : t < 0.5 ? "above" : "below";
+          row.dataset.kind === "group" && t > 0.3 && t < 0.7
+            ? "into"
+            : t < 0.5
+              ? "above"
+              : "below";
       }
       drag.over = over;
       drag.where = where;
@@ -1689,7 +1785,7 @@ export function App() {
       // The drop is read from the ref, not a state updater: an updater is
       // meant to be pure, and React may run it twice.
       if (drag?.active && drag.over !== null) {
-        layerDragDone.current = true;
+        layerDragDone.current = Date.now();
         dropLayer(drag.id, drag.over, drag.where);
       }
     };
@@ -1700,7 +1796,11 @@ export function App() {
    * list runs top-first, so "above" a row is the slot past its index in
    * painter's order, and a move within one group accounts for the slot
    * the layer leaves behind. */
-  const dropLayer = (id: NodeId, over: NodeId, where: "above" | "below" | "into") => {
+  const dropLayer = (
+    id: NodeId,
+    over: NodeId,
+    where: "above" | "below" | "into",
+  ) => {
     if (!session || id === over) return;
     const me = layers.find((l) => l.id === id);
     const target = layers.find((l) => l.id === over);
@@ -1717,7 +1817,10 @@ export function App() {
       if (me.parent === parent && me.index < index) index -= 1;
     }
     // Never into its own subtree.
-    for (let cur: NodeId | undefined = parent; cur !== undefined && cur !== session.root_id; ) {
+    for (
+      let cur: NodeId | undefined = parent;
+      cur !== undefined && cur !== session.root_id;
+    ) {
       if (cur === id) return;
       cur = layers.find((l) => l.id === cur)?.parent;
     }
@@ -1729,10 +1832,20 @@ export function App() {
    * typed so far. Every keystroke previews through the engine and the
    * block records one history entry when the editor closes; Escape puts
    * the old text back. */
-  const [inlineText, setInlineText] = useState<{ id: NodeId; value: string } | null>(null);
+  const [inlineText, setInlineText] = useState<{
+    id: NodeId;
+    value: string;
+  } | null>(null);
   const inlineRef = useRef<HTMLTextAreaElement>(null);
   const beginInlineText = () => {
-    if (!session || !selectedLayer || !selectedKind || typeof selectedKind !== "object" || !("Text" in selectedKind)) return;
+    if (
+      !session ||
+      !selectedLayer ||
+      !selectedKind ||
+      typeof selectedKind !== "object" ||
+      !("Text" in selectedKind)
+    )
+      return;
     setInlineText({ id: selectedLayer.id, value: selectedKind.Text.text });
     setTimeout(() => {
       inlineRef.current?.focus();
@@ -1740,9 +1853,20 @@ export function App() {
     }, 0);
   };
   const typeInlineText = (value: string) => {
-    if (!inlineText || !selectedKind || typeof selectedKind !== "object" || !("Text" in selectedKind)) return;
+    if (
+      !inlineText ||
+      !selectedKind ||
+      typeof selectedKind !== "object" ||
+      !("Text" in selectedKind)
+    )
+      return;
     setInlineText({ ...inlineText, value });
-    preview({ SetKind: { id: inlineText.id, kind: { Text: { ...selectedKind.Text, text: value } } } });
+    preview({
+      SetKind: {
+        id: inlineText.id,
+        kind: { Text: { ...selectedKind.Text, text: value } },
+      },
+    });
   };
   const closeInlineText = (keep: boolean) => {
     if (!inlineText) return;
@@ -1864,10 +1988,13 @@ export function App() {
       }
       e.preventDefault();
       const k = e.shiftKey ? 10 : 1;
-      const moving = selectionSet.map((id) => ({
-        id,
-        t0: toTransform(session.transform_of(id)),
-      }));
+      // Locked layers stay put, even when picked from the panel.
+      const moving = selectionSet
+        .filter((id) => !layers.find((l) => l.id === id)?.locked)
+        .map((id) => ({
+          id,
+          t0: toTransform(session.transform_of(id)),
+        }));
       const cmds = translateAll(moving, step[0] * k, step[1] * k);
       if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
     };
@@ -1925,7 +2052,10 @@ export function App() {
     const [w, h] = [Math.max(1, box[2] - box[0]), Math.max(1, box[3] - box[1])];
     const zoom = Math.min(
       8,
-      Math.max(0.05, Math.min(host.clientWidth / w, host.clientHeight / h) * 0.8),
+      Math.max(
+        0.05,
+        Math.min(host.clientWidth / w, host.clientHeight / h) * 0.8,
+      ),
     );
     setView({
       zoom,
@@ -2184,7 +2314,10 @@ export function App() {
 
   /** A pointer position in gradient coordinates: 0..1 across the selected
    * layer's own bounding box. */
-  const gradPoint = (e: { clientX: number; clientY: number }): [number, number] => {
+  const gradPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
     const [px, py] = layerPoint(e);
     if (!session || selected === null || !selLocal) return [0, 0];
     const inv = inverseOf(toTransform(session.transform_of(selected)));
@@ -2354,6 +2487,9 @@ export function App() {
     selectedLayer !== null &&
     selectedLayer.kind !== "adjustment" &&
     selectedLayer.kind !== "filter";
+  /** A locked layer keeps its outline — it is still the picked layer —
+   * but offers nothing to grab: it is not to be moved from the canvas. */
+  const movable = resizable && !selectedLayer.locked;
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
@@ -2376,7 +2512,10 @@ export function App() {
       // Draw against the document, so a layer inside a moved group is
       // outlined where it actually is.
       selParent = toTransform(session.parent_space_of(selected));
-      const t = composeT(selParent, toTransform(session.transform_of(selected)));
+      const t = composeT(
+        selParent,
+        toTransform(session.transform_of(selected)),
+      );
       const toScreen = (x: number, y: number): [number, number] => [
         view.x + (t.a * x + t.c * y + t.e) * view.zoom,
         view.y + (t.b * x + t.d * y + t.f) * view.zoom,
@@ -2396,9 +2535,15 @@ export function App() {
   let selectedEffects: Effect[] = [];
   if (session && selectedLayer) {
     try {
-      selectedKind = JSON.parse(session.kind_json(selectedLayer.id)) as NodeKind;
-      selectedMask = JSON.parse(session.mask_json(selectedLayer.id)) as Mask | null;
-      selectedEffects = JSON.parse(session.effects_json(selectedLayer.id)) as Effect[];
+      selectedKind = JSON.parse(
+        session.kind_json(selectedLayer.id),
+      ) as NodeKind;
+      selectedMask = JSON.parse(
+        session.mask_json(selectedLayer.id),
+      ) as Mask | null;
+      selectedEffects = JSON.parse(
+        session.effects_json(selectedLayer.id),
+      ) as Effect[];
     } catch {
       selectedKind = null;
     }
@@ -2511,8 +2656,14 @@ export function App() {
     const lb = session.local_bounds_of(selectedLayer.id);
     if (lb.length !== 4) return;
     const t = toTransform(session.transform_of(selectedLayer.id));
-    const xs = [t.a * lb[0] + t.c * lb[1] + t.e, t.a * lb[2] + t.c * lb[3] + t.e];
-    const ys = [t.b * lb[0] + t.d * lb[1] + t.f, t.b * lb[2] + t.d * lb[3] + t.f];
+    const xs = [
+      t.a * lb[0] + t.c * lb[1] + t.e,
+      t.a * lb[2] + t.c * lb[3] + t.e,
+    ];
+    const ys = [
+      t.b * lb[0] + t.d * lb[1] + t.f,
+      t.b * lb[2] + t.d * lb[3] + t.f,
+    ];
     const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
     const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
     const [w, h] = [x1 - x0, y1 - y0];
@@ -2622,7 +2773,11 @@ export function App() {
    * asset wants, re-solved rather than upsampled. */
   const exportPngAt = (scale: number) => {
     if (!session) return;
-    download(session.export_png_at(scale, 0, 0, 0, 0), `untitled@${scale}x.png`, "image/png");
+    download(
+      session.export_png_at(scale, 0, 0, 0, 0),
+      `untitled@${scale}x.png`,
+      "image/png",
+    );
   };
 
   /** PNG of just the picked layers' box, at document resolution. */
@@ -2632,7 +2787,11 @@ export function App() {
     if (!box) return;
     const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
     try {
-      download(session.export_png_at(1, x, y, w, h), "selection.png", "image/png");
+      download(
+        session.export_png_at(1, x, y, w, h),
+        "selection.png",
+        "image/png",
+      );
     } catch (err) {
       alert(`Export: ${err}`);
     }
@@ -2683,7 +2842,9 @@ export function App() {
     try {
       const png = session.export_png_at(1, x, y, w, h);
       const blob = new Blob([png as BlobPart], { type: "image/png" });
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
     } catch (err) {
       alert(`Copy as image: ${err}`);
     }
@@ -2815,7 +2976,11 @@ export function App() {
         return;
       }
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
-      if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) {
+      if (
+        selectedKind &&
+        typeof selectedKind === "object" &&
+        "Text" in selectedKind
+      ) {
         run({
           SetKind: {
             id: selectedLayer!.id,
@@ -2908,11 +3073,7 @@ export function App() {
                 Export selection as PNG
               </MenuItem>
             )}
-            <MenuItem
-              icon="export"
-              onClick={exportJpeg}
-              hint="flattened"
-            >
+            <MenuItem icon="export" onClick={exportJpeg} hint="flattened">
               Export JPEG
             </MenuItem>
             <MenuItem icon="export" onClick={exportSvg}>
@@ -2966,7 +3127,11 @@ export function App() {
             <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
               Paste
             </MenuItem>
-            <MenuItem icon="duplicate" onClick={duplicateSelected} hint="Ctrl+D">
+            <MenuItem
+              icon="duplicate"
+              onClick={duplicateSelected}
+              hint="Ctrl+D"
+            >
               Duplicate
             </MenuItem>
             <MenuItem icon="flipH" onClick={() => flipSelection(true)}>
@@ -3047,7 +3212,9 @@ export function App() {
             <button
               className={gamutWarn ? "chrome-button toggled" : "chrome-button"}
               onClick={() =>
-                gamutWarn ? applyProofing(proofing, false) : applyProofing(true, true)
+                gamutWarn
+                  ? applyProofing(proofing, false)
+                  : applyProofing(true, true)
               }
               title="Mark out-of-gamut pixels grey"
               aria-pressed={gamutWarn}
@@ -3059,7 +3226,11 @@ export function App() {
         )}
 
         <div className="chrome-group" role="group" aria-label="History">
-          <button className="chrome-button icon-only" onClick={undo} title="Undo (Ctrl+Z)">
+          <button
+            className="chrome-button icon-only"
+            onClick={undo}
+            title="Undo (Ctrl+Z)"
+          >
             <Icon name="undo" />
           </button>
           <button
@@ -3081,7 +3252,8 @@ export function App() {
           {units !== "px" && (
             <>
               {" "}
-              ({inUnits(docSize[0], units, docDpi)}×{inUnits(docSize[1], units, docDpi)} {units})
+              ({inUnits(docSize[0], units, docDpi)}×
+              {inUnits(docSize[1], units, docDpi)} {units})
             </>
           )}{" "}
           · {docDpi} dpi · {Math.round(view.zoom * 100)}%
@@ -3189,10 +3361,12 @@ export function App() {
             const ticks = (vertical: boolean) => {
               const span = vertical ? viewport[1] : viewport[0];
               const origin = vertical ? view.y : view.x;
-              const first = Math.floor(-origin / view.zoom / unitPx / step) * step;
+              const first =
+                Math.floor(-origin / view.zoom / unitPx / step) * step;
               const last = (span - origin) / view.zoom / unitPx;
               const out: number[] = [];
-              for (let v = first; v <= last; v += step) out.push(Math.round(v * 1000) / 1000);
+              for (let v = first; v <= last; v += step)
+                out.push(Math.round(v * 1000) / 1000);
               return out;
             };
             const ruler = (vertical: boolean) => (
@@ -3261,7 +3435,9 @@ export function App() {
                     <line
                       className="guide-hit"
                       {...ends}
-                      data-guide={vertical ? `v${guideAt(g)}` : `h${guideAt(g)}`}
+                      data-guide={
+                        vertical ? `v${guideAt(g)}` : `h${guideAt(g)}`
+                      }
                       onPointerDown={(e) => startGuideDrag(vertical, i, e)}
                     />
                     <line className="guide" {...ends} />
@@ -3272,14 +3448,10 @@ export function App() {
                 <line
                   className="guide dragging"
                   x1={
-                    guideDrag.vertical
-                      ? view.x + guideDrag.at * view.zoom
-                      : 0
+                    guideDrag.vertical ? view.x + guideDrag.at * view.zoom : 0
                   }
                   y1={
-                    guideDrag.vertical
-                      ? 0
-                      : view.y + guideDrag.at * view.zoom
+                    guideDrag.vertical ? 0 : view.y + guideDrag.at * view.zoom
                   }
                   x2={
                     guideDrag.vertical
@@ -3337,7 +3509,14 @@ export function App() {
                   [cropRect[2], cropRect[1], "100%", cropRect[3] - cropRect[1]],
                 ] as [number, number, number | string, number | string][]
               ).map(([x, y, w, h], i) => (
-                <rect key={i} className="crop-shade" x={x} y={y} width={w} height={h} />
+                <rect
+                  key={i}
+                  className="crop-shade"
+                  x={x}
+                  y={y}
+                  width={w}
+                  height={h}
+                />
               ))}
               <rect
                 className="crop-frame"
@@ -3374,7 +3553,10 @@ export function App() {
             <svg className="pen-overlay" aria-hidden="true">
               <polyline
                 points={penPoints
-                  .map((p) => `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`)
+                  .map(
+                    (p) =>
+                      `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
+                  )
                   .join(" ")}
               />
               {/* Only the pen closes a path by clicking its first anchor;
@@ -3453,7 +3635,10 @@ export function App() {
               // matrix — the layer's transform through its parents and
               // the view — puts it over the block however the block is
               // turned or scaled, and sizes its type with it.
-              const t = composeT(selParent, toTransform(session.transform_of(selected)));
+              const t = composeT(
+                selParent,
+                toTransform(session.transform_of(selected)),
+              );
               const z = view.zoom;
               const spec = selectedKind.Text;
               const fill = spec.fill;
@@ -3470,7 +3655,9 @@ export function App() {
                   spellCheck={false}
                   style={{
                     transform: `matrix(${t.a * z}, ${t.b * z}, ${t.c * z}, ${t.d * z}, ${view.x + t.e * z}, ${view.y + t.f * z})`,
-                    width: Math.max(spec.width, selLocal[2] - selLocal[0]) + spec.size,
+                    width:
+                      Math.max(spec.width, selLocal[2] - selLocal[0]) +
+                      spec.size,
                     height: selLocal[3] - selLocal[1] + spec.size,
                     fontFamily: `"${spec.font || "DejaVu Sans"}", sans-serif`,
                     // The document's size is the ascent-to-descent height;
@@ -3478,7 +3665,12 @@ export function App() {
                     fontSize: spec.size * 0.86,
                     lineHeight: `${spec.size * spec.line_height}px`,
                     letterSpacing: spec.letter_spacing * spec.size,
-                    textAlign: spec.align === "Center" ? "center" : spec.align === "Right" ? "right" : "left",
+                    textAlign:
+                      spec.align === "Center"
+                        ? "center"
+                        : spec.align === "Right"
+                          ? "right"
+                          : "left",
                     whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
                     fontStyle: spec.italic ? "italic" : "normal",
                     caretColor: caret,
@@ -3504,34 +3696,41 @@ export function App() {
                 <polygon points={selQuad.map((p) => p.join(",")).join(" ")} />
               </svg>
               {/* The knob sits off the top edge along the box's own normal,
-                  so it stays above the layer however the layer is turned. */}
-              {(() => {
-                const [tl, tr, , bl] = selQuad;
-                const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
-                const down = [bl[0] - tl[0], bl[1] - tl[1]];
-                const len = Math.hypot(down[0], down[1]) || 1;
-                const knob = [
-                  mid[0] - (down[0] / len) * 26,
-                  mid[1] - (down[1] / len) * 26,
-                ];
-                return (
-                  <>
-                    <svg className="sel-outline" aria-hidden="true">
-                      <line x1={mid[0]} y1={mid[1]} x2={knob[0]} y2={knob[1]} />
-                    </svg>
-                    <div
-                      className="rot-handle"
-                      data-handle="rotate"
-                      title="Rotate (hold Shift to snap)"
-                      aria-label="Rotate layer"
-                      style={{ left: knob[0] - 6, top: knob[1] - 6 }}
-                      onPointerDown={onRotatePointerDown}
-                      onPointerMove={onRotatePointerMove}
-                      onPointerUp={onRotatePointerUp}
-                    />
-                  </>
-                );
-              })()}
+                  so it stays above the layer however the layer is turned.
+                  A locked layer has none: nothing about it turns. */}
+              {movable &&
+                (() => {
+                  const [tl, tr, , bl] = selQuad;
+                  const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
+                  const down = [bl[0] - tl[0], bl[1] - tl[1]];
+                  const len = Math.hypot(down[0], down[1]) || 1;
+                  const knob = [
+                    mid[0] - (down[0] / len) * 26,
+                    mid[1] - (down[1] / len) * 26,
+                  ];
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line
+                          x1={mid[0]}
+                          y1={mid[1]}
+                          x2={knob[0]}
+                          y2={knob[1]}
+                        />
+                      </svg>
+                      <div
+                        className="rot-handle"
+                        data-handle="rotate"
+                        title="Rotate (hold Shift to snap)"
+                        aria-label="Rotate layer"
+                        style={{ left: knob[0] - 6, top: knob[1] - 6 }}
+                        onPointerDown={onRotatePointerDown}
+                        onPointerMove={onRotatePointerMove}
+                        onPointerUp={onRotatePointerUp}
+                      />
+                    </>
+                  );
+                })()}
               {/* The mask, drawn and edited where it applies. Dashed and
                   in its own colour, because it is not the layer's outline
                   and confusing the two makes both useless. */}
@@ -3587,7 +3786,8 @@ export function App() {
               {(() => {
                 const kind = selectedKind;
                 if (!selToScreen || !selLocal || kind === null) return null;
-                if (typeof kind !== "object" || !("Vector" in kind)) return null;
+                if (typeof kind !== "object" || !("Vector" in kind))
+                  return null;
                 const g = kind.Vector.gradient;
                 if (!g) return null;
                 const [x0, y0, x1, y1] = selLocal;
@@ -3625,17 +3825,19 @@ export function App() {
                       </svg>
                       {knob("from", a, "from", "grad-handle")}
                       {knob("to", b, "to", "grad-handle")}
-                      {stops.slice(1, -1).map((st, i) =>
-                        knob(
-                          `stop${i + 1}`,
-                          at(
-                            from[0] + (to[0] - from[0]) * st.offset,
-                            from[1] + (to[1] - from[1]) * st.offset,
+                      {stops
+                        .slice(1, -1)
+                        .map((st, i) =>
+                          knob(
+                            `stop${i + 1}`,
+                            at(
+                              from[0] + (to[0] - from[0]) * st.offset,
+                              from[1] + (to[1] - from[1]) * st.offset,
+                            ),
+                            i + 1,
+                            "grad-stop",
                           ),
-                          i + 1,
-                          "grad-stop",
-                        ),
-                      )}
+                        )}
                     </>
                   );
                 }
@@ -3658,20 +3860,21 @@ export function App() {
                   </>
                 );
               })()}
-              {HANDLES.map((c, i) => (
-                <div
-                  key={c}
-                  className={`handle ${c}`}
-                  data-handle={c}
-                  style={{
-                    left: selQuad![HANDLE_CORNER[i]][0] - 5,
-                    top: selQuad![HANDLE_CORNER[i]][1] - 5,
-                  }}
-                  onPointerDown={(e) => onHandlePointerDown(e, c)}
-                  onPointerMove={onHandlePointerMove}
-                  onPointerUp={onHandlePointerUp}
-                />
-              ))}
+              {movable &&
+                HANDLES.map((c, i) => (
+                  <div
+                    key={c}
+                    className={`handle ${c}`}
+                    data-handle={c}
+                    style={{
+                      left: selQuad![HANDLE_CORNER[i]][0] - 5,
+                      top: selQuad![HANDLE_CORNER[i]][1] - 5,
+                    }}
+                    onPointerDown={(e) => onHandlePointerDown(e, c)}
+                    onPointerMove={onHandlePointerMove}
+                    onPointerUp={onHandlePointerUp}
+                  />
+                ))}
             </>
           )}
         </main>
@@ -3774,7 +3977,11 @@ export function App() {
             </div>
           )}
           {selectionSet.length >= 2 && (
-            <div className="align-bar combine-bar" role="group" aria-label="Combine shapes">
+            <div
+              className="align-bar combine-bar"
+              role="group"
+              aria-label="Combine shapes"
+            >
               {BOOLEAN_BUTTONS.map(([op, icon, label]) => (
                 <button
                   key={op}
@@ -3817,7 +4024,8 @@ export function App() {
                         }}
                         onBlur={(e) => {
                           const v = Number(e.currentTarget.value);
-                          if (Number.isFinite(v)) setGeometry(field, v / perPixel(units, docDpi));
+                          if (Number.isFinite(v))
+                            setGeometry(field, v / perPixel(units, docDpi));
                         }}
                         aria-label={
                           field === "w" || field === "h"
@@ -3874,13 +4082,22 @@ export function App() {
                   cmyk={cmyk}
                   fonts={fontNames}
                   shapes={layers
-                    .filter((l) => l.kind === "vector" && l.id !== selectedLayer.id)
+                    .filter(
+                      (l) => l.kind === "vector" && l.id !== selectedLayer.id,
+                    )
                     .map((l) => ({ id: l.id, name: l.name }))}
                   onAlong={(shape) => {
                     if (!session || !selectedLayer) return;
                     if (shape === null) {
-                      if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) {
-                        setKind({ Text: { ...selectedKind.Text, along: null } }, false);
+                      if (
+                        selectedKind &&
+                        typeof selectedKind === "object" &&
+                        "Text" in selectedKind
+                      ) {
+                        setKind(
+                          { Text: { ...selectedKind.Text, along: null } },
+                          false,
+                        );
                       }
                       return;
                     }
@@ -3937,31 +4154,39 @@ export function App() {
                           className="mask-button"
                           aria-label={`Remove ${EFFECT_LABELS[kind]}`}
                           onClick={() =>
-                            setEffects(selectedEffects.filter((_, i) => i !== at))
+                            setEffects(
+                              selectedEffects.filter((_, i) => i !== at),
+                            )
                           }
                         >
                           Remove
                         </button>
                       </div>
-                      {EFFECT_FIELDS[kind].map(([field, label, min, max, step]) => (
-                        <label key={field}>
-                          {label} {(body[field] ?? 0).toFixed(2)}
-                          <input
-                            type="range"
-                            min={min}
-                            max={max}
-                            step={step}
-                            value={body[field] ?? 0}
-                            onChange={(e) =>
-                              tuneEffect(at, { [field]: Number(e.target.value) }, true)
-                            }
-                            onPointerUp={endGesture}
-                            onKeyUp={endGesture}
-                            onBlur={endGesture}
-                            aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
-                          />
-                        </label>
-                      ))}
+                      {EFFECT_FIELDS[kind].map(
+                        ([field, label, min, max, step]) => (
+                          <label key={field}>
+                            {label} {(body[field] ?? 0).toFixed(2)}
+                            <input
+                              type="range"
+                              min={min}
+                              max={max}
+                              step={step}
+                              value={body[field] ?? 0}
+                              onChange={(e) =>
+                                tuneEffect(
+                                  at,
+                                  { [field]: Number(e.target.value) },
+                                  true,
+                                )
+                              }
+                              onPointerUp={endGesture}
+                              onKeyUp={endGesture}
+                              onBlur={endGesture}
+                              aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
+                            />
+                          </label>
+                        ),
+                      )}
                     </div>
                   );
                 })}
@@ -3975,7 +4200,12 @@ export function App() {
                       e.target.value = "";
                       setEffects([
                         ...selectedEffects,
-                        newEffect(kind, cmyk ? hexToCmykColor("#000000") : hexColor("#000000")),
+                        newEffect(
+                          kind,
+                          cmyk
+                            ? hexToCmykColor("#000000")
+                            : hexColor("#000000"),
+                        ),
                       ]);
                     }}
                     aria-label="Add effect"
@@ -3991,19 +4221,28 @@ export function App() {
               </div>
               {selectedMask === null ? (
                 <div className="row mask-row">
-                  <button className="mask-button" onClick={() => addMask("ellipse")}>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("ellipse")}
+                  >
                     Ellipse mask
                   </button>
-                  <button className="mask-button" onClick={() => addMask("rect")}>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("rect")}
+                  >
                     Rect mask
                   </button>
                   {selectedKind &&
                     typeof selectedKind === "object" &&
                     "Vector" in selectedKind && (
-                    <button className="mask-button" onClick={maskWithSelectedShape}>
-                      Mask below
-                    </button>
-                  )}
+                      <button
+                        className="mask-button"
+                        onClick={maskWithSelectedShape}
+                      >
+                        Mask below
+                      </button>
+                    )}
                 </div>
               ) : (
                 <label className="row">
@@ -4040,8 +4279,14 @@ export function App() {
                 data-id={l.id}
                 data-kind={l.kind}
                 className={[
-                  l.id === selected ? "selected" : multiSel.includes(l.id) ? "multi" : "",
-                  layerDrag?.over === l.id && layerDrag.id !== l.id ? `drop-${layerDrag.where}` : "",
+                  l.id === selected
+                    ? "selected"
+                    : multiSel.includes(l.id)
+                      ? "multi"
+                      : "",
+                  layerDrag?.over === l.id && layerDrag.id !== l.id
+                    ? `drop-${layerDrag.where}`
+                    : "",
                   layerDrag?.id === l.id ? "dragging" : "",
                 ]
                   .filter(Boolean)
@@ -4049,10 +4294,7 @@ export function App() {
                 style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
                 onPointerDown={(e) => onRowPointerDown(e, l.id)}
                 onClick={(e) => {
-                  if (layerDragDone.current) {
-                    layerDragDone.current = false;
-                    return;
-                  }
+                  if (Date.now() - layerDragDone.current < 300) return;
                   if (e.ctrlKey || e.metaKey) {
                     // Toggle in the multi-selection; primary stays put.
                     if (l.id === selected) return;
@@ -4077,6 +4319,18 @@ export function App() {
                   title={l.visible ? "Hide layer" : "Show layer"}
                 >
                   <Icon name={l.visible ? "eye" : "eyeOff"} size={15} />
+                </button>
+                <button
+                  className="lock-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    run({ SetLocked: { id: l.id, locked: !l.locked } });
+                  }}
+                  aria-pressed={l.locked}
+                  title={l.locked ? "Unlock layer" : "Lock layer"}
+                  aria-label={l.locked ? "Unlock layer" : "Lock layer"}
+                >
+                  <Icon name={l.locked ? "lock" : "unlock"} size={14} />
                 </button>
                 <span className="layer-kind-icon" title={l.kind}>
                   <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
@@ -4211,7 +4465,11 @@ function NewDocDialog({
           {DOC_PRESETS.map(([name, pw, ph, pdpi]) => (
             <button
               key={name}
-              className={w === pw && h === ph && dpi === pdpi ? "preset active" : "preset"}
+              className={
+                w === pw && h === ph && dpi === pdpi
+                  ? "preset active"
+                  : "preset"
+              }
               onClick={() => {
                 setW(pw);
                 setH(ph);
@@ -4231,7 +4489,11 @@ function NewDocDialog({
             min={1}
             max={2400}
             value={dpi}
-            onChange={(e) => setDpi(Math.max(1, Math.min(2400, Math.round(Number(e.target.value)))))}
+            onChange={(e) =>
+              setDpi(
+                Math.max(1, Math.min(2400, Math.round(Number(e.target.value)))),
+              )
+            }
             aria-label="Resolution"
           />
           <span className="hint">
@@ -4349,9 +4611,18 @@ function MenuItem({
  * past the outer points, identity for fewer than two. */
 function curveSamples(points: [number, number][], n = 64): [number, number][] {
   const pts = [...points]
-    .map(([x, y]) => [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))] as [number, number])
+    .map(
+      ([x, y]) =>
+        [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))] as [
+          number,
+          number,
+        ],
+    )
     .sort((a, b) => a[0] - b[0])
-    .filter((p, i, all) => i === all.length - 1 || Math.abs(all[i + 1][0] - p[0]) >= 1e-6);
+    .filter(
+      (p, i, all) =>
+        i === all.length - 1 || Math.abs(all[i + 1][0] - p[0]) >= 1e-6,
+    );
   const k = pts.length;
   const at = (x: number): number => {
     if (k < 2) return x;
@@ -4360,7 +4631,13 @@ function curveSamples(points: [number, number][], n = 64): [number, number][] {
     const h = pts.slice(0, -1).map((p, i) => pts[i + 1][0] - p[0]);
     const d = pts.slice(0, -1).map((p, i) => (pts[i + 1][1] - p[1]) / h[i]);
     const m = pts.map((_, i) =>
-      i === 0 ? d[0] : i === k - 1 ? d[k - 2] : d[i - 1] * d[i] > 0 ? (d[i - 1] + d[i]) / 2 : 0,
+      i === 0
+        ? d[0]
+        : i === k - 1
+          ? d[k - 2]
+          : d[i - 1] * d[i] > 0
+            ? (d[i - 1] + d[i]) / 2
+            : 0,
     );
     for (let i = 0; i < k - 1; i++) {
       if (d[i] === 0) {
@@ -4413,9 +4690,14 @@ function CurveEditor({
     previewing: boolean;
   } | null>(null);
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
-  const local = (e: React.PointerEvent | React.MouseEvent): [number, number] => {
+  const local = (
+    e: React.PointerEvent | React.MouseEvent,
+  ): [number, number] => {
     const r = svgRef.current!.getBoundingClientRect();
-    return [clamp01((e.clientX - r.left) / r.width), clamp01(1 - (e.clientY - r.top) / r.height)];
+    return [
+      clamp01((e.clientX - r.left) / r.width),
+      clamp01(1 - (e.clientY - r.top) / r.height),
+    ];
   };
   const nearest = (p: [number, number]) => {
     let best = -1;
@@ -4429,7 +4711,8 @@ function CurveEditor({
     });
     return best;
   };
-  const sorted = (pts: [number, number][]) => [...pts].sort((a, b) => a[0] - b[0]);
+  const sorted = (pts: [number, number][]) =>
+    [...pts].sort((a, b) => a[0] - b[0]);
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     const p = local(e);
@@ -4441,7 +4724,11 @@ function CurveEditor({
     } else {
       index = next.findIndex((q) => q === points[index]);
     }
-    dragging.current = { index, points: next, previewing: index < 0 || next.length > points.length };
+    dragging.current = {
+      index,
+      points: next,
+      previewing: index < 0 || next.length > points.length,
+    };
     svgRef.current!.setPointerCapture(e.pointerId);
     // A new point is previewed at once; pressing an existing one previews
     // nothing until it moves, so a click on a point is not an edit.
@@ -4477,7 +4764,10 @@ function CurveEditor({
   const px = (v: number) => v * SIZE;
   const py = (v: number) => (1 - v) * SIZE;
   const line = curveSamples(points)
-    .map(([x, y], i) => `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`)
+    .map(
+      ([x, y], i) =>
+        `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`,
+    )
     .join(" ");
   return (
     <div className="curve-row">
@@ -4542,7 +4832,15 @@ interface KindPropsProps {
 
 /** Parameter editors for the selected node's kind — the panel that makes
  * every layer's settings revisitable (the non-destructive contract). */
-function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }: KindPropsProps) {
+function KindProps({
+  kind,
+  onEdit,
+  onGestureEnd,
+  cmyk,
+  fonts,
+  shapes,
+  onAlong,
+}: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -4611,21 +4909,32 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
       return (
         <CurveEditor
           points={adj.Curves.points}
-          onEdit={(points, gesture) => onEdit(wrap({ Curves: { points } }), gesture)}
+          onEdit={(points, gesture) =>
+            onEdit(wrap({ Curves: { points } }), gesture)
+          }
           onGestureEnd={onGestureEnd}
         />
       );
     }
     if ("Levels" in adj) {
       const p = adj.Levels;
-      const set = (patch: Partial<typeof p>) => wrap({ Levels: { ...p, ...patch } });
+      const set = (patch: Partial<typeof p>) =>
+        wrap({ Levels: { ...p, ...patch } });
       return (
         <>
-          {slider("Input black", p.in_black, 0, 1, 0.01, (v) => set({ in_black: v }))}
-          {slider("Input white", p.in_white, 0, 1, 0.01, (v) => set({ in_white: v }))}
+          {slider("Input black", p.in_black, 0, 1, 0.01, (v) =>
+            set({ in_black: v }),
+          )}
+          {slider("Input white", p.in_white, 0, 1, 0.01, (v) =>
+            set({ in_white: v }),
+          )}
           {slider("Gamma", p.gamma, 0.2, 3, 0.02, (v) => set({ gamma: v }))}
-          {slider("Output black", p.out_black, 0, 1, 0.01, (v) => set({ out_black: v }))}
-          {slider("Output white", p.out_white, 0, 1, 0.01, (v) => set({ out_white: v }))}
+          {slider("Output black", p.out_black, 0, 1, 0.01, (v) =>
+            set({ out_black: v }),
+          )}
+          {slider("Output white", p.out_white, 0, 1, 0.01, (v) =>
+            set({ out_white: v }),
+          )}
         </>
       );
     }
@@ -4635,9 +4944,16 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
   if ("Filter" in kind) {
     const filter = kind.Filter;
     if ("GaussianBlur" in filter) {
-      return slider("Blur sigma", filter.GaussianBlur.sigma, 0, 50, 0.5, (v) => ({
-        Filter: { GaussianBlur: { sigma: v } },
-      }));
+      return slider(
+        "Blur sigma",
+        filter.GaussianBlur.sigma,
+        0,
+        50,
+        0.5,
+        (v) => ({
+          Filter: { GaussianBlur: { sigma: v } },
+        }),
+      );
     }
     if ("Sharpen" in filter) {
       const p = filter.Sharpen;
@@ -4696,9 +5012,16 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
         {slider("Line height", t.line_height ?? 1, 0.5, 3, 0.05, (v) => ({
           Text: { ...t, line_height: v },
         }))}
-        {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
-          Text: { ...t, letter_spacing: v },
-        }))}
+        {slider(
+          "Letter spacing",
+          t.letter_spacing ?? 0,
+          -0.1,
+          0.5,
+          0.01,
+          (v) => ({
+            Text: { ...t, letter_spacing: v },
+          }),
+        )}
         {/* A row of its own rather than one label around both controls:
             a label labels one control, and a toggle sharing it would be
             what the label points at. */}
@@ -4743,7 +5066,9 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
             title="Underline"
             aria-label="Underline"
             aria-pressed={!!t.underline}
-            onClick={() => onEdit({ Text: { ...t, underline: !t.underline } }, false)}
+            onClick={() =>
+              onEdit({ Text: { ...t, underline: !t.underline } }, false)
+            }
           >
             <u>U</u>
           </button>
@@ -4759,7 +5084,9 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
           <select
             id="text-font"
             value={t.font || fonts[0]}
-            onChange={(e) => onEdit({ Text: { ...t, font: e.target.value } }, false)}
+            onChange={(e) =>
+              onEdit({ Text: { ...t, font: e.target.value } }, false)
+            }
             aria-label="Font"
           >
             {fonts.map((n) => (
@@ -4777,7 +5104,9 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
             id="text-along"
             aria-label="Along"
             value={t.along ? "on" : ""}
-            onChange={(e) => onAlong(e.target.value === "" ? null : Number(e.target.value))}
+            onChange={(e) =>
+              onAlong(e.target.value === "" ? null : Number(e.target.value))
+            }
           >
             <option value="">None</option>
             {t.along && <option value="on">This path</option>}
@@ -4834,7 +5163,9 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
       { offset: 1, color: authored("#ffffff") },
     ];
     /** Endpoints of a linear ramp at `deg`, across the shape's box. */
-    const endpoints = (deg: number): { from: [number, number]; to: [number, number] } => {
+    const endpoints = (
+      deg: number,
+    ): { from: [number, number]; to: [number, number] } => {
       const rad = (deg * Math.PI) / 180;
       const [dx, dy] = [Math.cos(rad) / 2, Math.sin(rad) / 2];
       return { from: [0.5 - dx, 0.5 - dy], to: [0.5 + dx, 0.5 + dy] };
@@ -4842,7 +5173,8 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
     const angleOf = (g: typeof grad): number => {
       if (!g || !("Linear" in g)) return 0;
       const { from, to } = g.Linear;
-      const deg = (Math.atan2(to[1] - from[1], to[0] - from[0]) * 180) / Math.PI;
+      const deg =
+        (Math.atan2(to[1] - from[1], to[0] - from[0]) * 180) / Math.PI;
       return Math.round(deg < 0 ? deg + 360 : deg);
     };
     const setFillKind = (next: string) => {
@@ -4922,7 +5254,10 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
                   type="color"
                   value={colorToHex(stop.color)}
                   onChange={(e) =>
-                    onEdit(setStop(i, { color: authored(e.target.value) }), true)
+                    onEdit(
+                      setStop(i, { color: authored(e.target.value) }),
+                      true,
+                    )
                   }
                   onBlur={onGestureEnd}
                   aria-label={`Gradient stop ${i + 1}`}
@@ -4970,10 +5305,16 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
                     },
                   }),
                 )
-              : slider("Gradient radius", grad.Radial.radius, 0.05, 1.5, 0.05, (r) =>
-                  patch({
-                    gradient: { Radial: { ...grad.Radial, radius: r } },
-                  }),
+              : slider(
+                  "Gradient radius",
+                  grad.Radial.radius,
+                  0.05,
+                  1.5,
+                  0.05,
+                  (r) =>
+                    patch({
+                      gradient: { Radial: { ...grad.Radial, radius: r } },
+                    }),
                 )}
           </>
         )}
@@ -5064,8 +5405,13 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
             // Half the shorter side is where the corners meet and the rect
             // becomes a capsule; past that there is nothing left to round.
             const most = Math.max(1, Math.min(rect.width, rect.height) / 2);
-            return slider("Corner radius", rect.radius ?? 0, 0, most, 0.5, (r) =>
-              patch({ shape: { Rect: { ...rect, radius: r } } }),
+            return slider(
+              "Corner radius",
+              rect.radius ?? 0,
+              0,
+              most,
+              0.5,
+              (r) => patch({ shape: { Rect: { ...rect, radius: r } } }),
             );
           })()}
         {"Path" in v.shape &&
@@ -5086,7 +5432,11 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
                       onEdit(
                         patch({
                           shape: {
-                            Path: { ...path, smooth: e.target.checked, handles: path.handles },
+                            Path: {
+                              ...path,
+                              smooth: e.target.checked,
+                              handles: path.handles,
+                            },
                           },
                         }),
                         false,
@@ -5099,8 +5449,8 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
                 {curved ? (
                   <>
                     <p className="muted">
-                      Curve handles are set, so they define the shape. Drag
-                      them on the canvas; hold Alt to move one on its own.
+                      Curve handles are set, so they define the shape. Drag them
+                      on the canvas; hold Alt to move one on its own.
                     </p>
                     <button
                       className="mask-button"
@@ -5120,7 +5470,9 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }:
                     onClick={() =>
                       onEdit(
                         patch({
-                          shape: { Path: { ...path, handles: seedHandles(path) } },
+                          shape: {
+                            Path: { ...path, handles: seedHandles(path) },
+                          },
                         }),
                         false,
                       )
