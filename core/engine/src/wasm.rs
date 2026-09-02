@@ -181,6 +181,14 @@ impl WasmSession {
             .unwrap_or_default()
     }
 
+    /// Local-space bounds of a node as `[x0, y0, x1, y1]`; empty if none.
+    pub fn local_bounds_of(&self, id: f64) -> Vec<f32> {
+        self.inner
+            .local_bounds_of(NodeId(id as u64))
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
     /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<(), JsError> {
         self.inner.place_image(bytes, name).map_err(to_js)

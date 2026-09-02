@@ -147,6 +147,8 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
+/** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
+const HANDLE_CORNER = [0, 1, 3, 2];
 type Handle = (typeof HANDLES)[number];
 
 const DOC_WIDTH = 1280;
@@ -628,15 +630,13 @@ export function App() {
 
   // Resize handles: drag scales the node, anchored at the opposite corner.
   const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
-    if (!session || selected === null) return;
+    if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
-    const b = session.bounds_of(selected);
-    if (b.length !== 4) return;
     handleDragRef.current = {
       corner,
       id: selected,
       t0: toTransform(session.transform_of(selected)),
-      b0: [b[0], b[1], b[2], b[3]],
+      b0: selLocal,
     };
     (e.target as Element).setPointerCapture(e.pointerId);
   };
@@ -645,21 +645,38 @@ export function App() {
     const drag = handleDragRef.current;
     if (!drag || !session) return;
     if (e.buttons === 0) return;
-    const [cx, cy] = docPoint(e);
-    const [bx, by, bw, bh] = drag.b0;
+    // Resize happens in the layer's own space: bring the cursor there,
+    // hold the opposite corner still, and scale about it. Doing it in
+    // document space would stretch a rotated layer along the wrong axes.
+    const [dx, dy] = docPoint(e);
+    const t = drag.t0;
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return;
+    const [ux, uy] = [dx - t.e, dy - t.f];
+    const lx = (t.d * ux - t.c * uy) / det;
+    const ly = (t.a * uy - t.b * ux) / det;
+
+    const [x0, y0, x1, y1] = drag.b0;
     const west = drag.corner === "nw" || drag.corner === "sw";
     const north = drag.corner === "nw" || drag.corner === "ne";
-    const newW = Math.max(MIN_SIZE, west ? bx + bw - cx : cx - bx);
-    const newH = Math.max(MIN_SIZE, north ? by + bh - cy : cy - by);
+    // The corner that stays put, in local units.
+    const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
+    const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
+    const sx = span(lx, fx) / span(west ? x0 : x1, fx);
+    const sy = span(ly, fy) / span(north ? y0 : y1, fy);
+
+    // T' = T0 . scale(sx, sy) about (fx, fy), composed in local space.
+    const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
     preview({
       SetTransform: {
         id: drag.id,
         transform: {
-          ...drag.t0,
-          a: (drag.t0.a * newW) / bw,
-          d: (drag.t0.d * newH) / bh,
-          e: west ? bx + bw - newW : drag.t0.e,
-          f: north ? by + bh - newH : drag.t0.f,
+          a: t.a * sx,
+          b: t.b * sx,
+          c: t.c * sy,
+          d: t.d * sy,
+          e: t.a * tx + t.c * ty + t.e,
+          f: t.b * tx + t.d * ty + t.f,
         },
       },
     });
@@ -979,6 +996,32 @@ export function App() {
     session && selected !== null && resizable
       ? session.bounds_of(selected)
       : null;
+  /** The selection box in the layer's own axes: its local bounds mapped
+   * through its transform, as four screen-space corners. Drawn instead of
+   * an axis-aligned box so it turns with a rotated layer, and so the resize
+   * handles sit on the corners they actually move. */
+  let selQuad: [number, number][] | null = null;
+  let selLocal: [number, number, number, number] | null = null;
+  let selT: Transform | null = null;
+  if (session && selected !== null && resizable) {
+    const lb = session.local_bounds_of(selected);
+    if (lb.length === 4) {
+      selLocal = [lb[0], lb[1], lb[2], lb[3]];
+      selT = toTransform(session.transform_of(selected));
+      const t = selT;
+      const toScreen = (x: number, y: number): [number, number] => [
+        view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+        view.y + (t.b * x + t.d * y + t.f) * view.zoom,
+      ];
+      selQuad = [
+        toScreen(lb[0], lb[1]),
+        toScreen(lb[2], lb[1]),
+        toScreen(lb[2], lb[3]),
+        toScreen(lb[0], lb[3]),
+      ];
+    }
+  }
+
   let selectedKind: NodeKind | null = null;
   let selectedMask: Mask | null = null;
   if (session && selectedLayer) {
@@ -1426,36 +1469,55 @@ export function App() {
                 return dots;
               });
             })()}
-          {selBounds && selBounds.length === 4 && (
-            <div
-              className="sel-overlay"
-              style={{
-                left: view.x + selBounds[0] * view.zoom,
-                top: view.y + selBounds[1] * view.zoom,
-                width: selBounds[2] * view.zoom,
-                height: selBounds[3] * view.zoom,
-              }}
-            >
-              <div
-                className="rot-handle"
-                data-handle="rotate"
-                title="Rotate (hold Shift to snap)"
-                aria-label="Rotate layer"
-                onPointerDown={onRotatePointerDown}
-                onPointerMove={onRotatePointerMove}
-                onPointerUp={onRotatePointerUp}
-              />
-              {HANDLES.map((c) => (
+          {selQuad && (
+            <>
+              <svg className="sel-outline" aria-hidden="true">
+                <polygon points={selQuad.map((p) => p.join(",")).join(" ")} />
+              </svg>
+              {/* The knob sits off the top edge along the box's own normal,
+                  so it stays above the layer however the layer is turned. */}
+              {(() => {
+                const [tl, tr, , bl] = selQuad;
+                const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
+                const down = [bl[0] - tl[0], bl[1] - tl[1]];
+                const len = Math.hypot(down[0], down[1]) || 1;
+                const knob = [
+                  mid[0] - (down[0] / len) * 26,
+                  mid[1] - (down[1] / len) * 26,
+                ];
+                return (
+                  <>
+                    <svg className="sel-outline" aria-hidden="true">
+                      <line x1={mid[0]} y1={mid[1]} x2={knob[0]} y2={knob[1]} />
+                    </svg>
+                    <div
+                      className="rot-handle"
+                      data-handle="rotate"
+                      title="Rotate (hold Shift to snap)"
+                      aria-label="Rotate layer"
+                      style={{ left: knob[0] - 6, top: knob[1] - 6 }}
+                      onPointerDown={onRotatePointerDown}
+                      onPointerMove={onRotatePointerMove}
+                      onPointerUp={onRotatePointerUp}
+                    />
+                  </>
+                );
+              })()}
+              {HANDLES.map((c, i) => (
                 <div
                   key={c}
                   className={`handle ${c}`}
                   data-handle={c}
+                  style={{
+                    left: selQuad![HANDLE_CORNER[i]][0] - 5,
+                    top: selQuad![HANDLE_CORNER[i]][1] - 5,
+                  }}
                   onPointerDown={(e) => onHandlePointerDown(e, c)}
                   onPointerMove={onHandlePointerMove}
                   onPointerUp={onHandlePointerUp}
                 />
               ))}
-            </div>
+            </>
           )}
         </main>
         <aside className="panel" aria-label="Layers">

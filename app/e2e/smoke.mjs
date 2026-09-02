@@ -444,8 +444,14 @@ assert((await rot.count()) === 1, "selection offers a rotation handle");
 const rectCorner = [590, 490];
 assert((await canvasPixel(...rectCorner))[3] === 255, "corner filled before turning");
 const rbox = await rot.boundingBox();
-const selBox = await page.locator(".sel-overlay").boundingBox();
-const pivot = [selBox.x + selBox.width / 2, selBox.y + selBox.height / 2];
+// Centre of the (now oriented) selection quad.
+const quad = await page.$eval(".sel-outline polygon", (el) =>
+  el.getAttribute("points").split(" ").map((p) => p.split(",").map(Number)),
+);
+const pivot = [
+  quad.reduce((a, p) => a + p[0], 0) / quad.length,
+  quad.reduce((a, p) => a + p[1], 0) / quad.length,
+];
 await rot.hover();
 await page.mouse.down();
 // Swing the knob a quarter turn about the selection centre.
@@ -455,6 +461,27 @@ await page.waitForTimeout(250);
 assert(
   (await canvasPixel(...rectCorner))[3] === 0,
   "the corner is vacated by the rotation",
+);
+// The selection box follows the layer's own axes rather than staying an
+// axis-aligned box around it, so its top edge is no longer horizontal.
+const turnedQuad = await page.$eval(".sel-outline polygon", (el) =>
+  el.getAttribute("points").split(" ").map((p) => p.split(",").map(Number)),
+);
+assert(
+  Math.abs(turnedQuad[0][1] - turnedQuad[1][1]) > 20,
+  `the selection box turned with the layer (${JSON.stringify(turnedQuad)})`,
+);
+// And a corner handle sits on a corner of that quad, not of its bounding
+// box. The polygon is in the canvas host's coordinates; boundingBox is in
+// the viewport's, so shift one into the other before comparing.
+const hostBox = await page.locator(".canvas-host").boundingBox();
+const nw = await page.locator(".handle.nw").boundingBox();
+assert(
+  Math.abs(nw.x + nw.width / 2 - hostBox.x - turnedQuad[0][0]) < 2 &&
+    Math.abs(nw.y + nw.height / 2 - hostBox.y - turnedQuad[0][1]) < 2,
+  `handles sit on the turned corners (${nw.x + nw.width / 2 - hostBox.x},${
+    nw.y + nw.height / 2 - hostBox.y
+  } vs ${turnedQuad[0]})`,
 );
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(200);

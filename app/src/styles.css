@@ -502,11 +502,8 @@ body {
    so the two gestures never compete for the same pixels. */
 .rot-handle {
   position: absolute;
-  left: 50%;
-  top: -26px;
   width: 12px;
   height: 12px;
-  margin-left: -6px;
   border-radius: 50%;
   background: var(--accent);
   border: 2px solid #fff;
@@ -515,16 +512,6 @@ body {
      its handles opt back in. */
   pointer-events: auto;
   touch-action: none;
-}
-
-.rot-handle::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 100%;
-  width: 1px;
-  height: 14px;
-  background: var(--accent);
 }
 
 .curve-handle {
@@ -539,11 +526,27 @@ body {
   z-index: 2;
 }
 
-.sel-overlay {
+/* The selection outline follows the layer's own axes, so it is drawn as a
+   quad rather than positioned as a box. SVG keeps the line 1px however the
+   layer is scaled or turned. */
+.sel-outline {
   position: absolute;
-  border: 1px solid var(--accent);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
-  box-sizing: border-box;
+  overflow: visible;
+}
+
+.sel-outline polygon {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+.sel-outline line {
+  stroke: var(--accent);
+  stroke-width: 1;
 }
 
 .handle {
@@ -558,26 +561,18 @@ body {
 }
 
 .handle.nw {
-  left: -5px;
-  top: -5px;
   cursor: nwse-resize;
 }
 
 .handle.ne {
-  right: -5px;
-  top: -5px;
   cursor: nesw-resize;
 }
 
 .handle.sw {
-  left: -5px;
-  bottom: -5px;
   cursor: nesw-resize;
 }
 
 .handle.se {
-  right: -5px;
-  bottom: -5px;
   cursor: nwse-resize;
 }
 

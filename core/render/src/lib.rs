@@ -268,6 +268,32 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     })
 }
 
+/// A node's bounds in its *own* space, before its transform — the box a
+/// selection outline should be drawn around so it turns with the layer.
+///
+/// Groups report document space, because a group's own transform is not
+/// applied to its children (their transforms are absolute), so its local
+/// space and the document's are the same one.
+pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, DocError> {
+    let node = doc.node(id)?;
+    Ok(match &node.kind {
+        NodeKind::Vector { shape, .. } => {
+            let flat = flatten_shape(shape);
+            let (x0, y0, x1, y1) = local_bounds(flat.as_ref());
+            (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
+        }
+        kind => match local_size(kind) {
+            Some((w, h)) => Some([0.0, 0.0, w, h]),
+            // Groups, adjustments and filters have no box of their own; fall
+            // back to whatever the document-space bounds say.
+            None => match node_bounds(doc, id)? {
+                Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
+                _ => None,
+            },
+        },
+    })
+}
+
 /// How far, in pixels, the document's filter stack can carry a change:
 /// the summed sample reach of every filter layer (sequential filters
 /// compound). A region render whose clip is padded by this much computes

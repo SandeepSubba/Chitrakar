@@ -583,6 +583,14 @@ impl Session {
         }
     }
 
+    /// A node's bounds in its own space, `[x0, y0, x1, y1]`, for drawing a
+    /// selection box that turns with the layer.
+    pub fn local_bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
+        chitrakar_render::local_bounds_of(&self.doc, id)
+            .ok()
+            .flatten()
+    }
+
     /// Set the CMYK press profile authored CMYK colors render through.
     /// Not a command: like resources, it is document setup, not an edit.
     pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), EngineError> {

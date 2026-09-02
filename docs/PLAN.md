@@ -41,7 +41,7 @@ without reading anything else.*
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~94),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~130 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~132 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -64,10 +64,10 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
-- **Known limits, deliberately:** the selection box stays axis-aligned
-  around a rotated layer, so its resize handles scale along document axes
-  rather than the layer's own; masks aren't editable on-canvas; PDF/TIFF
-  embed the composite as an image rather than live vectors.
+- **Known limits, deliberately:** a group's own transform is ignored (its
+  children carry absolute transforms), so groups cannot be moved or turned
+  as a unit; masks aren't editable on-canvas; PDF/TIFF embed the composite
+  as an image rather than live vectors.
 
 ---
 
