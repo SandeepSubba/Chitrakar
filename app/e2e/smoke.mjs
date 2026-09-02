@@ -1370,6 +1370,47 @@ assert(
   inkHello !== inkDefault && inkHello > 50,
   `edited text re-rendered (${inkDefault} -> ${inkHello} px)`,
 );
+// 8v1. Typing on the canvas: a double-click on the block opens it for
+// editing in place; keystrokes preview through the engine, Escape puts
+// the old text back, Ctrl+Enter keeps the new — one history entry.
+{
+  await page.mouse.dblclick(box.x + 780 * sx, box.y + 625 * sy);
+  await page.waitForTimeout(250);
+  const editor = page.locator("textarea.inline-text");
+  assert(
+    (await editor.count()) === 1 && (await editor.inputValue()) === "Hello!",
+    "double-clicking the block opens it for typing with its text",
+  );
+  await page.keyboard.press("End");
+  await page.keyboard.type("!!");
+  await page.waitForTimeout(250);
+  const inkTyped = await inkCount(740, 590, 1200, 710);
+  assert(inkTyped > inkHello, `typing on the canvas re-renders the block (${inkHello} -> ${inkTyped})`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  assert(
+    (await editor.count()) === 0 && (await inkCount(740, 590, 1200, 710)) === inkHello,
+    "Escape closes the editor and puts the old text back",
+  );
+  await page.mouse.dblclick(box.x + 780 * sx, box.y + 625 * sy);
+  await page.waitForTimeout(250);
+  await page.keyboard.press("End");
+  await page.keyboard.type("!!");
+  await page.keyboard.press("Control+Enter");
+  await page.waitForTimeout(250);
+  assert(
+    (await editor.count()) === 0 &&
+      (await inkCount(740, 590, 1200, 710)) === inkTyped &&
+      (await page.locator('textarea[aria-label="Text content"]').inputValue()) === "Hello!!!",
+    "Ctrl+Enter keeps what was typed, and the panel agrees",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await inkCount(740, 590, 1200, 710)) === inkHello,
+    "and the whole typing is one undo step",
+  );
+}
 await setSlider("Size", 96);
 const inkBig = await inkCount(740, 560, 1280, 720);
 assert(inkBig > inkHello * 1.5, `larger size grew the ink (${inkHello} -> ${inkBig})`);

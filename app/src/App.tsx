@@ -1066,6 +1066,11 @@ export function App() {
     window.addEventListener("pointerup", onUp);
   };
 
+  /** A double-click on a picked text block opens it for typing in place. */
+  const onCanvasDoubleClick = () => {
+    if (tool === "Move" && !inlineText) beginInlineText();
+  };
+
   const onCanvasPointerDown = (e: React.PointerEvent) => {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
@@ -1525,6 +1530,36 @@ export function App() {
   const [renaming, setRenaming] = useState<{ id: NodeId; value: string } | null>(
     null,
   );
+
+  /** Typing into a text block on the canvas: which block, and the text as
+   * typed so far. Every keystroke previews through the engine and the
+   * block records one history entry when the editor closes; Escape puts
+   * the old text back. */
+  const [inlineText, setInlineText] = useState<{ id: NodeId; value: string } | null>(null);
+  const inlineRef = useRef<HTMLTextAreaElement>(null);
+  const beginInlineText = () => {
+    if (!session || !selectedLayer || !selectedKind || typeof selectedKind !== "object" || !("Text" in selectedKind)) return;
+    setInlineText({ id: selectedLayer.id, value: selectedKind.Text.text });
+    setTimeout(() => {
+      inlineRef.current?.focus();
+      inlineRef.current?.select();
+    }, 0);
+  };
+  const typeInlineText = (value: string) => {
+    if (!inlineText || !selectedKind || typeof selectedKind !== "object" || !("Text" in selectedKind)) return;
+    setInlineText({ ...inlineText, value });
+    preview({ SetKind: { id: inlineText.id, kind: { Text: { ...selectedKind.Text, text: value } } } });
+  };
+  const closeInlineText = (keep: boolean) => {
+    if (!inlineText) return;
+    setInlineText(null);
+    if (!session) return;
+    if (keep) {
+      endGesture();
+    } else if (session.cancel_preview()) {
+      refresh(session);
+    }
+  };
 
   const commitRename = () => {
     if (renaming && renaming.value.trim()) {
@@ -3039,6 +3074,7 @@ export function App() {
             data-origin-y={view.y * dpr}
             data-frame-scale={view.zoom * dpr}
             style={{ width: viewport[0], height: viewport[1] }}
+            onDoubleClick={onCanvasDoubleClick}
             onPointerDown={onCanvasPointerDown}
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
@@ -3157,6 +3193,64 @@ export function App() {
                 }
                 return dots;
               });
+            })()}
+          {inlineText &&
+            session &&
+            selected === inlineText.id &&
+            selLocal &&
+            selParent &&
+            selectedKind &&
+            typeof selectedKind === "object" &&
+            "Text" in selectedKind &&
+            (() => {
+              // The editor lives in the block's own coordinates: one CSS
+              // matrix — the layer's transform through its parents and
+              // the view — puts it over the block however the block is
+              // turned or scaled, and sizes its type with it.
+              const t = composeT(selParent, toTransform(session.transform_of(selected)));
+              const z = view.zoom;
+              const spec = selectedKind.Text;
+              const fill = spec.fill;
+              const caret =
+                "Srgb" in fill
+                  ? `rgb(${fill.Srgb.r * 255}, ${fill.Srgb.g * 255}, ${fill.Srgb.b * 255})`
+                  : "currentColor";
+              return (
+                <textarea
+                  ref={inlineRef}
+                  className="inline-text"
+                  aria-label="Text on canvas"
+                  value={inlineText.value}
+                  spellCheck={false}
+                  style={{
+                    transform: `matrix(${t.a * z}, ${t.b * z}, ${t.c * z}, ${t.d * z}, ${view.x + t.e * z}, ${view.y + t.f * z})`,
+                    width: Math.max(spec.width, selLocal[2] - selLocal[0]) + spec.size,
+                    height: selLocal[3] - selLocal[1] + spec.size,
+                    fontFamily: `"${spec.font || "DejaVu Sans"}", sans-serif`,
+                    // The document's size is the ascent-to-descent height;
+                    // CSS wants the em, which in these faces is 0.86 of it.
+                    fontSize: spec.size * 0.86,
+                    lineHeight: `${spec.size * spec.line_height}px`,
+                    letterSpacing: spec.letter_spacing * spec.size,
+                    textAlign: spec.align === "Center" ? "center" : spec.align === "Right" ? "right" : "left",
+                    whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
+                    fontStyle: spec.italic ? "italic" : "normal",
+                    caretColor: caret,
+                  }}
+                  onChange={(e) => typeInlineText(e.target.value)}
+                  onBlur={() => closeInlineText(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      closeInlineText(false);
+                    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      closeInlineText(true);
+                    }
+                    e.stopPropagation();
+                  }}
+                />
+              );
             })()}
           {selQuad && (
             <>

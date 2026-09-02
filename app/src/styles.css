@@ -1099,3 +1099,47 @@ body {
 .curve-editor .pt {
   fill: var(--accent);
 }
+
+/* The faces the engine draws with, so a caret on the canvas walks the
+   same glyphs. Each registered name is its own family. */
+@font-face {
+  font-family: "DejaVu Sans";
+  src: url("/fonts/DejaVuSans.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Bold";
+  src: url("/fonts/DejaVuSans-Bold.ttf");
+}
+@font-face {
+  font-family: "DejaVu Serif";
+  src: url("/fonts/DejaVuSerif.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Mono";
+  src: url("/fonts/DejaVuSansMono.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Mono Oblique";
+  src: url("/fonts/DejaVuSansMono-Oblique.ttf");
+}
+
+/* Typing into a block on the canvas: the engine draws the letters, the
+   textarea only carries the caret and the selection over them. */
+.inline-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: transparent;
+  resize: none;
+  overflow: hidden;
+  z-index: 3;
+}
+.inline-text::selection {
+  background: rgba(88, 130, 255, 0.35);
+}
