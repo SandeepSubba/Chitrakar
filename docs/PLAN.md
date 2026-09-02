@@ -27,7 +27,7 @@ without reading anything else.*
   reorder, opacity/blend, rename, labelled history with jump-to-state.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
-  CMYK TIFF. Desktop app packages (deb verified locally; CI builds
+  CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~75),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
@@ -35,13 +35,12 @@ without reading anything else.*
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc.
 - **Next up (rough priority):**
-  1. PDF export (composite + embedded profile) — the last export gap.
-  2. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
+  1. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
      reference renderer (llvmpipe makes this CI-able — see
      docs/spikes/gpu-rendering.md).
-  3. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
+  2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  4. Depth: bezier handles on paths, brush engine, gradient fills, text
+  3. Depth: bezier handles on paths, brush engine, gradient fills, text
      shaping via rustybuzz/parley.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a
@@ -49,8 +48,8 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** no anti-aliasing in the CPU rasterizer
   (the GPU path brings it), transforms carry scale+translate only (no
-  rotation/shear yet), masks aren't editable on-canvas, PDF/JPEG export
-  missing.
+  rotation/shear yet), masks aren't editable on-canvas, JPEG export missing,
+  PDF/TIFF embed the composite as an image rather than live vectors.
 
 ---
 
@@ -264,7 +263,10 @@ chitrakar/
   omitted), CMYK TIFF ✅ (composite separated into ink through the press
   profile, composited over paper white, 4-channel TIFF with that profile
   embedded; refuses rather than guessing when no profile is loaded).
-  JPEG and PDF pending.
+  and PDF ✅ (one page sized from the document dpi, composite flattened over
+  paper, Flate-compressed lossless image; with a press profile the page is
+  separated into ink in an ICCBased N=4 space carrying that profile,
+  otherwise DeviceRGB). JPEG pending.
 
 ### Phase 4 — Mobile shells
 - Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.

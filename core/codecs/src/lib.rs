@@ -6,10 +6,12 @@
 //! treated as sRGB, which matches the naive pipeline in `chitrakar-color`.
 
 pub mod container;
+pub mod pdf;
 pub mod svg;
 pub mod tiff_export;
 
 pub use container::{load_chitra, save_chitra, ContainerError};
+pub use pdf::{export_pdf, PdfError};
 pub use svg::export_svg;
 pub use tiff_export::{export_cmyk_tiff, TiffError};
 

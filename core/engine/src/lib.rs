@@ -446,6 +446,21 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// Export a one-page PDF of the composite. With a press profile loaded
+    /// the page is separated into ink and carries that profile; otherwise it
+    /// is sRGB over white.
+    pub fn export_pdf(&self) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render()?;
+        chitrakar_codecs::export_pdf(
+            &surface.pixels,
+            surface.width,
+            surface.height,
+            self.doc.meta.dpi,
+            self.doc.cmyk_profile_bytes(),
+        )
+        .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Export vector layers (and embedded rasters/text) as SVG.
     pub fn export_svg(&self) -> Result<String, EngineError> {
         Ok(chitrakar_codecs::export_svg(&self.doc)?)

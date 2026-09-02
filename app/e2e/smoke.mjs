@@ -603,6 +603,18 @@ const marker = tiffBytes.subarray(0, 2).toString("latin1");
 assert(marker === "II" || marker === "MM", `TIFF byte-order marker (${marker})`);
 assert(tiffBytes.includes(iccBytes.subarray(0, 256)), "press profile embedded in TIFF");
 assert(tiffBytes.length > 10000, `TIFF carries pixel data (${tiffBytes.length} bytes)`);
+
+// 9f. PDF export, CMYK-separated because a press profile is loaded.
+const [pdfDl] = await Promise.all([
+  page.waitForEvent("download"),
+  page.click("text=Export PDF"),
+]);
+const pdfBytes = await readFile(await pdfDl.path());
+assert(pdfBytes.subarray(0, 8).toString("latin1") === "%PDF-1.7", "PDF header");
+assert(pdfBytes.subarray(-6).toString("latin1") === "%%EOF\n", "PDF trailer");
+const pdfText = pdfBytes.toString("latin1");
+assert(pdfText.includes("/ICCBased"), "PDF carries an ICC colorspace");
+assert(pdfText.includes("/N 4"), "PDF image is 4-channel CMYK");
 }
 
 await page.screenshot({ path: "editor.png" });

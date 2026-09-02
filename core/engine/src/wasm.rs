@@ -212,6 +212,11 @@ impl WasmSession {
         self.inner.render_png().map_err(to_js)
     }
 
+    /// Export a one-page PDF (CMYK-separated when a press profile is set).
+    pub fn export_pdf(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_pdf().map_err(to_js)
+    }
+
     /// Export as SVG markup.
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)

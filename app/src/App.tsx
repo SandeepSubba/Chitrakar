@@ -761,6 +761,15 @@ export function App() {
     download(session.export_png(), "untitled.png", "image/png");
   };
 
+  const exportPdf = () => {
+    if (!session) return;
+    try {
+      download(session.export_pdf(), "untitled.pdf", "application/pdf");
+    } catch (err) {
+      alert(`PDF export: ${err}`);
+    }
+  };
+
   const exportTiff = () => {
     if (!session) return;
     try {
@@ -886,6 +895,16 @@ export function App() {
         <button onClick={saveFile}>Save</button>
         <button onClick={exportPng}>Export PNG</button>
         <button onClick={exportSvg}>Export SVG</button>
+        <button
+          onClick={exportPdf}
+          title={
+            hasIcc
+              ? "PDF separated through the loaded press profile"
+              : "PDF (sRGB; load an ICC profile for CMYK separation)"
+          }
+        >
+          Export PDF
+        </button>
         {hasIcc && (
           <button
             onClick={exportTiff}
