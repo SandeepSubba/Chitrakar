@@ -60,7 +60,8 @@ without reading anything else.*
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
   free of it — and the same lines catch a resize handle. A ctrl-clicked
-  multi-selection moves as one — by drag or by
+  multi-selection — dragged out as a band over empty canvas, or built
+  ctrl-click by ctrl-click — moves as one — by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels.
   An SVG placed, dropped or pasted comes in as a group of editable shape
@@ -134,7 +135,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~178),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~350 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~354 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

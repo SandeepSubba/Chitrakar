@@ -1233,6 +1233,39 @@ export function App() {
     if (tool === "Move" && !inlineText) beginInlineText();
   };
 
+  /** A rubber band being dragged on empty canvas, in document
+   * coordinates, and whether it adds to the selection it started from. */
+  const marqueeRef = useRef<{ x0: number; y0: number; add: NodeId[] } | null>(
+    null,
+  );
+  const [marquee, setMarquee] = useState<
+    [number, number, number, number] | null
+  >(null);
+
+  /** Every top-level layer the band touches, topmost first. Nested layers
+   * are not offered: a band picks the objects on the page, and a group is
+   * one object. Locked layers, and the adjustment and filter layers that
+   * have no box of their own, are not picked. */
+  const layersInBand = (band: [number, number, number, number]): NodeId[] => {
+    if (!session) return [];
+    const [x0, y0, x1, y1] = band;
+    return layers
+      .filter(
+        (l) =>
+          l.depth === 0 &&
+          !l.locked &&
+          l.visible &&
+          l.kind !== "adjustment" &&
+          l.kind !== "filter",
+      )
+      .filter((l) => {
+        const b = session.bounds_of(l.id);
+        if (b.length !== 4) return false;
+        return b[0] < x1 && b[0] + b[2] > x0 && b[1] < y1 && b[1] + b[3] > y0;
+      })
+      .map((l) => l.id);
+  };
+
   const onCanvasPointerDown = (e: React.PointerEvent) => {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
@@ -1299,7 +1332,19 @@ export function App() {
     if (tool === "Move") {
       const hit = session.hit_test(x, y);
       if (hit === undefined) {
-        setSelected(null);
+        // Empty canvas: drag a band over what should be picked. Shift
+        // keeps what is already picked and adds to it.
+        marqueeRef.current = {
+          x0: x,
+          y0: y,
+          add: e.shiftKey ? selectionSet : [],
+        };
+        setMarquee([x, y, x, y]);
+        if (!e.shiftKey) {
+          setSelected(null);
+          setMultiSel([]);
+        }
+        (e.target as Element).setPointerCapture(e.pointerId);
         return;
       }
       // Dragging inside a selected group moves the group. Hit testing only
@@ -1335,6 +1380,17 @@ export function App() {
   };
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
+    const band = marqueeRef.current;
+    if (band) {
+      const [x, y] = docPoint(e);
+      setMarquee([
+        Math.min(band.x0, x),
+        Math.min(band.y0, y),
+        Math.max(band.x0, x),
+        Math.max(band.y0, y),
+      ]);
+      return;
+    }
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
@@ -1415,6 +1471,26 @@ export function App() {
   };
 
   const onCanvasPointerUp = () => {
+    const band = marqueeRef.current;
+    if (band) {
+      marqueeRef.current = null;
+      const rect = marquee;
+      setMarquee(null);
+      // A band with no width or height is a click on empty canvas, which
+      // has already cleared the selection.
+      if (rect && (rect[2] - rect[0] > 1 || rect[3] - rect[1] > 1)) {
+        const caught = layersInBand(rect);
+        const picked = [
+          ...band.add,
+          ...caught.filter((id) => !band.add.includes(id)),
+        ];
+        // The topmost of them leads, so the panel and the properties
+        // follow the layer a second click would grab.
+        setSelected(picked.length > 0 ? picked[picked.length - 1] : null);
+        setMultiSel(picked.length > 1 ? picked : []);
+      }
+      return;
+    }
     const drag = toolDragRef.current;
     toolDragRef.current = null;
     setGuides({ x: [], y: [] });
@@ -3524,6 +3600,16 @@ export function App() {
                 y={cropRect[1]}
                 width={cropRect[2] - cropRect[0]}
                 height={cropRect[3] - cropRect[1]}
+              />
+            </svg>
+          )}
+          {marquee && (
+            <svg className="marquee-overlay" aria-hidden="true">
+              <rect
+                x={view.x + marquee[0] * view.zoom}
+                y={view.y + marquee[1] * view.zoom}
+                width={(marquee[2] - marquee[0]) * view.zoom}
+                height={(marquee[3] - marquee[1]) * view.zoom}
               />
             </svg>
           )}

@@ -2658,6 +2658,54 @@ assert(
     (await page.locator(".panel ul li.selected").count()) === 1,
     "a row still picks after an earlier drag",
   );
+
+  // 8x13. A band dragged over empty canvas picks everything it touches;
+  // a locked layer stays out of it, and shift adds to what is picked.
+  await page.click('button[aria-label="Ellipse"]');
+  await page.mouse.move(...at(380, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 160), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  // From a bare corner across both shapes.
+  await page.mouse.move(...at(560, 380));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 200), { steps: 4 });
+  assert((await page.locator(".marquee-overlay").count()) === 1, "the band is drawn while dragging");
+  await page.mouse.move(...at(80, 80), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2 &&
+      (await page.locator(".marquee-overlay").count()) === 0,
+    "the band picked both layers and let go",
+  );
+  // Locked layers are not caught: lock the rect and band over both again.
+  await page.keyboard.press("Escape");
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).locator(".lock-toggle").click();
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Escape");
+  await page.mouse.move(...at(560, 380));
+  await page.mouse.down();
+  await page.mouse.move(...at(80, 80), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const caught = await page.locator(".panel ul li.selected, .panel ul li.multi").count();
+  assert(caught === 1, `the locked rect stays out of the band (${caught} picked)`);
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).locator(".lock-toggle").click();
+  await page.waitForTimeout(150);
+  // A click on bare canvas clears the selection, as it always did.
+  await page.mouse.click(...at(560, 380));
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
+    "a click on bare canvas still clears the selection",
+  );
+  await page.keyboard.press("Control+z"); // the ellipse
+  await page.waitForTimeout(150);
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

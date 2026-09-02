@@ -597,6 +597,7 @@ body {
 }
 
 .pen-overlay,
+.marquee-overlay,
 .snap-overlay,
 .crop-overlay {
   position: absolute;
@@ -1219,4 +1220,11 @@ body {
 }
 .lock-toggle[aria-pressed="true"] {
   color: var(--accent);
+}
+
+/* The band dragged over the canvas to pick several layers at once. */
+.marquee-overlay rect {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1;
 }
