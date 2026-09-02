@@ -43,6 +43,10 @@ without reading anything else.*
      wants a machine with Xcode/Android Studio).
   4. Depth: bezier handles on paths, brush engine, gradient fills, text
      shaping via rustybuzz/parley.
+- **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
+  the verification gate, status, ship, the engine conventions skill, and a
+  SessionStart hook (install: `/plugin marketplace add
+  SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** no anti-aliasing in the CPU rasterizer
   (the GPU path brings it), transforms carry scale+translate only (no
   rotation/shear yet), masks aren't editable on-canvas, PDF/JPEG export

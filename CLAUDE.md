@@ -59,6 +59,15 @@ bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. Env: `CHITRAKAR_CHROMIUM` (browser path override),
 `CHITRAKAR_TEST_CMYK_ICC` (enables the press-profile/proofing steps).
 
+## Claude Code plugin
+
+`tools/chitrakar-plugin/` packages this workflow: `/chitrakar:verify` (the
+full gate in one step), `/chitrakar:status`, `/chitrakar:ship`, an
+`engine-conventions` skill that loads when editing `core/`, and a
+SessionStart hook reporting live branch/dirty state. Install with
+`/plugin marketplace add SandeepSubba/Chitrakar` then
+`/plugin install chitrakar@chitrakar`.
+
 ## Working agreement
 
 Before committing: fmt + clippy clean + all tests green, and rebuild
