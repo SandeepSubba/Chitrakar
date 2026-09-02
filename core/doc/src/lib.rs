@@ -8,7 +8,7 @@
 mod node;
 
 pub use node::{
-    Adjustment, BlendMode, Filter, Gradient, GradientStop, Mask, MaskKind, Node, NodeKind,
+    Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Mask, MaskKind, Node, NodeKind,
     RasterRef, Stroke, TextSpec, Transform, VectorShape,
 };
 
@@ -332,6 +332,11 @@ impl Document {
                     mask: prev.map(Box::new),
                 })
             }
+            Command::SetEffects { id, effects } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = std::mem::replace(&mut node.effects, effects);
+                Ok(Command::SetEffects { id, effects: prev })
+            }
             Command::MoveNode { id, parent, index } => {
                 if id == self.root {
                     return Err(DocError::CannotRemoveRoot);
@@ -476,6 +481,13 @@ pub enum Command {
     SetMask {
         id: NodeId,
         mask: Option<Box<Mask>>,
+    },
+    /// Replace a node's whole effect list. Whole rather than per-effect so
+    /// adding, removing, reordering and retuning are all one command with
+    /// one obvious inverse.
+    SetEffects {
+        id: NodeId,
+        effects: Vec<Effect>,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).

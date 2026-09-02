@@ -20,8 +20,8 @@ pub mod tiles;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, Filter, Gradient, Mask, MaskKind, NodeId, NodeKind,
-    Transform, VectorShape,
+    Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Mask, MaskKind, NodeId,
+    NodeKind, Transform, VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -288,7 +288,24 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
 /// recursive form and `node_bounds` is the one that finishes the job.
 fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     let node = doc.node(id)?;
-    Ok(match &node.kind {
+    // Effects reach past the layer's own edges, in the parent space this
+    // whole function answers in, so they widen the box everything else —
+    // dirty regions, group extents, hit-test culling — is cut from.
+    let effect_pad = node
+        .effects
+        .iter()
+        .map(Effect::reach)
+        .fold(0.0f32, f32::max);
+    let grow = |b: Bounds| match b {
+        Bounds::Rect(x0, y0, x1, y1) if effect_pad > 0.0 => Bounds::Rect(
+            x0 - effect_pad,
+            y0 - effect_pad,
+            x1 + effect_pad,
+            y1 + effect_pad,
+        ),
+        other => other,
+    };
+    Ok(grow(match &node.kind {
         NodeKind::Adjustment(_) | NodeKind::Filter(_) => Bounds::Everything,
         NodeKind::Group => {
             let mut acc = Bounds::None;
@@ -324,7 +341,7 @@ fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
         }
-    })
+    }))
 }
 
 /// A node's bounds in its *own* space, before its transform — the box a
@@ -439,6 +456,78 @@ fn render_group(
         if !node.visible || node.opacity <= 0.0 {
             continue;
         }
+        // Effects are drawn from the layer's own silhouette, so a layer
+        // that has any must exist as a picture before they can be. An
+        // adjustment or filter has no silhouette — it is a transformation
+        // of what is below — so effects on one mean nothing and are
+        // ignored rather than given a surface.
+        let effected = !node.effects.is_empty()
+            && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+        if !effected {
+            render_child(doc, child, dst, clip, parent, node.blend)?;
+            continue;
+        }
+        let scale = max_scale(parent);
+        let reach = node
+            .effects
+            .iter()
+            .map(Effect::reach)
+            .fold(0.0f32, f32::max);
+        let pad = (reach * scale).ceil() as u32;
+        // The layer has to be drawn wherever it could feed a visible
+        // effect pixel, which is further out than the region being
+        // repainted — by exactly the effects' reach.
+        let grown = ClipRect {
+            x0: clip.x0.saturating_sub(pad),
+            y0: clip.y0.saturating_sub(pad),
+            x1: (clip.x1 + pad).min(dst.width),
+            y1: (clip.y1 + pad).min(dst.height),
+        };
+        let extent = match bounds_in_parent_space(doc, child)? {
+            Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
+            other => other,
+        };
+        let layer_clip = match extent.to_clip(dst.width, dst.height) {
+            Some(b) => b.intersect(grown),
+            None => continue,
+        };
+        if layer_clip.is_empty() {
+            continue;
+        }
+        let mut layer = Surface::new(dst.width, dst.height);
+        // Normal into the layer's own transparent surface; the node's blend
+        // belongs to the composite below, once the effects are in place.
+        render_child(
+            doc,
+            child,
+            &mut layer,
+            layer_clip,
+            parent,
+            BlendMode::Normal,
+        )?;
+        for effect in &node.effects {
+            draw_effect(
+                dst, &layer, doc, effect, scale, layer_clip, clip, node.blend,
+            );
+        }
+        composite(dst, &layer, 1.0, node.blend, clip.intersect(layer_clip));
+    }
+    Ok(())
+}
+
+/// Draw one layer, with its own blend supplied rather than read, so a layer
+/// being staged for its effects can be painted plainly into its own surface
+/// and blended once at the end.
+fn render_child(
+    doc: &Document,
+    child: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+    blend: BlendMode,
+) -> Result<(), DocError> {
+    {
+        let node = doc.node(child)?;
         // Everything below draws in the parent's space, so a node's own
         // transform is composed onto whatever its ancestors contribute; a
         // mask is authored in that same parent space.
@@ -463,29 +552,28 @@ fn render_group(
                 };
                 let sub_clip = match extent.to_clip(dst.width, dst.height) {
                     Some(b) => b.intersect(clip),
-                    None => continue,
+                    None => return Ok(()),
                 };
                 if sub_clip.is_empty() {
-                    continue;
+                    return Ok(());
                 }
                 // A group that composites like its children individually
                 // would needs no surface of its own: source-over is
                 // associative, so painting straight into the destination
                 // gives the same pixels for a fraction of the cost.
                 if node.opacity >= 1.0
-                    && node.blend == BlendMode::Normal
+                    && blend == BlendMode::Normal
                     && mask.mask.is_none()
                     && !reads_backdrop(doc, child)?
                 {
-                    render_group(doc, child, dst, sub_clip, t)?;
-                    continue;
+                    return render_group(doc, child, dst, sub_clip, t);
                 }
                 let mut sub = Surface::new(dst.width, dst.height);
                 render_group(doc, child, &mut sub, sub_clip, t)?;
                 if let Some(m) = mask.mask {
                     apply_mask(doc, m, &mut sub, sub_clip, parent);
                 }
-                composite(dst, &sub, node.opacity, node.blend, sub_clip);
+                composite(dst, &sub, node.opacity, blend, sub_clip);
             }
             NodeKind::Vector {
                 shape,
@@ -501,18 +589,7 @@ fn render_group(
                     }
                 };
                 if let Some(paint) = fill_paint {
-                    paint_shape(
-                        dst,
-                        doc,
-                        shape,
-                        t,
-                        &paint,
-                        node.blend,
-                        clip,
-                        None,
-                        &[],
-                        mask,
-                    );
+                    paint_shape(dst, doc, shape, t, &paint, blend, clip, None, &[], mask);
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
@@ -522,7 +599,7 @@ fn render_group(
                         shape,
                         t,
                         &Paint::Solid(color),
-                        node.blend,
+                        blend,
                         clip,
                         Some(stroke.width),
                         &flatten_widths(shape, &stroke.widths),
@@ -533,7 +610,7 @@ fn render_group(
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
-                        draw_raster(dst, doc, res, t, node.opacity, node.blend, clip, mask);
+                        draw_raster(dst, doc, res, t, node.opacity, blend, clip, mask);
                     }
                 }
             }
@@ -564,12 +641,90 @@ fn render_group(
                 clip,
                 max_scale(parent),
             ),
-            NodeKind::Text(spec) => {
-                draw_text(dst, doc, spec, t, node.opacity, node.blend, clip, mask)
-            }
+            NodeKind::Text(spec) => draw_text(dst, doc, spec, t, node.opacity, blend, clip, mask),
         }
     }
     Ok(())
+}
+
+/// Paint one of a layer's effects beneath it, given the layer already
+/// rendered on its own surface.
+///
+/// `layer_clip` is where that surface actually holds the layer (the visible
+/// region grown by the effect's reach); `clip` is what may be written.
+/// `scale` carries the effect's parameters — written in the layer's parent
+/// space — into device pixels, so a shadow grows with the group it is in
+/// and with the zoom.
+#[allow(clippy::too_many_arguments)]
+fn draw_effect(
+    dst: &mut Surface,
+    layer: &Surface,
+    doc: &Document,
+    effect: &Effect,
+    scale: f32,
+    layer_clip: ClipRect,
+    clip: ClipRect,
+    blend: BlendMode,
+) {
+    match effect {
+        Effect::DropShadow {
+            dx,
+            dy,
+            blur,
+            color,
+            opacity,
+        } => {
+            if *opacity <= 0.0 {
+                return;
+            }
+            // The shadow is the layer's alpha in one colour: silhouette,
+            // not picture, which is why a shadow of a photograph is a
+            // shape rather than a grey copy of the photograph.
+            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let mut shadow = Surface::new(dst.width, dst.height);
+            for y in layer_clip.y0..layer_clip.y1 {
+                for x in layer_clip.x0..layer_clip.x1 {
+                    let i = (y * dst.width + x) as usize;
+                    shadow.pixels[i] = scale_alpha(tint, layer.pixels[i].a);
+                }
+            }
+            blur::gaussian_blur(&mut shadow, layer_clip, blur * scale);
+            // The offset is applied on the way out, sampled between pixels
+            // so a sub-pixel offset (or a fractional zoom) doesn't jump.
+            let (ox, oy) = (dx * scale, dy * scale);
+            let write = clip.intersect(ClipRect {
+                x0: layer_clip.x0,
+                y0: layer_clip.y0,
+                x1: layer_clip.x1,
+                y1: layer_clip.y1,
+            });
+            let (lo_x, hi_x) = (layer_clip.x0 as f32, layer_clip.x1 as f32 - 1.0);
+            let (lo_y, hi_y) = (layer_clip.y0 as f32, layer_clip.y1 as f32 - 1.0);
+            for y in write.y0..write.y1 {
+                for x in write.x0..write.x1 {
+                    let (sx, sy) = (x as f32 - ox, y as f32 - oy);
+                    if sx < lo_x - 1.0 || sy < lo_y - 1.0 || sx > hi_x + 1.0 || sy > hi_y + 1.0 {
+                        continue;
+                    }
+                    let (fx, fy) = (sx.floor(), sy.floor());
+                    let (tx, ty) = (sx - fx, sy - fy);
+                    let at = |px: f32, py: f32| {
+                        let px = px.clamp(lo_x, hi_x) as u32;
+                        let py = py.clamp(lo_y, hi_y) as u32;
+                        shadow.pixels[(py * shadow.width + px) as usize]
+                    };
+                    let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
+                    let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
+                    let src = lerp(top, bottom, ty);
+                    if src.a <= 0.0 {
+                        continue;
+                    }
+                    let i = (y * dst.width + x) as usize;
+                    dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
+                }
+            }
+        }
+    }
 }
 
 /// Authored color → working space: CMYK goes through the document's press
@@ -2462,6 +2617,133 @@ mod tests {
         assert!(
             diff < ink * 0.1,
             "magnified text differs from native by {diff} over {ink} of ink"
+        );
+    }
+
+    #[test]
+    fn a_drop_shadow_falls_where_it_is_aimed_and_leaves_the_layer_alone() {
+        // The shadow is the layer's silhouette in one colour, offset and
+        // blurred, painted behind it: so it darkens the offset side, the
+        // layer's own pixels are untouched, and nothing lands on the side
+        // it was aimed away from.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        let plain = render(&doc).unwrap();
+        assert_eq!(
+            plain.get(42, 42).a,
+            0.0,
+            "nothing below-right to begin with"
+        );
+
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 6.0,
+                dy: 6.0,
+                blur: 2.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.8,
+            }],
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(30, 30),
+            plain.get(30, 30),
+            "the layer's own pixels are untouched"
+        );
+        let shadowed = s.get(42, 42);
+        assert!(
+            shadowed.a > 0.5 && shadowed.r < 0.05,
+            "the shadow lands below-right, dark: {shadowed:?}"
+        );
+        assert_eq!(
+            s.get(14, 14).a,
+            0.0,
+            "and nothing falls on the side it points away from"
+        );
+        // It reaches outside the layer, so the layer's bounds must say so.
+        match node_bounds(&doc, id).unwrap() {
+            Bounds::Rect(_, _, x1, y1) => {
+                assert!(x1 > 46.0 && y1 > 46.0, "bounds grew for the shadow");
+            }
+            other => panic!("expected a rect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_shadow_is_cast_by_the_silhouette_not_the_colours() {
+        // Two layers of different colours cast the same shadow, and a
+        // half-transparent layer casts a fainter one — that is what makes
+        // it a shadow rather than a tinted copy.
+        let shadow_at = |color: AuthoredColor, opacity: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("r", 20.0, 20.0, color),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 8.0,
+                    dy: 8.0,
+                    blur: 0.0,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+            render(&doc).unwrap().get(46, 46)
+        };
+        let red = shadow_at(RED, 1.0);
+        let blue = shadow_at(
+            AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            1.0,
+        );
+        assert_eq!(red, blue, "colour does not change the silhouette");
+        let faint = shadow_at(RED, 0.4);
+        assert!(
+            faint.a < red.a * 0.6 && faint.a > 0.0,
+            "a fainter layer casts a fainter shadow: {} vs {}",
+            faint.a,
+            red.a
         );
     }
 

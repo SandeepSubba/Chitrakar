@@ -244,6 +244,40 @@ pub struct Node {
     pub blend: BlendMode,
     #[serde(default)]
     pub mask: Option<Mask>,
+    /// Effects drawn around the layer, bottom-most first. Live parameters
+    /// like everything else: the layer's own pixels are untouched.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+}
+
+/// A live effect attached to a layer. Effects are rendered from the layer's
+/// own composite, so they follow it when it moves, turns, or changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Effect {
+    /// The layer's silhouette, blurred and offset, painted behind it.
+    /// `dx`/`dy` and `blur` are in the layer's parent space, so a shadow
+    /// scales and turns with the group it is in.
+    DropShadow {
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: AuthoredColor,
+        opacity: f32,
+    },
+}
+
+impl Effect {
+    /// How far, in the space the effect is written in, it can reach beyond
+    /// the layer's own bounds — what bounds and dirty regions must grow by.
+    pub fn reach(&self) -> f32 {
+        match self {
+            // Three iterated box blurs reach about 3σ; round up generously,
+            // then add the offset, which can point either way.
+            Effect::DropShadow { dx, dy, blur, .. } => {
+                blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
+            }
+        }
+    }
 }
 
 impl Node {
@@ -256,6 +290,7 @@ impl Node {
             visible: true,
             blend: BlendMode::Normal,
             mask: None,
+            effects: Vec::new(),
         }
     }
 

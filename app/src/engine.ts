@@ -77,6 +77,19 @@ export interface Mask {
   invert: boolean;
 }
 
+/** A live effect drawn around a layer, from the layer's own composite.
+ * Offsets and blur are in the layer's parent space, so an effect follows
+ * the group it is in. */
+export type Effect = {
+  DropShadow: {
+    dx: number;
+    dy: number;
+    blur: number;
+    color: AuthoredColor;
+    opacity: number;
+  };
+};
+
 export interface TextSpec {
   text: string;
   size: number;
@@ -133,6 +146,7 @@ export type Command =
   | { SetKind: { id: NodeId; kind: NodeKind } }
   | { SetName: { id: NodeId; name: string } }
   | { SetMask: { id: NodeId; mask: Mask | null } }
+  | { SetEffects: { id: NodeId; effects: Effect[] } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
   | { Batch: Command[] };
 
@@ -145,6 +159,7 @@ export interface LayerInfo {
   opacity: number;
   blend: BlendMode;
   has_mask: boolean;
+  has_effects: boolean;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

@@ -605,6 +605,16 @@ body {
   pointer-events: none;
 }
 
+/* The effect block sits with the other layer properties but reads as one
+   unit, so it gets a hairline rule above it rather than a heading. */
+.effect {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line, rgb(255 255 255 / 0.08));
+}
+
 /* Alignment guides: one hairline, drawn in the accent so it reads as
    live feedback rather than as part of the artwork. */
 .snap-overlay line {

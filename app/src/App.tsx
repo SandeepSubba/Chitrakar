@@ -5,6 +5,7 @@ import {
   BlendMode,
   AuthoredColor,
   Command,
+  Effect,
   GradientStop,
   LayerInfo,
   Mask,
@@ -1638,14 +1639,38 @@ export function App() {
 
   let selectedKind: NodeKind | null = null;
   let selectedMask: Mask | null = null;
+  let selectedEffects: Effect[] = [];
   if (session && selectedLayer) {
     try {
       selectedKind = JSON.parse(session.kind_json(selectedLayer.id)) as NodeKind;
       selectedMask = JSON.parse(session.mask_json(selectedLayer.id)) as Mask | null;
+      selectedEffects = JSON.parse(session.effects_json(selectedLayer.id)) as Effect[];
     } catch {
       selectedKind = null;
     }
   }
+
+  /** Replace the selected layer's effect list. Slider drags preview, so a
+   * whole drag is one history entry. */
+  const setEffects = (effects: Effect[], gesture = false) => {
+    if (!selectedLayer) return;
+    const cmd: Command = { SetEffects: { id: selectedLayer.id, effects } };
+    if (gesture) preview(cmd);
+    else run(cmd);
+  };
+
+  /** Rewrite one field of the layer's single drop shadow. */
+  const tuneShadow = (
+    patch: Partial<Effect["DropShadow"]>,
+    gesture = false,
+  ) => {
+    const current = selectedEffects[0];
+    if (!current) return;
+    setEffects(
+      [{ DropShadow: { ...current.DropShadow, ...patch } }],
+      gesture,
+    );
+  };
 
   /** Copy the selected layer and its contents, and select the copy — the
    * copy is what you want to move next. */
@@ -2470,6 +2495,73 @@ export function App() {
                   cmyk={cmyk}
                 />
               )}
+              {selectedEffects.length === 0 ? (
+                <button
+                  className="mask-button"
+                  onClick={() =>
+                    setEffects([
+                      {
+                        DropShadow: {
+                          dx: 6,
+                          dy: 6,
+                          blur: 6,
+                          color: cmyk ? hexToCmykColor("#000000") : hexColor("#000000"),
+                          opacity: 0.45,
+                        },
+                      },
+                    ])
+                  }
+                >
+                  Add drop shadow
+                </button>
+              ) : (
+                <div className="effect">
+                  {(
+                    [
+                      ["Shadow X", "dx", -60, 60, 1],
+                      ["Shadow Y", "dy", -60, 60, 1],
+                      ["Shadow blur", "blur", 0, 40, 0.5],
+                      ["Shadow opacity", "opacity", 0, 1, 0.01],
+                    ] as const
+                  ).map(([label, field, min, max, step]) => (
+                    <label key={field}>
+                      {label} {selectedEffects[0].DropShadow[field].toFixed(2)}
+                      <input
+                        type="range"
+                        min={min}
+                        max={max}
+                        step={step}
+                        value={selectedEffects[0].DropShadow[field]}
+                        onChange={(e) =>
+                          tuneShadow({ [field]: Number(e.target.value) }, true)
+                        }
+                        onPointerUp={endGesture}
+                        onKeyUp={endGesture}
+                        onBlur={endGesture}
+                        aria-label={label}
+                      />
+                    </label>
+                  ))}
+                  <label className="row">
+                    Shadow colour
+                    <input
+                      type="color"
+                      value={colorToHex(selectedEffects[0].DropShadow.color)}
+                      onChange={(e) =>
+                        tuneShadow({
+                          color: cmyk
+                            ? hexToCmykColor(e.target.value)
+                            : hexColor(e.target.value),
+                        })
+                      }
+                      aria-label="Shadow colour"
+                    />
+                    <button className="mask-button" onClick={() => setEffects([])}>
+                      Remove
+                    </button>
+                  </label>
+                </div>
+              )}
               {selectedMask === null ? (
                 <button className="mask-button" onClick={addMask}>
                   Add ellipse mask
@@ -2572,6 +2664,11 @@ export function App() {
                 {l.has_mask && (
                   <span className="kind" title="This layer has a mask">
                     <Icon name="mask" size={14} />
+                  </span>
+                )}
+                {l.has_effects && (
+                  <span className="kind" title="This layer has effects">
+                    <Icon name="shadow" size={14} />
                   </span>
                 )}
               </li>

@@ -1263,6 +1263,52 @@ assert(
   assert((await canvasPixel(20, 20))[3] === 0, "and not outside the drag");
 }
 
+// 8x2. Drop shadow: a live effect on the selected layer. The rect spans
+// (100,100)-(500,300) in this 600x400 document, so just past its
+// bottom-right corner is empty ground for the shadow to land on.
+{
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(503, 200))[3] === 0, "ground beside the rect is clear");
+  await page.click("text=Add drop shadow");
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: join(OUT, "drop-shadow.png") });
+  const shade = await canvasPixel(503, 200);
+  assert(shade[3] > 40 && shade[0] < 120, `a shadow fell to the right (${shade})`);
+  assert(
+    (await canvasPixel(300, 200))[3] === 255,
+    "and the layer itself is unchanged",
+  );
+  assert(
+    (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 1,
+    "the layer row marks that it carries effects",
+  );
+  // Aiming it the other way moves the shadow with it.
+  const xSlider = page.locator('input[aria-label="Shadow X"]');
+  await xSlider.fill("-30");
+  await xSlider.dispatchEvent("pointerup");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(503, 200))[3] === 0,
+    "re-aiming the shadow vacated where it was",
+  );
+  const behind = await canvasPixel(80, 200);
+  assert(behind[3] > 20, `and it now falls to the left (${behind})`);
+  await page.click("text=Remove");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(80, 200))[3] === 0, "removing it clears the ground");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(80, 200))[3] > 20, "and undo brings the shadow back");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
+    "undo unwinds the shadow entirely",
+  );
+}
+
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {

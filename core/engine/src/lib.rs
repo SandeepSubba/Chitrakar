@@ -148,6 +148,7 @@ impl Session {
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
             | Command::SetBlendMode { id, .. }
+            | Command::SetEffects { id, .. }
             | Command::SetTransform { id, .. }
             | Command::SetKind { id, .. }
             | Command::SetName { id, .. }
@@ -223,6 +224,11 @@ impl Session {
             Command::SetMask { id, mask } => format!(
                 "{} mask on {}",
                 if mask.is_some() { "Set" } else { "Clear" },
+                name(id)
+            ),
+            Command::SetEffects { id, effects } => format!(
+                "{} effects on {}",
+                if effects.is_empty() { "Clear" } else { "Set" },
                 name(id)
             ),
             Command::MoveNode { id, .. } => format!("Move {}", name(id)),
@@ -892,6 +898,7 @@ impl Session {
                 opacity: node.opacity,
                 blend: node.blend,
                 has_mask: node.mask.is_some(),
+                has_effects: !node.effects.is_empty(),
                 depth,
                 parent: group.0,
                 index,
@@ -945,6 +952,12 @@ impl Session {
     /// A node's mask as JSON (`null` when unmasked) — edited via `SetMask`.
     pub fn mask_json(&self, id: NodeId) -> Result<String, EngineError> {
         serde_json::to_string(&self.doc.node(id)?.mask)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A node's effect list as JSON.
+    pub fn effects_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.effects)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -1073,6 +1086,7 @@ pub struct LayerInfo {
     pub opacity: f32,
     pub blend: chitrakar_doc::BlendMode,
     pub has_mask: bool,
+    pub has_effects: bool,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,
@@ -1208,6 +1222,51 @@ mod tests {
         assert_eq!(a4.present_size(), (2480, 3508));
         // And nothing asks for less than the document's own pixels.
         assert_eq!(small.set_view_scale(0.25), 1.0);
+    }
+
+    #[test]
+    fn a_drop_shadow_repaints_the_ground_it_covers() {
+        // The shadow reaches outside the layer, so the dirty region has to
+        // as well. If it does not, adding or removing one leaves a stain
+        // where the cache was never revisited.
+        let mut session = Session::new(48, 48, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 16.0, 16.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(12.0, 12.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 7.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![shadow],
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        // And taking it away has to clear the ground it covered.
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        assert!(session.undo().unwrap(), "the shadow comes back");
+        assert_cache_matches_fresh(&mut session);
     }
 
     #[test]

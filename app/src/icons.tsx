@@ -29,6 +29,7 @@ export type IconName =
   | "ungroup"
   | "brush"
   | "duplicate"
+  | "shadow"
   | "trash"
   | "eye"
   | "eyeOff"
@@ -267,6 +268,14 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M4 4h16M4 20h16" />
       <rect x="7" y="10" width="10" height="4" rx="1" />
+    </>
+  ),
+  // A shape with its own shadow cast behind it, offset the way the
+  // default effect is.
+  shadow: (
+    <>
+      <rect x="8" y="8" width="12" height="12" rx="1.5" fill="currentColor" stroke="none" opacity="0.45" />
+      <rect x="4" y="4" width="12" height="12" rx="1.5" />
     </>
   ),
   duplicate: (
