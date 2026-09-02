@@ -106,6 +106,11 @@ pub enum VectorShape {
     Rect {
         width: f32,
         height: f32,
+        /// Corner radius, clamped at render time to half the shorter side.
+        /// Additive: a document written before rounded corners existed
+        /// loads with square ones, which is what it had.
+        #[serde(default)]
+        radius: f32,
     },
     Ellipse {
         rx: f32,

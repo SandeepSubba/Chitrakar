@@ -16,7 +16,7 @@ export type AuthoredColor =
   | { Cmyk: { c: number; m: number; y: number; k: number; a: number } };
 
 export type VectorShape =
-  | { Rect: { width: number; height: number } }
+  | { Rect: { width: number; height: number; radius: number } }
   | { Ellipse: { rx: number; ry: number } }
   | {
       Path: {

@@ -180,7 +180,7 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
 
 fn shape_size(shape: &VectorShape) -> (f32, f32) {
     match shape {
-        VectorShape::Rect { width, height } => (*width, *height),
+        VectorShape::Rect { width, height, .. } => (*width, *height),
         VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
         // Path anchors are normalized to a (0,0) origin on creation; local
         // size is their extent.
@@ -1168,7 +1168,11 @@ fn flatten_widths(shape: &VectorShape, widths: &[f32]) -> Vec<f32> {
 /// implicitly, the SVG convention).
 fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     match shape {
-        VectorShape::Rect { width, height } => x >= 0.0 && y >= 0.0 && x < *width && y < *height,
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        } => rounded_rect_distance(*width, *height, *radius, x, y) <= 0.0,
         VectorShape::Ellipse { rx, ry } => {
             let (nx, ny) = ((x - rx) / rx, (y - ry) / ry);
             nx * nx + ny * ny <= 1.0
@@ -1191,6 +1195,18 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
             inside
         }
     }
+}
+
+/// Signed distance from a point to a rounded rectangle's edge: negative
+/// inside, zero on the edge, positive outside. One formula covers the
+/// sides, the corners and a radius of zero, which is why the square case
+/// needs no branch of its own.
+fn rounded_rect_distance(width: f32, height: f32, radius: f32, x: f32, y: f32) -> f32 {
+    let (hw, hh) = (width / 2.0, height / 2.0);
+    let r = radius.clamp(0.0, hw.min(hh));
+    let qx = (x - hw).abs() - (hw - r);
+    let qy = (y - hh).abs() - (hh - r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
 /// Where the closest point on a segment lies along it, 0 at `a` and 1 at
@@ -1252,10 +1268,13 @@ fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32
         return false;
     }
     match shape {
+        // Inside already; the band is the outermost `width` of that, which
+        // the signed distance gives directly however round the corners are.
         VectorShape::Rect {
             width: w,
             height: h,
-        } => x < width || y < width || x >= w - width || y >= h - width,
+            radius,
+        } => rounded_rect_distance(*w, *h, *radius, x, y) > -width,
         VectorShape::Ellipse { rx, ry } => {
             let (irx, iry) = ((rx - width).max(0.0), (ry - width).max(0.0));
             if irx <= 0.0 || iry <= 0.0 {
@@ -1441,8 +1460,20 @@ fn pixel_coverage(
     // An axis-aligned rect fill has an exact answer, so take it. Rect fills
     // cover the largest areas, and this is both cheaper than sampling and
     // not an approximation of it.
-    if let (VectorShape::Rect { width, height }, None) = (shape, stroke_width) {
-        return rect_coverage(*width, *height, t, inv, px, py);
+    // Only a square-cornered one: the exact answer is a product of two 1-D
+    // overlaps, which a rounded corner is not.
+    if let (
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        },
+        None,
+    ) = (shape, stroke_width)
+    {
+        if *radius <= 0.0 {
+            return rect_coverage(*width, *height, t, inv, px, py);
+        }
     }
     let covers = |sx: f32, sy: f32| {
         let (x, y) = inv.at(sx, sy);
@@ -2037,6 +2068,7 @@ mod tests {
             VectorShape::Rect {
                 width: w,
                 height: h,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -2328,6 +2360,7 @@ mod tests {
                 shape: VectorShape::Rect {
                     width: 32.0,
                     height: 32.0,
+                    radius: 0.0,
                 },
                 fill: Some(RED),
                 stroke: None,
@@ -2886,6 +2919,92 @@ mod tests {
         b: 0.0,
         a: 1.0,
     };
+
+    #[test]
+    fn a_corner_radius_rounds_the_rectangle_off() {
+        // The corner is cut away, the sides stay flush, and the cut
+        // follows a circle rather than a chamfer.
+        let build = |radius: f32| {
+            let mut doc = Document::new(40, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "r",
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 30.0,
+                    radius,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(RED);
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc
+        };
+        let square = render(&build(0.0)).unwrap();
+        assert_eq!(square.get(1, 1).a, 1.0, "square-cornered to begin with");
+
+        let round = render(&build(10.0)).unwrap();
+        assert_eq!(round.get(1, 1).a, 0.0, "the corner is cut away");
+        assert_eq!(round.get(15, 1).a, 1.0, "the middle of the top edge stays");
+        assert_eq!(round.get(1, 15).a, 1.0, "and so does the left edge");
+        assert_eq!(round.get(15, 15).a, 1.0, "and the inside");
+        // On the corner circle: the radius runs from (10,10) outwards, so
+        // 10 - 10/sqrt2 ~ 2.93 along the diagonal is just inside it.
+        assert_eq!(round.get(3, 3).a, 1.0, "the cut follows a circle");
+        assert_eq!(round.get(2, 2).a, 0.0, "just outside it, nothing");
+        // All four corners, and a bigger radius cuts more.
+        for (x, y) in [(38, 1), (1, 38), (38, 38)] {
+            assert_eq!(round.get(x, y).a, 0.0, "corner ({x},{y}) is rounded too");
+        }
+        let capsule = render(&build(999.0)).unwrap();
+        assert_eq!(capsule.get(15, 15).a, 1.0, "an absurd radius still draws");
+        assert_eq!(
+            capsule.get(3, 3).a,
+            0.0,
+            "clamped to a circle, not inverted"
+        );
+        assert_eq!(capsule.get(1, 15).a, 1.0, "which still reaches the sides");
+    }
+
+    #[test]
+    fn a_rounded_rectangle_strokes_round_the_corner() {
+        // The inner band follows the rounded edge: present just inside the
+        // curve, absent in the middle.
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "r",
+            VectorShape::Rect {
+                width: 30.0,
+                height: 30.0,
+                radius: 10.0,
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 3.0,
+                widths: Vec::new(),
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert!(s.get(4, 4).a > 0.5, "the band turns the corner");
+        assert_eq!(s.get(15, 15).a, 0.0, "and leaves the middle empty");
+        assert!(s.get(15, 1).a > 0.5, "the straight edges still carry it");
+    }
 
     #[test]
     fn an_outline_hugs_the_shape_to_the_width_it_is_given() {
@@ -4225,6 +4344,7 @@ mod tests {
             VectorShape::Rect {
                 width: 10.0,
                 height: 10.0,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { stroke, .. } = &mut node.kind {

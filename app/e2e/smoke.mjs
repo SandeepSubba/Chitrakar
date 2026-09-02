@@ -1436,6 +1436,22 @@ assert(
   assert((await canvasPixel(20, 20))[3] === 0, "and not outside the drag");
 }
 
+// 8x1b. Corner radius: the rect's corners round off and its sides stay.
+{
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  // The rect spans (100,100)-(500,300) here.
+  assert((await canvasPixel(103, 103))[3] === 255, "the corner starts square");
+  await setSlider("Corner radius", 60);
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(103, 103))[3] === 0, "the corner is rounded away");
+  assert((await canvasPixel(300, 103))[3] === 255, "the top edge stays flush");
+  assert((await canvasPixel(103, 200))[3] === 255, "and so does the left edge");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(103, 103))[3] === 255, "and it undoes as one step");
+}
+
 // 8x2. Drop shadow: a live effect on the selected layer. The rect spans
 // (100,100)-(500,300) in this 600x400 document, so just past its
 // bottom-right corner is empty ground for the shadow to land on.

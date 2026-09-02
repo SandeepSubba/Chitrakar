@@ -1105,6 +1105,7 @@ mod tests {
             VectorShape::Rect {
                 width: w,
                 height: h,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -1826,6 +1827,7 @@ mod tests {
             chitrakar_doc::VectorShape::Rect {
                 width: 4.0,
                 height: 4.0,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -1870,6 +1872,7 @@ mod tests {
             chitrakar_doc::VectorShape::Rect {
                 width: 4.0,
                 height: 4.0,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {

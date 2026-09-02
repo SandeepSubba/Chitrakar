@@ -1088,7 +1088,7 @@ export function App() {
     shapeCount.current += 1;
     const shape =
       drag.tool === "Rect"
-        ? { Rect: { width: w, height: h } }
+        ? { Rect: { width: w, height: h, radius: 0 } }
         : { Ellipse: { rx: w / 2, ry: h / 2 } };
     run({
       AddNode: {
@@ -3464,6 +3464,16 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
           slider("Stroke width", v.stroke.width, 1, 50, 1, (w) =>
             patch({ stroke: { ...v.stroke!, width: w } }),
           )}
+        {"Rect" in v.shape &&
+          (() => {
+            const rect = v.shape.Rect;
+            // Half the shorter side is where the corners meet and the rect
+            // becomes a capsule; past that there is nothing left to round.
+            const most = Math.max(1, Math.min(rect.width, rect.height) / 2);
+            return slider("Corner radius", rect.radius ?? 0, 0, most, 0.5, (r) =>
+              patch({ shape: { Rect: { ...rect, radius: r } } }),
+            );
+          })()}
         {"Path" in v.shape &&
           (() => {
             const path = ("Path" in v.shape && v.shape.Path) as Extract<

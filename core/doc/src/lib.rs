@@ -557,6 +557,7 @@ mod tests {
             VectorShape::Rect {
                 width: 10.0,
                 height: 10.0,
+                radius: 0.0,
             },
         ))
     }

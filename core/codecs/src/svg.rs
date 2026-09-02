@@ -70,10 +70,22 @@ fn write_children(
                     defs,
                 );
                 match shape {
-                    VectorShape::Rect { width, height } => {
+                    VectorShape::Rect {
+                        width,
+                        height,
+                        radius,
+                    } => {
+                        // SVG rounds corners with rx, clamped the same way
+                        // the renderer clamps its own radius.
+                        let r = radius.clamp(0.0, (width / 2.0).min(height / 2.0));
+                        let round = if r > 0.0 {
+                            format!(r#" rx="{r}""#)
+                        } else {
+                            String::new()
+                        };
                         let _ = writeln!(
                             out,
-                            r#"{pad}<rect width="{width}" height="{height}"{common}{paint}/>"#
+                            r#"{pad}<rect width="{width}" height="{height}"{round}{common}{paint}/>"#
                         );
                     }
                     VectorShape::Ellipse { rx, ry } => {
@@ -388,6 +400,7 @@ mod tests {
             VectorShape::Rect {
                 width: 40.0,
                 height: 30.0,
+                radius: 0.0,
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut rect.kind {
@@ -438,11 +451,33 @@ mod tests {
             r##"<rect width="40" height="30" transform="matrix(1 0 0 1 10 20)" fill="#ff0000""##
         ));
         assert!(
+            !svg.contains(" rx="),
+            "a square-cornered rect carries no rx"
+        );
+        assert!(
             svg.contains(r#"href="data:image/png;base64,"#),
             "raster embedded"
         );
         assert!(svg.contains("a &lt; b"), "text XML-escaped");
         assert!(svg.contains(r#"font-size="24""#));
+
+        // A rounded rectangle carries its radius as SVG's own rx.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::vector(
+                "round",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    // Deliberately past half the shorter side, to check the
+                    // export clamps it the way the renderer does.
+                    radius: 40.0,
+                },
+            )),
+        })
+        .unwrap();
+        assert!(export_svg(&doc).unwrap().contains(r#" rx="15""#));
 
         // A second block, with newlines and tracking: each line is its own
         // tspan a line-height down, and the tracking rides on the <text>.
@@ -526,6 +561,7 @@ mod tests {
                 chitrakar_doc::VectorShape::Rect {
                     width: 50.0,
                     height: 50.0,
+                    radius: 0.0,
                 },
             )),
         })
@@ -537,6 +573,7 @@ mod tests {
                 shape: chitrakar_doc::VectorShape::Rect {
                     width: 50.0,
                     height: 50.0,
+                    radius: 0.0,
                 },
                 fill: None,
                 stroke: None,

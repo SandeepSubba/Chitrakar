@@ -20,7 +20,8 @@ two non-negotiable principles:
 without reading anything else.*
 
 - **Branch:** `claude/multiplatform-photo-vector-editor-enghs5`.
-- **Working today:** a real editor. Draw rects/ellipses/pen paths (straight
+- **Working today:** a real editor. Draw rects (square or round-cornered),
+  ellipses and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
