@@ -85,6 +85,18 @@ await page.click('button[title="Ellipse"]');
 await drag(300, 150, 700, 500);
 assert(await page.isVisible("text=Ellipse 2"), "second layer row");
 
+// 3b. A curved edge cannot land on pixel boundaries, so the rim has to carry
+// partial coverage — this is the rasterizer's anti-aliasing, live in the app.
+// Probe where the edge runs diagonally (x=641 is ~45 degrees round the rim);
+// straight across the top the curve is locally flat and lands on the grid.
+const rim = [];
+for (let y = 190; y <= 215; y++) rim.push((await canvasPixel(641, y))[3]);
+assert(
+  rim.some((a) => a > 8 && a < 247),
+  `ellipse rim is antialiased (alphas ${rim.join(",")})`,
+);
+assert(rim[0] === 0 && rim[rim.length - 1] === 255, "rim scan crosses the edge");
+
 // 4. Add an exposure adjustment (neutral), then edit its stops in the
 // properties panel — the pixel brightens via the re-editable layer.
 const before = await canvasPixel(500, 325);

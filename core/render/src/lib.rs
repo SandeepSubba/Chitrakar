@@ -625,6 +625,65 @@ fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
     }
 }
 
+/// Anti-aliased coverage of a shape over one device pixel, in 0..=1.
+///
+/// The corners plus the centre are tested first: when all five agree the
+/// pixel lies wholly inside or outside, which is true of every pixel but the
+/// boundary ones, so the common case costs five point tests. Only where they
+/// disagree does the pixel pay for an NxN box of samples.
+///
+/// Detail finer than that first five-point probe can still slip through and
+/// drop out — the same blind spot the old centre-only test had, now confined
+/// to sub-pixel features.
+fn pixel_coverage(
+    shape: &VectorShape,
+    stroke_width: Option<f32>,
+    t: Transform,
+    px: u32,
+    py: u32,
+) -> f32 {
+    const N: u32 = 4;
+    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+        return 0.0;
+    }
+    // An axis-aligned rect fill has an exact answer — the area the pixel
+    // square and the mapped rect share — so take it. Rect fills cover the
+    // largest areas, and this is both cheaper than sampling and not an
+    // approximation of it.
+    if let (VectorShape::Rect { width, height }, None) = (shape, stroke_width) {
+        let span = |lo: f32, hi: f32, at: u32| {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+        };
+        return span(t.e, t.e + width * t.a, px) * span(t.f, t.f + height * t.d, py);
+    }
+    let covers = |sx: f32, sy: f32| match to_local(t, sx, sy) {
+        Some((x, y)) => match stroke_width {
+            None => shape_covers(shape, x, y),
+            Some(sw) => stroke_covers(shape, sw, x, y),
+        },
+        None => false,
+    };
+    let (fx, fy) = (px as f32, py as f32);
+    let inside = covers(fx + 0.5, fy + 0.5);
+    let uniform = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        .into_iter()
+        .all(|(dx, dy)| covers(fx + dx, fy + dy) == inside);
+    if uniform {
+        return if inside { 1.0 } else { 0.0 };
+    }
+    let hits = (0..N * N)
+        .filter(|k| {
+            let (i, j) = (k % N, k / N);
+            covers(
+                fx + (i as f32 + 0.5) / N as f32,
+                fy + (j as f32 + 0.5) / N as f32,
+            )
+        })
+        .count();
+    hits as f32 / (N * N) as f32
+}
+
 fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> ClipRect {
     match transformed_bounds(t, w, h).to_clip(dst.width, dst.height) {
         Some(b) => b.intersect(clip),
@@ -669,25 +728,22 @@ fn paint_shape(
         }
         .intersect(clip);
     }
+    // A degenerate transform maps nothing; bail before walking the bbox.
+    if to_local(t, 0.0, 0.0).is_none() {
+        return;
+    }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            // Sample at pixel centers; anti-aliasing arrives with the real
-            // rasterizer (vello / analytic coverage).
-            let Some((x, y)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
-                return;
-            };
-            let covered = match stroke_width {
-                None => shape_covers(shape, x, y),
-                Some(sw) => stroke_covers(shape, sw, x, y),
-            };
-            if covered {
-                let c = coverage_at(doc, mask, px, py);
-                if c <= 0.0 {
-                    continue;
-                }
-                let i = (py * dst.width + px) as usize;
-                dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
+            let a = pixel_coverage(shape, stroke_width, t, px, py);
+            if a <= 0.0 {
+                continue;
             }
+            let c = a * coverage_at(doc, mask, px, py);
+            if c <= 0.0 {
+                continue;
+            }
+            let i = (py * dst.width + px) as usize;
+            dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
         }
     }
 }
@@ -748,10 +804,7 @@ fn coverage_at(doc: &Document, mask: Option<&Mask>, x: u32, y: u32) -> f32 {
     };
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
-        MaskKind::Vector { shape, transform } => match to_local(*transform, fx, fy) {
-            Some((lx, ly)) if shape_covers(shape, lx, ly) => 1.0,
-            _ => 0.0,
-        },
+        MaskKind::Vector { shape, transform } => pixel_coverage(shape, None, *transform, x, y),
         MaskKind::Raster {
             resource_id,
             transform,
@@ -1076,6 +1129,197 @@ mod tests {
         assert_eq!(s.get(0, 0).a, 0.0);
         assert_eq!(s.get(3, 3).to_srgb8(), [255, 0, 0, 255]);
         assert_eq!(s.get(6, 6).a, 0.0);
+    }
+
+    /// Not an assertion: the baseline for the scanline-rasterizer work.
+    /// Coverage sampling is cheap on rects and ellipses and expensive on
+    /// paths, because a path fill runs an O(anchors) even-odd test per
+    /// sample. Run with `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn render_timing_probe() {
+        let mut doc = Document::new(512, 512, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("bg", 512.0, 512.0, RED),
+        })
+        .unwrap();
+        let mut e = Node::vector(
+            "e",
+            VectorShape::Ellipse {
+                rx: 200.0,
+                ry: 200.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut e.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(e),
+        })
+        .unwrap();
+        let pts: Vec<[f32; 2]> = (0..40)
+            .map(|i| {
+                let a = i as f32 / 40.0 * std::f32::consts::TAU;
+                [200.0 + 180.0 * a.cos(), 200.0 + 180.0 * a.sin()]
+            })
+            .collect();
+        let mut p = Node::vector(
+            "p",
+            VectorShape::Path {
+                points: pts,
+                closed: true,
+                smooth: true,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut p.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(p),
+        })
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..10 {
+            render(&doc).unwrap();
+        }
+        println!(
+            "TIMING path-heavy: {:?} per 512x512 frame",
+            t0.elapsed() / 10
+        );
+
+        // Same doc without the 480-point flattened spline.
+        let ids = doc.children_of(root).unwrap();
+        doc.apply(Command::RemoveNode { id: ids[2] }).unwrap();
+        let t1 = std::time::Instant::now();
+        for _ in 0..10 {
+            render(&doc).unwrap();
+        }
+        println!(
+            "TIMING rect+ellipse: {:?} per 512x512 frame",
+            t1.elapsed() / 10
+        );
+    }
+
+    #[test]
+    fn half_pixel_offset_rect_antialiases_its_edge() {
+        // A rect landing on a half-pixel covers half of the boundary column,
+        // so that column must come out half opaque — the whole point of
+        // coverage sampling. On integer bounds the same rect stays hard.
+        let mut doc = Document::new(8, 8, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 4.0, 4.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(2.5, 2.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert!(
+            (s.get(2, 3).a - 0.5).abs() < 0.08,
+            "left edge column should be ~half covered, got {}",
+            s.get(2, 3).a
+        );
+        assert_eq!(s.get(3, 3).a, 1.0, "interior stays fully opaque");
+        assert!(
+            (s.get(6, 3).a - 0.5).abs() < 0.08,
+            "right edge column should be ~half covered, got {}",
+            s.get(6, 3).a
+        );
+        assert_eq!(s.get(7, 3).a, 0.0, "past the shape is still empty");
+
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(2.0, 2.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(2, 3).a, 1.0, "integer bounds stay hard-edged");
+        assert_eq!(s.get(6, 3).a, 0.0);
+    }
+
+    #[test]
+    fn ellipse_rim_is_partially_covered() {
+        // A curved edge cannot land on pixel boundaries, so the rim has to
+        // carry intermediate coverage while the inside stays solid.
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector("e", VectorShape::Ellipse { rx: 12.0, ry: 12.0 });
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(4.0, 4.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(16, 16).a, 1.0, "centre is solid");
+        assert_eq!(s.get(0, 0).a, 0.0, "corner is empty");
+        let partial = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let a = s.get(*x, *y).a;
+                a > 0.01 && a < 0.99
+            })
+            .count();
+        assert!(
+            partial > 20,
+            "the rim should be a band of partial coverage, found {partial} pixels"
+        );
+    }
+
+    #[test]
+    fn vector_mask_edges_are_soft() {
+        // Masks sample the same coverage function, so a mask edge feathers
+        // instead of stair-stepping.
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("bg", 32.0, 32.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(ellipse_mask(16.0, 16.0, 10.0, 10.0, false))),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(16, 16).a, 1.0, "inside the mask is untouched");
+        assert_eq!(s.get(0, 0).a, 0.0, "outside the mask is cut away");
+        let soft = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let a = s.get(*x, *y).a;
+                a > 0.01 && a < 0.99
+            })
+            .count();
+        assert!(soft > 20, "mask rim should feather, found {soft} pixels");
     }
 
     #[test]
