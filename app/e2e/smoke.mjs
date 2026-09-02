@@ -629,7 +629,7 @@ assert(pdfText.includes("/ICCBased"), "PDF carries an ICC colorspace");
 assert(pdfText.includes("/N 4"), "PDF image is 4-channel CMYK");
 }
 
-await page.screenshot({ path: "editor.png" });
+await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 
 console.log("\nALL SMOKE TESTS PASSED");
