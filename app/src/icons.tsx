@@ -31,6 +31,10 @@ export type IconName =
   | "duplicate"
   | "shadow"
   | "crop"
+  | "union"
+  | "subtract"
+  | "intersect"
+  | "exclude"
   | "trash"
   | "eye"
   | "eyeOff"
@@ -220,6 +224,45 @@ const PATHS: Record<IconName, JSX.Element> = {
   filter: (
     <>
       <path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 2v-7.4z" />
+    </>
+  ),
+  // Booleans: two overlapping shapes, with the part that survives filled.
+  union: (
+    <>
+      <path
+        d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v3A3.5 3.5 0 0 1 12.5 15h-5A3.5 3.5 0 0 1 4 11.5z"
+        fill="currentColor"
+        opacity="0.25"
+      />
+      <path
+        d="M8 12.5A3.5 3.5 0 0 1 11.5 9h5A3.5 3.5 0 0 1 20 12.5v3A3.5 3.5 0 0 1 16.5 19h-5A3.5 3.5 0 0 1 8 15.5z"
+        fill="currentColor"
+        opacity="0.25"
+      />
+      <rect x="4" y="5" width="12" height="10" rx="3.5" />
+      <rect x="8" y="9" width="12" height="10" rx="3.5" />
+    </>
+  ),
+  subtract: (
+    <>
+      <path d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H11.5A3.5 3.5 0 0 0 8 12.5V15H7.5A3.5 3.5 0 0 1 4 11.5z" fill="currentColor" opacity="0.35" />
+      <rect x="4" y="5" width="12" height="10" rx="3.5" />
+      <rect x="8" y="9" width="12" height="10" rx="3.5" strokeDasharray="3 3" />
+    </>
+  ),
+  intersect: (
+    <>
+      <path d="M8 9h8v6H8z" fill="currentColor" opacity="0.35" />
+      <rect x="4" y="5" width="12" height="10" rx="3.5" />
+      <rect x="8" y="9" width="12" height="10" rx="3.5" />
+    </>
+  ),
+  exclude: (
+    <>
+      <path d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H8v6H7.5A3.5 3.5 0 0 1 4 11.5z" fill="currentColor" opacity="0.35" />
+      <path d="M16 9h.5A3.5 3.5 0 0 1 20 12.5v3A3.5 3.5 0 0 1 16.5 19h-5A3.5 3.5 0 0 1 8 15.5V15h8z" fill="currentColor" opacity="0.35" />
+      <rect x="4" y="5" width="12" height="10" rx="3.5" />
+      <rect x="8" y="9" width="12" height="10" rx="3.5" />
     </>
   ),
   // Align and distribute: a rule plus the edges that meet it.

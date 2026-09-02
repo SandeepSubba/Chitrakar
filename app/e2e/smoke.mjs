@@ -864,7 +864,7 @@ assert(
   });
   await page.waitForTimeout(200);
   assert(
-    (await page.locator(".align-bar button").count()) === 8,
+    (await page.locator(".align-bar:not(.combine-bar) button").count()) === 8,
     "a multi-selection offers align and distribute",
   );
   // Where the two paths' left edges are before and after.
@@ -1576,6 +1576,65 @@ assert(
     (await canvasPixel(360, 110))[3] === 255 && (await canvasPixel(120, 240))[3] === 0,
     "and the pair moves back in one undo",
   );
+}
+
+// 8x3b. Booleans: two overlapping rects combine into one compound path,
+// and subtracting an enclosed one punches a hole.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-canvas").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const drawRect = async (x0, y0, x1, y1) => {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  };
+  await drawRect(100, 100, 300, 300);
+  await drawRect(200, 200, 400, 340);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('button[aria-label="Unite shapes"]').count()) === 1,
+    "a multi-selection offers the boolean operations",
+  );
+  await page.click('button[aria-label="Unite shapes"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "uniting left a single layer",
+  );
+  assert((await canvasPixel(150, 150))[3] === 255, "the first shape survives");
+  assert((await canvasPixel(350, 320))[3] === 255, "and so does the second");
+  assert((await canvasPixel(450, 150))[3] === 0, "and nothing outside them");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "and the union undoes as one step",
+  );
+
+  // Subtract an enclosed shape: the result is one layer with a hole in it.
+  await newDocument(600, 400, "rgb");
+  await drawRect(100, 100, 500, 300);
+  await drawRect(250, 170, 350, 230);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Subtract the shapes above"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "subtracting left a single layer",
+  );
+  assert((await canvasPixel(150, 200))[3] === 255, "the ring is filled");
+  assert((await canvasPixel(300, 200))[3] === 0, "and the middle is a hole");
+  assert((await canvasPixel(50, 200))[3] === 0, "outside is still outside");
 }
 
 // 8x4. Crop: drag a frame with the crop tool and the page becomes it,

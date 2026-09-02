@@ -129,6 +129,13 @@ pub enum VectorShape {
         /// `smooth`, whose curve is inferred rather than authored.
         #[serde(default)]
         handles: Vec<[f32; 4]>,
+        /// Extra closed rings drawn with the same fill. Coverage is
+        /// even-odd across all of them, so a ring inside another cuts a
+        /// hole and a ring beside it is a second island — which is what
+        /// makes a compound path, and what a boolean operation produces.
+        /// Straight-sided: only the main ring carries curves. Additive.
+        #[serde(default)]
+        subpaths: Vec<Vec<[f32; 2]>>,
     },
 }
 

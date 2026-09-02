@@ -81,6 +81,18 @@ struct HistoryEntry {
     label: String,
 }
 
+/// The verb a boolean operation is described by in history and in the name
+/// the combined layer takes.
+fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
+    use chitrakar_render::boolean::BoolOp;
+    match op {
+        BoolOp::Union => "Union",
+        BoolOp::Intersect => "Intersect",
+        BoolOp::Subtract => "Subtract",
+        BoolOp::Exclude => "Exclude",
+    }
+}
+
 /// An open document plus its edit history and cached composite.
 pub struct Session {
     doc: Document,
@@ -406,6 +418,133 @@ impl Session {
         );
         self.apply_labeled(Command::Batch(cmds), Some(format!("Group into {name}")))?;
         Ok(group_id)
+    }
+
+    /// Combine two or more shape layers into one compound path.
+    ///
+    /// Operands are taken bottom-to-top in the stack, which is what makes
+    /// "subtract" mean what it looks like: the shape underneath, with the
+    /// ones above cut out of it. The result keeps the bottom-most layer's
+    /// fill and stroke, because that is the shape the eye reads as the one
+    /// being operated on.
+    pub fn boolean_nodes(&mut self, ids: &[NodeId], op: &str) -> Result<NodeId, EngineError> {
+        let op = chitrakar_render::boolean::BoolOp::from_name(op)
+            .ok_or_else(|| EngineError::BadCommand(format!("unknown operation {op:?}")))?;
+        if ids.len() < 2 {
+            return Err(EngineError::BadCommand(
+                "combining needs at least two shapes".into(),
+            ));
+        }
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("cannot combine the root".into()))?;
+        let siblings = self.doc.children_of(parent)?.to_vec();
+        let ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "combined layers must share a parent".into(),
+            ));
+        }
+        // Every operand's outline, carried into the space they all share.
+        let mut rings: Vec<Vec<Vec<[f32; 2]>>> = Vec::new();
+        for id in &ordered {
+            let node = self.doc.node(*id)?;
+            let NodeKind::Vector { shape, .. } = &node.kind else {
+                return Err(EngineError::BadCommand(
+                    "only shapes can be combined".into(),
+                ));
+            };
+            let t = node.transform;
+            rings.push(
+                chitrakar_render::shape_rings(shape)
+                    .into_iter()
+                    .map(|ring| {
+                        ring.into_iter()
+                            .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
+        let mut acc = rings.remove(0);
+        for next in rings {
+            acc = chitrakar_render::boolean::combine(&acc, &next, op).ok_or_else(|| {
+                EngineError::BadCommand(
+                    "these outlines cannot be combined — they touch or overlap exactly".into(),
+                )
+            })?;
+        }
+        // Anchors are stored relative to the node's own origin, like every
+        // other path, so the transform carries the position.
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for p in acc.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+        }
+        if !x0.is_finite() {
+            return Err(EngineError::BadCommand("the result is empty".into()));
+        }
+        let shift = |ring: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ring.into_iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+        };
+        let mut acc = acc.into_iter();
+        let points = shift(acc.next().unwrap());
+        let subpaths: Vec<Vec<[f32; 2]>> = acc.map(shift).collect();
+
+        let bottom = self.doc.node(ordered[0])?;
+        let (fill, stroke, gradient) = match &bottom.kind {
+            NodeKind::Vector {
+                fill,
+                stroke,
+                gradient,
+                ..
+            } => (*fill, stroke.clone(), gradient.clone()),
+            _ => unreachable!("checked above"),
+        };
+        let name = format!("{} {}", bottom.name.clone(), label_for(op));
+        let mut node = Node::vector(
+            &name,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths,
+            },
+        );
+        node.transform = Transform::translation(x0, y0);
+        if let NodeKind::Vector {
+            fill: f,
+            stroke: s,
+            gradient: g,
+            ..
+        } = &mut node.kind
+        {
+            *f = fill;
+            *s = stroke;
+            *g = gradient;
+        }
+        let index = siblings
+            .iter()
+            .position(|s| *s == ordered[0])
+            .unwrap_or(siblings.len());
+        let new_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        }];
+        cmds.extend(ordered.iter().map(|id| Command::RemoveNode { id: *id }));
+        self.apply_labeled(
+            Command::Batch(cmds),
+            Some(format!("{} shapes", label_for(op))),
+        )?;
+        Ok(new_id)
     }
 
     /// Copy a node and everything under it, placed just above the original.
@@ -1342,6 +1481,144 @@ mod tests {
         let mut session = Session::new(16, 16, ColorMode::Rgb);
         assert!(session.resize_canvas(0, 10, 0.0, 0.0).is_err());
         assert_eq!(session.document().meta.width, 16, "and changes nothing");
+    }
+
+    /// Two 40x40 squares on a 100x100 page, overlapping in a 20x20 corner.
+    fn two_overlapping_squares() -> (Session, Vec<NodeId>) {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let b = add_rect(&mut session, "b", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: b,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        (session, vec![a, b])
+    }
+
+    /// How many pixels the composite covers.
+    fn ink(session: &mut Session) -> usize {
+        session
+            .render()
+            .unwrap()
+            .pixels
+            .iter()
+            .filter(|p| p.a > 0.5)
+            .count()
+    }
+
+    #[test]
+    fn booleans_combine_two_shapes_into_one_layer() {
+        // Areas are the check: union is both minus the overlap counted
+        // twice, intersect is the overlap, subtract is the lower shape
+        // less the overlap.
+        for (op, expected) in [
+            ("union", 40 * 40 * 2 - 20 * 20),
+            ("intersect", 20 * 20),
+            ("subtract", 40 * 40 - 20 * 20),
+        ] {
+            let (mut session, ids) = two_overlapping_squares();
+            let before = ink(&mut session);
+            assert_eq!(before, 40 * 40 * 2 - 20 * 20, "the two squares as drawn");
+            let id = session.boolean_nodes(&ids, op).unwrap();
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap(),
+                &[id],
+                "{op} left one layer"
+            );
+            let got = ink(&mut session);
+            assert!(
+                (got as i32 - expected).abs() < 200,
+                "{op}: covered {got}, expected about {expected}"
+            );
+            assert!(session.undo().unwrap());
+            assert_eq!(ink(&mut session), before, "{op} undoes as one step");
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap()
+                    .len(),
+                2,
+                "{op} brings both shapes back"
+            );
+        }
+    }
+
+    #[test]
+    fn subtracting_an_enclosed_shape_punches_a_hole() {
+        // The result is one layer whose middle is empty — a compound path,
+        // which is the whole reason a path can carry extra rings.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let outer = add_rect(&mut session, "outer", 60.0, 60.0);
+        session
+            .apply(Command::SetTransform {
+                id: outer,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        session.boolean_nodes(&[outer, inner], "subtract").unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(25, 25).a, 1.0, "the ring is filled");
+        assert_eq!(s.get(50, 50).a, 0.0, "and the middle is a hole");
+        assert_eq!(s.get(10, 10).a, 0.0, "outside is still outside");
+    }
+
+    #[test]
+    fn combining_refuses_what_it_cannot_answer_for() {
+        let (mut session, ids) = two_overlapping_squares();
+        assert!(
+            session.boolean_nodes(&ids[..1], "union").is_err(),
+            "needs two"
+        );
+        assert!(session.boolean_nodes(&ids, "invert").is_err(), "unknown op");
+        // A text layer has no outline to combine.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::text(
+                    "t",
+                    chitrakar_doc::TextSpec::new(
+                        "hi",
+                        12.0,
+                        AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    ),
+                )),
+            })
+            .unwrap();
+        let text = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        assert!(session.boolean_nodes(&[ids[0], text], "union").is_err());
+        // And nothing was half-applied.
+        assert_eq!(session.document().children_of(root).unwrap().len(), 3);
     }
 
     #[test]

@@ -600,7 +600,9 @@ export function App() {
               `Path ${shapeCount.current}`,
               {
                 Vector: {
-                  shape: { Path: { points, closed, smooth: false, handles: [] } },
+                  shape: {
+                    Path: { points, closed, smooth: false, handles: [], subpaths: [] },
+                  },
                   fill: closed
                     ? cmyk
                       ? hexToCmykColor(fill)
@@ -1089,6 +1091,7 @@ export function App() {
               Vector: {
                 shape: {
                   Path: {
+                    subpaths: [],
                     points: pts.map(
                       (p) => [p[0] - minX, p[1] - minY] as [number, number],
                     ),
@@ -1398,6 +1401,26 @@ export function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
+
+  /** Combine the picked shapes into one compound path. */
+  const combineSelection = (op: string) => {
+    if (!session || selectionSet.length < 2) return;
+    try {
+      const id = session.boolean_nodes(new Float64Array(selectionSet), op);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Combine: ${err}`);
+    }
+  };
+
+  const BOOLEAN_BUTTONS: [string, IconName, string][] = [
+    ["union", "union", "Unite shapes"],
+    ["subtract", "subtract", "Subtract the shapes above"],
+    ["intersect", "intersect", "Keep only the overlap"],
+    ["exclude", "exclude", "Keep everything but the overlap"],
+  ];
 
   const ALIGN_BUTTONS: [string, IconName, string][] = [
     ["left", "alignLeft", "Align left edges"],
@@ -2683,6 +2706,20 @@ export function App() {
                 <button
                   key={mode}
                   onClick={() => alignSelection(mode)}
+                  title={label}
+                  aria-label={label}
+                >
+                  <Icon name={icon} size={16} />
+                </button>
+              ))}
+            </div>
+          )}
+          {selectionSet.length >= 2 && (
+            <div className="align-bar combine-bar" role="group" aria-label="Combine shapes">
+              {BOOLEAN_BUTTONS.map(([op, icon, label]) => (
+                <button
+                  key={op}
+                  onClick={() => combineSelection(op)}
                   title={label}
                   aria-label={label}
                 >

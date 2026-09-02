@@ -172,6 +172,17 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// Combine shape layers into one compound path. `op` is one of
+    /// "union", "intersect", "subtract" or "exclude". Returns the new
+    /// layer's id.
+    pub fn boolean_nodes(&mut self, ids: Vec<f64>, op: &str) -> Result<f64, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .boolean_nodes(&ids, op)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Put a node and its subtree on the clipboard.
     pub fn copy_node(&self, id: f64) -> Result<(), JsError> {
         self.inner.copy_node(NodeId(id as u64)).map_err(to_js)

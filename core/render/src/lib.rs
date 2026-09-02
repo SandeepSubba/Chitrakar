@@ -15,6 +15,7 @@
 //! rotation (`b`, `c`) arrive with the GPU rasterizer.
 
 pub mod blur;
+pub mod boolean;
 pub mod text;
 pub mod tiles;
 
@@ -184,8 +185,11 @@ fn shape_size(shape: &VectorShape) -> (f32, f32) {
         VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
         // Path anchors are normalized to a (0,0) origin on creation; local
         // size is their extent.
-        VectorShape::Path { points, .. } => points
+        VectorShape::Path {
+            points, subpaths, ..
+        } => points
             .iter()
+            .chain(subpaths.iter().flatten())
             .fold((0.0f32, 0.0f32), |(w, h), p| (w.max(p[0]), h.max(p[1]))),
     }
 }
@@ -195,7 +199,9 @@ fn shape_size(shape: &VectorShape) -> (f32, f32) {
 /// anchors, including past the origin.
 fn local_bounds(shape: &VectorShape) -> (f32, f32, f32, f32) {
     match shape {
-        VectorShape::Path { points, .. } => points.iter().fold(
+        VectorShape::Path {
+            points, subpaths, ..
+        } => points.iter().chain(subpaths.iter().flatten()).fold(
             (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
             |(x0, y0, x1, y1), p| (x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1])),
         ),
@@ -1047,6 +1053,7 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
         closed,
         smooth,
         handles,
+        subpaths,
     } = shape
     else {
         return Cow::Borrowed(shape);
@@ -1081,6 +1088,9 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
             closed: *closed,
             smooth: false,
             handles: Vec::new(),
+            // Subpaths are straight-sided, so they survive flattening
+            // untouched.
+            subpaths: subpaths.clone(),
         });
     }
     if !smooth || n < 3 {
@@ -1122,7 +1132,86 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
         closed: *closed,
         smooth: false,
         handles: Vec::new(),
+        subpaths: subpaths.clone(),
     })
+}
+
+/// A shape as closed rings of straight segments, in its own local space.
+///
+/// Booleans, and anything else that needs an outline rather than a
+/// coverage test, work on these: curves are flattened, an ellipse becomes
+/// a polygon fine enough that its own edge is the limit, and a rounded
+/// rectangle's corners become arcs of segments. An open path is treated as
+/// closed, since only its filled area means anything here.
+pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
+    /// Segments per quarter turn. At 16 the chord of a 1000px circle
+    /// strays under a fifth of a pixel from the true arc.
+    const PER_QUARTER: usize = 16;
+    match shape {
+        VectorShape::Ellipse { rx, ry } => {
+            let n = PER_QUARTER * 4;
+            vec![(0..n)
+                .map(|i| {
+                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                    [rx + rx * a.cos(), ry + ry * a.sin()]
+                })
+                .collect()]
+        }
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        } => {
+            let r = radius.clamp(0.0, (width / 2.0).min(height / 2.0));
+            if r <= 0.0 {
+                return vec![vec![
+                    [0.0, 0.0],
+                    [*width, 0.0],
+                    [*width, *height],
+                    [0.0, *height],
+                ]];
+            }
+            // Each corner is a quarter arc about its own centre, walked in
+            // the same direction the square-cornered ring goes.
+            let corners = [
+                (r, r, std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+                (
+                    width - r,
+                    r,
+                    1.5 * std::f32::consts::PI,
+                    std::f32::consts::TAU,
+                ),
+                (width - r, height - r, 0.0, std::f32::consts::FRAC_PI_2),
+                (
+                    r,
+                    height - r,
+                    std::f32::consts::FRAC_PI_2,
+                    std::f32::consts::PI,
+                ),
+            ];
+            let mut ring = Vec::with_capacity(4 * (PER_QUARTER + 1));
+            for (cx, cy, from, to) in corners {
+                for i in 0..=PER_QUARTER {
+                    let a = from + (to - from) * (i as f32 / PER_QUARTER as f32);
+                    ring.push([cx + r * a.cos(), cy + r * a.sin()]);
+                }
+            }
+            vec![ring]
+        }
+        VectorShape::Path { .. } => {
+            let flat = flatten_shape(shape);
+            let VectorShape::Path {
+                points, subpaths, ..
+            } = flat.as_ref()
+            else {
+                return Vec::new();
+            };
+            std::iter::once(points.clone())
+                .chain(subpaths.iter().cloned())
+                .filter(|r| r.len() >= 3)
+                .collect()
+        }
+    }
 }
 
 /// Per-anchor widths resampled onto the flattened polyline, so index i of
@@ -1135,6 +1224,7 @@ fn flatten_widths(shape: &VectorShape, widths: &[f32]) -> Vec<f32> {
         closed,
         smooth,
         handles,
+        ..
     } = shape
     else {
         return widths.to_vec();
@@ -1177,18 +1267,24 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
             let (nx, ny) = ((x - rx) / rx, (y - ry) / ry);
             nx * nx + ny * ny <= 1.0
         }
-        VectorShape::Path { points, .. } => {
-            if points.len() < 3 {
-                return false;
-            }
+        // Even-odd across every ring, so a ring inside another cuts a
+        // hole and a ring beside it is a second island.
+        VectorShape::Path {
+            points, subpaths, ..
+        } => {
             let mut inside = false;
-            for i in 0..points.len() {
-                let a = points[i];
-                let b = points[(i + 1) % points.len()];
-                if (a[1] > y) != (b[1] > y) {
-                    let t = (y - a[1]) / (b[1] - a[1]);
-                    if x < a[0] + t * (b[0] - a[0]) {
-                        inside = !inside;
+            for ring in std::iter::once(points).chain(subpaths) {
+                if ring.len() < 3 {
+                    continue;
+                }
+                for i in 0..ring.len() {
+                    let a = ring[i];
+                    let b = ring[(i + 1) % ring.len()];
+                    if (a[1] > y) != (b[1] > y) {
+                        let t = (y - a[1]) / (b[1] - a[1]);
+                        if x < a[0] + t * (b[0] - a[0]) {
+                            inside = !inside;
+                        }
                     }
                 }
             }
@@ -1237,7 +1333,13 @@ fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
 /// (bounds stay stable); paths use a stroke centered on the line so open
 /// paths render as line art.
 fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32) -> bool {
-    if let VectorShape::Path { points, closed, .. } = shape {
+    if let VectorShape::Path {
+        points,
+        closed,
+        subpaths,
+        ..
+    } = shape
+    {
         if points.len() < 2 {
             return false;
         }
@@ -1253,7 +1355,7 @@ fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32
         let at = |i: usize| -> f32 { widths.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0) };
         let varying = !widths.is_empty();
         let half = width / 2.0;
-        return (0..segments).any(|i| {
+        let on_main = (0..segments).any(|i| {
             let j = (i + 1) % points.len();
             let (a, b) = (points[i], points[j]);
             if !varying {
@@ -1263,6 +1365,16 @@ fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32
             let w = half * (at(i) + (at(j) - at(i)) * t);
             segment_distance(x, y, a, b) <= w
         });
+        // Extra rings are always closed and never carry varying widths, so
+        // they are a plain distance test against the whole ring.
+        return on_main
+            || subpaths.iter().any(|ring| {
+                ring.len() >= 2
+                    && (0..ring.len()).any(|i| {
+                        let b = ring[(i + 1) % ring.len()];
+                        segment_distance(x, y, ring[i], b) <= half
+                    })
+            });
     }
     if !shape_covers(shape, x, y) {
         return false;
@@ -1518,7 +1630,7 @@ fn pixel_coverage(
 fn fill_path_scanlines(
     dst: &mut Surface,
     doc: &Document,
-    points: &[[f32; 2]],
+    rings: &[&[[f32; 2]]],
     t: Transform,
     inv: Inverse,
     paint: &Paint,
@@ -1527,13 +1639,20 @@ fn fill_path_scanlines(
     mask: MaskRef<'_>,
 ) {
     const N: u32 = 4;
-    if points.len() < 3 || bbox.is_empty() {
+    if bbox.is_empty() {
         return;
     }
-    // Map the polygon into device space once, then scan there. Doing it the
+    // Map the rings into device space once, then scan there. Doing it the
     // other way — scanning in local space — only works while the transform
     // keeps device rows parallel to local rows, which rotation does not.
-    let poly: Vec<(f32, f32)> = points.iter().map(|p| to_device(t, p[0], p[1])).collect();
+    let polys: Vec<Vec<(f32, f32)>> = rings
+        .iter()
+        .filter(|r| r.len() >= 3)
+        .map(|r| r.iter().map(|p| to_device(t, p[0], p[1])).collect())
+        .collect();
+    if polys.is_empty() {
+        return;
+    }
     let width = (bbox.x1 - bbox.x0) as usize;
     let mut cov = vec![0f32; width];
     let mut xs: Vec<f32> = Vec::new();
@@ -1543,11 +1662,15 @@ fn fill_path_scanlines(
             // Sample y at the middle of each sub-row, never on its edge.
             let sy = py as f32 + (j as f32 + 0.5) / N as f32;
             xs.clear();
-            for i in 0..poly.len() {
-                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                if (a.1 > sy) != (b.1 > sy) {
-                    let s = (sy - a.1) / (b.1 - a.1);
-                    xs.push(a.0 + s * (b.0 - a.0));
+            // Crossings from every ring go into one sorted list, which is
+            // exactly what makes the fill even-odd across all of them.
+            for poly in &polys {
+                for i in 0..poly.len() {
+                    let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                    if (a.1 > sy) != (b.1 > sy) {
+                        let s = (sy - a.1) / (b.1 - a.1);
+                        xs.push(a.0 + s * (b.0 - a.0));
+                    }
                 }
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1633,8 +1756,17 @@ fn paint_shape(
     };
     // Path fills go through the scanline rasterizer; strokes stay on the
     // sampler, whose distance test has no scanline form.
-    if let (VectorShape::Path { points, .. }, None) = (shape, stroke_width) {
-        fill_path_scanlines(dst, doc, points, t, inv, paint, mode, bbox, mask);
+    if let (
+        VectorShape::Path {
+            points, subpaths, ..
+        },
+        None,
+    ) = (shape, stroke_width)
+    {
+        let rings: Vec<&[[f32; 2]]> = std::iter::once(points.as_slice())
+            .chain(subpaths.iter().map(|r| r.as_slice()))
+            .collect();
+        fill_path_scanlines(dst, doc, &rings, t, inv, paint, mode, bbox, mask);
         return;
     }
     for py in bbox.y0..bbox.y1 {
@@ -2220,6 +2352,7 @@ mod tests {
                 closed: true,
                 smooth: true,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut p.kind {
@@ -2312,6 +2445,7 @@ mod tests {
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut tri.kind {
@@ -2486,6 +2620,7 @@ mod tests {
             closed: true,
             smooth: false,
             handles: Vec::new(),
+            subpaths: Vec::new(),
         };
         let mut node = Node::vector("p", straight.clone());
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -2514,6 +2649,7 @@ mod tests {
                 [0.0, -24.0, 0.0, 0.0],
                 [0.0, 0.0, 0.0, 0.0],
             ],
+            subpaths: Vec::new(),
         };
         doc.apply(Command::SetKind {
             id,
@@ -2555,6 +2691,7 @@ mod tests {
                     closed: true,
                     smooth: false,
                     handles: vec![[0.0; 4]; 3],
+                    subpaths: Vec::new(),
                 },
                 fill: Some(RED),
                 stroke: None,
@@ -2642,6 +2779,7 @@ mod tests {
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -3409,6 +3547,7 @@ mod tests {
                 closed: false,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { stroke, .. } = &mut node.kind {
@@ -3584,6 +3723,7 @@ mod tests {
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut tri.kind {
@@ -4097,6 +4237,7 @@ mod tests {
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -4209,6 +4350,7 @@ mod tests {
                     closed: true,
                     smooth,
                     handles: Vec::new(),
+                    subpaths: Vec::new(),
                 },
             );
             if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -4238,6 +4380,7 @@ mod tests {
                     closed: true,
                     smooth: true,
                     handles: Vec::new(),
+                    subpaths: Vec::new(),
                 },
                 fill: Some(RED),
                 stroke: None,
@@ -4282,6 +4425,7 @@ mod tests {
                 closed: false,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { stroke, .. } = &mut node.kind {

@@ -26,6 +26,9 @@ export type VectorShape =
         /** Per-anchor bezier control offsets, [inX, inY, outX, outY]. Empty
          * means a plain polyline; when present they override `smooth`. */
         handles: [number, number, number, number][];
+        /** Extra closed rings, filled even-odd with the main one — what a
+         * boolean operation leaves behind when it makes a hole. */
+        subpaths: [number, number][][];
       };
     };
 

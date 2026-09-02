@@ -99,6 +99,7 @@ fn write_children(
                         closed,
                         smooth,
                         handles,
+                        subpaths,
                     } => {
                         // With handles the path exports as real cubic
                         // segments, so a curve stays a curve downstream
@@ -141,13 +142,35 @@ fn write_children(
                         if *closed {
                             d.push_str(" Z");
                         }
+                        // Extra rings become extra subpaths in the same d,
+                        // which is what fill-rule="evenodd" needs to see to
+                        // cut a hole rather than paint over it.
+                        for ring in subpaths {
+                            for (i, p) in ring.iter().enumerate() {
+                                let _ = write!(
+                                    d,
+                                    "{}{},{}",
+                                    if i == 0 { " M" } else { " L" },
+                                    p[0],
+                                    p[1]
+                                );
+                            }
+                            d.push_str(" Z");
+                        }
+                        let rule = if subpaths.is_empty() {
+                            ""
+                        } else {
+                            r#" fill-rule="evenodd""#
+                        };
                         let smooth_note = if *smooth {
                             " data-chitrakar-smooth=\"true\""
                         } else {
                             ""
                         };
-                        let _ =
-                            writeln!(out, r#"{pad}<path d="{d}"{common}{paint}{smooth_note}/>"#);
+                        let _ = writeln!(
+                            out,
+                            r#"{pad}<path d="{d}"{common}{paint}{rule}{smooth_note}/>"#
+                        );
                     }
                 }
             }
@@ -533,6 +556,7 @@ mod tests {
                     closed: false,
                     smooth: false,
                     handles: vec![[0.0, 0.0, 10.0, -20.0], [-10.0, -20.0, 0.0, 0.0]],
+                    subpaths: Vec::new(),
                 },
             )),
         })
@@ -641,6 +665,7 @@ mod tests {
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
+                subpaths: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut path.kind {

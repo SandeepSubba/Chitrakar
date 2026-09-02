@@ -28,7 +28,9 @@ without reading anything else.*
   filter layers (gaussian blur, sharpen), masks on any layer that can be
   dragged and resized on the canvas, groups,
   reorder, duplicate/copy/cut/paste (subtree and pixels included, across
-  documents), delete, align and distribute a multi-selection, opacity/blend,
+  documents), delete, align and distribute a multi-selection, combine
+  shapes with union/subtract/intersect/exclude into a compound path that
+  can carry holes, opacity/blend,
   rename, labelled history with jump-to-state.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
@@ -111,7 +113,9 @@ without reading anything else.*
   text line as its own tspan but cannot carry alignment, which needs font
   metrics the codecs crate does not have; masks are ellipses only, moved and resized
   on canvas but not reshaped; PDF/TIFF
-  embed the composite as an image rather than live vectors.
+  embed the composite as an image rather than live vectors; a boolean
+  operation flattens curves to line segments and declines outlines that
+  touch or overlap exactly, rather than guessing.
 
 ---
 
