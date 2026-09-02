@@ -94,6 +94,9 @@ without reading anything else.*
   rasterizes at
   the size it is actually seen at, and carries alignment, line spacing,
   tracking and a wrap width for paragraph text.
+  A draft of the open document is written to IndexedDB a breath after
+  every change, and a fresh visit offers it back (Restore or Discard),
+  so a closed tab or a crash loses nothing.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
   the selection — rendered at that size, not upsampled), JPEG, SVG,
@@ -122,7 +125,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~174),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~332 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~336 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

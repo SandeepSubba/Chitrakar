@@ -1172,3 +1172,21 @@ body {
 .panel ul li.dragging {
   opacity: 0.5;
 }
+
+/* The draft offered back after a closed tab or a crash. */
+.recover {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.8rem;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+}
+.recover button {
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  padding: 0.1rem 0.6rem;
+}

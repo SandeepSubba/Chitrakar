@@ -225,6 +225,43 @@ function pointToSegment(
  * bare letter or Delete mean a character rather than a shortcut. A checkbox
  * or a slider is focusable and ignores both, so treating every input as
  * text entry silently disables the shortcuts after any panel click. */
+/** The draft of the open document, kept in IndexedDB so it survives a
+ * closed tab and a crash. One record; a .chitra with images can run past
+ * what localStorage holds, and IndexedDB takes bytes as they are. */
+const DRAFT_DB = "chitrakar";
+const DRAFT_STORE = "drafts";
+function draftDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(DRAFT_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(DRAFT_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+async function putDraft(bytes: Uint8Array): Promise<void> {
+  const db = await draftDb();
+  if (!db) return;
+  db.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).put(bytes, "current");
+}
+async function getDraft(): Promise<Uint8Array | null> {
+  const db = await draftDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    const req = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE).get("current");
+    req.onsuccess = () => resolve(req.result instanceof Uint8Array ? req.result : null);
+    req.onerror = () => resolve(null);
+  });
+}
+async function clearDraft(): Promise<void> {
+  const db = await draftDb();
+  if (!db) return;
+  db.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).delete("current");
+}
+
 function isTextEntry(target: EventTarget | null): boolean {
   if (target instanceof HTMLTextAreaElement) return true;
   if (target instanceof HTMLElement && target.isContentEditable) return true;
@@ -457,6 +494,27 @@ export function App() {
   const shapeCount = useRef(0);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** A draft from an earlier visit, offered back until it is taken or
+   * thrown away; and the draft-writer, a breath after the last change.
+   * `saveTick` is bumped on every refresh, so the draft follows the
+   * document. */
+  const [recoverable, setRecoverable] = useState<Uint8Array | null>(null);
+  const [saveTick, setSaveTick] = useState(0);
+  useEffect(() => {
+    getDraft().then((bytes) => bytes && bytes.length > 0 && setRecoverable(bytes));
+  }, []);
+  useEffect(() => {
+    if (!session || saveTick === 0) return;
+    const t = setTimeout(() => {
+      try {
+        putDraft(session.save());
+      } catch {
+        // A draft that cannot be written is not worth an alert.
+      }
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [session, saveTick]);
+
   /** Faces a text block can be set in. The bundled one is always there;
    * the rest are fetched from /fonts once per page load and registered
    * with the engine, which keeps them for good. */
@@ -505,6 +563,7 @@ export function App() {
   const groupCount = useRef(0);
 
   const refresh = useCallback((s: WasmSession) => {
+    setSaveTick((n) => n + 1);
     const canvas = canvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext("2d")!;
@@ -1542,14 +1601,20 @@ export function App() {
     over: NodeId | null;
     where: "above" | "below" | "into";
   } | null>(null);
-  const layerDragRef = useRef<{ id: NodeId; startY: number; active: boolean } | null>(null);
+  const layerDragRef = useRef<{
+    id: NodeId;
+    startY: number;
+    active: boolean;
+    over: NodeId | null;
+    where: "above" | "below" | "into";
+  } | null>(null);
   const layerListRef = useRef<HTMLUListElement>(null);
   /** Set while a drag just ended, so the click that follows the release
    * does not also pick the row. */
   const layerDragDone = useRef(false);
   const onRowPointerDown = (e: React.PointerEvent, id: NodeId) => {
     if (e.button !== 0 || renaming) return;
-    layerDragRef.current = { id, startY: e.clientY, active: false };
+    layerDragRef.current = { id, startY: e.clientY, active: false, over: null, where: "above" };
     const onMove = (ev: PointerEvent) => {
       const drag = layerDragRef.current;
       if (!drag) return;
@@ -1569,6 +1634,8 @@ export function App() {
         where =
           row.dataset.kind === "group" && t > 0.3 && t < 0.7 ? "into" : t < 0.5 ? "above" : "below";
       }
+      drag.over = over;
+      drag.where = where;
       setLayerDrag({ id: drag.id, over, where });
     };
     const onUp = () => {
@@ -1576,13 +1643,13 @@ export function App() {
       window.removeEventListener("pointerup", onUp);
       const drag = layerDragRef.current;
       layerDragRef.current = null;
-      setLayerDrag((current) => {
-        if (drag?.active && current?.over !== null && current?.over !== undefined) {
-          layerDragDone.current = true;
-          dropLayer(drag.id, current.over, current.where);
-        }
-        return null;
-      });
+      setLayerDrag(null);
+      // The drop is read from the ref, not a state updater: an updater is
+      // meant to be pure, and React may run it twice.
+      if (drag?.active && drag.over !== null) {
+        layerDragDone.current = true;
+        dropLayer(drag.id, drag.over, drag.where);
+      }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -2728,6 +2795,30 @@ export function App() {
 
   return (
     <div className="editor">
+      {recoverable && (
+        <div className="recover" role="status">
+          <span>A draft from your last session is here.</span>
+          <button
+            type="button"
+            onClick={() => {
+              const bytes = recoverable;
+              setRecoverable(null);
+              openDocumentBytes(bytes);
+            }}
+          >
+            Restore
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setRecoverable(null);
+              clearDraft();
+            }}
+          >
+            Discard
+          </button>
+        </div>
+      )}
       <header className="topbar">
         <span className="brand">Chitrakar</span>
         <nav className="menubar" aria-label="Main menu">

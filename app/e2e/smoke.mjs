@@ -2717,6 +2717,29 @@ assert(
 );
 }
 
+// 10. Recovery: a draft of the document is kept as it changes, and a
+// fresh visit offers it back — restored, the layers and the ink return.
+{
+  const rowsBefore = await page.locator(".panel ul li .layer-name").count();
+  assert(rowsBefore > 0, "something to lose");
+  await page.waitForTimeout(2200); // the draft is written a breath after the last change
+  await page.reload();
+  await page.waitForSelector("#engine-canvas");
+  await page.waitForTimeout(600);
+  assert(await page.isVisible(".recover"), "a fresh visit offers the draft back");
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === 0,
+    "and nothing is restored until asked",
+  );
+  await page.click(".recover >> text=Restore");
+  await page.waitForTimeout(600);
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rowsBefore &&
+      (await page.locator(".recover").count()) === 0,
+    `Restore brings the document back (${rowsBefore} layers)`,
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 
