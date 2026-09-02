@@ -60,9 +60,54 @@ const assert = (cond, msg) => {
   console.log("ok:", msg);
 };
 
+/** Document actions live in the menu bar, so reaching one means opening its
+ * menu first. Returns the item's locator without clicking, since some steps
+ * need to race the click against a download. */
+const menuItem = async (menu, item) => {
+  await page.click(`.menu-label:text-is("${menu}")`);
+  await page.waitForTimeout(120);
+  return page.locator(".menu-item", { hasText: item });
+};
+const menuClick = async (menu, item) => {
+  (await menuItem(menu, item)).click();
+  await page.waitForTimeout(200);
+};
+
 // 1. Empty document: canvas transparent, empty-state hint shown.
 assert((await canvasPixel(100, 100))[3] === 0, "empty doc renders transparent");
 assert(await page.isVisible("text=Drag on the canvas"), "empty layers hint");
+
+// 1b. Chrome: tools are glyphs, document actions live in menus, and a menu
+// closes the ways a menu is expected to.
+assert(
+  (await page.locator('button[title="Rect"] svg').count()) === 1,
+  "tools render an icon, not a letter",
+);
+assert(
+  (await page.locator(".topbar .menu-label").allTextContents()).join(",") ===
+    "File,Edit,View",
+  "menu bar carries File, Edit and View",
+);
+await page.click('.menu-label:text-is("File")');
+await page.waitForTimeout(120);
+assert(await page.isVisible("text=Export PNG"), "File menu holds the exports");
+assert(
+  await page.isVisible("text=New CMYK document"),
+  "and the document actions that used to crowd the bar",
+);
+// Hovering a neighbour switches menus once one is open.
+await page.hover('.menu-label:text-is("View")');
+await page.waitForTimeout(120);
+assert(
+  await page.isVisible("text=Fit document to window"),
+  "hovering across the bar switches menus",
+);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(120);
+assert(
+  (await page.locator(".menu-pop").count()) === 0,
+  "escape closes the open menu",
+);
 
 // 2. Draw a rect with the Rect tool.
 await page.click('button[title="Rect"]');
@@ -279,7 +324,7 @@ await page.mouse.wheel(0, -400);
 await page.waitForTimeout(150);
 const boxAfter = await page.locator("#engine-canvas").boundingBox();
 assert(boxAfter.width > boxBefore.width * 1.05, "wheel zoom enlarged canvas");
-await page.click('button[title="Fit document to window"]');
+await menuClick("View", "Fit document to window");
 await page.waitForTimeout(150);
 
 // 8h. Live move preview: pixels move BEFORE mouseup; Escape cancels.
@@ -621,7 +666,7 @@ await page.screenshot({ path: join(OUT, "editor5.png") });
 // 8w. Export SVG: the download carries live vector markup.
 const [svgDl] = await Promise.all([
   page.waitForEvent("download"),
-  page.click("text=Export SVG"),
+  (await menuItem("File", "Export SVG")).click(),
 ]);
 const svgPath = await svgDl.path();
 const svgText = await readFile(svgPath, "utf8");
@@ -631,7 +676,7 @@ assert(svgText.includes("<text") && svgText.includes("Hello!"), "text exported l
 console.log("ok: SVG export contains live vector markup");
 
 // 9. CMYK doc smoke: new doc, draw, still renders.
-await page.click("text=New CMYK");
+await menuClick("File", "New CMYK document");
 await page.click('button[title="Rect"]');
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
@@ -675,7 +720,7 @@ assert(
 );
 
 // 9d. Soft proofing on an RGB document with the same profile.
-await page.click("text=New RGB");
+await menuClick("File", "New RGB document");
 await page.waitForTimeout(200);
 await page.setInputFiles('input[accept=".icc,.icm"]', {
   name: "swop.icc",
@@ -716,7 +761,7 @@ assert(px[2] === 255, "proof off restores true pixels");
 // 9e. Print handoff: CMYK TIFF export separated through the profile.
 const [tiffDl] = await Promise.all([
   page.waitForEvent("download"),
-  page.click("text=Export TIFF"),
+  (await menuItem("File", "Export TIFF")).click(),
 ]);
 const tiffBytes = await readFile(await tiffDl.path());
 const marker = tiffBytes.subarray(0, 2).toString("latin1");
@@ -727,7 +772,7 @@ assert(tiffBytes.length > 10000, `TIFF carries pixel data (${tiffBytes.length} b
 // 9f. PDF export, CMYK-separated because a press profile is loaded.
 const [pdfDl] = await Promise.all([
   page.waitForEvent("download"),
-  page.click("text=Export PDF"),
+  (await menuItem("File", "Export PDF")).click(),
 ]);
 const pdfBytes = await readFile(await pdfDl.path());
 assert(pdfBytes.subarray(0, 8).toString("latin1") === "%PDF-1.7", "PDF header");

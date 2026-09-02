@@ -1,0 +1,190 @@
+/** Icon set for the chrome: one stroke weight, one 24-unit grid, all drawn
+ * in `currentColor` so a button's state (hover, active, disabled) colours
+ * its glyph without a second rule. Kept as paths rather than a font or
+ * sprite sheet so the bundle stays a single file and nothing loads late. */
+
+export type IconName =
+  | "move"
+  | "rect"
+  | "ellipse"
+  | "pen"
+  | "text"
+  | "undo"
+  | "redo"
+  | "fit"
+  | "zoomIn"
+  | "zoomOut"
+  | "proof"
+  | "gamut"
+  | "newDoc"
+  | "open"
+  | "image"
+  | "save"
+  | "export"
+  | "profile"
+  | "check"
+  | "raise"
+  | "lower"
+  | "group"
+  | "ungroup"
+  | "trash";
+
+const PATHS: Record<IconName, JSX.Element> = {
+  // Tools
+  move: <path d="M5 3l14 8-6 1.6L10.5 19z" />,
+  rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
+  ellipse: <ellipse cx="12" cy="12" rx="8" ry="6" />,
+  pen: (
+    <>
+      <path d="M5 19l1.2-4.2L15 6a2 2 0 0 1 2.8 2.8L9.2 17.8z" />
+      <path d="M4.6 19.4l3.2-1" />
+    </>
+  ),
+  text: (
+    <>
+      <path d="M5 6h14" />
+      <path d="M12 6v13" />
+      <path d="M9 19h6" />
+    </>
+  ),
+  // History and view
+  undo: (
+    <>
+      <path d="M4 10h9a5 5 0 0 1 0 10h-4" />
+      <path d="M8 6l-4 4 4 4" />
+    </>
+  ),
+  redo: (
+    <>
+      <path d="M20 10h-9a5 5 0 0 0 0 10h4" />
+      <path d="M16 6l4 4-4 4" />
+    </>
+  ),
+  fit: (
+    <>
+      <path d="M4 9V5h4" />
+      <path d="M20 9V5h-4" />
+      <path d="M4 15v4h4" />
+      <path d="M20 15v4h-4" />
+    </>
+  ),
+  zoomIn: (
+    <>
+      <circle cx="11" cy="11" r="6" />
+      <path d="M15.5 15.5L20 20" />
+      <path d="M11 8.5v5M8.5 11h5" />
+    </>
+  ),
+  zoomOut: (
+    <>
+      <circle cx="11" cy="11" r="6" />
+      <path d="M15.5 15.5L20 20" />
+      <path d="M8.5 11h5" />
+    </>
+  ),
+  // Colour management
+  proof: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </>
+  ),
+  gamut: (
+    <>
+      <path d="M12 4.5l8.5 15h-17z" />
+      <path d="M12 10v4" />
+      <path d="M12 16.8v.2" />
+    </>
+  ),
+  profile: (
+    <>
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="M12 4.5v15" />
+      <path d="M4.5 12h15" />
+    </>
+  ),
+  // Documents
+  newDoc: (
+    <>
+      <path d="M13 4H7a1.5 1.5 0 0 0-1.5 1.5v13A1.5 1.5 0 0 0 7 20h10a1.5 1.5 0 0 0 1.5-1.5V9.5z" />
+      <path d="M13 4v5.5h5.5" />
+    </>
+  ),
+  open: <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />,
+  image: (
+    <>
+      <rect x="4" y="5.5" width="16" height="13" rx="1.5" />
+      <circle cx="9" cy="10" r="1.5" />
+      <path d="M4.5 16.5l4.5-4 3.5 3 3-2.5 4 3.5" />
+    </>
+  ),
+  save: (
+    <>
+      <path d="M5 5.5h11L19 8.5v10a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5z" />
+      <path d="M8.5 5.5v4h6v-4" />
+      <rect x="8" y="13" width="8" height="6" />
+    </>
+  ),
+  export: (
+    <>
+      <path d="M12 4v10" />
+      <path d="M8.5 10.5L12 14l3.5-3.5" />
+      <path d="M5 16.5v2a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5v-2" />
+    </>
+  ),
+  check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
+  // Layer actions
+  raise: (
+    <>
+      <path d="M12 19V6" />
+      <path d="M7 11l5-5 5 5" />
+    </>
+  ),
+  lower: (
+    <>
+      <path d="M12 5v13" />
+      <path d="M7 13l5 5 5-5" />
+    </>
+  ),
+  group: (
+    <>
+      <rect x="4" y="4" width="11" height="11" rx="1.5" />
+      <path d="M9 19h9.5a1.5 1.5 0 0 0 1.5-1.5V8" />
+    </>
+  ),
+  ungroup: (
+    <>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+      <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M4.5 7h15" />
+      <path d="M9.5 7V5.5h5V7" />
+      <path d="M6.5 7l.8 12.1a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7" />
+      <path d="M10.5 11v6M13.5 11v6" />
+    </>
+  ),
+};
+
+/** A single glyph. `size` is the rendered box; the art is on a 24 grid. */
+export function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
+  return (
+    <svg
+      className="icon"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {PATHS[name]}
+    </svg>
+  );
+}

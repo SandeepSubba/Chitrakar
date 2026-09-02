@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Icon, IconName } from "./icons";
 import {
   Adjustment,
   BlendMode,
@@ -61,6 +62,13 @@ function seedHandles(
 }
 
 const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Text"] as const;
+const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
+  Move: "move",
+  Rect: "rect",
+  Ellipse: "ellipse",
+  Pen: "pen",
+  Text: "text",
+};
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
@@ -120,6 +128,12 @@ export function App() {
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
+  /** Which top-level menu is open, if any. */
+  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "view" | null>(null);
+  const openInputRef = useRef<HTMLInputElement>(null);
+  const placeInputRef = useRef<HTMLInputElement>(null);
+  const iccInputRef = useRef<HTMLInputElement>(null);
+  const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -180,6 +194,19 @@ export function App() {
       zoom,
       x: (host.clientWidth - DOC_WIDTH * zoom) / 2,
       y: (host.clientHeight - DOC_HEIGHT * zoom) / 2,
+    });
+  }, []);
+
+  /** Zoom about the centre of the viewport, so the View menu behaves like
+   * the wheel does under the cursor. */
+  const zoomBy = useCallback((factor: number) => {
+    const host = hostRef.current;
+    if (!host) return;
+    setView((v) => {
+      const zoom = Math.min(8, Math.max(0.05, v.zoom * factor));
+      const k = zoom / v.zoom;
+      const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
     });
   }, []);
 
@@ -959,83 +986,165 @@ export function App() {
     <div className="editor">
       <header className="topbar">
         <span className="brand">Chitrakar</span>
-        <button onClick={() => newDocument(false)}>New RGB</button>
-        <button onClick={() => newDocument(true)}>New CMYK</button>
-        <label className="file-button">
-          Open
-          <input type="file" accept=".chitra" onChange={openFile} hidden />
-        </label>
-        <label className="file-button" title="Place image">
-          Place
-          <input
-            type="file"
-            accept="image/png,image/jpeg"
-            onChange={placeImage}
-            hidden
-          />
-        </label>
-        <label
-          className="file-button"
-          title="Load a CMYK press profile (ICC) for ink preview and proofing"
-        >
-          {hasIcc ? "ICC ✓" : "ICC…"}
-          <input type="file" accept=".icc,.icm" onChange={loadIccProfile} hidden />
-        </label>
+        <nav className="menubar" aria-label="Main menu">
+          <MenuButton
+            label="File"
+            open={openMenu === "file"}
+            onOpen={() => setOpenMenu(openMenu === "file" ? null : "file")}
+            onHover={() => openMenu && setOpenMenu("file")}
+            onClose={() => setOpenMenu(null)}
+          >
+            <MenuItem icon="newDoc" onClick={() => newDocument(false)}>
+              New RGB document
+            </MenuItem>
+            <MenuItem icon="newDoc" onClick={() => newDocument(true)}>
+              New CMYK document
+            </MenuItem>
+            <hr />
+            <MenuItem icon="open" onClick={() => pick(openInputRef)}>
+              Open…
+            </MenuItem>
+            <MenuItem icon="image" onClick={() => pick(placeInputRef)}>
+              Place image…
+            </MenuItem>
+            <MenuItem icon="save" onClick={saveFile}>
+              Save
+            </MenuItem>
+            <hr />
+            <MenuItem icon="export" onClick={exportPng}>
+              Export PNG
+            </MenuItem>
+            <MenuItem icon="export" onClick={exportSvg}>
+              Export SVG
+            </MenuItem>
+            <MenuItem
+              icon="export"
+              onClick={exportPdf}
+              hint={hasIcc ? "CMYK" : "sRGB"}
+            >
+              Export PDF
+            </MenuItem>
+            {hasIcc && (
+              <MenuItem icon="export" onClick={exportTiff} hint="CMYK">
+                Export TIFF
+              </MenuItem>
+            )}
+            <hr />
+            <MenuItem
+              icon={hasIcc ? "check" : "profile"}
+              onClick={() => pick(iccInputRef)}
+            >
+              {hasIcc ? "Replace press profile…" : "Load press profile…"}
+            </MenuItem>
+          </MenuButton>
+
+          <MenuButton
+            label="Edit"
+            open={openMenu === "edit"}
+            onOpen={() => setOpenMenu(openMenu === "edit" ? null : "edit")}
+            onHover={() => openMenu && setOpenMenu("edit")}
+            onClose={() => setOpenMenu(null)}
+          >
+            <MenuItem icon="undo" onClick={undo} hint="Ctrl+Z">
+              Undo
+            </MenuItem>
+            <MenuItem icon="redo" onClick={redo} hint="Ctrl+Shift+Z">
+              Redo
+            </MenuItem>
+          </MenuButton>
+
+          <MenuButton
+            label="View"
+            open={openMenu === "view"}
+            onOpen={() => setOpenMenu(openMenu === "view" ? null : "view")}
+            onHover={() => openMenu && setOpenMenu("view")}
+            onClose={() => setOpenMenu(null)}
+          >
+            <MenuItem icon="fit" onClick={fitView}>
+              Fit document to window
+            </MenuItem>
+            <MenuItem icon="zoomIn" onClick={() => zoomBy(1.25)}>
+              Zoom in
+            </MenuItem>
+            <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)}>
+              Zoom out
+            </MenuItem>
+          </MenuButton>
+        </nav>
+
+        <span className="spacer" />
+
         {hasIcc && (
-          <>
+          <div className="chrome-group" role="group" aria-label="Soft proofing">
             <button
-              className={proofing ? "toggled" : ""}
+              className={proofing ? "chrome-button toggled" : "chrome-button"}
               onClick={() => applyProofing(!proofing, false)}
               title="Soft proof: preview what the press can reproduce"
+              aria-pressed={proofing}
             >
+              <Icon name="proof" />
               Proof
             </button>
             <button
-              className={gamutWarn ? "toggled" : ""}
+              className={gamutWarn ? "chrome-button toggled" : "chrome-button"}
               onClick={() =>
                 gamutWarn ? applyProofing(proofing, false) : applyProofing(true, true)
               }
               title="Mark out-of-gamut pixels grey"
+              aria-pressed={gamutWarn}
             >
+              <Icon name="gamut" />
               Gamut
             </button>
-          </>
+          </div>
         )}
-        <button onClick={saveFile}>Save</button>
-        <button onClick={exportPng}>Export PNG</button>
-        <button onClick={exportSvg}>Export SVG</button>
-        <button
-          onClick={exportPdf}
-          title={
-            hasIcc
-              ? "PDF separated through the loaded press profile"
-              : "PDF (sRGB; load an ICC profile for CMYK separation)"
-          }
-        >
-          Export PDF
-        </button>
-        {hasIcc && (
-          <button
-            onClick={exportTiff}
-            title="Print-ready CMYK TIFF, separated through the loaded press profile"
-          >
-            Export TIFF
+
+        <div className="chrome-group" role="group" aria-label="History">
+          <button className="chrome-button icon-only" onClick={undo} title="Undo (Ctrl+Z)">
+            <Icon name="undo" />
           </button>
-        )}
-        <span className="spacer" />
-        <button onClick={undo} title="Ctrl+Z">
-          Undo
-        </button>
-        <button onClick={redo} title="Ctrl+Shift+Z">
-          Redo
-        </button>
-        <button onClick={fitView} title="Fit document to window">
-          Fit
-        </button>
-        <span className="doc-title">
+          <button
+            className="chrome-button icon-only"
+            onClick={redo}
+            title="Redo (Ctrl+Shift+Z)"
+          >
+            <Icon name="redo" />
+          </button>
+        </div>
+
+        <span className="doc-chip">
+          {hasIcc && (
+            <span className="icc-badge" title="A CMYK press profile is loaded">
+              ICC ✓
+            </span>
+          )}
           {cmyk ? "CMYK" : "RGB"}, {DOC_WIDTH}×{DOC_HEIGHT} ·{" "}
           {Math.round(view.zoom * 100)}%
         </span>
+
+        {/* The file inputs live here, outside the menus, so they stay mounted
+            whether or not a menu is open; the menu items just click them. */}
+        <input
+          ref={openInputRef}
+          type="file"
+          accept=".chitra"
+          onChange={openFile}
+          hidden
+        />
+        <input
+          ref={placeInputRef}
+          type="file"
+          accept="image/png,image/jpeg"
+          onChange={placeImage}
+          hidden
+        />
+        <input
+          ref={iccInputRef}
+          type="file"
+          accept=".icc,.icm"
+          onChange={loadIccProfile}
+          hidden
+        />
       </header>
       <div className="workspace">
         <nav className="toolbar" aria-label="Tools">
@@ -1048,8 +1157,9 @@ export function App() {
                 setPenPoints([]);
               }}
               title={t}
+              aria-label={t}
             >
-              {t[0]}
+              <Icon name={TOOL_ICONS[t]} size={20} />
             </button>
           ))}
           <input
@@ -1194,36 +1304,41 @@ export function App() {
                 selectedLayer.index >= selectedLayer.sibling_count - 1
               }
               title="Raise layer"
+              aria-label="Raise layer"
             >
-              ↑
+              <Icon name="raise" size={16} />
             </button>
             <button
               onClick={() => reorderSelected(-1)}
               disabled={!selectedLayer || selectedLayer.index === 0}
               title="Lower layer"
+              aria-label="Lower layer"
             >
-              ↓
+              <Icon name="lower" size={16} />
             </button>
             <button
               onClick={groupSelection}
               disabled={selectionSet.length === 0}
               title="Group selected layers (ctrl-click to select several)"
+              aria-label="Group selected layers (ctrl-click to select several)"
             >
-              ⧉
+              <Icon name="group" size={16} />
             </button>
             <button
               onClick={ungroupSelection}
               disabled={selectedLayer?.kind !== "group"}
               title="Ungroup selected group"
+              aria-label="Ungroup selected group"
             >
-              ⧎
+              <Icon name="ungroup" size={16} />
             </button>
             <button
               onClick={deleteSelected}
               disabled={selected === null}
               title="Delete selected layer"
+              aria-label="Delete selected layer"
             >
-              🗑
+              <Icon name="trash" size={16} />
             </button>
           </div>
           {selectedLayer && (
@@ -1411,6 +1526,85 @@ export function App() {
 
 function topLevelCount(layers: LayerInfo[]): number {
   return layers.filter((l) => l.depth === 0).length;
+}
+
+/** One top-level menu: a label in the bar and the popup it owns.
+ *
+ * Menu bars have a convention worth honouring — once one menu is open,
+ * moving across the bar switches to its neighbour without another click —
+ * so opening is a click but switching is a hover, which is what `onHover`
+ * is for. Escape and any click outside close it. */
+function MenuButton({
+  label,
+  open,
+  onOpen,
+  onHover,
+  onClose,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onOpen: () => void;
+  onHover: () => void;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open, onClose]);
+
+  return (
+    <div className="menu" ref={ref}>
+      <button
+        className={open ? "menu-label open" : "menu-label"}
+        onClick={onOpen}
+        onPointerEnter={onHover}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {label}
+      </button>
+      {open && (
+        <div className="menu-pop" role="menu" onClick={onClose}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A row in a menu: glyph, label, and an optional hint on the right for a
+ * shortcut or the mode an action will use. */
+function MenuItem({
+  icon,
+  onClick,
+  hint,
+  children,
+}: {
+  icon: IconName;
+  onClick: () => void;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button className="menu-item" role="menuitem" onClick={onClick}>
+      <Icon name={icon} size={16} />
+      <span className="menu-item-label">{children}</span>
+      {hint && <span className="menu-item-hint">{hint}</span>}
+    </button>
+  );
 }
 
 interface KindPropsProps {
