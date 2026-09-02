@@ -59,9 +59,18 @@ export type IconName =
   | "flipV"
   | "units"
   | "lock"
-  | "unlock";
+  | "unlock"
+  | "eyedropper";
 
 const PATHS: Record<IconName, JSX.Element> = {
+  // A pipette: the barrel down to a tip, with the bulb at the top.
+  eyedropper: (
+    <>
+      <path d="M4 20l1-3.5L14.5 7l2 2L7 18.5z" />
+      <path d="M13.5 5.5l3 3" />
+      <path d="M15 4l5 5" />
+    </>
+  ),
   // A padlock, shut and open.
   lock: (
     <>
@@ -189,7 +198,9 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M13 4v5.5h5.5" />
     </>
   ),
-  open: <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />,
+  open: (
+    <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />
+  ),
   image: (
     <>
       <rect x="4" y="5.5" width="16" height="13" rx="1.5" />
@@ -257,7 +268,9 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M12 4.5a7.5 7.5 0 0 0 0 15z" fill="currentColor" stroke="none" />
     </>
   ),
-  "group-layer": <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />,
+  "group-layer": (
+    <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />
+  ),
   adjust: (
     <>
       <path d="M5 7h14M5 12h14M5 17h14" />
@@ -290,7 +303,11 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   subtract: (
     <>
-      <path d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H11.5A3.5 3.5 0 0 0 8 12.5V15H7.5A3.5 3.5 0 0 1 4 11.5z" fill="currentColor" opacity="0.35" />
+      <path
+        d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H11.5A3.5 3.5 0 0 0 8 12.5V15H7.5A3.5 3.5 0 0 1 4 11.5z"
+        fill="currentColor"
+        opacity="0.35"
+      />
       <rect x="4" y="5" width="12" height="10" rx="3.5" />
       <rect x="8" y="9" width="12" height="10" rx="3.5" strokeDasharray="3 3" />
     </>
@@ -304,8 +321,16 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   exclude: (
     <>
-      <path d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H8v6H7.5A3.5 3.5 0 0 1 4 11.5z" fill="currentColor" opacity="0.35" />
-      <path d="M16 9h.5A3.5 3.5 0 0 1 20 12.5v3A3.5 3.5 0 0 1 16.5 19h-5A3.5 3.5 0 0 1 8 15.5V15h8z" fill="currentColor" opacity="0.35" />
+      <path
+        d="M4 8.5A3.5 3.5 0 0 1 7.5 5h5A3.5 3.5 0 0 1 16 8.5v.5H8v6H7.5A3.5 3.5 0 0 1 4 11.5z"
+        fill="currentColor"
+        opacity="0.35"
+      />
+      <path
+        d="M16 9h.5A3.5 3.5 0 0 1 20 12.5v3A3.5 3.5 0 0 1 16.5 19h-5A3.5 3.5 0 0 1 8 15.5V15h8z"
+        fill="currentColor"
+        opacity="0.35"
+      />
       <rect x="4" y="5" width="12" height="10" rx="3.5" />
       <rect x="8" y="9" width="12" height="10" rx="3.5" />
     </>
@@ -369,7 +394,16 @@ const PATHS: Record<IconName, JSX.Element> = {
   // default effect is.
   shadow: (
     <>
-      <rect x="8" y="8" width="12" height="12" rx="1.5" fill="currentColor" stroke="none" opacity="0.45" />
+      <rect
+        x="8"
+        y="8"
+        width="12"
+        height="12"
+        rx="1.5"
+        fill="currentColor"
+        stroke="none"
+        opacity="0.45"
+      />
       <rect x="4" y="4" width="12" height="12" rx="1.5" />
     </>
   ),

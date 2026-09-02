@@ -130,6 +130,7 @@ const TOOLS = [
   "Brush",
   "Text",
   "Crop",
+  "Eyedropper",
 ] as const;
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
@@ -143,6 +144,7 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   b: "Brush",
   t: "Text",
   c: "Crop",
+  i: "Eyedropper",
 };
 
 /** A glyph per layer kind, so the stack is scannable without reading the
@@ -164,6 +166,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Brush: "B",
   Text: "T",
   Crop: "C",
+  Eyedropper: "I",
 };
 
 const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
@@ -174,6 +177,7 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Brush: "brush",
   Text: "text",
   Crop: "crop",
+  Eyedropper: "eyedropper",
 };
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
@@ -1329,6 +1333,38 @@ export function App() {
       widths: tool === "Brush" ? [1] : undefined,
       lastAt: performance.now(),
     };
+    if (tool === "Eyedropper") {
+      // Take the colour the page shows there — the composite, not the
+      // layer under the cursor, which is what the eye is pointing at —
+      // and make it the colour to draw with. With a shape or a block of
+      // text picked, it becomes that layer's fill as well.
+      const c = session.color_at(x, y);
+      if (c.length === 4 && c[3] > 0) {
+        const hex = `#${[c[0], c[1], c[2]]
+          .map((v) => v.toString(16).padStart(2, "0"))
+          .join("")}`;
+        setFill(hex);
+        const colour = cmyk ? hexToCmykColor(hex) : hexColor(hex);
+        if (selectedKind && typeof selectedKind === "object") {
+          if ("Vector" in selectedKind) {
+            setKind(
+              {
+                Vector: {
+                  ...selectedKind.Vector,
+                  fill: colour,
+                  gradient: null,
+                },
+              },
+              false,
+            );
+          } else if ("Text" in selectedKind) {
+            setKind({ Text: { ...selectedKind.Text, fill: colour } }, false);
+          }
+        }
+      }
+      setTool("Move");
+      return;
+    }
     if (tool === "Move") {
       const hit = session.hit_test(x, y);
       if (hit === undefined) {
@@ -3400,6 +3436,7 @@ export function App() {
             value={fill}
             onChange={(e) => setFill(e.target.value)}
             title="Fill color"
+            aria-label="Fill colour"
             className="fill-swatch"
           />
           {tool === "Brush" && (

@@ -1462,6 +1462,31 @@ impl Session {
         self.last_touched.filter(|id| self.doc.node(*id).is_ok())
     }
 
+    /// The colour the page shows at a document point, as straight sRGB
+    /// with alpha — what an eyedropper picks up. Nothing off the page.
+    /// Composited for that pixel alone rather than read from the frame,
+    /// so it is the document's colour whatever the view is doing.
+    pub fn color_at(&self, x: f32, y: f32) -> Option<[u8; 4]> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        if !(x >= 0.0 && y >= 0.0 && x < w && y < h) {
+            return None;
+        }
+        let mut surface = Surface::new(1, 1);
+        chitrakar_render::render_region_at(
+            &self.doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 1,
+                y1: 1,
+            },
+            Transform::translation(-x.floor(), -y.floor()),
+        )
+        .ok()?;
+        Some(surface.get(0, 0).to_srgb8())
+    }
+
     /// Topmost clickable node at a document-space point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
         chitrakar_render::hit_test(&self.doc, x, y).ok().flatten()
@@ -3345,6 +3370,54 @@ mod tests {
     }
 
     #[test]
+    fn the_colour_at_a_point_is_what_the_page_shows_there() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.5,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let picked = session.color_at(10.0, 10.0).unwrap();
+        assert_eq!(picked, [255, 128, 0, 255], "the fill, as it is shown");
+        assert_eq!(
+            session.color_at(30.0, 30.0).unwrap()[3],
+            0,
+            "bare page is clear"
+        );
+        assert_eq!(session.color_at(-1.0, 5.0), None, "nothing off the page");
+        assert_eq!(session.color_at(40.0, 5.0), None);
+        // Half opacity over nothing reads as half-covered, not as the fill.
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        let faded = session.color_at(10.0, 10.0).unwrap();
+        assert!(
+            (faded[3] as i32 - 128).abs() <= 1 && faded[0] == 255,
+            "{faded:?}"
+        );
+        // And it is the document's colour, not the view's: zoomed out, the
+        // same point reads the same.
+        session.set_viewport(0.25, 0.0, 0.0, 10, 10);
+        assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    #[test]
     fn a_locked_layer_is_not_picked_on_the_canvas() {
         let mut session = Session::new(60, 60, ColorMode::Rgb);
         let under = add_rect(&mut session, "under", 60.0, 60.0);
@@ -3538,5 +3611,26 @@ mod tests {
             plain.render().unwrap().pixels,
             "the carried face is the one drawn"
         );
+    }
+}
+
+#[cfg(test)]
+mod save_probe {
+    use super::*;
+    use chitrakar_color::ColorMode;
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn how_long_a_save_takes_with_images() {
+        let mut session = Session::new(2000, 1500, ColorMode::Rgb);
+        let pixels: Vec<u8> = (0..2000 * 1500 * 4).map(|i| (i % 251) as u8).collect();
+        let png = chitrakar_codecs::encode_png(2000, 1500, &pixels).unwrap();
+        session.place_image(&png, "big").unwrap();
+        let t = std::time::Instant::now();
+        let bytes = session.save().unwrap();
+        eprintln!("save: {:?} for {} bytes", t.elapsed(), bytes.len());
+        let t = std::time::Instant::now();
+        let _ = session.save().unwrap();
+        eprintln!("again: {:?}", t.elapsed());
     }
 }

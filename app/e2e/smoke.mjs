@@ -2725,6 +2725,62 @@ assert(
     await page.keyboard.press("Control+z"); // align, lock ×3, the ellipse
     await page.waitForTimeout(120);
   }
+
+  // 8x14. The eyedropper takes the colour the page shows and draws with
+  // it — and gives it to the picked layer.
+  const setSwatch = async (hex) =>
+    page.locator('input[aria-label="Fill colour"]').evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }, hex);
+  await setSwatch("#00cc44");
+  await page.click('button[aria-label="Ellipse"]');
+  await page.mouse.move(...at(380, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(520, 170), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await setSwatch("#1122cc");
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(80, 260));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 380), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const blue = await canvasPixel(160, 320);
+  assert(blue[2] > 150 && blue[1] < 80, `the new rect is blue (${blue})`);
+  await page.click('button[aria-label="Move"]');
+  await page.mouse.click(...at(160, 320)); // pick the blue rect
+  await page.waitForTimeout(200);
+  await page.keyboard.press("i");
+  await page.waitForTimeout(120);
+  assert(
+    (await page.getAttribute('button[aria-label="Eyedropper"]', "class")).includes("active"),
+    "the letter picks up the eyedropper",
+  );
+  await page.mouse.click(...at(450, 115)); // on the green ellipse
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('input[aria-label="Fill colour"]').inputValue()) === "#00cc44",
+    "it takes the colour the page shows there",
+  );
+  const picked = await canvasPixel(160, 320);
+  assert(
+    picked[1] > 150 && picked[2] < 90 && picked[3] === 255,
+    `and gives it to the picked layer (${picked})`,
+  );
+  assert(
+    (await page.getAttribute('button[aria-label="Move"]', "class")).includes("active"),
+    "and hands the Move tool back",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert((await canvasPixel(160, 320))[2] > 150, "one undo puts the layer's own colour back");
+  await page.keyboard.press("Control+z"); // the rect
+  await page.keyboard.press("Control+z"); // the ellipse
+  await page.waitForTimeout(200);
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

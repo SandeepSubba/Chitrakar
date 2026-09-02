@@ -64,6 +64,9 @@ without reading anything else.*
   ctrl-click by ctrl-click — moves as one, by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels.
+  The eyedropper (I) takes the colour the page shows under the cursor —
+  the composite, effects and opacity included — as the colour to draw
+  with, and gives it to the picked shape or block of text.
   An SVG placed, dropped or pasted comes in as a group of editable shape
   layers — paths with their curves, solid and gradient fills, strokes,
   group opacity, text as outlines — in document space, one undo step
@@ -133,9 +136,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~178),
+- **Verify before committing:** `cargo test --workspace` (~179),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~355 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~361 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

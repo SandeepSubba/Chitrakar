@@ -183,6 +183,15 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// The colour the page shows at a document point, as four bytes of
+    /// straight sRGB with alpha; empty off the page.
+    pub fn color_at(&self, x: f32, y: f32) -> Vec<u8> {
+        self.inner
+            .color_at(x, y)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+    }
+
     /// Bring an SVG in as a group of shape layers (see
     /// `Session::place_svg`). Returns the group's id.
     pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
