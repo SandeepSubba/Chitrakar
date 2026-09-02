@@ -659,7 +659,14 @@ impl Session {
             + 1;
         let mut next = self.doc.peek_next_id().0;
         let mut cmds = Vec::new();
-        let copy_id = self.emit_copy(id, parent, index, true, true, &mut next, &mut cmds)?;
+        let copy_id = self.emit_copy(
+            id,
+            parent,
+            index,
+            CopyStyle::Duplicate,
+            &mut next,
+            &mut cmds,
+        )?;
         let label = format!("Duplicate {}", self.doc.node(id)?.name);
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(copy_id)
@@ -677,6 +684,11 @@ impl Session {
         if ids.is_empty() {
             return Err(EngineError::BadCommand("nothing to duplicate".into()));
         }
+        let style = if offset {
+            CopyStyle::Duplicate
+        } else {
+            CopyStyle::InPlace
+        };
         // Where each copy goes, read from the document as it stands.
         let mut slots = Vec::with_capacity(ids.len());
         for (at, &id) in ids.iter().enumerate() {
@@ -700,7 +712,7 @@ impl Session {
         let mut cmds = Vec::new();
         let mut copies = vec![NodeId(0); ids.len()];
         for (at, id, parent, index) in slots {
-            copies[at] = self.emit_copy(id, parent, index, true, offset, &mut next, &mut cmds)?;
+            copies[at] = self.emit_copy(id, parent, index, style, &mut next, &mut cmds)?;
         }
         let label = if ids.len() == 1 {
             format!("Duplicate {}", self.doc.node(ids[0])?.name)
@@ -716,16 +728,15 @@ impl Session {
         src: NodeId,
         parent: NodeId,
         index: usize,
-        rename: bool,
-        offset: bool,
+        style: CopyStyle,
         next: &mut u64,
         cmds: &mut Vec<Command>,
     ) -> Result<NodeId, EngineError> {
         let mut node = self.doc.node(src)?.clone();
-        if rename {
+        if style != CopyStyle::Exact {
             node.name = format!("{} copy", node.name);
         }
-        if offset {
+        if style == CopyStyle::Duplicate {
             // Nudge the copy so it is visible rather than hiding exactly
             // behind the original. A copy that is about to be dragged
             // wants none: it starts where the pointer took hold of it.
@@ -740,7 +751,7 @@ impl Session {
             node: Box::new(node),
         });
         for (i, child) in self.doc.children_of(src)?.to_vec().iter().enumerate() {
-            self.emit_copy(*child, new_id, i, false, false, next, cmds)?;
+            self.emit_copy(*child, new_id, i, CopyStyle::Exact, next, cmds)?;
         }
         Ok(new_id)
     }
@@ -1761,6 +1772,19 @@ impl Session {
 
 fn parse_command(json: &str) -> Result<Command, EngineError> {
     serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))
+}
+
+/// How a copy differs from what it was made from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyStyle {
+    /// A duplicate: named "… copy" and nudged clear of the original, so
+    /// it is visible rather than hiding exactly behind it.
+    Duplicate,
+    /// The same, left where it stands — for a drag about to carry it off.
+    InPlace,
+    /// Neither renamed nor moved: a child inside a subtree being copied,
+    /// which belongs exactly where it was.
+    Exact,
 }
 
 /// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
