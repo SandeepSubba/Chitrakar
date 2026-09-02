@@ -2535,6 +2535,40 @@ assert(
     (await inkCount(370, 240, 570, 440)) === 0 && (await inkCount(40, 340, 260, 420)) === 0,
     "three undos: the attachment, the text and the ellipse are gone",
   );
+
+  // 8x10. Reordering by drag: carry the top row below the one under it
+  // and the stack turns over; one undo turns it back.
+  await page.click('button[aria-label="Ellipse"]');
+  await page.mouse.move(...at(400, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 380), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const names = async () =>
+    (await page.locator(".panel ul li .layer-name").allTextContents()).map((n) => n.trim());
+  const before = await names();
+  assert(before.length === 2 && before[0].startsWith("Ellipse"), `the ellipse is on top (${before})`);
+  const rows = page.locator(".panel ul li");
+  const [top, bottom] = [await rows.nth(0).boundingBox(), await rows.nth(1).boundingBox()];
+  await page.mouse.move(top.x + 40, top.y + top.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(top.x + 40, bottom.y + bottom.height * 0.85, { steps: 6 });
+  assert(
+    (await rows.nth(1).getAttribute("class")).includes("drop-below"),
+    "a line shows where the row would land",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const after = await names();
+  assert(
+    after[0] === before[1] && after[1] === before[0],
+    `dropped below the rect, the ellipse goes under it (${after})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert((await names()).join() === before.join(), "one undo turns the stack back");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

@@ -1143,3 +1143,32 @@ body {
 .inline-text::selection {
   background: rgba(88, 130, 255, 0.35);
 }
+
+/* Reordering by drag: a line where the row would land, a frame on a
+   group it would go into, and the row being carried dimmed. */
+.panel ul li {
+  position: relative;
+  touch-action: none;
+}
+.panel ul li.drop-above::before,
+.panel ul li.drop-below::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.panel ul li.drop-above::before {
+  top: -1px;
+}
+.panel ul li.drop-below::after {
+  bottom: -1px;
+}
+.panel ul li.drop-into {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.panel ul li.dragging {
+  opacity: 0.5;
+}

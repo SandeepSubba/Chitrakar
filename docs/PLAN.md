@@ -32,7 +32,8 @@ without reading anything else.*
   the confining — masks on any layer — an
   inscribed ellipse or rectangle, or any shape handed down to the layer
   below — dragged and resized on the canvas, groups,
-  reorder, duplicate/copy/cut/paste (subtree and pixels included, across
+  reorder (by the arrows, or by dragging a row above, below or into
+  another), duplicate/copy/cut/paste (subtree and pixels included, across
   documents), delete, align and distribute a multi-selection, combine
   shapes with union/subtract/intersect/exclude into a compound path that
   can carry holes, opacity/blend,
@@ -121,7 +122,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~174),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~328 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~332 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -134,8 +135,7 @@ without reading anything else.*
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each
      pass so far has found real defects), then whatever the next user
-     of the editor misses first — a layer panel that drags to reorder,
-     artboards, a brush that paints pixels.
+     of the editor misses first — artboards, a brush that paints pixels.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

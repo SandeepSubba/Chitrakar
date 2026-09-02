@@ -1533,6 +1533,89 @@ export function App() {
     null,
   );
 
+  /** Dragging a row of the layers list to reorder: which layer, the row
+   * under the pointer and where it would land relative to it. Pointer
+   * driven rather than HTML drag-and-drop, so it works the same with a
+   * mouse, a touch, and a test's synthetic pointer. */
+  const [layerDrag, setLayerDrag] = useState<{
+    id: NodeId;
+    over: NodeId | null;
+    where: "above" | "below" | "into";
+  } | null>(null);
+  const layerDragRef = useRef<{ id: NodeId; startY: number; active: boolean } | null>(null);
+  const layerListRef = useRef<HTMLUListElement>(null);
+  /** Set while a drag just ended, so the click that follows the release
+   * does not also pick the row. */
+  const layerDragDone = useRef(false);
+  const onRowPointerDown = (e: React.PointerEvent, id: NodeId) => {
+    if (e.button !== 0 || renaming) return;
+    layerDragRef.current = { id, startY: e.clientY, active: false };
+    const onMove = (ev: PointerEvent) => {
+      const drag = layerDragRef.current;
+      if (!drag) return;
+      if (!drag.active) {
+        if (Math.abs(ev.clientY - drag.startY) < 4) return;
+        drag.active = true;
+      }
+      let over: NodeId | null = null;
+      let where: "above" | "below" | "into" = "above";
+      for (const row of layerListRef.current?.querySelectorAll<HTMLLIElement>("li[data-id]") ?? []) {
+        const r = row.getBoundingClientRect();
+        if (ev.clientY < r.top || ev.clientY >= r.bottom) continue;
+        over = Number(row.dataset.id);
+        const t = (ev.clientY - r.top) / r.height;
+        // The middle of a group's row drops into it; the edges of any
+        // row drop beside it.
+        where =
+          row.dataset.kind === "group" && t > 0.3 && t < 0.7 ? "into" : t < 0.5 ? "above" : "below";
+      }
+      setLayerDrag({ id: drag.id, over, where });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const drag = layerDragRef.current;
+      layerDragRef.current = null;
+      setLayerDrag((current) => {
+        if (drag?.active && current?.over !== null && current?.over !== undefined) {
+          layerDragDone.current = true;
+          dropLayer(drag.id, current.over, current.where);
+        }
+        return null;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+  /** Move `id` to where a drop over `over` asked for, as one MoveNode. The
+   * list runs top-first, so "above" a row is the slot past its index in
+   * painter's order, and a move within one group accounts for the slot
+   * the layer leaves behind. */
+  const dropLayer = (id: NodeId, over: NodeId, where: "above" | "below" | "into") => {
+    if (!session || id === over) return;
+    const me = layers.find((l) => l.id === id);
+    const target = layers.find((l) => l.id === over);
+    if (!me || !target) return;
+    let parent: NodeId;
+    let index: number;
+    if (where === "into") {
+      parent = target.id;
+      index = layers.filter((l) => l.parent === target.id).length;
+      if (me.parent === parent) index -= 1;
+    } else {
+      parent = target.parent;
+      index = where === "above" ? target.index + 1 : target.index;
+      if (me.parent === parent && me.index < index) index -= 1;
+    }
+    // Never into its own subtree.
+    for (let cur: NodeId | undefined = parent; cur !== undefined && cur !== session.root_id; ) {
+      if (cur === id) return;
+      cur = layers.find((l) => l.id === cur)?.parent;
+    }
+    if (parent === me.parent && index === me.index) return;
+    run({ MoveNode: { id, parent, index } });
+  };
+
   /** Typing into a text block on the canvas: which block, and the text as
    * typed so far. Every keystroke previews through the engine and the
    * block records one history entry when the editor closes; Escape puts
@@ -3788,19 +3871,26 @@ export function App() {
               )}
             </div>
           )}
-          <ul>
+          <ul ref={layerListRef}>
             {layers.map((l) => (
               <li
                 key={l.id}
-                className={
-                  l.id === selected
-                    ? "selected"
-                    : multiSel.includes(l.id)
-                      ? "multi"
-                      : ""
-                }
+                data-id={l.id}
+                data-kind={l.kind}
+                className={[
+                  l.id === selected ? "selected" : multiSel.includes(l.id) ? "multi" : "",
+                  layerDrag?.over === l.id && layerDrag.id !== l.id ? `drop-${layerDrag.where}` : "",
+                  layerDrag?.id === l.id ? "dragging" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
+                onPointerDown={(e) => onRowPointerDown(e, l.id)}
                 onClick={(e) => {
+                  if (layerDragDone.current) {
+                    layerDragDone.current = false;
+                    return;
+                  }
                   if (e.ctrlKey || e.metaKey) {
                     // Toggle in the multi-selection; primary stays put.
                     if (l.id === selected) return;
