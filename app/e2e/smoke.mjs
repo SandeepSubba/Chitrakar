@@ -1593,6 +1593,57 @@ assert(
   );
 }
 
+// 8x3a. Typed geometry: the position and size fields place a layer
+// exactly, and each edit is one history entry.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 180), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const field = (label) => page.locator(`input[aria-label="${label}"]`);
+  const geometry = async () =>
+    Promise.all(
+      ["X position", "Y position", "W size", "H size"].map((l) =>
+        field(l).inputValue().then(Number),
+      ),
+    );
+  const drawn = await geometry();
+  assert(
+    Math.abs(drawn[0] - 100) < 2 && Math.abs(drawn[2] - 100) < 2,
+    `the fields report where it was drawn (${drawn})`,
+  );
+  // Type an exact position: the shape moves and the fields agree.
+  await field("X position").fill("300");
+  await field("X position").press("Enter");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(350, 140))[3] === 255, "typing X moved the layer");
+  assert((await canvasPixel(150, 140))[3] === 0, "and vacated where it was");
+  // Then an exact size, anchored at the corner the position names.
+  await field("W size").fill("200");
+  await field("W size").press("Enter");
+  await page.waitForTimeout(300);
+  const resized = await geometry();
+  assert(
+    Math.abs(resized[0] - 300) < 2 && Math.abs(resized[2] - 200) < 2,
+    `typing W resized it about its own corner (${resized})`,
+  );
+  assert((await canvasPixel(490, 140))[3] === 255, "the layer reaches its new width");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(490, 140))[3] === 0, "the resize undoes on its own");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(150, 140))[3] === 255, "and so does the move");
+}
+
 // 8x3b. Booleans: two overlapping rects combine into one compound path,
 // and subtracting an enclosed one punches a hole.
 {

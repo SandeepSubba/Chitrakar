@@ -606,6 +606,27 @@ body {
   pointer-events: none;
 }
 
+/* Position and size: four short fields on one line, so exact placement is
+   typed rather than nudged. */
+.geometry {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.3rem;
+}
+
+.geometry label {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--muted, #9aa0aa);
+}
+
+.geometry input {
+  width: 100%;
+  min-width: 0;
+}
+
 /* Each effect reads as one unit stacked on the next, so it gets a hairline
    rule above it rather than a heading of its own. */
 .effects {

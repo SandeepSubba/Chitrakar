@@ -54,7 +54,8 @@ without reading anything else.*
   other layers', showing a guide on the line it caught; ctrl/cmd drags
   free of it — and the same lines catch a resize handle. A ctrl-clicked
   multi-selection moves as one — by drag or by
-  arrow key (shift for a coarse step) — in a single history entry.
+  arrow key (shift for a coarse step) — in a single history entry. Exact
+  placement is typed: the panel carries X/Y/W/H in document pixels.
   Zooming in re-renders rather than magnifies: the engine composites a
   viewport at the resolution the canvas is displayed at, so outlines,
   gradients and glyphs are re-solved instead of interpolated, and a page

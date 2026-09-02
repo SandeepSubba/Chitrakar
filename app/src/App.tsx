@@ -1932,6 +1932,59 @@ export function App() {
     setEffects(next, gesture);
   };
 
+  /** The selected layer's visual box in document pixels, [x, y, w, h] —
+   * what the geometry fields show and edit. */
+  const selBox = ((): [number, number, number, number] | null => {
+    if (!session || selected === null) return null;
+    const b = session.bounds_of(selected);
+    return b.length === 4 ? [b[0], b[1], b[2], b[3]] : null;
+  })();
+
+  /** Type an exact position or size. Moving is a translation in the
+   * layer's own parent space; resizing scales it about its own top-left,
+   * exactly as dragging the south-east handle does. For a turned layer the
+   * box is the one around it, so a size typed there is the size of that
+   * box rather than of the layer's own axes. */
+  const setGeometry = (field: "x" | "y" | "w" | "h", value: number) => {
+    if (!session || selected === null || !selBox) return;
+    const [x, y, w, h] = selBox;
+    const t0 = toTransform(session.transform_of(selected));
+    if (field === "x" || field === "y") {
+      const [dx, dy] = layerVector(
+        selected,
+        field === "x" ? value - x : 0,
+        field === "y" ? value - y : 0,
+      );
+      if (dx === 0 && dy === 0) return;
+      run({
+        SetTransform: {
+          id: selected,
+          transform: { ...t0, e: t0.e + dx, f: t0.f + dy },
+        },
+      });
+      return;
+    }
+    const from = field === "w" ? w : h;
+    if (from <= 0 || value <= 0 || !selLocal) return;
+    const ratio = value / from;
+    const [sx, sy] = field === "w" ? [ratio, 1] : [1, ratio];
+    const [fx, fy] = [selLocal[0], selLocal[1]];
+    const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
+    run({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: t0.a * sx,
+          b: t0.b * sx,
+          c: t0.c * sy,
+          d: t0.d * sy,
+          e: t0.a * tx + t0.c * ty + t0.e,
+          f: t0.b * tx + t0.d * ty + t0.f,
+        },
+      },
+    });
+  };
+
   /** Copy the selected layer and its contents, and select the copy — the
    * copy is what you want to move next. */
   const duplicateSelected = () => {
@@ -2756,6 +2809,45 @@ export function App() {
           )}
           {selectedLayer && (
             <div className="layer-props">
+              {selBox && (
+                <div className="geometry" aria-label="Position and size">
+                  {(
+                    [
+                      ["x", "X", selBox[0]],
+                      ["y", "Y", selBox[1]],
+                      ["w", "W", selBox[2]],
+                      ["h", "H", selBox[3]],
+                    ] as const
+                  ).map(([field, label, value]) => (
+                    <label key={field}>
+                      {label}
+                      <input
+                        type="number"
+                        step="1"
+                        // Keyed by the value so a committed edit re-reads
+                        // from the document rather than keeping a stale
+                        // draft: the box moves for reasons other than this
+                        // field (a drag, an undo, an align).
+                        key={`${field}${Math.round(value * 100)}`}
+                        defaultValue={Math.round(value * 100) / 100}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter") e.currentTarget.blur();
+                        }}
+                        onBlur={(e) => {
+                          const v = Number(e.currentTarget.value);
+                          if (Number.isFinite(v)) setGeometry(field, v);
+                        }}
+                        aria-label={
+                          field === "w" || field === "h"
+                            ? `${label} size`
+                            : `${label} position`
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
               <label>
                 Opacity{" "}
                 {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
