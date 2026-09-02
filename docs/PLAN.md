@@ -25,8 +25,9 @@ without reading anything else.*
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
-  filter layers (gaussian blur, sharpen), masks on any layer that can be
-  dragged and resized on the canvas, groups,
+  filter layers (gaussian blur, sharpen), masks on any layer — an
+  inscribed ellipse or rectangle, or any shape handed down to the layer
+  below — dragged and resized on the canvas, groups,
   reorder, duplicate/copy/cut/paste (subtree and pixels included, across
   documents), delete, align and distribute a multi-selection, combine
   shapes with union/subtract/intersect/exclude into a compound path that
@@ -122,8 +123,9 @@ without reading anything else.*
   them means removing and re-adding;
   and export flattens them like everything else; SVG export writes each
   text line as its own tspan but cannot carry alignment, which needs font
-  metrics the codecs crate does not have; masks are ellipses only, moved and resized
-  on canvas but not reshaped; PDF/TIFF
+  metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
+  another shape handed down to the layer below, moved and resized on
+  canvas but not reshaped there; PDF/TIFF
   embed the composite as an image rather than live vectors; a boolean
   operation flattens curves to line segments and declines outlines that
   touch or overlap exactly, rather than guessing.

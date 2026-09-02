@@ -606,6 +606,13 @@ body {
   pointer-events: none;
 }
 
+/* The three ways to start a mask, side by side. */
+.mask-row {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
 /* Rulers: thin strips over the top and left of the canvas, marked in
    document units. Guides are dragged out of them. */
 .ruler {

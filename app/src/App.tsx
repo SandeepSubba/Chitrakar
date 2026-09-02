@@ -2138,7 +2138,7 @@ export function App() {
   };
 
   /** Attach an ellipse mask inscribed in the layer's current bounds. */
-  const addMask = () => {
+  const addMask = (kind: "ellipse" | "rect") => {
     if (!session || !selectedLayer) return;
     // A mask is written in the layer's parent space, so inscribe it in the
     // layer's bounds *there* — mapping its own box through its own
@@ -2151,13 +2151,17 @@ export function App() {
     const ys = [t.b * lb[0] + t.d * lb[1] + t.f, t.b * lb[2] + t.d * lb[3] + t.f];
     const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
     const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+    const [w, h] = [x1 - x0, y1 - y0];
     run({
       SetMask: {
         id: selectedLayer.id,
         mask: {
           kind: {
             Vector: {
-              shape: { Ellipse: { rx: (x1 - x0) / 2, ry: (y1 - y0) / 2 } },
+              shape:
+                kind === "rect"
+                  ? { Rect: { width: w, height: h, radius: 0 } }
+                  : { Ellipse: { rx: w / 2, ry: h / 2 } },
               transform: { a: 1, b: 0, c: 0, d: 1, e: x0, f: y0 },
             },
           },
@@ -2165,6 +2169,44 @@ export function App() {
         },
       },
     });
+  };
+
+  /** Make the picked shape the mask of the layer under it: the shape
+   * itself goes away and its outline becomes what shows of the layer.
+   * A mask is written in its owner's parent space, and both layers share
+   * a parent, so the shape's own transform carries over unchanged. */
+  const maskWithSelectedShape = () => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    const parent = layers.find((l) => l.id === selected)?.parent;
+    const siblings = layers.filter((l) => l.parent === parent);
+    // The panel lists topmost first, so the layer below is the next row.
+    const at = siblings.findIndex((l) => l.id === selected);
+    const below = siblings[at + 1];
+    if (!below) {
+      alert("Masking needs a layer underneath the shape.");
+      return;
+    }
+    run({
+      Batch: [
+        {
+          SetMask: {
+            id: below.id,
+            mask: {
+              kind: {
+                Vector: {
+                  shape: selectedKind.Vector.shape,
+                  transform: toTransform(session.transform_of(selected)),
+                },
+              },
+              invert: false,
+            },
+          },
+        },
+        { RemoveNode: { id: selected } },
+      ],
+    });
+    setSelected(below.id);
   };
 
   let history: { past: string[]; future: string[] } = { past: [], future: [] };
@@ -3262,9 +3304,21 @@ export function App() {
                 </label>
               </div>
               {selectedMask === null ? (
-                <button className="mask-button" onClick={addMask}>
-                  Add ellipse mask
-                </button>
+                <div className="row mask-row">
+                  <button className="mask-button" onClick={() => addMask("ellipse")}>
+                    Ellipse mask
+                  </button>
+                  <button className="mask-button" onClick={() => addMask("rect")}>
+                    Rect mask
+                  </button>
+                  {selectedKind &&
+                    typeof selectedKind === "object" &&
+                    "Vector" in selectedKind && (
+                    <button className="mask-button" onClick={maskWithSelectedShape}>
+                      Mask below
+                    </button>
+                  )}
+                </div>
               ) : (
                 <label className="row">
                   <input

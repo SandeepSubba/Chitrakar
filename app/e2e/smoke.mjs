@@ -738,7 +738,7 @@ assert(
 // the edge only partly covers.
 px = await canvasPixel(594, 494); // rect's bottom-right corner, outside ellipse
 assert(px[3] === 255, "rect corner visible before mask");
-await page.click("text=Add ellipse mask");
+await page.click("text=Ellipse mask");
 await page.waitForTimeout(200);
 px = await canvasPixel(594, 494);
 assert(px[3] === 0, "ellipse mask hides the rect corner");
@@ -1590,6 +1590,70 @@ assert(
   assert(
     (await canvasPixel(360, 110))[3] === 255 && (await canvasPixel(120, 240))[3] === 0,
     "and the pair moves back in one undo",
+  );
+}
+
+// 8x1c. Masks beyond the inscribed ellipse: a rectangle, and a shape
+// used as the mask of the layer under it.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const drawRect = async (x0, y0, x1, y1) => {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  };
+  await drawRect(100, 100, 500, 300);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  // An ellipse mask cuts the corners; a rectangle one does not.
+  await page.click("text=Ellipse mask");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(110, 110))[3] === 0, "the ellipse mask cut the corner");
+  await page.click("text=Remove");
+  await page.waitForTimeout(250);
+  await page.click("text=Rect mask");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(110, 110))[3] === 255,
+    "a rectangle mask keeps the corner it inscribes",
+  );
+  assert((await canvasPixel(300, 200))[3] === 255, "and the middle with it");
+  await page.click("text=Remove");
+  await page.waitForTimeout(250);
+
+  // Draw a second shape over it and make it the mask of the one below.
+  await drawRect(150, 150, 250, 250);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "two layers before masking",
+  );
+  await page.click("text=Mask below");
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "the shape became the mask and left the stack",
+  );
+  assert((await canvasPixel(200, 200))[3] === 255, "what the shape covered shows");
+  assert((await canvasPixel(400, 200))[3] === 0, "and what it did not is hidden");
+  assert(
+    (await page.locator('.panel ul li [title="This layer has a mask"]').count()) === 1,
+    "the row marks the mask it now carries",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2 &&
+      (await canvasPixel(400, 200))[3] === 255,
+    "and the whole thing undoes as one step",
   );
 }
 
