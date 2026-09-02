@@ -433,6 +433,36 @@ await page.waitForTimeout(150);
 px = await canvasPixel(650, 530);
 assert(px[3] === 0, "resize is a single undo step");
 
+// 8i2. Rotation: the knob above the selection turns the layer, and the
+// whole turn is one undo step.
+await page.mouse.click(...toScreen(450, 400)); // select the rect
+await page.waitForTimeout(150);
+const rot = page.locator(".rot-handle");
+assert((await rot.count()) === 1, "selection offers a rotation handle");
+// A corner the rect covers and the ellipse does not, so the probe reads the
+// rect alone; a quarter turn about the selection centre vacates it.
+const rectCorner = [590, 490];
+assert((await canvasPixel(...rectCorner))[3] === 255, "corner filled before turning");
+const rbox = await rot.boundingBox();
+const selBox = await page.locator(".sel-overlay").boundingBox();
+const pivot = [selBox.x + selBox.width / 2, selBox.y + selBox.height / 2];
+await rot.hover();
+await page.mouse.down();
+// Swing the knob a quarter turn about the selection centre.
+await page.mouse.move(pivot[0] + (rbox.y + 6 - pivot[1]), pivot[1], { steps: 8 });
+await page.mouse.up();
+await page.waitForTimeout(250);
+assert(
+  (await canvasPixel(...rectCorner))[3] === 0,
+  "the corner is vacated by the rotation",
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+assert(
+  (await canvasPixel(...rectCorner))[3] === 255,
+  "and the whole turn undoes as one step",
+);
+
 // 8j. Edit the selected rect's fill color through the properties panel.
 await page.mouse.click(...toScreen(450, 400)); // reselect rect
 await page.waitForTimeout(150);

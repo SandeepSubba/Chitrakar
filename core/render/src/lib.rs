@@ -206,28 +206,28 @@ fn local_bounds(shape: &VectorShape) -> (f32, f32, f32, f32) {
     }
 }
 
-/// Transformed doc-space bounds of a local box.
+/// Doc-space bounds of a local box: the axis-aligned box around all four
+/// mapped corners, since a rotated box is not one of them.
 fn transformed_local_bounds(t: Transform, lb: (f32, f32, f32, f32)) -> Bounds {
-    let xs = [t.a * lb.0 + t.e, t.a * lb.2 + t.e];
-    let ys = [t.d * lb.1 + t.f, t.d * lb.3 + t.f];
-    Bounds::Rect(
-        xs[0].min(xs[1]),
-        ys[0].min(ys[1]),
-        xs[0].max(xs[1]),
-        ys[0].max(ys[1]),
-    )
+    let corners = [
+        to_device(t, lb.0, lb.1),
+        to_device(t, lb.2, lb.1),
+        to_device(t, lb.0, lb.3),
+        to_device(t, lb.2, lb.3),
+    ];
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in corners {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    Bounds::Rect(x0, y0, x1, y1)
 }
 
 /// Transformed doc-space bounds of a local (0,0)-(w,h) box.
 fn transformed_bounds(t: Transform, w: f32, h: f32) -> Bounds {
-    let xs = [t.e, t.a * w + t.e];
-    let ys = [t.f, t.d * h + t.f];
-    Bounds::Rect(
-        xs[0].min(xs[1]),
-        ys[0].min(ys[1]),
-        xs[0].max(xs[1]),
-        ys[0].max(ys[1]),
-    )
+    transformed_local_bounds(t, (0.0, 0.0, w, h))
 }
 
 /// Doc-space extent of a node: leaf bounds through its transform; groups are
@@ -254,7 +254,7 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
             // Path strokes are centered on the line, so they overhang the
             // anchor bounds (rect/ellipse strokes are inner bands and don't).
             if let (VectorShape::Path { .. }, Some(stroke)) = (shape, stroke) {
-                let pad = stroke.width * node.transform.a.abs().max(node.transform.d.abs());
+                let pad = stroke.width * max_scale(node.transform);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
                 }
@@ -488,11 +488,29 @@ fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode, cl
 
 /// Map a doc-space point into a node's local space (inverse of its
 /// scale+translate transform). Degenerate scales map nowhere.
+/// Map a point from a node's local space into document space. Transforms
+/// are the full affine `[a c e; b d f]`, so this is where rotation and
+/// shear actually take effect.
+fn to_device(t: Transform, x: f32, y: f32) -> (f32, f32) {
+    (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f)
+}
+
+/// The inverse map, or `None` when the transform collapses space (a zero
+/// determinant), which would make every device pixel map nowhere.
 fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
-    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+    let det = t.a * t.d - t.b * t.c;
+    if det.abs() < 1e-9 {
         return None;
     }
-    Some(((x - t.e) / t.a, (y - t.f) / t.d))
+    let (dx, dy) = (x - t.e, y - t.f);
+    Some(((t.d * dx - t.c * dy) / det, (t.a * dy - t.b * dx) / det))
+}
+
+/// How much the transform can stretch a length, used to pad bounds for
+/// strokes: the larger of the two column norms, which bounds the true
+/// largest singular value closely enough for a conservative pad.
+fn max_scale(t: Transform) -> f32 {
+    t.a.hypot(t.b).max(t.c.hypot(t.d))
 }
 
 /// Expand a curved path into the polyline everything else works on — paint,
@@ -793,8 +811,28 @@ fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
 /// scale and translation only, so the mapped rect stays axis-aligned and the
 /// answer is a product of two 1-D overlaps.
 fn rect_coverage(width: f32, height: f32, t: Transform, px: u32, py: u32) -> f32 {
-    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+    if to_local(t, 0.0, 0.0).is_none() {
         return 0.0;
+    }
+    // Rotated or sheared, the mapped rect is no longer axis-aligned and the
+    // area is no longer a product of two 1-D overlaps, so fall back to
+    // sampling the pixel.
+    if t.b.abs() > 1e-6 || t.c.abs() > 1e-6 {
+        const N: u32 = 4;
+        let hits = (0..N * N)
+            .filter(|k| {
+                let (i, j) = (k % N, k / N);
+                match to_local(
+                    t,
+                    px as f32 + (i as f32 + 0.5) / N as f32,
+                    py as f32 + (j as f32 + 0.5) / N as f32,
+                ) {
+                    Some((x, y)) => x >= 0.0 && y >= 0.0 && x < width && y < height,
+                    None => false,
+                }
+            })
+            .count();
+        return hits as f32 / (N * N) as f32;
     }
     let span = |lo: f32, hi: f32, at: u32| {
         let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
@@ -821,7 +859,7 @@ fn pixel_coverage(
     py: u32,
 ) -> f32 {
     const N: u32 = 4;
-    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+    if to_local(t, 0.0, 0.0).is_none() {
         return 0.0;
     }
     // An axis-aligned rect fill has an exact answer, so take it. Rect fills
@@ -881,9 +919,13 @@ fn fill_path_scanlines(
     mask: Option<&Mask>,
 ) {
     const N: u32 = 4;
-    if points.len() < 3 || bbox.is_empty() || t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+    if points.len() < 3 || bbox.is_empty() || to_local(t, 0.0, 0.0).is_none() {
         return;
     }
+    // Map the polygon into device space once, then scan there. Doing it the
+    // other way — scanning in local space — only works while the transform
+    // keeps device rows parallel to local rows, which rotation does not.
+    let poly: Vec<(f32, f32)> = points.iter().map(|p| to_device(t, p[0], p[1])).collect();
     let width = (bbox.x1 - bbox.x0) as usize;
     let mut cov = vec![0f32; width];
     let mut xs: Vec<f32> = Vec::new();
@@ -891,13 +933,13 @@ fn fill_path_scanlines(
         cov.fill(0.0);
         for j in 0..N {
             // Sample y at the middle of each sub-row, never on its edge.
-            let ly = ((py as f32 + (j as f32 + 0.5) / N as f32) - t.f) / t.d;
+            let sy = py as f32 + (j as f32 + 0.5) / N as f32;
             xs.clear();
-            for i in 0..points.len() {
-                let (a, b) = (points[i], points[(i + 1) % points.len()]);
-                if (a[1] > ly) != (b[1] > ly) {
-                    let s = (ly - a[1]) / (b[1] - a[1]);
-                    xs.push((a[0] + s * (b[0] - a[0])) * t.a + t.e);
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                if (a.1 > sy) != (b.1 > sy) {
+                    let s = (sy - a.1) / (b.1 - a.1);
+                    xs.push(a.0 + s * (b.0 - a.0));
                 }
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -966,7 +1008,7 @@ fn paint_shape(
         };
     // Centered path strokes overhang the anchor bounds.
     if let (Some(sw), VectorShape::Path { .. }) = (stroke_width, shape) {
-        let pad = (sw * t.a.abs().max(t.d.abs())).ceil() as u32 + 1;
+        let pad = (sw * max_scale(t)).ceil() as u32 + 1;
         bbox = ClipRect {
             x0: bbox.x0.saturating_sub(pad),
             y0: bbox.y0.saturating_sub(pad),
@@ -1795,6 +1837,176 @@ mod tests {
             0.0,
             "zero handles leave the path straight"
         );
+    }
+
+    /// A rotation by `deg` about the local origin, then a translation.
+    fn rotation(deg: f32, tx: f32, ty: f32) -> Transform {
+        let r = deg.to_radians();
+        Transform {
+            a: r.cos(),
+            b: r.sin(),
+            c: -r.sin(),
+            d: r.cos(),
+            e: tx,
+            f: ty,
+        }
+    }
+
+    #[test]
+    fn a_rotated_rect_paints_where_it_was_turned_to() {
+        // 45 degrees turns a square into a diamond: its corners reach the
+        // horizontal extremes and the old corners come off the canvas edge.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: rotation(45.0, 32.0, 18.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        // The diamond's centre sits a half-diagonal below the pivot.
+        let mid = 18.0 + 20.0 * std::f32::consts::SQRT_2 / 2.0;
+        assert_eq!(s.get(32, mid as u32).a, 1.0, "inside the rotated shape");
+        // Just outside the pivot corner, where an unrotated rect would be.
+        assert_eq!(s.get(36, 20).a, 0.0, "the unrotated position is empty");
+        assert_eq!(
+            hit_test(&doc, 32.0, mid).unwrap(),
+            Some(id),
+            "hit testing follows the rotation"
+        );
+        assert_eq!(hit_test(&doc, 36.0, 20.0).unwrap(), None);
+
+        // Bounds have to contain the turned shape, or incremental rendering
+        // would leave parts of it stale.
+        match node_bounds(&doc, id).unwrap() {
+            Bounds::Rect(x0, y0, x1, y1) => {
+                let half = 20.0 * std::f32::consts::SQRT_2;
+                assert!(
+                    x1 - x0 > half - 0.5 && y1 - y0 > half - 0.5,
+                    "bounds must span the diagonal, got {:?}",
+                    (x0, y0, x1, y1)
+                );
+            }
+            other => panic!("expected a rect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rotated_path_fills_through_the_scanline_rasterizer() {
+        // Paths take a different code path from rects, and it scans device
+        // rows — so it has to map the polygon rather than the scanline.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "tri",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [24.0, 0.0], [24.0, 24.0], [0.0, 24.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        // Unrotated: a square with its top-left at (20, 20).
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        let flat = render(&doc).unwrap();
+        assert_eq!(flat.get(22, 22).a, 1.0);
+
+        // Rotated 45 degrees about the same pivot, that corner is now empty
+        // and the shape reaches straight down instead.
+        doc.apply(Command::SetTransform {
+            id,
+            transform: rotation(45.0, 20.0, 20.0),
+        })
+        .unwrap();
+        let turned = render(&doc).unwrap();
+        // Clear of the diamond: (22,22) would sit exactly on the rotated
+        // edge running down-right from the pivot, and read half covered.
+        assert_eq!(turned.get(35, 22).a, 0.0, "the old corner is vacated");
+        assert_eq!(
+            turned.get(20, 20 + 12).a,
+            1.0,
+            "and the shape now runs down from the pivot"
+        );
+        // The area is unchanged by a rotation, give or take the edge pixels.
+        let area = |s: &Surface| -> f32 {
+            (0..64)
+                .flat_map(|y| (0..64).map(move |x| (x, y)))
+                .map(|(x, y)| s.get(x, y).a)
+                .sum()
+        };
+        let (before, after) = (area(&flat), area(&turned));
+        assert!(
+            (before - after).abs() < before * 0.05,
+            "rotation preserves area: {before} vs {after}"
+        );
+    }
+
+    #[test]
+    fn region_render_matches_full_render_when_rotated() {
+        // The equivalence incremental rendering rests on, with a transform
+        // whose device rows are not local rows.
+        let mut doc = Document::new(48, 48, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 12.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: rotation(30.0, 20.0, 14.0),
+        })
+        .unwrap();
+
+        let full = render(&doc).unwrap();
+        let mut patched = render(&doc).unwrap();
+        let clip = ClipRect {
+            x0: 8,
+            y0: 8,
+            x1: 40,
+            y1: 40,
+        };
+        for y in clip.y0..clip.y1 {
+            for x in clip.x0..clip.x1 {
+                patched.pixels[(y * 48 + x) as usize] = LinearRgba {
+                    r: 9.0,
+                    g: 9.0,
+                    b: 9.0,
+                    a: 1.0,
+                };
+            }
+        }
+        render_region(&doc, &mut patched, clip).unwrap();
+        for y in 0..48 {
+            for x in 0..48 {
+                assert_eq!(patched.get(x, y), full.get(x, y), "pixel ({x},{y})");
+            }
+        }
     }
 
     #[test]

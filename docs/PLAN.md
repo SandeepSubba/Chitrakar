@@ -39,9 +39,9 @@ without reading anything else.*
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~91),
+- **Verify before committing:** `cargo test --workspace` (~94),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~125 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~130 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -64,8 +64,9 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
-- **Known limits, deliberately:** transforms carry scale+translate only (no
-  rotation/shear yet), masks aren't editable on-canvas, PDF/TIFF
+- **Known limits, deliberately:** the selection box stays axis-aligned
+  around a rotated layer, so its resize handles scale along document axes
+  rather than the layer's own; masks aren't editable on-canvas; PDF/TIFF
   embed the composite as an image rather than live vectors.
 
 ---

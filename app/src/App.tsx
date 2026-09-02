@@ -899,6 +899,64 @@ export function App() {
     });
   };
 
+  /** Rotation: the knob above the selection turns the node about the
+   * centre of its bounds. Composed onto the transform captured at drag
+   * start, so the gesture is one rotation rather than an accumulation of
+   * small ones that drift. */
+  const rotateDragRef = useRef<{
+    t0: Transform;
+    centre: [number, number];
+    start: number;
+  } | null>(null);
+
+  const onRotatePointerDown = (e: React.PointerEvent) => {
+    if (!session || selected === null || !selBounds || selBounds.length !== 4)
+      return;
+    e.stopPropagation();
+    const centre: [number, number] = [
+      selBounds[0] + selBounds[2] / 2,
+      selBounds[1] + selBounds[3] / 2,
+    ];
+    const [px, py] = docPoint(e);
+    rotateDragRef.current = {
+      t0: toTransform(session.transform_of(selected)),
+      centre,
+      start: Math.atan2(py - centre[1], px - centre[0]),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onRotatePointerMove = (e: React.PointerEvent) => {
+    const drag = rotateDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const [px, py] = docPoint(e);
+    const [cx, cy] = drag.centre;
+    let d = Math.atan2(py - cy, px - cx) - drag.start;
+    // Shift snaps to 15 degrees, the usual courtesy for straightening up.
+    if (e.shiftKey) d = Math.round(d / (Math.PI / 12)) * (Math.PI / 12);
+    const [cos, sin] = [Math.cos(d), Math.sin(d)];
+    const t = drag.t0;
+    preview({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: cos * t.a - sin * t.b,
+          b: sin * t.a + cos * t.b,
+          c: cos * t.c - sin * t.d,
+          d: sin * t.c + cos * t.d,
+          e: cos * (t.e - cx) - sin * (t.f - cy) + cx,
+          f: sin * (t.e - cx) + cos * (t.f - cy) + cy,
+        },
+      },
+    });
+  };
+
+  const onRotatePointerUp = () => {
+    rotateDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const onCurveHandleUp = () => {
     handleDragRef.current = null;
     if (session?.commit_preview()) refresh(session);
@@ -1378,6 +1436,15 @@ export function App() {
                 height: selBounds[3] * view.zoom,
               }}
             >
+              <div
+                className="rot-handle"
+                data-handle="rotate"
+                title="Rotate (hold Shift to snap)"
+                aria-label="Rotate layer"
+                onPointerDown={onRotatePointerDown}
+                onPointerMove={onRotatePointerMove}
+                onPointerUp={onRotatePointerUp}
+              />
               {HANDLES.map((c) => (
                 <div
                   key={c}
