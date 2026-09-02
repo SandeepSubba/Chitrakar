@@ -32,15 +32,16 @@ without reading anything else.*
   Fills can be linear or radial gradients with any number of stops,
   authored in the shape's own box so they follow it, and exported as live
   SVG gradients. Paths carry bezier
-  handles you drag on canvas (converting from straight or smooth preserves
-  the shape), exported as real cubic segments.
+  handles you drag on canvas — alt-drag breaks a pair to make a corner —
+  and converting from straight or smooth preserves the shape; they export
+  as real cubic segments.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~90),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~119 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~122 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -51,9 +52,8 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: brush engine, per-side (broken) curve handles — dragging one
-     mirrors its partner today — dragging gradient stops on the canvas
-     rather than by slider, text shaping via rustybuzz/parley.
+  3. Depth: brush engine, dragging gradient stops on the canvas rather than
+     by slider, text shaping via rustybuzz/parley.
 - **Chrome:** document actions live in a File/Edit/View menu bar; the tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is

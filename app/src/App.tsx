@@ -644,6 +644,7 @@ export function App() {
   const onHandlePointerMove = (e: React.PointerEvent) => {
     const drag = handleDragRef.current;
     if (!drag || !session) return;
+    if (e.buttons === 0) return;
     const [cx, cy] = docPoint(e);
     const [bx, by, bw, bh] = drag.b0;
     const west = drag.corner === "nw" || drag.corner === "sw";
@@ -782,6 +783,7 @@ export function App() {
   const onAnchorPointerMove = (e: React.PointerEvent) => {
     const drag = anchorDragRef.current;
     if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
     if (!("Path" in drag.vector.shape)) return;
     const [dx, dy] = docPoint(e);
     const { t0 } = drag;
@@ -858,6 +860,11 @@ export function App() {
   const onCurveHandleMove = (e: React.PointerEvent) => {
     const drag = curveDragRef.current;
     if (!drag || !session || selected === null) return;
+    // A pointermove with no button down is a hover, not a drag. Without
+    // this a hover over any handle after a drag re-applies that drag's
+    // captured state, quietly undoing whatever happened since.
+    if (e.buttons === 0) return;
+
     if (!("Path" in drag.vector.shape)) return;
     const [dx, dy] = docPoint(e);
     const { t0, idx, side } = drag;
@@ -871,10 +878,14 @@ export function App() {
     );
     handles[idx][side] = ox;
     handles[idx][side + 1] = oy;
-    // Mirror the opposite handle so a curve stays smooth through its
+    // The pair points opposite ways so the curve stays smooth through its
     // anchor, which is what dragging one of a pair is understood to mean.
-    handles[idx][side === 0 ? 2 : 0] = -ox;
-    handles[idx][side === 0 ? 3 : 1] = -oy;
+    // Alt breaks the pairing and moves only the handle under the cursor —
+    // how a corner gets made.
+    if (!e.altKey) {
+      handles[idx][side === 0 ? 2 : 0] = -ox;
+      handles[idx][side === 0 ? 3 : 1] = -oy;
+    }
     preview({
       SetKind: {
         id: selected,
@@ -2117,7 +2128,7 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
                   <>
                     <p className="muted">
                       Curve handles are set, so they define the shape. Drag
-                      them on the canvas.
+                      them on the canvas; hold Alt to move one on its own.
                     </p>
                     <button
                       className="mask-button"

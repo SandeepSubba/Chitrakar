@@ -673,6 +673,79 @@ await page.waitForTimeout(200);
 const bent = await canvasPixel(92, 80);
 assert(bent[3] > 0, `dragging a handle bent the outline (got ${bent})`);
 
+// Handles come in pairs that point opposite ways through their anchor, so
+// dragging one swings the other; Alt breaks that pairing.
+// Work on whichever pair sits clear of the tool rail, since a handle dragged
+// out to the left would be unclickable.
+const pairIndex = await page.$$eval(".curve-handle", (els) => {
+  const byAnchor = {};
+  for (const el of els) {
+    const [i, side] = el.dataset.handle.split("-");
+    (byAnchor[i] ??= {})[side] = el.getBoundingClientRect().x;
+  }
+  let best = null;
+  for (const [i, sides] of Object.entries(byAnchor)) {
+    if (sides["0"] === undefined || sides["2"] === undefined) continue;
+    const clearance = Math.min(sides["0"], sides["2"]);
+    if (!best || clearance > best.clearance) best = { i, clearance };
+  }
+  return best.i;
+});
+const centre = async (sel) => {
+  const b = await page.locator(sel).boundingBox();
+  return [b.x + b.width / 2, b.y + b.height / 2];
+};
+/** How far each handle of the chosen anchor sits from the anchor itself. */
+const arms = async () => {
+  const a = await centre(`.anchor[data-anchor="${pairIndex}"]`);
+  const i = await centre(`[data-handle="${pairIndex}-0"]`);
+  const o = await centre(`[data-handle="${pairIndex}-2"]`);
+  return [
+    [i[0] - a[0], i[1] - a[1]],
+    [o[0] - a[0], o[1] - a[1]],
+  ];
+};
+const opposite = ([i, o]) =>
+  Math.abs(i[0] + o[0]) < 3 && Math.abs(i[1] + o[1]) < 3;
+
+const outHandle = page.locator(`[data-handle="${pairIndex}-2"]`);
+let ob = await outHandle.boundingBox();
+await outHandle.hover(); // actionability check: fail loudly if it is covered
+await page.mouse.down();
+await page.mouse.move(ob.x + ob.width / 2 + 40, ob.y + ob.height / 2 - 40, {
+  steps: 5,
+});
+await page.mouse.up();
+await page.waitForTimeout(250);
+assert(
+  opposite(await arms()),
+  `dragging one handle keeps the pair opposite (${JSON.stringify(await arms())})`,
+);
+
+// Alt-drag its partner: it moves alone and the pair stops being mirrored.
+const inHandle = page.locator(`[data-handle="${pairIndex}-0"]`);
+const outBefore = (await arms())[1];
+const ib = await inHandle.boundingBox();
+await page.keyboard.down("Alt");
+await inHandle.hover();
+await page.mouse.down();
+await page.mouse.move(ib.x + ib.width / 2 + 45, ib.y + ib.height / 2 + 30, {
+  steps: 5,
+});
+await page.mouse.up();
+await page.keyboard.up("Alt");
+await page.waitForTimeout(250);
+const armsAfterAlt = await arms();
+assert(
+  Math.abs(armsAfterAlt[1][0] - outBefore[0]) < 3 &&
+    Math.abs(armsAfterAlt[1][1] - outBefore[1]) < 3,
+  `alt-drag left the other handle where it was (${outBefore} -> ${armsAfterAlt[1]})`,
+);
+assert(!opposite(armsAfterAlt), "and the pair is no longer mirrored");
+await page.keyboard.press("Control+z");
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(250);
+
 // One undo step for the whole drag, one more for the conversion.
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(150);
