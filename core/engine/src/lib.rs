@@ -1413,6 +1413,34 @@ impl Session {
         Ok(id)
     }
 
+    /// Bring an SVG in as a group of shape layers named after the file,
+    /// on top of the stack, as one undo step. Returns the group's id.
+    pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
+        let imported = chitrakar_codecs::import_svg(bytes).map_err(EngineError::BadCommand)?;
+        if imported.shapes.is_empty() {
+            return Err(EngineError::BadCommand(
+                "the SVG holds nothing to draw".into(),
+            ));
+        }
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        let group = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(Node::group(name)),
+        }];
+        for (i, shape) in imported.shapes.into_iter().enumerate() {
+            cmds.push(Command::AddNode {
+                parent: group,
+                index: i,
+                node: Box::new(shape),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Place {name}")))?;
+        Ok(group)
+    }
+
     /// Make a font available to every text block that names it, for the
     /// rest of the process. Names are the ones the Text panel offers.
     pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), EngineError> {
@@ -3272,6 +3300,42 @@ mod tests {
             session.text_along(circle, text).is_err(),
             "a shape is not text"
         );
+    }
+
+    #[test]
+    fn an_svg_is_placed_as_a_group_of_shapes_in_one_step() {
+        let mut session = Session::new(120, 100, ColorMode::Rgb);
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+            <rect x="10" y="10" width="40" height="30" fill="#ff0000"/>
+            <circle cx="80" cy="25" r="15" fill="#0000ff"/></svg>"##;
+        let group = session.place_svg(svg, "mark.svg").unwrap();
+        let layers = session.layers();
+        assert_eq!(layers.len(), 3);
+        assert!(layers
+            .iter()
+            .any(|l| l.id == group.0 && l.kind == "group" && l.name == "mark.svg"));
+        assert_eq!(layers.iter().filter(|l| l.parent == group.0).count(), 2);
+        let b = session.bounds_of(group).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.5 && (b[0] + b[2] - 95.0).abs() < 0.5,
+            "{b:?}"
+        );
+        assert_eq!(
+            session.render().unwrap().get(30, 25).to_srgb8(),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Place mark.svg")
+        );
+        assert!(session.undo().unwrap());
+        assert!(
+            session.layers().is_empty(),
+            "one undo takes the whole group"
+        );
+        assert!(session
+            .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
+            .is_err());
     }
 
     #[test]

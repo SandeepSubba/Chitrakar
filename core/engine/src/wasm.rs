@@ -183,6 +183,15 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// Bring an SVG in as a group of shape layers (see
+    /// `Session::place_svg`). Returns the group's id.
+    pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
+        self.inner
+            .place_svg(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Set a text block along a shape layer's outline (see
     /// `Session::text_along`).
     pub fn text_along(&mut self, text: f64, shape: f64) -> Result<(), JsError> {

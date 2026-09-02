@@ -2722,9 +2722,14 @@ export function App() {
   const placeImageFile = useCallback(
     (file: File) => {
       if (!session) return;
+      // An SVG comes in as shapes, anything else as pixels.
+      const vector = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
       file.arrayBuffer().then((buf) => {
         try {
-          const id = session.place_image(new Uint8Array(buf), file.name || "Pasted image");
+          const bytes = new Uint8Array(buf);
+          const id = vector
+            ? session.place_svg(bytes, file.name || "Pasted drawing")
+            : session.place_image(bytes, file.name || "Pasted image");
           setSelected(id);
           setMultiSel([]);
           refresh(session);
@@ -3094,7 +3099,7 @@ export function App() {
         <input
           ref={placeInputRef}
           type="file"
-          accept="image/png,image/jpeg"
+          accept="image/png,image/jpeg,image/svg+xml"
           onChange={placeImage}
           hidden
         />

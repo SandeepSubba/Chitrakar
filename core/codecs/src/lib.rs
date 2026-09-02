@@ -9,6 +9,7 @@ pub mod container;
 pub mod pdf;
 mod subset;
 pub mod svg;
+pub mod svg_import;
 pub mod tiff_export;
 
 pub use container::{
@@ -17,6 +18,7 @@ pub use container::{
 };
 pub use pdf::{export_pdf, export_pdf_document, PdfError};
 pub use svg::export_svg;
+pub use svg_import::{import_svg, ImportedSvg};
 pub use tiff_export::{export_cmyk_tiff, TiffError};
 
 use chitrakar_color::LinearRgba;

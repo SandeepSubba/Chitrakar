@@ -494,7 +494,7 @@ const pngB64 = await page.evaluate(() => {
   g.fillRect(0, 0, 4, 4);
   return c.toDataURL("image/png").split(",")[1];
 });
-await page.setInputFiles('input[accept="image/png,image/jpeg"]', {
+await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
   name: "green.png",
   mimeType: "image/png",
   buffer: Buffer.from(pngB64, "base64"),
@@ -2596,6 +2596,32 @@ assert(
   assert((await names()).join() === before.join(), "one undo turns the stack back");
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(150);
+
+  // 8x11. Placing an SVG brings its shapes in as a group of editable
+  // layers, drawn where the file drew them; one undo takes it all back.
+  const beforeSvg = await names();
+  const mark = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <rect id="box" x="10" y="10" width="40" height="30" fill="#00aa00"/>
+    <circle cx="80" cy="25" r="15" fill="#ff8800"/></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "mark.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(mark),
+  });
+  await page.waitForTimeout(400);
+  const placed = await names();
+  assert(
+    placed[0] === "mark.svg" && placed.includes("box") && placed.length === beforeSvg.length + 3,
+    `the SVG is a group with its shapes as layers (${placed})`,
+  );
+  const green = await canvasPixel(30, 25);
+  assert(green[1] > 150 && green[0] < 60, `the rect is drawn where the file put it (${green})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await names()).join() === beforeSvg.join() && (await canvasPixel(30, 25))[3] === 0,
+    "one undo takes the whole drawing back",
+  );
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a
