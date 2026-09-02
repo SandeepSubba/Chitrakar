@@ -2704,8 +2704,27 @@ assert(
     (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
     "a click on bare canvas still clears the selection",
   );
-  await page.keyboard.press("Control+z"); // the ellipse
+  // A locked layer is not shifted by an alignment either.
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).locator(".lock-toggle").click();
   await page.waitForTimeout(150);
+  await page.mouse.move(...at(560, 380));
+  await page.mouse.down();
+  await page.mouse.move(...at(80, 80), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click({ modifiers: ["Control"] });
+  await page.waitForTimeout(150);
+  const rectInk = await inkCount(100, 100, 300, 250);
+  await page.click('button[aria-label="Align left edges"]');
+  await page.waitForTimeout(250);
+  assert(
+    (await inkCount(100, 100, 300, 250)) === rectInk,
+    "aligning a selection leaves its locked layer where it was",
+  );
+  for (let i = 0; i < 5; i++) {
+    await page.keyboard.press("Control+z"); // align, lock ×3, the ellipse
+    await page.waitForTimeout(120);
+  }
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

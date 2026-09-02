@@ -1356,9 +1356,11 @@ export function App() {
       drag.t0 = toTransform(session.transform_of(target));
       // Grabbing any member of a multi-selection drags the whole of it;
       // grabbing anything else starts a fresh single selection.
+      // A locked layer among them stays where it is; the target itself is
+      // never locked, since the pick fell through anything that was.
       const together =
         selectionSet.length > 1 && selectionSet.includes(target)
-          ? selectionSet
+          ? movableSelection
           : [target];
       if (together.length === 1) setMultiSel([]);
       drag.moving = together.map((id) => ({
@@ -2028,13 +2030,18 @@ export function App() {
     selected === null
       ? multiSel
       : [selected, ...multiSel.filter((id) => id !== selected)];
+  /** What a move, an alignment or a flip acts on: a locked layer is
+   * picked and read like any other, but nothing shifts it. */
+  const movableSelection = selectionSet.filter(
+    (id) => !layers.find((l) => l.id === id)?.locked,
+  );
 
   /** Align or distribute everything picked. Enabled only with two or more,
    * which is the only case where either word means anything. */
   const alignSelection = (mode: string) => {
-    if (!session || selectionSet.length < 2) return;
+    if (!session || movableSelection.length < 2) return;
     try {
-      session.align_nodes(new Float64Array(selectionSet), mode);
+      session.align_nodes(new Float64Array(movableSelection), mode);
       refresh(session);
     } catch (err) {
       alert(`Align: ${err}`);
@@ -2064,13 +2071,10 @@ export function App() {
       }
       e.preventDefault();
       const k = e.shiftKey ? 10 : 1;
-      // Locked layers stay put, even when picked from the panel.
-      const moving = selectionSet
-        .filter((id) => !layers.find((l) => l.id === id)?.locked)
-        .map((id) => ({
-          id,
-          t0: toTransform(session.transform_of(id)),
-        }));
+      const moving = movableSelection.map((id) => ({
+        id,
+        t0: toTransform(session.transform_of(id)),
+      }));
       const cmds = translateAll(moving, step[0] * k, step[1] * k);
       if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
     };
@@ -2081,9 +2085,9 @@ export function App() {
   /** Mirror the picked layers about their shared box, one history
    * entry: a pair flips as a pair, a lone layer flips in place. */
   const flipSelection = (horizontal: boolean) => {
-    if (!session || selectionSet.length === 0) return;
+    if (!session || movableSelection.length === 0) return;
     try {
-      session.flip_nodes(new Float64Array(selectionSet), horizontal);
+      session.flip_nodes(new Float64Array(movableSelection), horizontal);
       refresh(session);
     } catch (err) {
       alert(`Flip: ${err}`);
