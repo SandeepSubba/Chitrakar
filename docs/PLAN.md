@@ -25,13 +25,14 @@ without reading anything else.*
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
   filter layers (gaussian blur, sharpen), masks on any layer, groups,
   reorder, opacity/blend, rename, labelled history with jump-to-state.
-  Edges are anti-aliased: rect fills analytically, everything else by
-  coverage sampling, and vector mask edges feather the same way.
+  Edges are anti-aliased: rect fills analytically, path fills by a scanline
+  rasterizer (exact horizontally), the rest by coverage sampling, and vector
+  mask edges feather the same way.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~80),
+- **Verify before committing:** `cargo test --workspace` (~81),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~87 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -39,19 +40,12 @@ without reading anything else.*
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
   locally is the clippy that runs in CI; bump it deliberately.
 - **Next up (rough priority):**
-  1. Scanline rasterizer for path fills. Coverage sampling runs an
-     O(anchors) even-odd test per sample, so a canvas-filling 480-point
-     spline costs ~435 ms/frame (it was ~89 ms before anti-aliasing; rects
-     and ellipses are ~5 ms and fine). Computing edge crossings once per
-     sub-scanline and filling spans makes it exact in x and drops the cost
-     by orders of magnitude. `render_timing_probe` in core/render is the
-     baseline.
-  2. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
+  1. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
      reference renderer (llvmpipe makes this CI-able — see
      docs/spikes/gpu-rendering.md).
-  3. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
+  2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  4. Depth: bezier handles on paths, brush engine, gradient fills, text
+  3. Depth: bezier handles on paths, brush engine, gradient fills, text
      shaping via rustybuzz/parley.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a

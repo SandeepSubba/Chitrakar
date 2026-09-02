@@ -684,6 +684,79 @@ fn pixel_coverage(
     hits as f32 / (N * N) as f32
 }
 
+/// Fill a polygon row by row instead of sampling it per pixel.
+///
+/// The crossings of the polygon with a scanline are O(anchors) to compute
+/// and serve the whole row, so the fill costs O(rows x N x anchors) rather
+/// than the O(pixels x N^2 x anchors) the general sampler spends here — the
+/// difference between milliseconds and half a second on a canvas-filling
+/// spline. Coverage is exact horizontally (a span contributes the fraction
+/// of the pixel it really covers) and N-sampled vertically, so it is also
+/// better than the box of samples it replaces.
+///
+/// Even-odd fill, matching [`shape_covers`]: sorted crossings pair up into
+/// inside spans.
+#[allow(clippy::too_many_arguments)]
+fn fill_path_scanlines(
+    dst: &mut Surface,
+    doc: &Document,
+    points: &[[f32; 2]],
+    t: Transform,
+    color: LinearRgba,
+    mode: BlendMode,
+    bbox: ClipRect,
+    mask: Option<&Mask>,
+) {
+    const N: u32 = 4;
+    if points.len() < 3 || bbox.is_empty() || t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+        return;
+    }
+    let width = (bbox.x1 - bbox.x0) as usize;
+    let mut cov = vec![0f32; width];
+    let mut xs: Vec<f32> = Vec::new();
+    for py in bbox.y0..bbox.y1 {
+        cov.fill(0.0);
+        for j in 0..N {
+            // Sample y at the middle of each sub-row, never on its edge.
+            let ly = ((py as f32 + (j as f32 + 0.5) / N as f32) - t.f) / t.d;
+            xs.clear();
+            for i in 0..points.len() {
+                let (a, b) = (points[i], points[(i + 1) % points.len()]);
+                if (a[1] > ly) != (b[1] > ly) {
+                    let s = (ly - a[1]) / (b[1] - a[1]);
+                    xs.push((a[0] + s * (b[0] - a[0])) * t.a + t.e);
+                }
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            for span in xs.as_chunks::<2>().0 {
+                let lo = span[0].max(bbox.x0 as f32);
+                let hi = span[1].min(bbox.x1 as f32);
+                if hi <= lo {
+                    continue;
+                }
+                let first = (lo.floor().max(0.0) as u32).max(bbox.x0);
+                let last = (hi.ceil().max(0.0) as u32).min(bbox.x1);
+                for px in first..last {
+                    let overlap = (hi.min(px as f32 + 1.0) - lo.max(px as f32)).clamp(0.0, 1.0);
+                    cov[(px - bbox.x0) as usize] += overlap / N as f32;
+                }
+            }
+        }
+        for px in bbox.x0..bbox.x1 {
+            let a = cov[(px - bbox.x0) as usize].min(1.0);
+            if a <= 0.0 {
+                continue;
+            }
+            let c = a * coverage_at(doc, mask, px, py);
+            if c <= 0.0 {
+                continue;
+            }
+            let i = (py * dst.width + px) as usize;
+            dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
+        }
+    }
+}
+
 fn draw_bbox(t: Transform, w: f32, h: f32, dst: &Surface, clip: ClipRect) -> ClipRect {
     match transformed_bounds(t, w, h).to_clip(dst.width, dst.height) {
         Some(b) => b.intersect(clip),
@@ -730,6 +803,12 @@ fn paint_shape(
     }
     // A degenerate transform maps nothing; bail before walking the bbox.
     if to_local(t, 0.0, 0.0).is_none() {
+        return;
+    }
+    // Path fills go through the scanline rasterizer; strokes stay on the
+    // sampler, whose distance test has no scanline form.
+    if let (VectorShape::Path { points, .. }, None) = (shape, stroke_width) {
+        fill_path_scanlines(dst, doc, points, t, color, mode, bbox, mask);
         return;
     }
     for py in bbox.y0..bbox.y1 {
@@ -1131,10 +1210,11 @@ mod tests {
         assert_eq!(s.get(6, 6).a, 0.0);
     }
 
-    /// Not an assertion: the baseline for the scanline-rasterizer work.
-    /// Coverage sampling is cheap on rects and ellipses and expensive on
-    /// paths, because a path fill runs an O(anchors) even-odd test per
-    /// sample. Run with `--release --ignored --nocapture`.
+    /// Not an assertion: a guard against the rasterizer getting slow again.
+    /// Both docs should land in single-digit milliseconds — the path-heavy
+    /// one (a canvas-filling 480-point spline) cost 435 ms while path fills
+    /// still went through the per-pixel sampler. Run with
+    /// `--release --ignored --nocapture`.
     #[test]
     #[ignore = "timing probe, not an assertion"]
     fn render_timing_probe() {
@@ -1249,6 +1329,46 @@ mod tests {
         let s = render(&doc).unwrap();
         assert_eq!(s.get(2, 3).a, 1.0, "integer bounds stay hard-edged");
         assert_eq!(s.get(6, 3).a, 0.0);
+    }
+
+    #[test]
+    fn path_fill_coverage_integrates_to_the_true_area() {
+        // Half a 32x32 square, cut corner to corner. Summing alpha over the
+        // canvas recovers the triangle's real area — the check a box of
+        // samples could only approximate, and the reason the scanline fill
+        // is exact horizontally.
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        let mut tri = Node::vector(
+            "tri",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [32.0, 0.0], [0.0, 32.0]],
+                closed: true,
+                smooth: false,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut tri.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(tri),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        let area: f32 = (0..32)
+            .flat_map(|y| (0..32).map(move |x| (x, y)))
+            .map(|(x, y)| s.get(x, y).a)
+            .sum();
+        let expected = 32.0 * 32.0 / 2.0;
+        assert!(
+            (area - expected).abs() < expected * 0.01,
+            "covered area {area} should be within 1% of {expected}"
+        );
+        assert_eq!(s.get(1, 1).a, 1.0, "well inside is solid");
+        assert_eq!(s.get(30, 30).a, 0.0, "across the diagonal is empty");
     }
 
     #[test]
@@ -1382,6 +1502,30 @@ mod tests {
                     a: 0.5,
                 },
             ),
+        })
+        .unwrap();
+        // A diagonal path: the scanline fill clips spans to the bbox, which
+        // is exactly where a region render could seam against a full one.
+        let mut tri = Node::vector(
+            "tri",
+            VectorShape::Path {
+                points: vec![[2.0, 2.0], [26.0, 8.0], [8.0, 27.0]],
+                closed: true,
+                smooth: false,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut tri.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 0.7,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(tri),
         })
         .unwrap();
 
