@@ -4,8 +4,8 @@
 //! assets/DejaVuSans-LICENSE.txt) is shaped by rustybuzz — so the font's
 //! own kerning, ligatures and mark positioning apply, and a script that
 //! reorders or joins will work the day a font for it is bundled — and its
-//! glyphs are rasterized by ab_glyph. Lines break on `\n`; there is no
-//! wrapping yet.
+//! glyphs are rasterized by ab_glyph. Lines break on `\n`, and a block
+//! given a width wraps words to it.
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 use chitrakar_doc::TextSpec;
@@ -44,7 +44,11 @@ struct Shaped {
 fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
     let face = face();
     let px = spec.size.max(0.1) * scale;
-    let unit = px / face.units_per_em() as f32;
+    // `size` is ab_glyph's scale — pixels per ascent-to-descent height, not
+    // per em — so the shaper's font units are converted by that same
+    // height. Using the em here instead sets every advance and offset 16%
+    // adrift of the outlines they position in DejaVu Sans.
+    let unit = px / font().height_unscaled();
     let track = tracking(spec, scale);
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(line);
@@ -111,13 +115,26 @@ pub fn measure(spec: &TextSpec) -> (f32, f32) {
 /// font size, so this is the natural measure times the scale — but taken
 /// from the scaled font, so it agrees with the raster to the pixel.
 fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
+    let l = layout(spec, scale);
+    (l.width, l.height)
+}
+
+/// A block set in lines: the lines themselves, each one's shaped width,
+/// and the block's size. Computed once and used by measure and raster
+/// alike, so a rasterize does not shape everything twice over.
+struct Layout {
+    lines: Vec<String>,
+    widths: Vec<f32>,
+    width: f32,
+    height: f32,
+}
+
+fn layout(spec: &TextSpec, scale: f32) -> Layout {
     let font = font().as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
     let lines = lines_of(spec, scale);
-    let widest = lines
-        .iter()
-        .map(|l| line_width(l, spec, scale))
-        .fold(0f32, f32::max);
+    let widths: Vec<f32> = lines.iter().map(|l| line_width(l, spec, scale)).collect();
+    let widest = widths.iter().cloned().fold(0f32, f32::max);
     // A wrapping block is as wide as it was told to be, so its right edge
     // holds still while the words inside it change; only a word too long
     // to fit pushes past that.
@@ -126,14 +143,23 @@ fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
     } else {
         widest
     };
-    (width.max(1.0), (lines.len().max(1) as f32 * step).max(1.0))
+    Layout {
+        height: (lines.len().max(1) as f32 * step).max(1.0),
+        lines,
+        widths,
+        width: width.max(1.0),
+    }
 }
 
 /// The lines the block is set in: each paragraph (a run between newlines)
-/// wrapped to the block's width when it has one, greedily, at spaces. Words
-/// are measured shaped, so a line breaks where the glyphs really end, and
-/// the line itself is shaped whole afterwards so kerning across the words
-/// on it is the font's, not a sum of parts.
+/// wrapped to the block's width when it has one, greedily, at spaces.
+///
+/// Each word is shaped once and the break decided from the words' widths
+/// plus a space's, which ignores kerning across a space — a fraction of a
+/// pixel, and only for the decision; the line is then shaped whole, so the
+/// kerning that shows is the font's. Lines are cut out of the paragraph as
+/// it was typed, so a run of spaces stays a run of spaces, an indent stays
+/// an indent, and only the single space at a cut is dropped.
 fn lines_of(spec: &TextSpec, scale: f32) -> Vec<String> {
     let limit = spec.width * scale;
     let mut out = Vec::new();
@@ -142,20 +168,26 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<String> {
             out.push(paragraph.to_string());
             continue;
         }
-        let mut line = String::new();
+        let space = line_width(" ", spec, scale);
+        let mut start = 0usize; // where the current line begins, in bytes
+        let mut used = 0f32; // its width so far
+        let mut first = true;
+        let mut pos = 0usize; // where the current word begins
         for word in paragraph.split(' ') {
-            let candidate = if line.is_empty() {
-                word.to_string()
+            let w = line_width(word, spec, scale);
+            if first {
+                used = w;
+                first = false;
+            } else if used + space + w <= limit {
+                used += space + w;
             } else {
-                format!("{line} {word}")
-            };
-            if line.is_empty() || line_width(&candidate, spec, scale) <= limit {
-                line = candidate;
-            } else {
-                out.push(std::mem::replace(&mut line, word.to_string()));
+                out.push(paragraph[start..pos - 1].to_string());
+                start = pos;
+                used = w;
             }
+            pos += word.len() + 1;
         }
-        out.push(line);
+        out.push(paragraph[start..].to_string());
     }
     out
 }
@@ -189,7 +221,8 @@ pub fn rasterize(spec: &TextSpec) -> TextRaster {
 /// result by natural-size coordinates times the same scale.
 pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let scale = scale.max(0.01);
-    let (w, h) = measure_at(spec, scale);
+    let l = layout(spec, scale);
+    let (w, h) = (l.width, l.height);
     let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
     let mut coverage = vec![0f32; (width * height) as usize];
     // Every metric below comes from the scaled font, so advances, kerning
@@ -197,9 +230,10 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let font = font().as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
 
-    for (line_no, line) in lines_of(spec, scale).iter().enumerate() {
+    for (line_no, line) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
-        let (glyphs, line_w) = shape_line(line, spec, scale);
+        let (glyphs, _) = shape_line(line, spec, scale);
+        let line_w = l.widths[line_no];
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let slack = w - line_w;
@@ -383,6 +417,41 @@ mod tests {
         let mut tracked = spec("fi", 40.0);
         tracked.letter_spacing = 0.5;
         assert_eq!(shape_line("fi", &tracked, 1.0).0.len(), 1);
+    }
+
+    #[test]
+    fn the_shaper_and_the_rasterizer_agree_on_the_scale() {
+        // Both read the same font, but each has its own idea of what one
+        // pixel of "size" is. Set the shaper's advance against ab_glyph's
+        // for the same glyph at the same size: they have to be the same
+        // number, or every line is set loose against its own ink.
+        let s = spec("", 40.0);
+        let scaled = font().as_scaled(40.0);
+        for ch in ['H', 'i', 'W', '.'] {
+            let (glyphs, w) = shape_line(&ch.to_string(), &s, 1.0);
+            assert_eq!(glyphs.len(), 1);
+            let expected = scaled.h_advance(scaled.glyph_id(ch));
+            assert!(
+                (w - expected).abs() < 0.05,
+                "{ch}: shaped {w} vs ab_glyph {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_keeps_the_spaces_that_were_typed() {
+        // Wrapping only ever moves words to the next line. An indent, or a
+        // run of spaces inside a line, is what was typed and stays.
+        let mut s = spec("    indented start", 20.0);
+        s.width = 1000.0;
+        assert_eq!(lines_of(&s, 1.0), vec!["    indented start"]);
+        let mut runs = spec("a  b c", 20.0);
+        runs.width = 1000.0;
+        assert_eq!(lines_of(&runs, 1.0), vec!["a  b c"]);
+        // At a cut, exactly the one separating space goes.
+        let mut cut = spec("aa bb", 20.0);
+        cut.width = line_width("aa", &cut, 1.0) + 1.0;
+        assert_eq!(lines_of(&cut, 1.0), vec!["aa", "bb"]);
     }
 
     #[test]

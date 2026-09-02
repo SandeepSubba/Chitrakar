@@ -128,8 +128,8 @@ without reading anything else.*
   other applications do come *in*, by paste or by dropping a file on the
   canvas (a dropped .chitra opens); effects come in three kinds;
   and export flattens them like everything else; SVG export writes each
-  text line as its own tspan but cannot carry alignment, which needs font
-  metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
+  typed line as its own tspan but cannot carry alignment or a wrap width,
+  both of which need font metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
   another shape handed down to the layer below, moved and resized on
   canvas but not reshaped there; PDF/TIFF
   embed the composite as an image rather than live vectors; a boolean

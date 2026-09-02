@@ -444,6 +444,8 @@ export function App() {
   const [viewport, setViewport] = useState<[number, number]>([1, 1]);
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
+  /** Whether a paste event followed the last Ctrl+V; see the keydown. */
+  const pasteSeen = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const imgDataRef = useRef<ImageData | null>(null);
@@ -1519,7 +1521,16 @@ export function App() {
           copySelected();
           deleteSelected();
         }
-        // Ctrl+V is left to the paste event, which can see the clipboard.
+        // Ctrl+V is left to the paste event, which can see the clipboard —
+        // with a fallback: a webview that never fires it on a non-editable
+        // target (WKWebView) still gets the in-app paste, a beat later,
+        // and one that does fire it has already been served by then.
+        if (k === "v") {
+          pasteSeen.current = false;
+          window.setTimeout(() => {
+            if (!pasteSeen.current) pasteClipboard();
+          }, 80);
+        }
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
@@ -2395,15 +2406,19 @@ export function App() {
     if (file) placeImageFile(file);
   };
 
-  /** Files dropped on the canvas: images become layers, a .chitra opens. */
+  /** Files dropped on the canvas: images become layers, a .chitra opens.
+   * A drop that holds both opens the document and leaves the images —
+   * placing them would put them into the session the open just replaced. */
   const onHostDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    for (const file of Array.from(e.dataTransfer.files)) {
-      if (file.name.toLowerCase().endsWith(".chitra")) {
-        file.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
-      } else if (file.type.startsWith("image/")) {
-        placeImageFile(file);
-      }
+    const files = Array.from(e.dataTransfer.files);
+    const doc = files.find((f) => f.name.toLowerCase().endsWith(".chitra"));
+    if (doc) {
+      doc.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
+      return;
+    }
+    for (const file of files) {
+      if (file.type.startsWith("image/")) placeImageFile(file);
     }
   };
 
@@ -2413,6 +2428,7 @@ export function App() {
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (isTextEntry(e.target)) return;
+      pasteSeen.current = true;
       const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
         f.type.startsWith("image/"),
       );
