@@ -1537,6 +1537,26 @@ assert(
     (await canvasPixel(515, 200))[3] > 200,
     "and adding one did not replace the other",
   );
+  // Order matters: an outline under an inner shadow is a different
+  // picture from one over it, so the stack can be rearranged.
+  const stackOrder = () =>
+    page.$$eval(".effect .effect-head span", (els) => els.map((e) => e.textContent));
+  assert(
+    (await stackOrder()).join() === "Outline,Inner shadow",
+    `the stack lists them in order (${await stackOrder()})`,
+  );
+  await page.click('button[aria-label="Move Outline up"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await stackOrder()).join() === "Inner shadow,Outline",
+    `moving one up rearranged the stack (${await stackOrder()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await stackOrder()).join() === "Outline,Inner shadow",
+    "and the rearrangement undoes",
+  );
   await page.click('button[aria-label="Remove Outline"]');
   await page.waitForTimeout(300);
   assert((await page.locator(".effect").count()) === 1, "removing one leaves the other");

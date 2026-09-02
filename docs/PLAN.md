@@ -119,8 +119,7 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the clipboard is in-process, so it does
   not exchange with other applications; undo after a delete restores the
-  layer but not the selection; effects come in three kinds and stack, but reordering
-  them means removing and re-adding;
+  layer but not the selection; effects come in three kinds;
   and export flattens them like everything else; SVG export writes each
   text line as its own tspan but cannot carry alignment, which needs font
   metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or

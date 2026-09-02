@@ -2056,6 +2056,13 @@ export function App() {
     else run(cmd);
   };
 
+  /** The effect list with two entries exchanged. */
+  const swapEffects = (a: number, b: number): Effect[] => {
+    const next = [...selectedEffects];
+    [next[a], next[b]] = [next[b], next[a]];
+    return next;
+  };
+
   /** Rewrite one field of the effect at `at`, keeping its variant. */
   const tuneEffect = (
     at: number,
@@ -3247,6 +3254,24 @@ export function App() {
                           }
                           aria-label={`${EFFECT_LABELS[kind]} colour`}
                         />
+                        {/* Order matters: an outline under a drop shadow
+                            is not the same picture as one over it. */}
+                        <button
+                          className="mask-button"
+                          disabled={at === 0}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} down`}
+                          onClick={() => setEffects(swapEffects(at, at - 1))}
+                        >
+                          <Icon name="lower" size={14} />
+                        </button>
+                        <button
+                          className="mask-button"
+                          disabled={at === selectedEffects.length - 1}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} up`}
+                          onClick={() => setEffects(swapEffects(at, at + 1))}
+                        >
+                          <Icon name="raise" size={14} />
+                        </button>
                         <button
                           className="mask-button"
                           aria-label={`Remove ${EFFECT_LABELS[kind]}`}
