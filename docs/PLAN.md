@@ -37,7 +37,7 @@ without reading anything else.*
   as real cubic segments.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
-  JPEG, CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
+  CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~91),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
