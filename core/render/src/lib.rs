@@ -1849,6 +1849,20 @@ fn draw_raster(
         }
     };
     let (last_x, last_y) = (res.width as f32 - 1.0, res.height as f32 - 1.0);
+    // One bilinear sample takes the four texels around a point and ignores
+    // the rest, which is right when the image is being enlarged and wrong
+    // when it is being shrunk: at a third of its size, two texels in three
+    // never contribute and the picture crawls as it moves. So when one
+    // device pixel spans more than one texel, average a grid across the
+    // texels it really covers. The footprint is the inverse's own column
+    // sums — how far in the source a step of one device pixel goes.
+    let foot_x = (inv.a.abs() + inv.c.abs()).max(1.0);
+    let foot_y = (inv.b.abs() + inv.d.abs()).max(1.0);
+    // Capped: past four samples an axis the picture is already settled and
+    // the cost is not.
+    let taps_x = (foot_x.ceil() as u32).clamp(1, 4);
+    let taps_y = (foot_y.ceil() as u32).clamp(1, 4);
+    let averaging = taps_x > 1 || taps_y > 1;
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             // The image is a rect in local space, so its outline gets the
@@ -1862,18 +1876,40 @@ fn draw_raster(
                 continue;
             }
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
-            // Texel centres sit at (i + 0.5), so the sample lands between
-            // the four texels around (lx - 0.5, ly - 0.5).
-            let (u, v) = (lx - 0.5, ly - 0.5);
-            let (u0, v0) = (u.floor(), v.floor());
-            let (fx, fy) = (u - u0, v - v0);
             let cx = |i: f32| i.clamp(0.0, last_x) as u32;
             let cy = |i: f32| i.clamp(0.0, last_y) as u32;
-            let (x0, x1) = (cx(u0), cx(u0 + 1.0));
-            let (y0, y1) = (cy(v0), cy(v0 + 1.0));
-            let top = lerp(texel(x0, y0), texel(x1, y0), fx);
-            let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
-            let src = scale_alpha(lerp(top, bottom, fy), cov);
+            // Texel centres sit at (i + 0.5), so a sample at (sx, sy) lands
+            // between the four texels around (sx - 0.5, sy - 0.5).
+            let bilinear = |sx: f32, sy: f32| {
+                let (u, v) = (sx - 0.5, sy - 0.5);
+                let (u0, v0) = (u.floor(), v.floor());
+                let (fx, fy) = (u - u0, v - v0);
+                let (x0, x1) = (cx(u0), cx(u0 + 1.0));
+                let (y0, y1) = (cy(v0), cy(v0 + 1.0));
+                let top = lerp(texel(x0, y0), texel(x1, y0), fx);
+                let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
+                lerp(top, bottom, fy)
+            };
+            let sampled = if averaging {
+                let mut acc = LinearRgba::TRANSPARENT;
+                for j in 0..taps_y {
+                    for i in 0..taps_x {
+                        let ox = (i as f32 + 0.5) / taps_x as f32 - 0.5;
+                        let oy = (j as f32 + 0.5) / taps_y as f32 - 0.5;
+                        let s = bilinear(lx + ox * foot_x, ly + oy * foot_y);
+                        acc = LinearRgba {
+                            r: acc.r + s.r,
+                            g: acc.g + s.g,
+                            b: acc.b + s.b,
+                            a: acc.a + s.a,
+                        };
+                    }
+                }
+                scale_alpha(acc, 1.0 / (taps_x * taps_y) as f32)
+            } else {
+                bilinear(lx, ly)
+            };
+            let src = scale_alpha(sampled, cov);
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
         }
@@ -3969,6 +4005,69 @@ mod tests {
             "exposure only where masked in ({} vs {})",
             inside.r,
             outside.r
+        );
+    }
+
+    #[test]
+    fn a_minified_raster_averages_the_texels_it_skips_over() {
+        // Four-texel stripes shrunk to an eighth. Every device pixel spans
+        // a whole period, so the honest answer is the average — mid grey.
+        // One bilinear sample instead lands in whichever stripe the grid
+        // happens to fall on and reads black or white, which is what makes
+        // a shrunk photograph crawl when it moves. (Stripes rather than a
+        // checkerboard: a one-texel checkerboard averages to grey under a
+        // single bilinear tap too, and so would prove nothing.)
+        const N: u32 = 64;
+        let mut rgba8 = Vec::with_capacity((N * N * 4) as usize);
+        for y in 0..N {
+            for x in 0..N {
+                let _ = y;
+                let v = if (x / 3) % 2 == 0 { 0u8 } else { 255u8 };
+                rgba8.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let root = doc.root();
+        let id = doc.add_resource(N, N, rgba8);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: N,
+                    height: N,
+                },
+            )),
+        })
+        .unwrap();
+        let node = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: node,
+            transform: Transform {
+                a: 0.125,
+                d: 0.125,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        // Linear-light average of black and white is 0.5, whatever sRGB
+        // makes of it at the display edge.
+        let inside: Vec<f32> = (1..7)
+            .flat_map(|y| (1..7).map(move |x| (x, y)))
+            .map(|(x, y)| s.get(x, y).r)
+            .collect();
+        let lo = inside.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = inside.iter().cloned().fold(f32::MIN, f32::max);
+        // Four taps across eight texels do not fully resolve a six-texel
+        // period, so the reading wobbles a little either side of the
+        // average. A single sample swings the whole way from black to
+        // white, which is the difference this is about.
+        assert!(
+            (lo - 0.5).abs() < 0.15 && (hi - 0.5).abs() < 0.15,
+            "every pixel should read near the average, got {lo}..{hi}"
         );
     }
 

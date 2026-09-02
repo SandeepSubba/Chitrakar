@@ -81,9 +81,10 @@ without reading anything else.*
   through `Session::set_viewport`, which composites only what the canvas
   can see: an A4 page at 300dpi shown on screen is 15 ms rather than
   169 ms, and the zoom is no longer capped by what a full-page surface
-  would cost. What that leaves open is minification quality — a placed
-  photo shown at a third of its size is point-sampled, where a mip chain
-  or a box prefilter in `draw_raster` would settle it.
+  would cost. A placed photo shown smaller than
+  its own resolution is box-filtered over the texels each device pixel
+  really covers (up to four taps an axis), so shrinking one settles
+  instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~103),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~174 browser
