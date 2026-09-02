@@ -659,10 +659,56 @@ impl Session {
             + 1;
         let mut next = self.doc.peek_next_id().0;
         let mut cmds = Vec::new();
-        let copy_id = self.emit_copy(id, parent, index, true, &mut next, &mut cmds)?;
+        let copy_id = self.emit_copy(id, parent, index, true, true, &mut next, &mut cmds)?;
         let label = format!("Duplicate {}", self.doc.node(id)?.name);
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(copy_id)
+    }
+
+    /// Duplicate several layers as one undo step, each copy landing just
+    /// above the layer it was made from and nudged clear of it when
+    /// `offset`. Returns the copies in the order the originals were
+    /// given.
+    pub fn duplicate_nodes(
+        &mut self,
+        ids: &[NodeId],
+        offset: bool,
+    ) -> Result<Vec<NodeId>, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing to duplicate".into()));
+        }
+        // Where each copy goes, read from the document as it stands.
+        let mut slots = Vec::with_capacity(ids.len());
+        for (at, &id) in ids.iter().enumerate() {
+            let parent = self
+                .doc
+                .parent_of(id)
+                .ok_or_else(|| EngineError::BadCommand("cannot duplicate the root".into()))?;
+            let index = self
+                .doc
+                .children_of(parent)?
+                .iter()
+                .position(|s| *s == id)
+                .unwrap_or(0)
+                + 1;
+            slots.push((at, id, parent, index));
+        }
+        // Topmost first: an insertion shifts everything above it, so the
+        // slots read a moment ago stay true if they are filled downwards.
+        slots.sort_by(|a, b| b.3.cmp(&a.3));
+        let mut next = self.doc.peek_next_id().0;
+        let mut cmds = Vec::new();
+        let mut copies = vec![NodeId(0); ids.len()];
+        for (at, id, parent, index) in slots {
+            copies[at] = self.emit_copy(id, parent, index, true, offset, &mut next, &mut cmds)?;
+        }
+        let label = if ids.len() == 1 {
+            format!("Duplicate {}", self.doc.node(ids[0])?.name)
+        } else {
+            format!("Duplicate {} layers", ids.len())
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(copies)
     }
 
     fn emit_copy(
@@ -671,14 +717,18 @@ impl Session {
         parent: NodeId,
         index: usize,
         rename: bool,
+        offset: bool,
         next: &mut u64,
         cmds: &mut Vec<Command>,
     ) -> Result<NodeId, EngineError> {
         let mut node = self.doc.node(src)?.clone();
         if rename {
             node.name = format!("{} copy", node.name);
-            // Offset the copy so it is visible rather than hiding exactly
-            // behind the original.
+        }
+        if offset {
+            // Nudge the copy so it is visible rather than hiding exactly
+            // behind the original. A copy that is about to be dragged
+            // wants none: it starts where the pointer took hold of it.
             node.transform.e += DUPLICATE_OFFSET;
             node.transform.f += DUPLICATE_OFFSET;
         }
@@ -690,7 +740,7 @@ impl Session {
             node: Box::new(node),
         });
         for (i, child) in self.doc.children_of(src)?.to_vec().iter().enumerate() {
-            self.emit_copy(*child, new_id, i, false, next, cmds)?;
+            self.emit_copy(*child, new_id, i, false, false, next, cmds)?;
         }
         Ok(new_id)
     }
@@ -3367,6 +3417,53 @@ mod tests {
         assert!(session
             .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
             .is_err());
+    }
+
+    #[test]
+    fn several_layers_duplicate_in_one_step() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 20.0, 20.0);
+        let copies = session.duplicate_nodes(&[a, b], false).unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(session.layers().len(), 4);
+        // Each copy sits directly above what it was copied from, and
+        // carries its size.
+        for (from, copy) in [a, b].iter().zip(&copies) {
+            let (f, c) = (
+                session
+                    .layers()
+                    .iter()
+                    .find(|l| l.id == from.0)
+                    .unwrap()
+                    .index,
+                session
+                    .layers()
+                    .iter()
+                    .find(|l| l.id == copy.0)
+                    .unwrap()
+                    .index,
+            );
+            assert_eq!(c, f + 1, "the copy is the layer above");
+            assert_eq!(session.bounds_of(*copy), session.bounds_of(*from));
+        }
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Duplicate 2 layers")
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(session.layers().len(), 2, "one undo takes both copies");
+        assert!(session.duplicate_nodes(&[], false).is_err());
+        // Asked to, it nudges each copy clear of its original instead.
+        let nudged = session.duplicate_nodes(&[a], true).unwrap()[0];
+        let (from, copy) = (
+            session.bounds_of(a).unwrap(),
+            session.bounds_of(nudged).unwrap(),
+        );
+        assert!(
+            copy[0] > from[0] && copy[1] > from[1],
+            "{from:?} -> {copy:?}"
+        );
     }
 
     #[test]

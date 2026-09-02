@@ -2775,6 +2775,41 @@ assert(
     (await page.getAttribute('button[aria-label="Move"]', "class")).includes("active"),
     "and hands the Move tool back",
   );
+  // 8x15. Alt-dragging a layer takes a copy and leaves the original.
+  await page.mouse.move(...at(160, 320));
+  await page.mouse.down({ button: "left" });
+  await page.keyboard.down("Alt");
+  await page.mouse.up();
+  await page.mouse.move(...at(160, 320));
+  await page.mouse.down();
+  await page.mouse.move(...at(420, 320), { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(300);
+  const afterAlt = (await page.locator(".panel ul li .layer-name").allTextContents()).map((n) =>
+    n.trim(),
+  );
+  assert(
+    afterAlt.filter((n) => n.endsWith("copy")).length === 1,
+    `alt-drag made a copy (${afterAlt})`,
+  );
+  assert(
+    (await canvasPixel(160, 320))[3] === 255 && (await canvasPixel(420, 320))[3] === 255,
+    "the original stayed and the copy came along",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await canvasPixel(420, 320))[3] === 0 && (await canvasPixel(160, 320))[3] === 255,
+    "one undo takes the drag back",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li .layer-name").allTextContents()).every((n) => !n.trim().endsWith("copy")),
+    "and the next takes the copy",
+  );
+
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(150);
   assert((await canvasPixel(160, 320))[2] > 150, "one undo puts the layer's own colour back");

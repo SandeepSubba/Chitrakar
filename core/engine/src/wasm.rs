@@ -259,6 +259,16 @@ impl WasmSession {
     }
 
     /// Copy a node and its subtree just above itself; returns the copy's id.
+    /// Duplicate several layers as one undo step (see
+    /// `Session::duplicate_nodes`); the copies come back in order.
+    pub fn duplicate_nodes(&mut self, ids: Vec<f64>, offset: bool) -> Result<Vec<f64>, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .duplicate_nodes(&ids, offset)
+            .map(|copies| copies.into_iter().map(|id| id.0 as f64).collect())
+            .map_err(to_js)
+    }
+
     pub fn duplicate_node(&mut self, id: f64) -> Result<f64, JsError> {
         self.inner
             .duplicate_node(NodeId(id as u64))

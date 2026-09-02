@@ -1419,18 +1419,34 @@ export function App() {
       // ever reports leaves, so without this a group could be selected in
       // the panel and still not be draggable — you would grab whichever
       // child happened to be under the cursor.
-      const target = inSelectedGroup(hit) ? selected! : hit;
-      drag.target = target;
-      drag.t0 = toTransform(session.transform_of(target));
+      let target = inSelectedGroup(hit) ? selected! : hit;
       // Grabbing any member of a multi-selection drags the whole of it;
       // grabbing anything else starts a fresh single selection.
       // A locked layer among them stays where it is; the target itself is
       // never locked, since the pick fell through anything that was.
-      const together =
+      let together =
         selectionSet.length > 1 && selectionSet.includes(target)
           ? movableSelection
           : [target];
       if (together.length === 1) setMultiSel([]);
+      // Alt drags a copy and leaves the original where it was: the copies
+      // are made where they stand, and the drag carries them off. Two
+      // history entries — the move, then the duplicate under it.
+      if (e.altKey) {
+        try {
+          const copies = Array.from(
+            session.duplicate_nodes(new Float64Array(together), false),
+          );
+          target = copies[Math.max(0, together.indexOf(target))];
+          together = copies;
+          setMultiSel(copies.length > 1 ? copies : []);
+          refresh(session);
+        } catch (err) {
+          alert(`Duplicate: ${err}`);
+        }
+      }
+      drag.target = target;
+      drag.t0 = toTransform(session.transform_of(target));
       drag.moving = together.map((id) => ({
         id,
         t0: toTransform(session.transform_of(id)),
