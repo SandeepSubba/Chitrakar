@@ -172,7 +172,7 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("vs_stencil"),
                 compilation_options: Default::default(),
-                buffers: &[vertex_layout.clone()],
+                buffers: std::slice::from_ref(&vertex_layout),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -199,7 +199,7 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("vs_cover"),
                 compilation_options: Default::default(),
-                buffers: &[vertex_layout.clone()],
+                buffers: std::slice::from_ref(&vertex_layout),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -223,7 +223,7 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[vertex_layout],
+                buffers: std::slice::from_ref(&vertex_layout),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
