@@ -631,6 +631,34 @@ px = await canvasPixel(599, 499);
 assert(px[3] === 0, "ellipse mask hides the rect corner");
 px = await canvasPixel(450, 400);
 assert(px[0] === 255, "rect center still visible through mask");
+// The mask is editable where it applies: drag it and the hole moves with
+// it, as one undo step.
+assert(
+  (await page.locator(".mask-move").count()) === 1 &&
+    (await page.locator(".mask-handle").count()) === 4,
+  "the mask gets a move knob and corner handles",
+);
+{
+  const knob = page.locator(".mask-move");
+  const kb = await knob.boundingBox();
+  await knob.hover();
+  await page.mouse.down();
+  await page.mouse.move(kb.x + kb.width / 2 + 140, kb.y + kb.height / 2 + 110, {
+    steps: 6,
+  });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(599, 499))[3] === 255,
+    "moving the mask uncovered the corner it was hiding",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(599, 499))[3] === 0,
+    "and the move undoes as one step",
+  );
+}
 await page.check('input[aria-label="Invert mask"]');
 await page.waitForTimeout(200);
 px = await canvasPixel(450, 400);

@@ -24,7 +24,8 @@ without reading anything else.*
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
-  filter layers (gaussian blur, sharpen), masks on any layer, groups,
+  filter layers (gaussian blur, sharpen), masks on any layer that can be
+  dragged and resized on the canvas, groups,
   reorder, duplicate/copy/cut/paste (subtree and pixels included, across
   documents), delete, opacity/blend, rename, labelled history with
   jump-to-state.
@@ -47,7 +48,7 @@ without reading anything else.*
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~101),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~166 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~169 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -71,7 +72,8 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the clipboard is in-process, so it does
   not exchange with other applications; undo after a delete restores the
-  layer but not the selection; masks aren't editable on-canvas; PDF/TIFF
+  layer but not the selection; masks are ellipses only, moved and resized
+  on canvas but not reshaped; PDF/TIFF
   embed the composite as an image rather than live vectors.
 
 ---

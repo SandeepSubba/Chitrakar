@@ -1353,6 +1353,84 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** Mask editing on the canvas. A mask created here is an ellipse with a
+   * translation, so its box in the layer's parent space is simply
+   * [e, e+2rx] x [f, f+2ry] — which is what these drags rewrite. */
+  const maskDragRef = useRef<{
+    corner: Handle | "move";
+    mask: Mask;
+    box: [number, number, number, number];
+    start: [number, number];
+  } | null>(null);
+
+  const maskBox = (m: Mask | null): [number, number, number, number] | null => {
+    if (!m || !("Vector" in m.kind)) return null;
+    const { shape, transform } = m.kind.Vector;
+    if (!("Ellipse" in shape)) return null;
+    return [
+      transform.e,
+      transform.f,
+      transform.e + shape.Ellipse.rx * 2,
+      transform.f + shape.Ellipse.ry * 2,
+    ];
+  };
+
+  const onMaskHandleDown = (e: React.PointerEvent, corner: Handle | "move") => {
+    if (!session || selected === null || !selectedMask) return;
+    const box = maskBox(selectedMask);
+    if (!box) return;
+    e.stopPropagation();
+    maskDragRef.current = {
+      corner,
+      mask: JSON.parse(JSON.stringify(selectedMask)),
+      box,
+      start: layerPoint(e),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onMaskHandleMove = (e: React.PointerEvent) => {
+    const drag = maskDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const [px, py] = layerPoint(e);
+    let [x0, y0, x1, y1] = drag.box;
+    if (drag.corner === "move") {
+      const [dx, dy] = [px - drag.start[0], py - drag.start[1]];
+      [x0, y0, x1, y1] = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+    } else {
+      const west = drag.corner === "nw" || drag.corner === "sw";
+      const north = drag.corner === "nw" || drag.corner === "ne";
+      const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
+      [x0, x1] = [Math.min(px, fx), Math.max(px, fx)];
+      [y0, y1] = [Math.min(py, fy), Math.max(py, fy)];
+    }
+    preview({
+      SetMask: {
+        id: selected,
+        mask: {
+          ...drag.mask,
+          kind: {
+            Vector: {
+              shape: {
+                Ellipse: {
+                  rx: Math.max(MIN_SIZE, x1 - x0) / 2,
+                  ry: Math.max(MIN_SIZE, y1 - y0) / 2,
+                },
+              },
+              transform: { a: 1, b: 0, c: 0, d: 1, e: x0, f: y0 },
+            },
+          },
+        },
+      },
+    });
+  };
+
+  const onMaskHandleUp = () => {
+    maskDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const onCurveHandleUp = () => {
     handleDragRef.current = null;
     if (session?.commit_preview()) refresh(session);
@@ -1386,16 +1464,17 @@ export function App() {
   let selLocal: [number, number, number, number] | null = null;
   /** Maps a point in the selected layer's own space to screen. */
   let selToScreen: ((x: number, y: number) => [number, number]) | null = null;
+  /** The selected layer's parent space — the space its own transform, and
+   * its mask's, are written against. */
+  let selParent: Transform | null = null;
   if (session && selected !== null && resizable) {
     const lb = session.local_bounds_of(selected);
     if (lb.length === 4) {
       selLocal = [lb[0], lb[1], lb[2], lb[3]];
       // Draw against the document, so a layer inside a moved group is
       // outlined where it actually is.
-      const t = composeT(
-        toTransform(session.parent_space_of(selected)),
-        toTransform(session.transform_of(selected)),
-      );
+      selParent = toTransform(session.parent_space_of(selected));
+      const t = composeT(selParent, toTransform(session.transform_of(selected)));
       const toScreen = (x: number, y: number): [number, number] => [
         view.x + (t.a * x + t.c * y + t.e) * view.zoom,
         view.y + (t.b * x + t.d * y + t.f) * view.zoom,
@@ -1438,16 +1517,25 @@ export function App() {
   /** Attach an ellipse mask inscribed in the layer's current bounds. */
   const addMask = () => {
     if (!session || !selectedLayer) return;
-    const b = session.bounds_of(selectedLayer.id);
-    if (b.length !== 4) return;
+    // A mask is written in the layer's parent space, so inscribe it in the
+    // layer's bounds *there* — mapping its own box through its own
+    // transform — rather than in document bounds, which only agree while
+    // the layer sits at the top level.
+    const lb = session.local_bounds_of(selectedLayer.id);
+    if (lb.length !== 4) return;
+    const t = toTransform(session.transform_of(selectedLayer.id));
+    const xs = [t.a * lb[0] + t.c * lb[1] + t.e, t.a * lb[2] + t.c * lb[3] + t.e];
+    const ys = [t.b * lb[0] + t.d * lb[1] + t.f, t.b * lb[2] + t.d * lb[3] + t.f];
+    const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+    const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
     run({
       SetMask: {
         id: selectedLayer.id,
         mask: {
           kind: {
             Vector: {
-              shape: { Ellipse: { rx: b[2] / 2, ry: b[3] / 2 } },
-              transform: { a: 1, b: 0, c: 0, d: 1, e: b[0], f: b[1] },
+              shape: { Ellipse: { rx: (x1 - x0) / 2, ry: (y1 - y0) / 2 } },
+              transform: { a: 1, b: 0, c: 0, d: 1, e: x0, f: y0 },
             },
           },
           invert: false,
@@ -1927,6 +2015,56 @@ export function App() {
                       onPointerMove={onRotatePointerMove}
                       onPointerUp={onRotatePointerUp}
                     />
+                  </>
+                );
+              })()}
+              {/* The mask, drawn and edited where it applies. Dashed and
+                  in its own colour, because it is not the layer's outline
+                  and confusing the two makes both useless. */}
+              {(() => {
+                const box = maskBox(selectedMask);
+                if (!box || !selParent) return null;
+                const p = selParent;
+                const at = (x: number, y: number): [number, number] => [
+                  view.x + (p.a * x + p.c * y + p.e) * view.zoom,
+                  view.y + (p.b * x + p.d * y + p.f) * view.zoom,
+                ];
+                const [x0, y0, x1, y1] = box;
+                const quad: [number, number][] = [
+                  at(x0, y0),
+                  at(x1, y0),
+                  at(x1, y1),
+                  at(x0, y1),
+                ];
+                const centre = at((x0 + x1) / 2, (y0 + y1) / 2);
+                const knob = (
+                  key: string,
+                  pt: [number, number],
+                  corner: Handle | "move",
+                ) => (
+                  <div
+                    key={key}
+                    className={corner === "move" ? "mask-move" : "mask-handle"}
+                    data-mask={key}
+                    style={{ left: pt[0] - 5, top: pt[1] - 5 }}
+                    onPointerDown={(e) => onMaskHandleDown(e, corner)}
+                    onPointerMove={onMaskHandleMove}
+                    onPointerUp={onMaskHandleUp}
+                  />
+                );
+                return (
+                  <>
+                    <svg className="sel-outline" aria-hidden="true">
+                      <ellipse
+                        className="mask-outline"
+                        cx={(quad[0][0] + quad[2][0]) / 2}
+                        cy={(quad[0][1] + quad[2][1]) / 2}
+                        rx={Math.abs(quad[1][0] - quad[0][0]) / 2}
+                        ry={Math.abs(quad[3][1] - quad[0][1]) / 2}
+                      />
+                    </svg>
+                    {knob("move", centre, "move")}
+                    {HANDLES.map((c, i) => knob(c, quad[HANDLE_CORNER[i]], c))}
                   </>
                 );
               })()}

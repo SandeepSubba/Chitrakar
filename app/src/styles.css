@@ -619,6 +619,31 @@ body {
 
 /* Gradient geometry: hollow knobs so they read as controls over artwork
    rather than as part of it, and a dashed line for the ramp's axis. */
+.mask-outline {
+  fill: none;
+  stroke: #ffcf5c;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+.mask-handle,
+.mask-move {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #ffcf5c;
+  border: 1px solid #2a2a30;
+  border-radius: 2px;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 3;
+}
+
+.mask-move {
+  border-radius: 50%;
+}
+
 .grad-line {
   stroke: var(--accent);
   stroke-width: 1;
