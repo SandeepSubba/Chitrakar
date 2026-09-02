@@ -877,6 +877,51 @@ assert(
   "and the conversion undoes too",
 );
 
+// 8u3. Brush: a freehand drag becomes a stroked path — editable anchors,
+// not baked pixels — simplified down from the raw samples.
+await page.click('button[aria-label="Brush"]');
+await page.locator('input[aria-label="Brush width"]').fill("10");
+await page.waitForTimeout(150);
+const strokeAt = [420, 640];
+assert((await canvasPixel(...strokeAt))[3] === 0, "brush area starts empty");
+await page.mouse.move(...toScreen(300, 620));
+await page.mouse.down();
+for (const [x, y] of [
+  [340, 630],
+  [380, 645],
+  [420, 640],
+  [460, 620],
+  [500, 600],
+]) {
+  await page.mouse.move(...toScreen(x, y), { steps: 3 });
+}
+await page.mouse.up();
+await page.waitForTimeout(300);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Stroke" }).count()) === 1,
+  "the stroke became a layer",
+);
+const painted = await canvasPixel(...strokeAt);
+assert(painted[3] > 0, `ink follows the drag (${painted})`);
+assert(
+  (await canvasPixel(420, 700))[3] === 0,
+  "and nowhere the brush did not go",
+);
+// It is a path, so it has anchors to grab — and far fewer than the samples.
+const anchors = await page.locator(".anchor").count();
+assert(
+  anchors >= 2 && anchors <= 8,
+  `the stroke simplifies to a handful of anchors (${anchors})`,
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Stroke" }).count()) === 0 &&
+    (await canvasPixel(...strokeAt))[3] === 0,
+  "and the whole stroke undoes as one step",
+);
+await page.click('button[aria-label="Move"]');
+
 // 8v. Text tool: click to add a live text object, edit it via the panel.
 const inkCount = (x0, y0, x1, y1) =>
   page.evaluate(([a, b, c, d]) => {

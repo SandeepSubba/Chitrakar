@@ -118,7 +118,7 @@ function seedHandles(
   });
 }
 
-const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Text"] as const;
+const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Brush", "Text"] as const;
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
  * called Move here. */
@@ -128,6 +128,7 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   r: "Rect",
   e: "Ellipse",
   p: "Pen",
+  b: "Brush",
   t: "Text",
 };
 
@@ -147,6 +148,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Rect: "R",
   Ellipse: "E",
   Pen: "P",
+  Brush: "B",
   Text: "T",
 };
 
@@ -155,10 +157,60 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Rect: "rect",
   Ellipse: "ellipse",
   Pen: "pen",
+  Brush: "brush",
   Text: "text",
 };
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
+/** Minimum travel between recorded brush samples, and how far a simplified
+ * stroke may stray from the one that was drawn — both in document units. */
+const BRUSH_STEP = 3;
+const BRUSH_TOLERANCE = 2;
+
+/** Ramer-Douglas-Peucker: drop anchors that the line between their
+ * neighbours already accounts for. A raw stroke is hundreds of points at
+ * screen resolution, which renders the same and cannot be edited by hand;
+ * this keeps the shape within `tol` of what was drawn and leaves a handful
+ * of anchors to grab afterwards. */
+function simplifyStroke(
+  pts: [number, number][],
+  tol: number,
+): [number, number][] {
+  if (pts.length < 3) return pts;
+  const [first, last] = [pts[0], pts[pts.length - 1]];
+  let worst = 0;
+  let at = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = pointToSegment(pts[i], first, last);
+    if (d > worst) {
+      worst = d;
+      at = i;
+    }
+  }
+  if (worst <= tol) return [first, last];
+  return [
+    ...simplifyStroke(pts.slice(0, at + 1), tol).slice(0, -1),
+    ...simplifyStroke(pts.slice(at), tol),
+  ];
+}
+
+function pointToSegment(
+  p: [number, number],
+  a: [number, number],
+  b: [number, number],
+): number {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+  const len2 = dx * dx + dy * dy;
+  const t =
+    len2 < 1e-9
+      ? 0
+      : Math.max(
+          0,
+          Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2),
+        );
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
 /** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
 const HANDLE_CORNER = [0, 1, 3, 2];
@@ -186,6 +238,8 @@ interface ToolDrag {
   /** Move tool: the node being dragged and its full starting transform. */
   target?: NodeId;
   t0?: Transform;
+  /** Brush: the stroke so far, in document coordinates. */
+  stroke?: [number, number][];
 }
 
 interface HandleDrag {
@@ -215,6 +269,7 @@ export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
   const [tool, setTool] = useState<Tool>("Move");
   const [fill, setFill] = useState("#6c8cff");
+  const [brushSize, setBrushSize] = useState(8);
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
@@ -609,6 +664,7 @@ export function App() {
       lastX: x,
       lastY: y,
       moved: false,
+      stroke: tool === "Brush" ? [[x, y]] : undefined,
     };
     if (tool === "Move") {
       const hit = session.hit_test(x, y);
@@ -633,6 +689,16 @@ export function App() {
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
+    if (drag.stroke) {
+      // Only keep points that add something: a stroke sampled at screen
+      // resolution carries hundreds of anchors nobody can edit.
+      const last = drag.stroke[drag.stroke.length - 1];
+      if (Math.hypot(drag.lastX - last[0], drag.lastY - last[1]) >= BRUSH_STEP) {
+        drag.stroke.push([drag.lastX, drag.lastY]);
+        drag.moved = true;
+        setPenPoints([...drag.stroke]); // live line while drawing
+      }
+    }
     // Move tool: live preview while dragging.
     if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
       const [dx, dy] = layerVector(
@@ -660,6 +726,51 @@ export function App() {
     if (drag.tool === "Move") {
       // The document already holds the previewed position; seal the gesture.
       if (drag.moved && session.commit_preview()) refresh(session);
+      return;
+    }
+
+    if (drag.tool === "Brush") {
+      setPenPoints([]);
+      const pts = simplifyStroke(drag.stroke ?? [], BRUSH_TOLERANCE);
+      if (pts.length < 2) return;
+      // Anchors are stored relative to the stroke's own origin, like every
+      // other path, so the node's transform carries its position.
+      const minX = Math.min(...pts.map((p) => p[0]));
+      const minY = Math.min(...pts.map((p) => p[1]));
+      shapeCount.current += 1;
+      run({
+        AddNode: {
+          parent: session.root_id,
+          index: topLevelCount(layers),
+          node: nodePayload(
+            `Stroke ${shapeCount.current}`,
+            {
+              Vector: {
+                shape: {
+                  Path: {
+                    points: pts.map(
+                      (p) => [p[0] - minX, p[1] - minY] as [number, number],
+                    ),
+                    closed: false,
+                    // Smoothed, so a hand-drawn line reads as a curve and
+                    // stays editable as a handful of anchors.
+                    smooth: true,
+                    handles: [],
+                  },
+                },
+                fill: null,
+                stroke: {
+                  color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                  width: brushSize,
+                },
+                gradient: null,
+              },
+            },
+            minX,
+            minY,
+          ),
+        },
+      });
       return;
     }
 
@@ -1545,6 +1656,20 @@ export function App() {
             title="Fill color"
             className="fill-swatch"
           />
+          {tool === "Brush" && (
+            <input
+              type="number"
+              min={1}
+              max={64}
+              value={brushSize}
+              onChange={(e) =>
+                setBrushSize(Math.max(1, Math.min(64, Number(e.target.value))))
+              }
+              title="Brush width"
+              aria-label="Brush width"
+              className="brush-size"
+            />
+          )}
         </nav>
         <main
           className="canvas-host"
@@ -1572,12 +1697,16 @@ export function App() {
                   .map((p) => `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`)
                   .join(" ")}
               />
-              <circle
-                className="pen-first"
-                cx={view.x + penPoints[0][0] * view.zoom}
-                cy={view.y + penPoints[0][1] * view.zoom}
-                r={5}
-              />
+              {/* Only the pen closes a path by clicking its first anchor;
+                  a brush stroke reuses the preview line but not that mark. */}
+              {tool === "Pen" && (
+                <circle
+                  className="pen-first"
+                  cx={view.x + penPoints[0][0] * view.zoom}
+                  cy={view.y + penPoints[0][1] * view.zoom}
+                  r={5}
+                />
+              )}
             </svg>
           )}
           {session &&

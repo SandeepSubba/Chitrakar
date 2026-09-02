@@ -27,6 +27,7 @@ export type IconName =
   | "lower"
   | "group"
   | "ungroup"
+  | "brush"
   | "trash"
   | "eye"
   | "eyeOff"
@@ -44,6 +45,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M5 19l1.2-4.2L15 6a2 2 0 0 1 2.8 2.8L9.2 17.8z" />
       <path d="M4.6 19.4l3.2-1" />
+    </>
+  ),
+  brush: (
+    <>
+      <path d="M9.5 14.5c-1.6.6-2 2.2-2.2 3.6-.1.9-.8 1.5-1.7 1.6.9 1 2.2 1.4 3.5 1.1 1.7-.4 2.8-1.9 2.7-3.6" />
+      <path d="M11 16.5L19.2 8a2 2 0 0 0-2.8-2.8L8 13.4" />
     </>
   ),
   text: (
