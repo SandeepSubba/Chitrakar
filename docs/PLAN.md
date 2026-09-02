@@ -109,7 +109,9 @@ without reading anything else.*
   tracking and a wrap width for paragraph text.
   A draft of the open document is written to IndexedDB a breath after
   every change, and a fresh visit offers it back (Restore or Discard),
-  so a closed tab or a crash loses nothing.
+  so a closed tab or a crash loses nothing. The document has a name —
+  typed in the bar, taken from the file it was opened from, restored
+  with the draft — and every save and export is named after it.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
   the selection — rendered at that size, not upsampled), JPEG, SVG,
@@ -138,7 +140,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~179),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~361 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~365 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

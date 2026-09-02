@@ -274,12 +274,36 @@ async function getDraft(): Promise<Uint8Array | null> {
     req.onerror = () => resolve(null);
   });
 }
-async function clearDraft(): Promise<void> {
+/** The draft's name, kept beside it so a restored document is still
+ * called what it was called. */
+async function putDraftName(name: string): Promise<void> {
   const db = await draftDb();
   if (!db) return;
   db.transaction(DRAFT_STORE, "readwrite")
     .objectStore(DRAFT_STORE)
-    .delete("current");
+    .put(name, "name");
+}
+async function getDraftName(): Promise<string | null> {
+  const db = await draftDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    const req = db
+      .transaction(DRAFT_STORE)
+      .objectStore(DRAFT_STORE)
+      .get("name");
+    req.onsuccess = () =>
+      resolve(typeof req.result === "string" ? req.result : null);
+    req.onerror = () => resolve(null);
+  });
+}
+async function clearDraft(): Promise<void> {
+  const db = await draftDb();
+  if (!db) return;
+  const store = db
+    .transaction(DRAFT_STORE, "readwrite")
+    .objectStore(DRAFT_STORE);
+  store.delete("current");
+  store.delete("name");
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
@@ -568,10 +592,16 @@ export function App() {
    * document. */
   const [recoverable, setRecoverable] = useState<Uint8Array | null>(null);
   const [saveTick, setSaveTick] = useState(0);
+  /** What this document is called: the name it was opened under, or the
+   * one typed in the bar. Every save and every export is named after it,
+   * so a file keeps its name through a session. */
+  const [docName, setDocName] = useState("untitled");
+  const draftName = useRef<string | null>(null);
   useEffect(() => {
     getDraft().then(
       (bytes) => bytes && bytes.length > 0 && setRecoverable(bytes),
     );
+    getDraftName().then((name) => (draftName.current = name));
   }, []);
   useEffect(() => {
     // Nothing to keep until there is something on the page: the empty
@@ -581,12 +611,13 @@ export function App() {
     const t = setTimeout(() => {
       try {
         putDraft(session.save());
+        putDraftName(docName);
       } catch {
         // A draft that cannot be written is not worth an alert.
       }
     }, 1500);
     return () => clearTimeout(t);
-  }, [session, saveTick, layers.length]);
+  }, [session, saveTick, layers.length, docName]);
 
   /** Faces a text block can be set in. The bundled one is always there;
    * the rest are fetched from /fonts once per page load and registered
@@ -744,6 +775,7 @@ export function App() {
       setProofing(false);
       setGamutWarn(false);
       shapeCount.current = 0;
+      setDocName("untitled");
       refresh(s);
       fitView();
     },
@@ -2875,14 +2907,18 @@ export function App() {
     setOpacityDraft(null);
   };
 
+  /** The document's name as a file's: trimmed, and never empty. */
+  const fileName = () =>
+    docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
+
   const saveFile = () => {
     if (!session) return;
-    download(session.save(), "untitled.chitra", "application/zip");
+    download(session.save(), `${fileName()}.chitra`, "application/zip");
   };
 
   const exportPng = () => {
     if (!session) return;
-    download(session.export_png(), "untitled.png", "image/png");
+    download(session.export_png(), `${fileName()}.png`, "image/png");
   };
 
   /** PNG at a multiple of the document's size — the @2x/@3x a screen
@@ -2891,7 +2927,7 @@ export function App() {
     if (!session) return;
     download(
       session.export_png_at(scale, 0, 0, 0, 0),
-      `untitled@${scale}x.png`,
+      `${fileName()}@${scale}x.png`,
       "image/png",
     );
   };
@@ -2905,7 +2941,7 @@ export function App() {
     try {
       download(
         session.export_png_at(1, x, y, w, h),
-        "selection.png",
+        `${fileName()}-selection.png`,
         "image/png",
       );
     } catch (err) {
@@ -2915,13 +2951,13 @@ export function App() {
 
   const exportJpeg = () => {
     if (!session) return;
-    download(session.export_jpeg(92), "untitled.jpg", "image/jpeg");
+    download(session.export_jpeg(92), `${fileName()}.jpg`, "image/jpeg");
   };
 
   const exportPdf = () => {
     if (!session) return;
     try {
-      download(session.export_pdf(), "untitled.pdf", "application/pdf");
+      download(session.export_pdf(), `${fileName()}.pdf`, "application/pdf");
     } catch (err) {
       alert(`PDF export: ${err}`);
     }
@@ -2930,7 +2966,7 @@ export function App() {
   const exportTiff = () => {
     if (!session) return;
     try {
-      download(session.export_cmyk_tiff(), "untitled.tif", "image/tiff");
+      download(session.export_cmyk_tiff(), `${fileName()}.tif`, "image/tiff");
     } catch (err) {
       alert(`CMYK TIFF export: ${err}`);
     }
@@ -2940,7 +2976,7 @@ export function App() {
     if (!session) return;
     download(
       new TextEncoder().encode(session.export_svg()),
-      "untitled.svg",
+      `${fileName()}.svg`,
       "image/svg+xml",
     );
   };
@@ -2967,11 +3003,12 @@ export function App() {
   };
 
   /** Open a .chitra from its bytes, whether chosen or dropped. */
-  const openDocumentBytes = (bytes: Uint8Array) => {
+  const openDocumentBytes = (bytes: Uint8Array, name?: string) => {
     try {
       const s = WasmSession.open(bytes);
       // Faces the file carried are registered by the open; offer them.
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      if (name) setDocName(name.replace(/\.chitra$/i, ""));
       setDocDpi(s.dpi);
       setSession(s);
       setDocumentSize(s.width, s.height);
@@ -2991,7 +3028,9 @@ export function App() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    file.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
+    file
+      .arrayBuffer()
+      .then((buf) => openDocumentBytes(new Uint8Array(buf), file.name));
   };
 
   /** Bring an image file in as a layer and pick it — whichever way it
@@ -3032,7 +3071,9 @@ export function App() {
     const files = Array.from(e.dataTransfer.files);
     const doc = files.find((f) => f.name.toLowerCase().endsWith(".chitra"));
     if (doc) {
-      doc.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
+      doc
+        .arrayBuffer()
+        .then((buf) => openDocumentBytes(new Uint8Array(buf), doc.name));
       return;
     }
     for (const file of files) {
@@ -3132,7 +3173,7 @@ export function App() {
             onClick={() => {
               const bytes = recoverable;
               setRecoverable(null);
-              openDocumentBytes(bytes);
+              openDocumentBytes(bytes, draftName.current ?? undefined);
             }}
           >
             Restore
@@ -3358,6 +3399,18 @@ export function App() {
           </button>
         </div>
 
+        <input
+          className="doc-name"
+          value={docName}
+          onChange={(e) => setDocName(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          spellCheck={false}
+          title="What this document is called; every save and export is named after it"
+          aria-label="Document name"
+        />
         <span className="doc-chip">
           {hasIcc && (
             <span className="icc-badge" title="A CMYK press profile is loaded">

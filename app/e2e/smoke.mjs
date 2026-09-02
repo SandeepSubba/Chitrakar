@@ -2953,6 +2953,47 @@ assert(
 }
 
 
+// 9g. The document's name: typed in the bar, it names every file that
+// leaves — the save, and the exports.
+{
+  await page.locator('input[aria-label="Document name"]').fill("blue-mark");
+  await page.waitForTimeout(150);
+  const [saved] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Save")).click(),
+  ]);
+  assert(saved.suggestedFilename() === "blue-mark.chitra", `the save carries the name (${saved.suggestedFilename()})`);
+  const [png] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export PNG")).first().click(),
+  ]);
+  assert(png.suggestedFilename() === "blue-mark.png", `and so does the export (${png.suggestedFilename()})`);
+  // Opening a file takes its name; a new document starts over.
+  await page.locator('input[accept=".chitra"]').setInputFiles({
+    name: "logo.chitra",
+    mimeType: "application/zip",
+    buffer: await readFile(await saved.path()),
+  });
+  await page.waitForTimeout(600);
+  assert(
+    (await page.locator('input[aria-label="Document name"]').inputValue()) === "logo",
+    "an opened file brings its own name",
+  );
+  await newDocument(400, 300, "rgb");
+  assert(
+    (await page.locator('input[aria-label="Document name"]').inputValue()) === "untitled",
+    "and a new document starts over",
+  );
+  // Leave something on the page for the recovery step that follows.
+  await page.click('button[aria-label="Rect"]');
+  const nameBox = await page.locator("#engine-page").boundingBox();
+  await page.mouse.move(nameBox.x + nameBox.width * 0.2, nameBox.y + nameBox.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(nameBox.x + nameBox.width * 0.7, nameBox.y + nameBox.height * 0.7, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

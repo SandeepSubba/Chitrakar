@@ -1228,3 +1228,26 @@ body {
   stroke: var(--accent);
   stroke-width: 1;
 }
+
+/* The document's name, typed in the bar beside its size. */
+.doc-name {
+  min-width: 6rem;
+  max-width: 14rem;
+  margin-left: auto;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: right;
+}
+.doc-name:hover {
+  border-color: var(--border);
+}
+.doc-name:focus {
+  border-color: var(--accent);
+  outline: none;
+  text-align: left;
+}
