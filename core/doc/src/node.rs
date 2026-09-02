@@ -165,6 +165,17 @@ pub enum Adjustment {
         saturation: f32,
         lightness: f32,
     },
+    /// Levels, in linear light like every adjustment here: the input
+    /// range `in_black..in_white` is stretched to 0..1, a gamma lifts or
+    /// sinks the midtones (above 1 lightens), and the result lands in
+    /// `out_black..out_white`.
+    Levels {
+        in_black: f32,
+        in_white: f32,
+        gamma: f32,
+        out_black: f32,
+        out_white: f32,
+    },
 }
 
 /// Non-destructive convolution filters; like adjustments they apply at

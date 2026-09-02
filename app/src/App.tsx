@@ -1452,6 +1452,14 @@ export function App() {
         },
       },
     },
+    levels: {
+      name: "Levels",
+      kind: {
+        Adjustment: {
+          Levels: { in_black: 0, in_white: 1, gamma: 1, out_black: 0, out_white: 1 },
+        },
+      },
+    },
     blur: { name: "Gaussian Blur", kind: { Filter: { GaussianBlur: { sigma: 4 } } } },
     sharpen: {
       name: "Sharpen",
@@ -3973,6 +3981,19 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
           {slider("Lightness", p.lightness, -1, 1, 0.01, (v) =>
             wrap({ HueSaturation: { ...p, lightness: v } }),
           )}
+        </>
+      );
+    }
+    if ("Levels" in adj) {
+      const p = adj.Levels;
+      const set = (patch: Partial<typeof p>) => wrap({ Levels: { ...p, ...patch } });
+      return (
+        <>
+          {slider("Input black", p.in_black, 0, 1, 0.01, (v) => set({ in_black: v }))}
+          {slider("Input white", p.in_white, 0, 1, 0.01, (v) => set({ in_white: v }))}
+          {slider("Gamma", p.gamma, 0.2, 3, 0.02, (v) => set({ gamma: v }))}
+          {slider("Output black", p.out_black, 0, 1, 0.01, (v) => set({ out_black: v }))}
+          {slider("Output white", p.out_white, 0, 1, 0.01, (v) => set({ out_white: v }))}
         </>
       );
     }

@@ -41,6 +41,15 @@ export type Adjustment =
         saturation: number;
         lightness: number;
       };
+    }
+  | {
+      Levels: {
+        in_black: number;
+        in_white: number;
+        gamma: number;
+        out_black: number;
+        out_white: number;
+      };
     };
 
 export interface Transform {

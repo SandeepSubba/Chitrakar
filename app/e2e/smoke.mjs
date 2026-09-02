@@ -344,6 +344,44 @@ await setSlider("Stops", 1);
 after = await canvasPixel(500, 325);
 assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} -> ${after[1]})`);
 
+// 4b. Levels: neutral at first; an input white below the pixel's value
+// pushes it to white, an output white pulls everything down. Undone
+// again afterwards — four gestures, four entries — so the rest of the
+// suite sees the document and the history it expects.
+{
+  await page.selectOption('[aria-label="Add adjustment layer"]', "levels");
+  await page.waitForTimeout(200);
+  const neutral = await canvasPixel(500, 325);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Levels" }).count()) === 1 &&
+      neutral.join() === after.join(),
+    "a neutral levels layer changes nothing",
+  );
+  await page.locator(".panel ul li", { hasText: "Levels" }).click();
+  await setSlider("Input white", 0.05);
+  const stretched = await canvasPixel(500, 325);
+  assert(
+    stretched[1] > neutral[1] && stretched[1] >= 250,
+    `an input white below the pixel clips it to white (g ${neutral[1]} -> ${stretched[1]})`,
+  );
+  await setSlider("Input white", 1);
+  await setSlider("Output white", 0.2);
+  const pressed = await canvasPixel(500, 325);
+  assert(
+    pressed[1] < neutral[1],
+    `an output white pulls it down (g ${neutral[1]} -> ${pressed[1]})`,
+  );
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(100);
+  }
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Levels" }).count()) === 0 &&
+      (await canvasPixel(500, 325)).join() === after.join(),
+    "and four undos take the layer and its three edits back",
+  );
+}
+
 // 5. Undo three times: stops edit, adjustment layer, ellipse all revert.
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(100);

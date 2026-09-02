@@ -2238,6 +2238,23 @@ fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
             let f = |v: f32| (lum + (v - lum) * s + lightness).clamp(0.0, 1.0);
             (f(r), f(g), f(b))
         }
+        Adjustment::Levels {
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+        } => {
+            // An input range that has collapsed still has to map somewhere:
+            // hold it a hair wide rather than divide by nothing.
+            let span = (in_white - in_black).max(1e-3);
+            let exponent = 1.0 / gamma.max(0.05);
+            let f = |v: f32| {
+                let v = ((v - in_black) / span).clamp(0.0, 1.0).powf(exponent);
+                (out_black + v * (out_white - out_black)).clamp(0.0, 1.0)
+            };
+            (f(r), f(g), f(b))
+        }
     };
     LinearRgba {
         r: r * px.a,
@@ -4889,6 +4906,92 @@ mod tests {
             px[0] == px[1] && px[1] == px[2],
             "desaturated to grey, got {px:?}"
         );
+    }
+
+    #[test]
+    fn levels_stretch_the_input_range_lift_the_midtones_and_land_in_the_output_range() {
+        // A mid grey — 0.25 linear — under a rect, so one pixel says it all.
+        let grey = AuthoredColor::Srgb {
+            r: 0.5371,
+            g: 0.5371,
+            b: 0.5371,
+            a: 1.0,
+        };
+        let mut doc = Document::new(2, 2, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 2.0, 2.0, grey),
+        })
+        .unwrap();
+        let levels = |in_black, in_white, gamma, out_black, out_white| {
+            Box::new(NodeKind::Adjustment(Adjustment::Levels {
+                in_black,
+                in_white,
+                gamma,
+                out_black,
+                out_white,
+            }))
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "levels",
+                Adjustment::Levels {
+                    in_black: 0.0,
+                    in_white: 1.0,
+                    gamma: 1.0,
+                    out_black: 0.0,
+                    out_white: 1.0,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[1];
+        let linear = |doc: &Document| render(doc).unwrap().get(0, 0).r;
+        let plain = linear(&doc);
+        assert!(
+            (plain - 0.25).abs() < 0.01,
+            "neutral levels leave the grey ({plain})"
+        );
+
+        let set = |doc: &mut Document, kind| doc.apply(Command::SetKind { id, kind }).unwrap();
+        set(&mut doc, levels(0.0, 0.5, 1.0, 0.0, 1.0));
+        assert!(
+            (linear(&doc) - 0.5).abs() < 0.01,
+            "an input white at the grey's double stretches it to half ({})",
+            linear(&doc)
+        );
+        set(&mut doc, levels(0.25, 1.0, 1.0, 0.0, 1.0));
+        assert!(
+            linear(&doc) < 1e-3,
+            "an input black at the grey sinks it to black ({})",
+            linear(&doc)
+        );
+        set(&mut doc, levels(0.0, 1.0, 2.0, 0.0, 1.0));
+        assert!(
+            (linear(&doc) - 0.5).abs() < 0.01,
+            "gamma 2 lifts a quarter to a half ({})",
+            linear(&doc)
+        );
+        set(&mut doc, levels(0.0, 1.0, 1.0, 0.5, 1.0));
+        assert!(
+            (linear(&doc) - 0.625).abs() < 0.01,
+            "an output black at half lands the grey at 0.5 + 0.25 × 0.5 ({})",
+            linear(&doc)
+        );
+        set(&mut doc, levels(0.0, 1.0, 1.0, 0.0, 0.0));
+        assert_eq!(linear(&doc), 0.0, "an output range of nothing is all black");
+        set(&mut doc, levels(0.5, 0.5, 1.0, 0.0, 1.0));
+        let collapsed = linear(&doc);
+        assert!(
+            collapsed.is_finite() && (collapsed == 0.0 || collapsed == 1.0),
+            "a collapsed input range thresholds rather than blowing up ({collapsed})"
+        );
+        // Alpha is untouched: the adjustment is on colour, not coverage.
+        assert_eq!(render(&doc).unwrap().get(0, 0).a, 1.0);
     }
 
     #[test]
