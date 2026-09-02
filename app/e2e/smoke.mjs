@@ -2522,6 +2522,10 @@ assert(pdfBytes.subarray(-6).toString("latin1") === "%%EOF\n", "PDF trailer");
 const pdfText = pdfBytes.toString("latin1");
 assert(pdfText.includes("/ICCBased"), "PDF carries an ICC colorspace");
 assert(pdfText.includes("/N 4"), "PDF image is 4-channel CMYK");
+assert(
+  pdfText.includes(" re\n") && pdfText.includes("/CS0 cs") && pdfText.includes("/OutputIntents"),
+  "PDF carries live paths in ink, with the profile as its output intent",
+);
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

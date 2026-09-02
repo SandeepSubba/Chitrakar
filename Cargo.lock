@@ -75,6 +75,7 @@ version = "0.1.0"
 dependencies = [
  "chitrakar-color",
  "chitrakar-doc",
+ "chitrakar-render",
  "flate2",
  "image",
  "serde",

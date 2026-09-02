@@ -109,9 +109,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~150),
+- **Verify before committing:** `cargo test --workspace` (~154),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~311 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~312 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -148,8 +148,11 @@ without reading anything else.*
   typed line as its own tspan but cannot carry alignment or a wrap width,
   both of which need font metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
   another shape handed down to the layer below, moved and resized on
-  canvas but not reshaped there; PDF/TIFF
-  embed the composite as an image rather than live vectors; a boolean
+  canvas but not reshaped there; PDF export is live where PDF has the
+  words (paths, solid fills and strokes, groups, images, opacity, blend)
+  and the engine's pixels where it does not (text, gradients, effects,
+  masks, varying strokes; an adjustment or filter flattens what is under
+  it), and TIFF is the composite; a boolean
   operation flattens curves to line segments and declines outlines that
   touch or overlap exactly, rather than guessing.
 
@@ -367,10 +370,14 @@ chitrakar/
   omitted), CMYK TIFF ✅ (composite separated into ink through the press
   profile, composited over paper white, 4-channel TIFF with that profile
   embedded; refuses rather than guessing when no profile is loaded).
-  and PDF ✅ (one page sized from the document dpi, composite flattened over
-  paper, Flate-compressed lossless image; with a press profile the page is
-  separated into ink in an ICCBased N=4 space carrying that profile,
-  otherwise DeviceRGB). JPEG pending.
+  and PDF ✅ (one page sized from the document dpi; live paths, solid
+  fills and inner/centred strokes, nested groups, image XObjects with
+  soft masks, opacity and blend as graphics states, and the engine's
+  pixels — trimmed to their ink — for what PDF cannot say; with a press
+  profile authored ink is written as ink, sRGB is separated through the
+  profile, and the profile is both the ICCBased colour space and the
+  page's output intent; a Ghostscript test checks the page against the
+  CPU renderer). JPEG ✅.
 
 ### Phase 4 — Mobile shells
 - Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.
