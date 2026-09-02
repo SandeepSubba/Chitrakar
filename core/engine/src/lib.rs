@@ -105,6 +105,12 @@ pub struct Session {
     /// in document pixels — `render_cached` carries it into the cache's own
     /// resolution.
     stale: Option<ClipRect>,
+    /// Set when the whole presented surface must be redrawn rather than a
+    /// region of the page: a new or resized cache, or a viewport that has
+    /// moved. The dirty region is tracked in document pixels and so cannot
+    /// say anything about the part of the surface the page does not cover,
+    /// which is exactly the part a pan leaves stale.
+    stale_all: bool,
     /// Resolution the cache is kept at, as a multiple of document pixels.
     /// Presenting a magnified document at 1.0 and letting the display
     /// enlarge the result is what makes a zoomed-in canvas look soft; the
@@ -142,6 +148,7 @@ impl Session {
             cache: None,
             scratch: None,
             stale: None,
+            stale_all: true,
             view_scale: 1.0,
             view_origin: (0.0, 0.0),
             viewport: None,
@@ -879,28 +886,31 @@ impl Session {
         if self.cache.as_ref().map(|c| (c.width, c.height)) != Some((w, h)) {
             self.cache = Some(Surface::new(w, h));
             self.scratch = None;
-            self.stale = Some(ClipRect {
-                x0: 0,
-                y0: 0,
-                x1: self.doc.meta.width,
-                y1: self.doc.meta.height,
-            });
+            self.stale_all = true;
         }
-        match self.stale.take() {
-            Some(doc_clip) => {
+        let doc_clip = self.stale.take();
+        let everything = std::mem::take(&mut self.stale_all);
+        match (everything, doc_clip) {
+            (false, None) => Ok((self.cache.as_ref().unwrap(), None)),
+            (everything, doc_clip) => {
                 // The dirty region arrives in document pixels; the cache is
                 // kept in the view's, so carry it through the view and
                 // widen it outwards to whole pixels rather than trusting a
                 // rounded edge.
-                let clip = ClipRect::from_float(
-                    doc_clip.x0 as f32 * scale + view.e,
-                    doc_clip.y0 as f32 * scale + view.f,
-                    doc_clip.x1 as f32 * scale + view.e,
-                    doc_clip.y1 as f32 * scale + view.f,
-                    w,
-                    h,
-                )
-                .intersect(full);
+                let clip = if everything {
+                    full
+                } else {
+                    let d = doc_clip.unwrap();
+                    ClipRect::from_float(
+                        d.x0 as f32 * scale + view.e,
+                        d.y0 as f32 * scale + view.f,
+                        d.x1 as f32 * scale + view.e,
+                        d.y1 as f32 * scale + view.f,
+                        w,
+                        h,
+                    )
+                    .intersect(full)
+                };
                 if clip.is_empty() {
                     // The change happened off-screen. Nothing to present,
                     // but the cache is still whole.
@@ -931,7 +941,6 @@ impl Session {
                 }
                 Ok((self.cache.as_ref().unwrap(), Some(clip)))
             }
-            None => Ok((self.cache.as_ref().unwrap(), None)),
         }
     }
 
@@ -984,10 +993,13 @@ impl Session {
         self.view_scale = scale;
         self.view_origin = (x, y);
         self.viewport = Some(size);
-        // Everything the surface shows has moved; none of it can be reused.
+        // Everything the surface shows has moved; none of it can be reused,
+        // and that includes the part beside the page, which a document-space
+        // dirty region has no way to name.
         self.cache = None;
         self.scratch = None;
         self.stale = None;
+        self.stale_all = true;
     }
 
     pub fn view_scale(&self) -> f32 {
@@ -1160,7 +1172,7 @@ impl Session {
     /// replaced — a resized canvas element, say — the engine has to be
     /// told that its idea of what is already on screen is gone.
     pub fn invalidate(&mut self) {
-        self.mark_dirty(Bounds::Everything);
+        self.stale_all = true;
     }
 
     /// A node's effect list as JSON.
@@ -1371,6 +1383,69 @@ mod tests {
         assert_eq!(s.get(50, 50).a, 1.0, "and the page itself is painted");
         assert_eq!(s.get(19, 40).a, 0.0, "the page's left edge is respected");
         assert_eq!(s.get(21, 40).a, 1.0, "just inside it, painted");
+    }
+
+    #[test]
+    fn a_viewport_still_clips_artwork_to_the_page() {
+        // With the surface no longer being the page, a layer hanging off
+        // the page's edge would otherwise paint onto the desk beside it.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "over", 80.0, 80.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(-40.0, -40.0),
+            })
+            .unwrap();
+        session.set_viewport(1.0, 50.0, 50.0, 200, 200);
+        let (s, _) = session.render_cached().unwrap();
+        assert_eq!(s.get(60, 60).a, 1.0, "the part on the page is painted");
+        assert_eq!(s.get(30, 30).a, 0.0, "the part hanging off it is not");
+        assert_eq!(s.get(49, 60).a, 0.0, "not even a pixel past the edge");
+    }
+
+    #[test]
+    fn moving_the_viewport_presents_the_whole_surface() {
+        // The caller copies the reported region and nothing else, so after
+        // a pan that region has to be the whole surface: the part beside
+        // the page still holds the last frame's picture of the page, and a
+        // document-space dirty region cannot name it.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        add_rect(&mut session, "r", 100.0, 100.0);
+        session.set_viewport(1.0, 20.0, 20.0, 200, 200);
+        let (_, first) = session.render_cached().unwrap();
+        assert_eq!(
+            first.map(|c| (c.x1 - c.x0, c.y1 - c.y0)),
+            Some((200, 200)),
+            "the first frame is the whole surface"
+        );
+        session.render_cached().unwrap();
+        session.set_viewport(1.0, 60.0, 60.0, 200, 200);
+        let (_, after_pan) = session.render_cached().unwrap();
+        assert_eq!(
+            after_pan.map(|c| (c.x0, c.y0, c.x1, c.y1)),
+            Some((0, 0, 200, 200)),
+            "and so is the one after a pan"
+        );
+        // An ordinary edit still reports only what it touched.
+        let id = *session
+            .document()
+            .children_of(session.document().root())
+            .unwrap()
+            .last()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let (_, after_edit) = session.render_cached().unwrap();
+        let c = after_edit.expect("the edit dirties something");
+        assert!(
+            (c.x1 - c.x0) < 200 || (c.y1 - c.y0) < 200,
+            "an edit is not a whole-surface repaint: {c:?}"
+        );
     }
 
     #[test]
