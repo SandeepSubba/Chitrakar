@@ -1271,9 +1271,12 @@ export function App() {
 
   /** A rubber band being dragged on empty canvas, in document
    * coordinates, and whether it adds to the selection it started from. */
-  const marqueeRef = useRef<{ x0: number; y0: number; add: NodeId[] } | null>(
-    null,
-  );
+  const marqueeRef = useRef<{
+    x0: number;
+    y0: number;
+    add: NodeId[];
+    band: [number, number, number, number];
+  } | null>(null);
   const [marquee, setMarquee] = useState<
     [number, number, number, number] | null
   >(null);
@@ -1406,6 +1409,7 @@ export function App() {
           x0: x,
           y0: y,
           add: e.shiftKey ? selectionSet : [],
+          band: [x, y, x, y],
         };
         setMarquee([x, y, x, y]);
         if (!e.shiftKey) {
@@ -1469,12 +1473,16 @@ export function App() {
     const band = marqueeRef.current;
     if (band) {
       const [x, y] = docPoint(e);
-      setMarquee([
+      // The gesture keeps the band itself; the state is only what the
+      // overlay draws, and a release that lands before React has painted
+      // must still pick what the pointer actually swept.
+      band.band = [
         Math.min(band.x0, x),
         Math.min(band.y0, y),
         Math.max(band.x0, x),
         Math.max(band.y0, y),
-      ]);
+      ];
+      setMarquee(band.band);
       return;
     }
     const drag = toolDragRef.current;
@@ -1560,7 +1568,7 @@ export function App() {
     const band = marqueeRef.current;
     if (band) {
       marqueeRef.current = null;
-      const rect = marquee;
+      const rect = band.band;
       setMarquee(null);
       // A band with no width or height is a click on empty canvas, which
       // has already cleared the selection.
