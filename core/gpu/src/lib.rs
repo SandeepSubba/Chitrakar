@@ -14,8 +14,12 @@
 //! distance; a path is filled the way a stencil buffer fills one — a fan
 //! over its rings flips the stencil, so even-odd falls out of the parity
 //! and a hole is a hole however the ring is wound — and the multisampling
-//! is what softens its edges. Everything else — strokes, gradients, text,
-//! rasters, masks, effects, filters, adjustments, blend modes, a group
+//! is what softens its edges. A placed image is a textured quad, its
+//! texels premultiplied into linear light before they are uploaded so
+//! the filtering happens where the compositor works — magnified or at
+//! its own size; shrunk, where the CPU box-filters the texels a pixel
+//! covers, the page goes back. Everything else — strokes, gradients,
+//! text, masks, effects, filters, adjustments, blend modes, a group
 //! that has to be composited on its own, ink authored for a press — is
 //! declined, and the caller falls back to the CPU.
 
@@ -92,6 +96,12 @@ enum Draw {
         stencil: std::ops::Range<u32>,
         cover: std::ops::Range<u32>,
     },
+    /// A placed image: the quad, and which of the scene's textures it
+    /// samples.
+    Image {
+        quad: std::ops::Range<u32>,
+        texture: usize,
+    },
 }
 
 /// A device, a queue and the pipelines that draw every shape.
@@ -101,7 +111,10 @@ pub struct GpuRenderer {
     pipeline: wgpu::RenderPipeline,
     stencil: wgpu::RenderPipeline,
     cover: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     /// What the adapter calls itself, for tests and diagnostics.
     pub adapter: String,
 }
@@ -145,6 +158,42 @@ impl GpuRenderer {
             label: Some("shapes"),
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
+        });
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("image"),
+            bind_group_layouts: &[&layout, &texture_layout],
+            push_constant_ranges: &[],
+        });
+        // Bilinear, clamped: the texels are premultiplied linear, so the
+        // filtering happens where the compositor works, as it does on the
+        // CPU. Off the edge reads as the edge, which the quad never asks
+        // for anyway.
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
         let target = wgpu::ColorTargetState {
             format: wgpu::TextureFormat::Rgba16Float,
@@ -216,6 +265,30 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        let image = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("image"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_image"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes"),
             layout: Some(&pipeline_layout),
@@ -248,7 +321,10 @@ impl GpuRenderer {
             pipeline,
             stencil,
             cover,
+            image,
             layout,
+            texture_layout,
+            sampler,
             adapter: info.name,
         })
     }
@@ -340,6 +416,63 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
 
+        // A texture per image the page places, premultiplied linear
+        // already, so nothing has to be converted per sample.
+        let textures: Vec<wgpu::BindGroup> = scene
+            .images
+            .iter()
+            .map(|img| {
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("image"),
+                    size: wgpu::Extent3d {
+                        width: img.width,
+                        height: img.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    bytemuck::cast_slice(&img.texels),
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(img.width * 8),
+                        rows_per_image: Some(img.height),
+                    },
+                    wgpu::Extent3d {
+                        width: img.width,
+                        height: img.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = texture.create_view(&Default::default());
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("image"),
+                    layout: &self.texture_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                })
+            })
+            .collect();
+
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -380,6 +513,11 @@ impl GpuRenderer {
                         pass.draw(stencil.clone(), 0..1);
                         pass.set_pipeline(&self.cover);
                         pass.draw(cover.clone(), 0..1);
+                    }
+                    Draw::Image { quad, texture } => {
+                        pass.set_pipeline(&self.image);
+                        pass.set_bind_group(1, &textures[*texture], &[]);
+                        pass.draw(quad.clone(), 0..1);
                     }
                 }
             }
@@ -436,6 +574,29 @@ impl GpuRenderer {
     }
 }
 
+/// The nearest half-precision float to a full-precision one, for the
+/// texels an image is uploaded as. Values here are colours in 0..1, so
+/// the overflow and subnormal corners are handled plainly.
+fn f32_to_f16(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+    let mantissa = bits & 0x7f_ffff;
+    if exponent > 15 {
+        return sign | 0x7c00; // infinity, or as near as this format goes
+    }
+    if exponent < -24 {
+        return sign;
+    }
+    if exponent < -14 {
+        // Subnormal: shift the implicit one down into the mantissa.
+        let shift = (-14 - exponent) as u32;
+        let m = (mantissa | 0x80_0000) >> (shift + 13);
+        return sign | m as u16;
+    }
+    sign | (((exponent + 15) as u16) << 10) | ((mantissa >> 13) as u16)
+}
+
 /// A half-precision float as the full-precision one it stands for. The
 /// target is 16-bit because that is the widest format every adapter will
 /// blend into; nothing else in the engine speaks it.
@@ -461,6 +622,18 @@ fn f16_to_f32(bits: u16) -> f32 {
 struct Scene {
     vertices: Vec<Vertex>,
     draws: Vec<Draw>,
+    /// The pixels behind each placed image, premultiplied in linear
+    /// light and half-precision — one entry per resource used, however
+    /// many layers place it.
+    images: Vec<Image>,
+    ids: Vec<String>,
+}
+
+/// A resource ready to upload: its size and its texels.
+struct Image {
+    width: u32,
+    height: u32,
+    texels: Vec<u16>,
 }
 
 impl Scene {
@@ -600,8 +773,45 @@ fn collect(
                 if !(size[0] > 0.0 && size[1] > 0.0) {
                     continue;
                 }
-                let range = out.push(quad(t, size, [size[0], size[1], radius, kind], color));
+                let range = out.push(quad(t, size, [size[0], size[1], radius, kind], color, 1.5));
                 out.draws.push(Draw::Shape(range));
+            }
+            NodeKind::Raster(raster) => {
+                let Some(res) = doc.resource(&raster.resource_id) else {
+                    // A resource whose pixels never came back is drawn by
+                    // nobody; the CPU skips it too.
+                    continue;
+                };
+                if res.rgba8.is_empty() {
+                    continue;
+                }
+                // Shrinking is where the two renderers part: the CPU box-
+                // filters the texels a pixel covers, and bilinear sampling
+                // would alias. Hand the page over rather than draw it
+                // differently.
+                let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs());
+                if scale < 0.99 {
+                    return None;
+                }
+                let at = match out.ids.iter().position(|id| *id == raster.resource_id) {
+                    Some(at) => at,
+                    None => {
+                        out.ids.push(raster.resource_id.clone());
+                        out.images.push(premultiplied(res));
+                        out.images.len() - 1
+                    }
+                };
+                let alpha = node.opacity * opacity;
+                let size = [res.width as f32, res.height as f32];
+                // The quad is the image's own box; its local coordinates
+                // are the texture's, so the vertex shader passes them
+                // straight through as texture coordinates.
+                let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], 0.0);
+                for v in &mut verts {
+                    v.local = [v.local[0] / size[0], v.local[1] / size[1]];
+                }
+                let quad = out.push(verts);
+                out.draws.push(Draw::Image { quad, texture: at });
             }
             _ => return None,
         }
@@ -609,11 +819,29 @@ fn collect(
     Some(())
 }
 
-/// The six vertices of a shape's quad, in document space, grown by a
-/// pixel and a half so the antialiased edge has somewhere to land.
-fn quad(t: Transform, size: [f32; 2], params: [f32; 4], color: [f32; 4]) -> Vec<Vertex> {
+/// A resource's pixels as the compositor wants them: linear light,
+/// premultiplied, half-precision.
+fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
+    let mut texels = Vec::with_capacity(res.rgba8.len());
+    for px in res.rgba8.chunks_exact(4) {
+        let a = px[3] as f32 / 255.0;
+        let c = |v: u8| f32_to_f16(chitrakar_color::srgb_to_linear(v as f32 / 255.0) * a);
+        texels.extend_from_slice(&[c(px[0]), c(px[1]), c(px[2]), f32_to_f16(a)]);
+    }
+    Image {
+        width: res.width,
+        height: res.height,
+        texels,
+    }
+}
+
+/// The six vertices of a shape's quad, in document space, grown by
+/// `grow` device pixels so an antialiased edge has somewhere to land.
+/// A shape wants a pixel and a half of that; an image wants none — its
+/// texture ends where the box does, and a margin would sample past it.
+fn quad(t: Transform, size: [f32; 2], params: [f32; 4], color: [f32; 4], grow: f32) -> Vec<Vertex> {
     let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6);
-    let m = 1.5 / scale;
+    let m = grow / scale;
     let corners = [
         [-m, -m],
         [size[0] + m, -m],
@@ -951,6 +1179,116 @@ mod tests {
         .unwrap();
         assert!(!GpuRenderer::can_render(&doc));
         assert!(gpu.render(&doc).is_none());
+    }
+
+    #[test]
+    fn a_placed_image_is_sampled_the_way_the_cpu_samples_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(64, 40, ColorMode::Rgb);
+        // Four texels: red, green, blue and a clear one, so the corners
+        // and the alpha all have something to say.
+        let rgba = vec![
+            255, 40, 30, 255, 30, 220, 60, 255, //
+            40, 60, 240, 255, 0, 0, 0, 0,
+        ];
+        let id = doc.add_resource(2, 2, rgba);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: id.clone(),
+                    width: 2,
+                    height: 2,
+                },
+            )),
+        })
+        .unwrap();
+        let img = doc.children_of(root).unwrap()[0];
+        // Magnified ten times and moved: bilinear both sides.
+        doc.apply(Command::SetTransform {
+            id: img,
+            transform: Transform {
+                a: 10.0,
+                d: 10.0,
+                e: 5.0,
+                f: 5.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.006,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // The texel centres are the colours they were given, and the
+        // clear corner stays clear.
+        let red = drawn.get(10, 10).to_srgb8();
+        assert!(red[0] > 240 && red[1] < 70, "the red texel: {red:?}");
+        // Halfway between the blue texel's centre and the clear one,
+        // coverage is halfway too — and it is the CPU's halfway.
+        let (mid, want) = (drawn.get(15, 20).a, reference.get(15, 20).a);
+        assert!(
+            mid > 0.3 && mid < 0.7 && (mid - want).abs() < 0.05,
+            "{mid} vs {want}"
+        );
+        assert!(
+            (drawn.get(20, 20).a - reference.get(20, 20).a).abs() < 0.05,
+            "the clear corner"
+        );
+        assert_eq!(drawn.get(2, 2).a, 0.0, "bare page beside it");
+        // The same image twice shares one texture.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::raster(
+                "again",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: 2,
+                    height: 2,
+                },
+            )),
+        })
+        .unwrap();
+        let mut scene = Scene::default();
+        collect(&doc, doc.root(), Transform::default(), 1.0, &mut scene).unwrap();
+        assert_eq!(scene.images.len(), 1, "one texture for two placements");
+        assert_eq!(scene.draws.len(), 2);
+
+        // Shrunk, the CPU box-filters the texels a pixel covers; rather
+        // than draw that differently, the page goes back.
+        doc.apply(Command::SetTransform {
+            id: img,
+            transform: Transform {
+                a: 0.25,
+                d: 0.25,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        assert!(!GpuRenderer::can_render(&doc));
+    }
+
+    #[test]
+    fn half_precision_survives_the_trip_out_and_back() {
+        for v in [0.0, 0.25, 0.5, 1.0, 1.0 / 3.0, 0.001] {
+            let back = f16_to_f32(f32_to_f16(v));
+            assert!((back - v).abs() < 1e-3, "{v} came back as {back}");
+        }
+        assert_eq!(f32_to_f16(0.0), 0);
+        assert_eq!(f16_to_f32(f32_to_f16(1.0)), 1.0);
+        // Below what the format can hold, it says nothing rather than
+        // something wrong.
+        assert_eq!(f32_to_f16(1e-9), 0);
     }
 
     #[test]

@@ -97,3 +97,30 @@ fn vs_cover(@location(0) doc: vec2f, @location(3) color: vec4f) -> CoverOut {
 fn fs_cover(in: CoverOut) -> @location(0) vec4f {
     return in.color;
 }
+
+// A placed image: the quad's own coordinates are its texture coordinates,
+// and the texels are already premultiplied linear, so the filtering
+// happens in the same space the compositor works in.
+struct ImageOut {
+    @builtin(position) pos: vec4f,
+    @location(0) uv: vec2f,
+    @location(1) @interpolate(flat) alpha: f32,
+};
+
+@group(1) @binding(0) var image: texture_2d<f32>;
+@group(1) @binding(1) var image_sampler: sampler;
+
+@vertex
+fn vs_image(@location(0) doc: vec2f, @location(1) uv: vec2f, @location(3) color: vec4f) -> ImageOut {
+    var out: ImageOut;
+    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
+    out.pos = vec4f(ndc, 0.0, 1.0);
+    out.uv = uv;
+    out.alpha = color.a;
+    return out;
+}
+
+@fragment
+fn fs_image(in: ImageOut) -> @location(0) vec4f {
+    return textureSample(image, image_sampler, in.uv) * in.alpha;
+}

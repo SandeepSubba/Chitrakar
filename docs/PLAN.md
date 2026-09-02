@@ -140,7 +140,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~186),
+- **Verify before committing:** `cargo test --workspace` (~188),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~372 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -156,10 +156,13 @@ without reading anything else.*
   pixel it lands on; a path is stencilled (a fan over its rings flips the
   stencil, so even-odd falls out of the parity and a hole is a hole
   however the ring is wound) and covered, and the multisampling softens
-  it. It declines anything else — strokes, gradients, text, rasters,
-  masks, effects, filters, adjustments, blend modes, a group that needs
-  isolating, ink authored for a press — and the caller falls back to the
-  CPU. Its tests render the same page both ways and compare: mean channel
+  it. A placed image is a textured quad whose texels are premultiplied
+  into linear light before upload, so the filtering happens where the
+  compositor works; shrunk — where the CPU box-filters the texels a pixel
+  covers — it hands the page back rather than aliasing. It declines
+  anything else — strokes, gradients, text, masks, effects, filters,
+  adjustments, blend modes, a group that needs isolating, ink authored
+  for a press — and the caller falls back to the CPU. Its tests render the same page both ways and compare: mean channel
   difference under 0.004 for the analytic shapes and 0.012 for the
   stencilled paths, interiors, holes and bare page exact, the antialiased
   edges tracking the CPU's. Nothing depends on it yet: the engine still
@@ -168,7 +171,7 @@ without reading anything else.*
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
 - **Next up (rough priority):**
-  1. Extend the GPU backend to strokes, gradients, rasters and text,
+  1. Extend the GPU backend to strokes, gradients and text,
      then wire it into the engine behind a feature and let the viewport
      present from it (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
