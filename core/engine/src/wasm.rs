@@ -87,11 +87,30 @@ impl WasmSession {
         self.inner.redo().map_err(to_js)
     }
 
+    /// Width of the presented frame in device pixels: the document width
+    /// times the view scale.
+    pub fn frame_width(&self) -> u32 {
+        self.inner.present_size().0
+    }
+
+    pub fn frame_height(&self) -> u32 {
+        self.inner.present_size().1
+    }
+
+    /// Ask for the composite at `scale` times document resolution so a
+    /// zoomed-in canvas stays sharp. Returns the scale actually adopted,
+    /// which is capped by a pixel budget.
+    pub fn set_view_scale(&mut self, scale: f32) -> f32 {
+        self.inner.set_view_scale(scale)
+    }
+
     /// Re-render what changed since the last call into the internal RGBA8
-    /// frame. Returns the dirty rect `[x, y, w, h]`, or an empty array when
-    /// nothing changed. Read pixels via `frame_ptr`/`frame_len`.
+    /// frame. Returns the dirty rect `[x, y, w, h]` in frame pixels, or an
+    /// empty array when nothing changed. Read pixels via
+    /// `frame_ptr`/`frame_len`.
     pub fn render_frame(&mut self) -> Result<Vec<u32>, JsError> {
-        let expected = (self.width() * self.height() * 4) as usize;
+        let (fw, fh) = self.inner.present_size();
+        let expected = (fw * fh * 4) as usize;
         let first_frame = self.frame.len() != expected;
         if first_frame {
             self.frame = vec![0; expected];
@@ -99,8 +118,8 @@ impl WasmSession {
         let full = crate::ClipRect {
             x0: 0,
             y0: 0,
-            x1: self.width(),
-            y1: self.height(),
+            x1: fw,
+            y1: fh,
         };
         let (_, dirty) = self.inner.render_cached().map_err(to_js)?;
         let clip = match (dirty, first_frame) {

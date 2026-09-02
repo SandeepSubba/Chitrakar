@@ -89,8 +89,15 @@ pub struct Session {
     cache: Option<Surface>,
     /// Reused scratch surface for padded region renders under filters.
     scratch: Option<Surface>,
-    /// Region of `cache` that must be recomputed before the next present.
+    /// Region of `cache` that must be recomputed before the next present,
+    /// in document pixels — `render_cached` carries it into the cache's own
+    /// resolution.
     stale: Option<ClipRect>,
+    /// Resolution the cache is kept at, as a multiple of document pixels.
+    /// Presenting a magnified document at 1.0 and letting the display
+    /// enlarge the result is what makes a zoomed-in canvas look soft; the
+    /// fix is to render more pixels, not to interpolate the ones we have.
+    view_scale: f32,
     /// Inverse restoring the state before the current preview gesture, with
     /// the label captured from the gesture's first command.
     preview_inverse: Option<HistoryEntry>,
@@ -116,6 +123,7 @@ impl Session {
             cache: None,
             scratch: None,
             stale: None,
+            view_scale: 1.0,
             preview_inverse: None,
             pixels_recomputed: 0,
             proof_cms: None,
@@ -695,28 +703,53 @@ impl Session {
     /// since the last call. Returns the cached surface and the region that
     /// was just recomputed (None if the cache was already clean).
     pub fn render_cached(&mut self) -> Result<(&Surface, Option<ClipRect>), EngineError> {
-        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let scale = self.view_scale;
+        let (w, h) = self.present_size();
         let full = ClipRect {
             x0: 0,
             y0: 0,
             x1: w,
             y1: h,
         };
-        if self.cache.is_none() {
+        if self.cache.as_ref().map(|c| (c.width, c.height)) != Some((w, h)) {
             self.cache = Some(Surface::new(w, h));
-            self.stale = Some(full);
+            self.scratch = None;
+            self.stale = Some(ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: self.doc.meta.width,
+                y1: self.doc.meta.height,
+            });
         }
         match self.stale.take() {
-            Some(clip) => {
+            Some(doc_clip) => {
+                // The dirty region arrives in document pixels; the cache is
+                // kept at view resolution, so widen it outwards to whole
+                // device pixels rather than trusting a rounded edge.
+                let clip = ClipRect::from_float(
+                    doc_clip.x0 as f32 * scale,
+                    doc_clip.y0 as f32 * scale,
+                    doc_clip.x1 as f32 * scale,
+                    doc_clip.y1 as f32 * scale,
+                    w,
+                    h,
+                )
+                .intersect(full);
+                let view = Transform {
+                    a: scale,
+                    d: scale,
+                    ..Default::default()
+                };
                 // Filters sample neighbors: a region render is only correct
                 // deeper than the filter stack's reach inside its own edge.
                 // So compute a padded region in scratch and copy back just
                 // the exact region — the padding ring, whose values clamp
-                // against stale surroundings, is discarded.
-                let pad = chitrakar_render::filter_reach(&self.doc);
+                // against stale surroundings, is discarded. The reach is a
+                // document-space figure, so it scales with the view too.
+                let pad = (chitrakar_render::filter_reach(&self.doc) as f32 * scale).ceil() as u32;
                 if pad == 0 {
                     let cache = self.cache.as_mut().unwrap();
-                    chitrakar_render::render_region(&self.doc, cache, clip)?;
+                    chitrakar_render::render_region_at(&self.doc, cache, clip, view)?;
                     self.pixels_recomputed += clip.area();
                 } else {
                     let compute = ClipRect {
@@ -726,7 +759,7 @@ impl Session {
                         y1: (clip.y1 + pad).min(h),
                     };
                     let scratch = self.scratch.get_or_insert_with(|| Surface::new(w, h));
-                    chitrakar_render::render_region(&self.doc, scratch, compute)?;
+                    chitrakar_render::render_region_at(&self.doc, scratch, compute, view)?;
                     self.cache.as_mut().unwrap().copy_region_from(scratch, clip);
                     self.pixels_recomputed += compute.area();
                 }
@@ -734,6 +767,43 @@ impl Session {
             }
             None => Ok((self.cache.as_ref().unwrap(), None)),
         }
+    }
+
+    /// Size of the surface [`render_cached`](Self::render_cached) presents,
+    /// which is the document scaled by the view resolution.
+    pub fn present_size(&self) -> (u32, u32) {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        (
+            ((w as f32 * self.view_scale).round() as u32).max(1),
+            ((h as f32 * self.view_scale).round() as u32).max(1),
+        )
+    }
+
+    pub fn view_scale(&self) -> f32 {
+        self.view_scale
+    }
+
+    /// Ask for the composite at `scale` times document resolution, so a
+    /// magnified canvas is re-rendered rather than interpolated. The request
+    /// is capped: past a budget the surface costs more than the sharpness is
+    /// worth, and on a document already larger than the budget the answer is
+    /// document resolution.
+    pub fn set_view_scale(&mut self, scale: f32) -> f32 {
+        /// Device pixels the presented surface may occupy. At 16 bytes a
+        /// pixel in the compositor plus 4 in the presented frame, this is
+        /// about 160 MB — enough to sharpen a screen-sized document
+        /// several times over, and a ceiling a huge one cannot push past.
+        const BUDGET: f32 = 8_000_000.0;
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        let ceiling = (BUDGET / (w * h).max(1.0)).sqrt().max(1.0);
+        let scale = scale.clamp(1.0, ceiling.min(8.0));
+        if (scale - self.view_scale).abs() > 1e-4 {
+            self.view_scale = scale;
+            self.cache = None;
+            self.scratch = None;
+            self.stale = None;
+        }
+        self.view_scale
     }
 
     /// Render the current document state from scratch (export path; the
@@ -1056,6 +1126,88 @@ mod tests {
         let fresh = session.render().unwrap().to_srgb8();
         let (cached, _) = session.render_cached().unwrap();
         assert_eq!(cached.to_srgb8(), fresh, "cache diverged from full render");
+    }
+
+    #[test]
+    fn the_view_scale_renders_more_pixels_of_the_same_picture() {
+        // Raising the view scale must give a bigger surface showing the
+        // same composition — the point is more detail, not a crop or a
+        // shift, so the same fraction of the canvas stays covered.
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        add_rect(&mut session, "half", 16.0, 32.0);
+        let covered = |s: &Surface| {
+            s.pixels.iter().filter(|p| p.a > 0.5).count() as f32 / s.pixels.len() as f32
+        };
+        let (one, _) = session.render_cached().unwrap();
+        assert_eq!((one.width, one.height), (32, 32));
+        let at_one = covered(one);
+
+        assert_eq!(session.set_view_scale(3.0), 3.0);
+        let (three, dirty) = session.render_cached().unwrap();
+        assert_eq!((three.width, three.height), (96, 96));
+        assert!(dirty.is_some(), "changing the scale invalidates the cache");
+        assert!(
+            (covered(three) - at_one).abs() < 0.02,
+            "the same half of the canvas is covered: {at_one} vs {}",
+            covered(three)
+        );
+    }
+
+    #[test]
+    fn an_edit_at_view_scale_repaints_the_right_device_pixels() {
+        // The dirty region is tracked in document pixels but the cache is
+        // kept in device ones. Get that conversion wrong and an edit leaves
+        // a stale band behind, so compare against a full render.
+        let mut session = Session::new(24, 24, ColorMode::Rgb);
+        session.set_view_scale(2.5);
+        let id = add_rect(&mut session, "r", 8.0, 8.0);
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(11.0, 7.0),
+            })
+            .unwrap();
+        let (cached, dirty) = session.render_cached().unwrap();
+        let dirty = dirty.expect("moving a layer dirties something");
+        assert!(
+            dirty.x1 <= cached.width && dirty.y1 <= cached.height,
+            "the dirty rect is in device pixels: {dirty:?}"
+        );
+        let cached = cached.to_srgb8();
+        let mut fresh = Surface::new(60, 60);
+        let clip = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 60,
+            y1: 60,
+        };
+        chitrakar_render::render_region_at(
+            session.document(),
+            &mut fresh,
+            clip,
+            Transform {
+                a: 2.5,
+                d: 2.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cached, fresh.to_srgb8(), "incremental cache diverged");
+    }
+
+    #[test]
+    fn the_view_scale_is_capped_by_what_the_surface_would_cost() {
+        // A screen-sized document can afford to be sharpened; a print-sized
+        // one is already past the budget and stays at its own resolution.
+        let mut small = Session::new(800, 600, ColorMode::Rgb);
+        assert!(small.set_view_scale(8.0) > 3.0);
+        assert!(small.set_view_scale(8.0) <= 8.0);
+        let mut a4 = Session::new(2480, 3508, ColorMode::Rgb);
+        assert_eq!(a4.set_view_scale(4.0), 1.0);
+        assert_eq!(a4.present_size(), (2480, 3508));
+        // And nothing asks for less than the document's own pixels.
+        assert_eq!(small.set_view_scale(0.25), 1.0);
     }
 
     #[test]

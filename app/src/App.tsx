@@ -328,6 +328,11 @@ export function App() {
   const iccInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
+  /** Device pixels the engine renders per document pixel. Follows the zoom
+   * so magnifying the canvas re-renders the artwork instead of enlarging
+   * the pixels of a document-sized frame; the engine caps it and tells us
+   * what it actually adopted. */
+  const [frameScale, setFrameScale] = useState(1);
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -350,10 +355,10 @@ export function App() {
       const dirty = s.render_frame();
       if (
         !imgDataRef.current ||
-        imgDataRef.current.width !== s.width ||
-        imgDataRef.current.height !== s.height
+        imgDataRef.current.width !== s.frame_width() ||
+        imgDataRef.current.height !== s.frame_height()
       ) {
-        imgDataRef.current = new ImageData(s.width, s.height);
+        imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
       }
       if (dirty.length === 4) {
         // Zero-copy view into wasm memory; ImageData needs its own buffer.
@@ -549,6 +554,22 @@ export function App() {
       window.removeEventListener("keyup", onKeyUp);
     };
   }, [undo, redo, cancelGesture, finishPath]);
+
+  // Ask the engine to render at the zoom the canvas is actually shown at.
+  // It answers with the scale it adopted (a budget caps large documents),
+  // and only that answer resizes the canvas.
+  useEffect(() => {
+    if (!session) return;
+    const dpr = window.devicePixelRatio || 1;
+    setFrameScale(session.set_view_scale(view.zoom * dpr));
+  }, [session, view.zoom]);
+
+  // Repaint once the canvas has been resized to the adopted scale — its
+  // backing store is cleared by that resize, and the engine has a whole
+  // fresh frame waiting.
+  useEffect(() => {
+    if (session) refresh(session);
+  }, [session, frameScale, refresh]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
@@ -1928,10 +1949,18 @@ export function App() {
           <canvas
             id="engine-canvas"
             ref={canvasRef}
-            width={docSize[0]}
-            height={docSize[1]}
+            width={Math.round(docSize[0] * frameScale)}
+            height={Math.round(docSize[1] * frameScale)}
+            /* Device pixels per document pixel, published so anything
+               reading the backing store can convert into it. */
+            data-frame-scale={frameScale}
             style={{
-              transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
+              // The backing store holds frameScale device pixels per
+              // document pixel, so the element is scaled down by that much
+              // on its way to the requested zoom. When the engine granted
+              // the full request the two cancel and one frame pixel lands
+              // on one screen pixel.
+              transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom / frameScale})`,
             }}
             onPointerDown={onCanvasPointerDown}
             onPointerMove={onCanvasPointerMove}

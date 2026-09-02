@@ -42,8 +42,10 @@ without reading anything else.*
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments.
-  Text rasterizes at the size it is actually seen at, so a magnified text
-  layer sharpens its outlines instead of enlarging its pixels.
+  Zooming in re-renders rather than magnifies: the engine composites at
+  the resolution the canvas is displayed at (capped by a pixel budget), so
+  outlines, gradients and glyphs are re-solved instead of interpolated.
+  Text likewise rasterizes at the size it is actually seen at.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
@@ -60,7 +62,11 @@ without reading anything else.*
   full-canvas pass over it costs ~55 ms. `cargo test --release -p
   chitrakar-render -- --ignored --nocapture --test-threads=1` runs the
   timing probes; the next win there is avoiding the whole-canvas
-  allocation an isolated group still makes.
+  allocation an isolated group still makes. Presenting at view resolution
+  multiplies those costs by the scale squared, which is why the budget in
+  `Session::set_view_scale` exists; rendering only the visible viewport
+  (a root transform with pan, on a viewport-sized surface — the renderer
+  already takes an arbitrary root affine) is what would lift it.
 - **Verify before committing:** `cargo test --workspace` (~103),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~174 browser

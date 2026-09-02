@@ -401,6 +401,20 @@ pub fn render_region(
     surface: &mut Surface,
     clip: ClipRect,
 ) -> Result<(), DocError> {
+    render_region_at(doc, surface, clip, Transform::default())
+}
+
+/// The same, with the document mapped through `view` on the way to the
+/// surface. A surface twice the document's size and a `view` of scale two
+/// gets the document rendered at twice the resolution — outlines re-solved
+/// at that scale, not a magnified bitmap — which is how zooming in stays
+/// sharp instead of enlarging pixels.
+pub fn render_region_at(
+    doc: &Document,
+    surface: &mut Surface,
+    clip: ClipRect,
+    view: Transform,
+) -> Result<(), DocError> {
     if clip.is_empty() {
         return Ok(());
     }
@@ -409,7 +423,7 @@ pub fn render_region(
         surface.pixels[row + clip.x0 as usize..row + clip.x1 as usize]
             .fill(LinearRgba::TRANSPARENT);
     }
-    render_group(doc, doc.root(), surface, clip, Transform::default())
+    render_group(doc, doc.root(), surface, clip, view)
 }
 
 fn render_group(
@@ -538,7 +552,18 @@ fn render_group(
                     }
                 }
             }
-            NodeKind::Filter(filter) => apply_filter(doc, filter, node.opacity, mask, dst, clip),
+            // A filter's radius is written in the space it lives in, so it
+            // stretches with whatever scales that space — the view, or a
+            // group the filter sits inside.
+            NodeKind::Filter(filter) => apply_filter(
+                doc,
+                filter,
+                node.opacity,
+                mask,
+                dst,
+                clip,
+                max_scale(parent),
+            ),
             NodeKind::Text(spec) => {
                 draw_text(dst, doc, spec, t, node.opacity, node.blend, clip, mask)
             }
@@ -1427,6 +1452,7 @@ fn apply_mask(
 
 /// Run a filter layer over the accumulated composite below it, weighted by
 /// the layer's opacity and mask coverage.
+#[allow(clippy::too_many_arguments)]
 fn apply_filter(
     doc: &Document,
     filter: &Filter,
@@ -1434,12 +1460,13 @@ fn apply_filter(
     mask: MaskRef<'_>,
     dst: &mut Surface,
     clip: ClipRect,
+    scale: f32,
 ) {
     match filter {
         Filter::GaussianBlur { sigma } => {
             let needs_mix = opacity < 1.0 || mask.mask.is_some();
             let original = needs_mix.then(|| blur::snapshot(dst, clip));
-            blur::gaussian_blur(dst, clip, *sigma);
+            blur::gaussian_blur(dst, clip, *sigma * scale);
             if let Some(orig) = original {
                 mix_snapshot(dst, clip, &orig, |o, f, x, y| {
                     lerp(o, f, opacity * coverage_at(doc, mask, x, y))
@@ -1448,7 +1475,7 @@ fn apply_filter(
         }
         Filter::Sharpen { sigma, amount } => {
             let original = blur::snapshot(dst, clip);
-            blur::gaussian_blur(dst, clip, *sigma);
+            blur::gaussian_blur(dst, clip, *sigma * scale);
             mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
                 let amt = amount * opacity * coverage_at(doc, mask, x, y);
                 // Unsharp mask; keep alpha, clamp premultiplied channels to it.

@@ -49,10 +49,17 @@ await page.goto("http://localhost:8123/");
 await page.waitForSelector("#engine-canvas");
 await page.waitForTimeout(500); // wasm init
 
+// Probes are written in document pixels. The canvas backing store holds
+// `data-frame-scale` device pixels for each of them (it rises with zoom so
+// magnified artwork is re-rendered rather than enlarged), so every read
+// converts through it.
 const canvasPixel = (x, y) =>
   page.evaluate(([x, y]) => {
     const c = document.getElementById("engine-canvas");
-    return Array.from(c.getContext("2d").getImageData(x, y, 1, 1).data);
+    const s = Number(c.dataset.frameScale) || 1;
+    const dx = Math.min(c.width - 1, Math.floor((x + 0.5) * s));
+    const dy = Math.min(c.height - 1, Math.floor((y + 0.5) * s));
+    return Array.from(c.getContext("2d").getImageData(dx, dy, 1, 1).data);
   }, [x, y]);
 
 const assert = (cond, msg) => {
@@ -424,11 +431,31 @@ assert((await page.locator(".panel ul li", { hasText: "green.png" }).count()) ==
 
 // 8g. Wheel zoom shrinks/grows the on-screen canvas.
 const boxBefore = await page.locator("#engine-canvas").boundingBox();
+const pixelBeforeZoom = await canvasPixel(310, 480);
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 await page.mouse.wheel(0, -400);
 await page.waitForTimeout(150);
 const boxAfter = await page.locator("#engine-canvas").boundingBox();
 assert(boxAfter.width > boxBefore.width * 1.05, "wheel zoom enlarged canvas");
+// And it enlarged the artwork, not its pixels: the engine renders more of
+// them, so the backing store grows with the zoom rather than being
+// stretched to fill the larger box.
+const zoomedStore = await page.$eval("#engine-canvas", (c) => [
+  c.width,
+  Number(c.dataset.frameScale),
+]);
+assert(
+  zoomedStore[1] > 1 && zoomedStore[0] > 1280,
+  `zooming in raised the render resolution (${zoomedStore})`,
+);
+// The picture is still the same picture at the new resolution.
+{
+  const px = await canvasPixel(310, 480);
+  assert(
+    px.every((v, i) => Math.abs(v - pixelBeforeZoom[i]) <= 4),
+    `and the same document pixel still reads the same (${px} vs ${pixelBeforeZoom})`,
+  );
+}
 await menuClick("View", "Fit document to window");
 await page.waitForTimeout(150);
 
@@ -1089,8 +1116,10 @@ await page.click('button[aria-label="Move"]');
 // 8v. Text tool: click to add a live text object, edit it via the panel.
 const inkCount = (x0, y0, x1, y1) =>
   page.evaluate(([a, b, c, d]) => {
-    const ctx = document.getElementById("engine-canvas").getContext("2d");
-    const img = ctx.getImageData(a, b, c - a, d - b).data;
+    const el = document.getElementById("engine-canvas");
+    const s = Number(el.dataset.frameScale) || 1;
+    [a, b, c, d] = [a, b, c, d].map((v) => Math.round(v * s));
+    const img = el.getContext("2d").getImageData(a, b, c - a, d - b).data;
     let n = 0;
     for (let i = 3; i < img.length; i += 4) if (img[i] > 0) n++;
     return n;
@@ -1174,8 +1203,9 @@ assert(
 );
 const smallCanvas = await page.$eval("#engine-canvas", (c) => [c.width, c.height]);
 assert(
-  smallCanvas[0] === 600 && smallCanvas[1] === 400,
-  `the canvas is sized to the document (${smallCanvas})`,
+  smallCanvas[0] >= 600 &&
+    Math.abs(smallCanvas[0] / smallCanvas[1] - 600 / 400) < 0.02,
+  `the canvas carries the document's shape at or above its resolution (${smallCanvas})`,
 );
 {
   // Screen/document conversion has to follow the new size, so a drag in
