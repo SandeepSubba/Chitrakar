@@ -473,6 +473,14 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// Render and encode as JPEG. Transparency flattens onto white, since
+    /// JPEG carries no alpha.
+    pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render()?;
+        chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Flattened layer tree (depth-first, topmost layer first) for the UI's
     /// layers panel.
     pub fn layers(&self) -> Vec<LayerInfo> {

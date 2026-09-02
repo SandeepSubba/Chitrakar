@@ -998,6 +998,11 @@ export function App() {
     download(session.export_png(), "untitled.png", "image/png");
   };
 
+  const exportJpeg = () => {
+    if (!session) return;
+    download(session.export_jpeg(92), "untitled.jpg", "image/jpeg");
+  };
+
   const exportPdf = () => {
     if (!session) return;
     try {
@@ -1114,6 +1119,13 @@ export function App() {
             <hr />
             <MenuItem icon="export" onClick={exportPng}>
               Export PNG
+            </MenuItem>
+            <MenuItem
+              icon="export"
+              onClick={exportJpeg}
+              hint="flattened"
+            >
+              Export JPEG
             </MenuItem>
             <MenuItem icon="export" onClick={exportSvg}>
               Export SVG

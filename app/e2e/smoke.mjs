@@ -823,6 +823,22 @@ assert(svgText.includes("<rect") && svgText.includes("<path"), "shapes exported 
 assert(svgText.includes("<text") && svgText.includes("Hello!"), "text exported live");
 console.log("ok: SVG export contains live vector markup");
 
+// 8w2. Export JPEG: a real JPEG, with the canvas flattened onto white.
+const [jpegDl] = await Promise.all([
+  page.waitForEvent("download"),
+  (await menuItem("File", "Export JPEG")).click(),
+]);
+const jpegBytes = await readFile(await jpegDl.path());
+assert(
+  jpegBytes[0] === 0xff && jpegBytes[1] === 0xd8,
+  "JPEG starts with the SOI marker",
+);
+assert(
+  jpegBytes.subarray(-2).equals(Buffer.from([0xff, 0xd9])),
+  "and ends with EOI",
+);
+assert(jpegBytes.length > 2000, `JPEG carries image data (${jpegBytes.length} bytes)`);
+
 // 9. CMYK doc smoke: new doc, draw, still renders.
 await menuClick("File", "New CMYK document");
 await page.click('button[aria-label="Rect"]');

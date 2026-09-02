@@ -36,12 +36,12 @@ without reading anything else.*
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
-  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
-  CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
+  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
+  JPEG, CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~90),
+- **Verify before committing:** `cargo test --workspace` (~91),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~122 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~125 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -65,8 +65,8 @@ without reading anything else.*
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** transforms carry scale+translate only (no
-  rotation/shear yet), masks aren't editable on-canvas, JPEG export missing,
-  PDF/TIFF embed the composite as an image rather than live vectors.
+  rotation/shear yet), masks aren't editable on-canvas, PDF/TIFF
+  embed the composite as an image rather than live vectors.
 
 ---
 

@@ -84,6 +84,36 @@ pub fn encode_png(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, Code
     Ok(out.into_inner())
 }
 
+/// Encode as JPEG, compositing over white first.
+///
+/// JPEG has no alpha channel, so transparency has to become something:
+/// white, the same choice the print exports make for unprinted paper. The
+/// composite is over *linear* values, before sRGB encoding, because that is
+/// where "half covered" actually means half — blending the encoded bytes
+/// instead would darken every antialiased edge.
+pub fn encode_jpeg(
+    width: u32,
+    height: u32,
+    pixels: &[LinearRgba],
+    quality: u8,
+) -> Result<Vec<u8>, CodecError> {
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for px in pixels {
+        let over_white = |v: f32| (v + (1.0 - px.a)).clamp(0.0, 1.0);
+        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.r)) * 255.0).round() as u8);
+        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.g)) * 255.0).round() as u8);
+        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.b)) * 255.0).round() as u8);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100)).encode(
+        &rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +148,44 @@ mod tests {
         let tagged = decode(&png_p3.into_inner()).unwrap();
         assert_ne!(tagged.rgba8, pixels, "P3-tagged pixels must be normalized");
         assert_eq!(tagged.rgba8[3], 255, "alpha preserved");
+    }
+
+    #[test]
+    fn jpeg_flattens_transparency_onto_white() {
+        // Two pixels: opaque red, and a half-covered red. JPEG has no alpha,
+        // so the second must land halfway to white rather than being
+        // dropped or coming out fully red.
+        let half = LinearRgba {
+            r: 0.5,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        };
+        let opaque = LinearRgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let jpeg = encode_jpeg(2, 1, &[opaque, half], 92).unwrap();
+        assert_eq!(&jpeg[0..2], &[0xff, 0xd8], "JPEG SOI marker");
+
+        let decoded = decode(&jpeg).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        let px = |i: usize| &decoded.rgba8[i * 4..i * 4 + 3];
+        assert!(
+            px(0)[0] > 240 && px(0)[1] < 30,
+            "opaque red survives: {:?}",
+            px(0)
+        );
+        // Half coverage over white: red stays high, the other channels lift
+        // toward white rather than staying at zero.
+        assert!(
+            px(1)[1] > 150 && px(1)[2] > 150,
+            "half-covered pixel blends toward white: {:?}",
+            px(1)
+        );
+        assert!(px(1)[0] > 200, "and keeps its red: {:?}", px(1));
     }
 
     #[test]

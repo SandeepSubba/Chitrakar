@@ -212,6 +212,11 @@ impl WasmSession {
         self.inner.render_png().map_err(to_js)
     }
 
+    /// Render and encode as JPEG (export); transparency flattens onto white.
+    pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, JsError> {
+        self.inner.export_jpeg(quality).map_err(to_js)
+    }
+
     /// Export a one-page PDF (CMYK-separated when a press profile is set).
     pub fn export_pdf(&self) -> Result<Vec<u8>, JsError> {
         self.inner.export_pdf().map_err(to_js)
