@@ -1043,6 +1043,29 @@ export function App() {
       ? multiSel
       : [selected, ...multiSel.filter((id) => id !== selected)];
 
+  /** Align or distribute everything picked. Enabled only with two or more,
+   * which is the only case where either word means anything. */
+  const alignSelection = (mode: string) => {
+    if (!session || selectionSet.length < 2) return;
+    try {
+      session.align_nodes(new Float64Array(selectionSet), mode);
+      refresh(session);
+    } catch (err) {
+      alert(`Align: ${err}`);
+    }
+  };
+
+  const ALIGN_BUTTONS: [string, IconName, string][] = [
+    ["left", "alignLeft", "Align left edges"],
+    ["center-h", "alignCenterH", "Align horizontal centres"],
+    ["right", "alignRight", "Align right edges"],
+    ["top", "alignTop", "Align top edges"],
+    ["middle-v", "alignMiddleV", "Align vertical centres"],
+    ["bottom", "alignBottom", "Align bottom edges"],
+    ["distribute-h", "distributeH", "Space evenly across"],
+    ["distribute-v", "distributeV", "Space evenly down"],
+  ];
+
   const groupSelection = () => {
     if (!session || selectionSet.length === 0) return;
     try {
@@ -2232,6 +2255,20 @@ export function App() {
               <Icon name="trash" size={16} />
             </button>
           </div>
+          {selectionSet.length >= 2 && (
+            <div className="align-bar" role="group" aria-label="Align layers">
+              {ALIGN_BUTTONS.map(([mode, icon, label]) => (
+                <button
+                  key={mode}
+                  onClick={() => alignSelection(mode)}
+                  title={label}
+                  aria-label={label}
+                >
+                  <Icon name={icon} size={16} />
+                </button>
+              ))}
+            </div>
+          )}
           {selectedLayer && (
             <div className="layer-props">
               <label>

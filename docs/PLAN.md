@@ -27,8 +27,8 @@ without reading anything else.*
   filter layers (gaussian blur, sharpen), masks on any layer that can be
   dragged and resized on the canvas, groups,
   reorder, duplicate/copy/cut/paste (subtree and pixels included, across
-  documents), delete, opacity/blend, rename, labelled history with
-  jump-to-state.
+  documents), delete, align and distribute a multi-selection, opacity/blend,
+  rename, labelled history with jump-to-state.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK.
@@ -46,9 +46,9 @@ without reading anything else.*
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~101),
+- **Verify before committing:** `cargo test --workspace` (~103),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~169 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~174 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

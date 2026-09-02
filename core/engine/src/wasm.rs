@@ -147,6 +147,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Line up or space out several layers (see `Session::align_nodes`).
+    pub fn align_nodes(&mut self, ids: Vec<f64>, mode: &str) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.align_nodes(&ids, mode).map_err(to_js)
+    }
+
     /// Put a node and its subtree on the clipboard.
     pub fn copy_node(&self, id: f64) -> Result<(), JsError> {
         self.inner.copy_node(NodeId(id as u64)).map_err(to_js)

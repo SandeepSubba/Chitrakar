@@ -297,6 +297,34 @@ body {
   font-weight: 600;
 }
 
+/* Align controls: a strip of icon buttons that appears only with a
+   multi-selection, since neither word means anything for one layer. */
+.align-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.15rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.4rem;
+}
+
+.align-bar button {
+  display: grid;
+  place-items: center;
+  height: 1.8rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.align-bar button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
 .brush-size {
   width: 2.4rem;
   margin-top: 0.3rem;

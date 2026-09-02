@@ -748,6 +748,58 @@ assert(
   "one undo dissolved the whole grouping",
 );
 
+// 8q2. Align: with two layers picked, the strip appears and lines them up.
+{
+  await page.locator(".panel ul li", { hasText: "Path" }).first().click();
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".align-bar").count()) === 0,
+    "one layer offers nothing to align",
+  );
+  await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
+    modifiers: ["Control"],
+  });
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".align-bar button").count()) === 8,
+    "a multi-selection offers align and distribute",
+  );
+  // Where the two paths' left edges are before and after.
+  const leftEdge = async (nth) => {
+    await page.locator(".panel ul li", { hasText: "Path" }).nth(nth).click();
+    await page.waitForTimeout(150);
+    const q = await page.$eval(".sel-outline polygon", (el) =>
+      el.getAttribute("points").split(" ").map((p) => Number(p.split(",")[0])),
+    );
+    return Math.min(...q);
+  };
+  const gap = async () => Math.abs((await leftEdge(0)) - (await leftEdge(1)));
+  const beforeGap = await gap();
+  assert(beforeGap > 5, `the two paths start at different edges (${beforeGap})`);
+  await page.locator(".panel ul li", { hasText: "Path" }).first().click();
+  await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
+    modifiers: ["Control"],
+  });
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Align left edges"]');
+  await page.waitForTimeout(250);
+  const afterGap = await gap();
+  // Not exactly zero: alignment works on visual bounds, which include a
+  // stroked path's overhang, while this probe reads the anchor outline —
+  // so a stroked layer and a filled one settle a stroke-width apart.
+  assert(
+    afterGap < beforeGap * 0.05,
+    `aligning brought their left edges together (${beforeGap} -> ${afterGap})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  const undone = await gap();
+  assert(
+    Math.abs(undone - beforeGap) < 2,
+    "and the whole alignment undoes as one step",
+  );
+}
+
 // 8r. Ungroup via the button.
 await page.locator(".panel ul li", { hasText: "Path" }).first().click();
 await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: ["Control"] });

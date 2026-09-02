@@ -35,7 +35,15 @@ export type IconName =
   | "mask"
   | "group-layer"
   | "adjust"
-  | "filter";
+  | "filter"
+  | "alignLeft"
+  | "alignCenterH"
+  | "alignRight"
+  | "alignTop"
+  | "alignMiddleV"
+  | "alignBottom"
+  | "distributeH"
+  | "distributeV";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // Tools
@@ -204,6 +212,61 @@ const PATHS: Record<IconName, JSX.Element> = {
   filter: (
     <>
       <path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 2v-7.4z" />
+    </>
+  ),
+  // Align and distribute: a rule plus the edges that meet it.
+  alignLeft: (
+    <>
+      <path d="M4 4v16" />
+      <rect x="7" y="6.5" width="12" height="4" rx="1" />
+      <rect x="7" y="13.5" width="7" height="4" rx="1" />
+    </>
+  ),
+  alignCenterH: (
+    <>
+      <path d="M12 4v16" />
+      <rect x="6" y="6.5" width="12" height="4" rx="1" />
+      <rect x="8.5" y="13.5" width="7" height="4" rx="1" />
+    </>
+  ),
+  alignRight: (
+    <>
+      <path d="M20 4v16" />
+      <rect x="5" y="6.5" width="12" height="4" rx="1" />
+      <rect x="10" y="13.5" width="7" height="4" rx="1" />
+    </>
+  ),
+  alignTop: (
+    <>
+      <path d="M4 4h16" />
+      <rect x="6.5" y="7" width="4" height="12" rx="1" />
+      <rect x="13.5" y="7" width="4" height="7" rx="1" />
+    </>
+  ),
+  alignMiddleV: (
+    <>
+      <path d="M4 12h16" />
+      <rect x="6.5" y="6" width="4" height="12" rx="1" />
+      <rect x="13.5" y="8.5" width="4" height="7" rx="1" />
+    </>
+  ),
+  alignBottom: (
+    <>
+      <path d="M4 20h16" />
+      <rect x="6.5" y="5" width="4" height="12" rx="1" />
+      <rect x="13.5" y="10" width="4" height="7" rx="1" />
+    </>
+  ),
+  distributeH: (
+    <>
+      <path d="M4 4v16M20 4v16" />
+      <rect x="10" y="7" width="4" height="10" rx="1" />
+    </>
+  ),
+  distributeV: (
+    <>
+      <path d="M4 4h16M4 20h16" />
+      <rect x="7" y="10" width="10" height="4" rx="1" />
     </>
   ),
   duplicate: (

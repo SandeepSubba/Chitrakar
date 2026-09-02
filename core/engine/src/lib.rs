@@ -534,6 +534,123 @@ impl Session {
         new_id
     }
 
+    /// Line up or space out several layers, as one undo step.
+    ///
+    /// `mode` is one of `left`, `center-h`, `right`, `top`, `middle-v`,
+    /// `bottom`, `distribute-h`, `distribute-v`. Alignment is measured in
+    /// document space — that is where "lined up" means anything — but a
+    /// node's transform is written in its parent's, so each move is carried
+    /// back through the ancestors before it is applied. Nodes may therefore
+    /// come from different groups.
+    pub fn align_nodes(&mut self, ids: &[NodeId], mode: &str) -> Result<(), EngineError> {
+        if ids.len() < 2 {
+            return Err(EngineError::BadCommand(
+                "aligning needs at least two layers".into(),
+            ));
+        }
+        // [x0, y0, x1, y1] per node, in document space.
+        let mut boxes: Vec<(NodeId, [f32; 4])> = Vec::new();
+        for id in ids {
+            if let Some(b) = self.bounds_of(*id) {
+                boxes.push((*id, [b[0], b[1], b[0] + b[2], b[1] + b[3]]));
+            }
+        }
+        if boxes.len() < 2 {
+            return Err(EngineError::BadCommand("nothing to align".into()));
+        }
+        let union = boxes
+            .iter()
+            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
+                [
+                    acc[0].min(b[0]),
+                    acc[1].min(b[1]),
+                    acc[2].max(b[2]),
+                    acc[3].max(b[3]),
+                ]
+            });
+
+        // Wanted document-space movement per node.
+        let mut deltas: Vec<(NodeId, f32, f32)> = Vec::new();
+        match mode {
+            "left" | "center-h" | "right" | "top" | "middle-v" | "bottom" => {
+                for (id, b) in &boxes {
+                    let (dx, dy) = match mode {
+                        "left" => (union[0] - b[0], 0.0),
+                        "right" => (union[2] - b[2], 0.0),
+                        "center-h" => ((union[0] + union[2] - b[0] - b[2]) / 2.0, 0.0),
+                        "top" => (0.0, union[1] - b[1]),
+                        "bottom" => (0.0, union[3] - b[3]),
+                        _ => (0.0, (union[1] + union[3] - b[1] - b[3]) / 2.0),
+                    };
+                    deltas.push((*id, dx, dy));
+                }
+            }
+            "distribute-h" | "distribute-v" => {
+                let horizontal = mode == "distribute-h";
+                let centre = |b: &[f32; 4]| {
+                    if horizontal {
+                        (b[0] + b[2]) / 2.0
+                    } else {
+                        (b[1] + b[3]) / 2.0
+                    }
+                };
+                boxes.sort_by(|a, b| {
+                    centre(&a.1)
+                        .partial_cmp(&centre(&b.1))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                // The outermost two stay put and the rest space evenly
+                // between them, which is what makes the result stable if you
+                // run it twice.
+                let (first, last) = (centre(&boxes[0].1), centre(&boxes[boxes.len() - 1].1));
+                let step = (last - first) / (boxes.len() - 1) as f32;
+                for (i, (id, b)) in boxes.iter().enumerate() {
+                    let want = first + step * i as f32;
+                    let d = want - centre(b);
+                    deltas.push((
+                        *id,
+                        if horizontal { d } else { 0.0 },
+                        if horizontal { 0.0 } else { d },
+                    ));
+                }
+            }
+            other => {
+                return Err(EngineError::BadCommand(format!(
+                    "unknown alignment: {other}"
+                )))
+            }
+        }
+
+        let mut cmds = Vec::new();
+        for (id, dx, dy) in deltas {
+            if dx == 0.0 && dy == 0.0 {
+                continue;
+            }
+            // A displacement in document space is a vector, so only the
+            // linear part of the ancestors' transform applies to it.
+            let a = chitrakar_render::ancestor_space(&self.doc, id);
+            let det = a.a * a.d - a.b * a.c;
+            let (px, py) = if det.abs() < 1e-9 {
+                (dx, dy)
+            } else {
+                ((a.d * dx - a.c * dy) / det, (a.a * dy - a.b * dx) / det)
+            };
+            let t = self.doc.node(id)?.transform;
+            cmds.push(Command::SetTransform {
+                id,
+                transform: Transform {
+                    e: t.e + px,
+                    f: t.f + py,
+                    ..t
+                },
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
+    }
+
     /// Dissolve a group: its children move to its position in the parent,
     /// the empty group is removed. One undo step.
     pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
@@ -1328,6 +1445,91 @@ mod tests {
         assert!(b.document().node(pasted).is_err());
         assert!(crate::clipboard_has_content());
         assert!(b.paste(None).unwrap().is_some(), "paste is repeatable");
+    }
+
+    #[test]
+    fn aligning_lines_layers_up_and_distributing_spaces_them_evenly() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let place = |s: &mut Session, name: &str, x: f32| {
+            let id = add_rect(s, name, 10.0, 10.0);
+            s.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, 0.0),
+            })
+            .unwrap();
+            id
+        };
+        let a = place(&mut session, "a", 0.0);
+        let b = place(&mut session, "b", 30.0);
+        let c = place(&mut session, "c", 100.0);
+
+        // Left: everything to the leftmost edge, which does not move.
+        session.align_nodes(&[a, b, c], "left").unwrap();
+        for id in [a, b, c] {
+            assert!((session.bounds_of(id).unwrap()[0] - 0.0).abs() < 1e-3);
+        }
+        assert_cache_matches_fresh(&mut session);
+        session.undo().unwrap();
+
+        // Distribute: the outermost two stay, the middle one lands halfway,
+        // and running it again changes nothing.
+        session.align_nodes(&[a, b, c], "distribute-h").unwrap();
+        let mid = |s: &Session, id| {
+            let bb = s.bounds_of(id).unwrap();
+            bb[0] + bb[2] / 2.0
+        };
+        assert!((mid(&session, a) - 5.0).abs() < 1e-3, "the left one stays");
+        assert!((mid(&session, c) - 105.0).abs() < 1e-3, "so does the right");
+        assert!(
+            (mid(&session, b) - 55.0).abs() < 1e-3,
+            "and the middle lands halfway, got {}",
+            mid(&session, b)
+        );
+        let before = mid(&session, b);
+        session.align_nodes(&[a, b, c], "distribute-h").unwrap();
+        assert!(
+            (mid(&session, b) - before).abs() < 1e-3,
+            "distributing twice is a no-op"
+        );
+
+        // Two layers minimum, and unknown modes are refused rather than
+        // silently doing nothing.
+        assert!(session.align_nodes(&[a], "left").is_err());
+        assert!(session.align_nodes(&[a, b], "sideways").is_err());
+    }
+
+    #[test]
+    fn aligning_a_layer_inside_a_moved_group_still_lands_where_asked() {
+        // Alignment is measured in document space, but a transform is
+        // written in its parent's — so a layer inside a moved group has to
+        // have the movement carried back through the group.
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let loose = add_rect(&mut session, "loose", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: loose,
+                transform: Transform::translation(120.0, 0.0),
+            })
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 10.0, 10.0);
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+
+        session.align_nodes(&[loose, inner], "left").unwrap();
+        let (x1, x2) = (
+            session.bounds_of(loose).unwrap()[0],
+            session.bounds_of(inner).unwrap()[0],
+        );
+        assert!(
+            (x1 - x2).abs() < 1e-3,
+            "both should share a left edge in document space: {x1} vs {x2}"
+        );
+        assert_cache_matches_fresh(&mut session);
     }
 
     #[test]
