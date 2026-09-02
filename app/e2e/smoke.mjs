@@ -540,6 +540,42 @@ await page.waitForTimeout(150);
 px = await canvasPixel(650, 530);
 assert(px[3] === 0, "resize is a single undo step");
 
+// 8i3. Resizing snaps too: pull a corner near the page's middle and it
+// catches, with a guide, on the same lines a move would.
+{
+  await page.mouse.click(...toScreen(450, 400));
+  await page.waitForTimeout(150);
+  const se = await page.locator(".handle.se").boundingBox();
+  await page.mouse.move(se.x + 5, se.y + 5);
+  await page.mouse.down();
+  // Aim three document pixels short of the page's vertical centre (640).
+  await page.mouse.move(...toScreen(637, 500), { steps: 8 });
+  await page.waitForTimeout(200);
+  const vertical = await page.$$eval(".snap-overlay line", (ls) =>
+    ls.filter((l) => l.getAttribute("x1") === l.getAttribute("x2")).length,
+  );
+  assert(vertical === 1, "a vertical guide shows while the corner is caught");
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  // Outline points are relative to the canvas host, not the viewport.
+  const host = await page.locator(".canvas-host").boundingBox();
+  const rightDoc = await page
+    .$eval(".sel-outline polygon", (el) =>
+      Math.max(...el.getAttribute("points").split(" ").map((p) => Number(p.split(",")[0]))),
+    )
+    .then((x) => (x + host.x - box2.x) / sx2);
+  assert(
+    Math.abs(rightDoc - 640) < 1.5 && Math.abs(rightDoc - 637) > 1.5,
+    `the corner settled on the page's centre line, not where it was dropped (${rightDoc})`,
+  );
+  assert(
+    (await page.locator(".snap-overlay line").count()) === 0,
+    "and the guide clears when the drag ends",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+}
+
 // 8i2. Rotation: the knob above the selection turns the layer, and the
 // whole turn is one undo step.
 await page.mouse.click(...toScreen(450, 400)); // select the rect

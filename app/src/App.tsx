@@ -368,6 +368,9 @@ interface HandleDrag {
   id: NodeId;
   t0: Transform;
   b0: [number, number, number, number];
+  /** Lines the dragged corner can catch on, as for a move. */
+  snapX?: number[];
+  snapY?: number[];
 }
 
 interface PanDrag {
@@ -716,8 +719,10 @@ export function App() {
   const layerPoint = (
     e: { clientX: number; clientY: number },
     id: NodeId | null = selected,
+    /** Treat the coordinates as document units already, not screen ones. */
+    inDoc = false,
   ): [number, number] => {
-    const [x, y] = docPoint(e);
+    const [x, y] = inDoc ? [e.clientX, e.clientY] : docPoint(e);
     if (!session || id === null) return [x, y];
     const inv = inverseOf(toTransform(session.parent_space_of(id)));
     return inv ? inv(x, y) : [x, y];
@@ -785,6 +790,24 @@ export function App() {
       });
     }
     return out;
+  };
+
+  /** The lines a drag can catch on: the page's own edges and middle, and
+   * the same three from every layer that is not travelling with the drag
+   * (its ancestors and descendants move too, so they are no use). */
+  const snapTargets = (moving: NodeId[]): [number[], number[]] => {
+    const xs = snapLines(0, docSize[0]);
+    const ys = snapLines(0, docSize[1]);
+    if (!session) return [xs, ys];
+    for (const layer of layers) {
+      const id = layer.id as NodeId;
+      if (moving.some((m) => relatedTo(id, m))) continue;
+      const b = session.bounds_of(id);
+      if (b.length !== 4) continue;
+      xs.push(...snapLines(b[0], b[0] + b[2]));
+      ys.push(...snapLines(b[1], b[1] + b[3]));
+    }
+    return [xs, ys];
   };
 
   /** The document-space box around a set of layers, as two corners.
@@ -924,26 +947,13 @@ export function App() {
         id,
         t0: toTransform(session.transform_of(id)),
       }));
-      // Collect what this drag can snap to, once, while nothing is moving:
-      // the page's own edges and middle, and the same three lines from
-      // every layer that is not travelling with it. What snaps is the box
-      // around everything being moved, so a group of layers aligns as the
-      // one shape it looks like.
+      // Collect the snap lines once, while nothing is moving. What snaps
+      // is the box around everything being dragged, so several layers
+      // align as the one shape they look like.
       const moved = unionBounds(together);
       if (moved) {
         drag.b0 = moved;
-        const xs = snapLines(0, docSize[0]);
-        const ys = snapLines(0, docSize[1]);
-        for (const layer of layers) {
-          const id = layer.id as NodeId;
-          if (together.some((m) => relatedTo(id, m))) continue;
-          const b = session.bounds_of(id);
-          if (b.length !== 4) continue;
-          xs.push(...snapLines(b[0], b[0] + b[2]));
-          ys.push(...snapLines(b[1], b[1] + b[3]));
-        }
-        drag.snapX = xs;
-        drag.snapY = ys;
+        [drag.snapX, drag.snapY] = snapTargets(together);
       }
       setSelected(target);
     }
@@ -1107,11 +1117,14 @@ export function App() {
   const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
     if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
+    const [snapX, snapY] = snapTargets([selected]);
     handleDragRef.current = {
       corner,
       id: selected,
       t0: toTransform(session.transform_of(selected)),
       b0: selLocal,
+      snapX,
+      snapY,
     };
     (e.target as Element).setPointerCapture(e.pointerId);
   };
@@ -1120,10 +1133,25 @@ export function App() {
     const drag = handleDragRef.current;
     if (!drag || !session) return;
     if (e.buttons === 0) return;
+    // The corner follows the cursor, so snapping the cursor snaps the
+    // corner — done in document space, where the lines are, and before
+    // the point is carried into the layer's own space.
+    let [px, py] = docPoint(e);
+    const next: Guides = { x: [], y: [] };
+    if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
+      const tol = SNAP_PX / view.zoom;
+      const sx = snapAxis([px], drag.snapX, tol);
+      const sy = snapAxis([py], drag.snapY, tol);
+      px += sx.delta;
+      py += sy.delta;
+      if (sx.guide !== null) next.x.push(sx.guide);
+      if (sy.guide !== null) next.y.push(sy.guide);
+    }
+    setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
     // Resize happens in the layer's own space: bring the cursor there,
     // hold the opposite corner still, and scale about it. Doing it in
     // document space would stretch a rotated layer along the wrong axes.
-    const [dx, dy] = layerPoint(e);
+    const [dx, dy] = layerPoint({ clientX: px, clientY: py }, drag.id, true);
     const t = drag.t0;
     const det = t.a * t.d - t.b * t.c;
     if (Math.abs(det) < 1e-9) return;
@@ -1159,6 +1187,7 @@ export function App() {
 
   const onHandlePointerUp = () => {
     handleDragRef.current = null;
+    setGuides({ x: [], y: [] });
     if (session?.commit_preview()) refresh(session);
   };
 

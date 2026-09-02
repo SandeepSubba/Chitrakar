@@ -47,7 +47,8 @@ without reading anything else.*
   silhouette so they follow every edit.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
-  free of it. A ctrl-clicked multi-selection moves as one — by drag or by
+  free of it — and the same lines catch a resize handle. A ctrl-clicked
+  multi-selection moves as one — by drag or by
   arrow key (shift for a coarse step) — in a single history entry.
   Zooming in re-renders rather than magnifies: the engine composites at
   the resolution the canvas is displayed at (capped by a pixel budget), so
@@ -101,8 +102,7 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the clipboard is in-process, so it does
   not exchange with other applications; undo after a delete restores the
-  layer but not the selection; snapping applies to moving a layer, not yet
-  to resizing one; effects come in three kinds and stack, but reordering
+  layer but not the selection; effects come in three kinds and stack, but reordering
   them means removing and re-adding;
   and export flattens them like everything else; SVG export writes each
   text line as its own tspan but cannot carry alignment, which needs font
