@@ -707,7 +707,12 @@ fn render_child(
             }
             NodeKind::Adjustment(adj) => {
                 // An adjustment layer transforms everything composited below
-                // it, weighted by its opacity and mask coverage.
+                // it, weighted by its opacity and mask coverage. A curve is
+                // tabulated once here rather than solved per pixel.
+                let lut = match adj {
+                    Adjustment::Curves { points } => Some(curve_lut(points)),
+                    _ => None,
+                };
                 for y in clip.y0..clip.y1 {
                     for x in clip.x0..clip.x1 {
                         let weight = node.opacity * coverage_at(doc, mask, x, y);
@@ -715,7 +720,7 @@ fn render_child(
                             continue;
                         }
                         let i = (y * dst.width + x) as usize;
-                        let adjusted = apply_adjustment(adj, dst.pixels[i]);
+                        let adjusted = apply_adjustment(adj, lut.as_deref(), dst.pixels[i]);
                         dst.pixels[i] = lerp(dst.pixels[i], adjusted, weight);
                     }
                 }
@@ -2185,7 +2190,96 @@ fn draw_text(
     }
 }
 
-fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
+/// Tabulate a tone curve: 257 outputs for inputs 0..=1 in steps of 1/256,
+/// both in the display encoding. A monotone cubic (Fritsch–Carlson)
+/// through the sorted points, so the curve never overshoots the points
+/// it is drawn through and a rising set of points gives a rising curve;
+/// flat beyond the first and last points. Fewer than two distinct points
+/// is the identity.
+pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
+    let mut pts: Vec<[f32; 2]> = points
+        .iter()
+        .map(|p| [p[0].clamp(0.0, 1.0), p[1].clamp(0.0, 1.0)])
+        .collect();
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    // Two points on one input would make a vertical step; the later one
+    // wins, as the one most recently placed there.
+    pts.dedup_by(|later, earlier| {
+        if (later[0] - earlier[0]).abs() < 1e-6 {
+            earlier[1] = later[1];
+            true
+        } else {
+            false
+        }
+    });
+    let n = pts.len();
+    if n < 2 {
+        return (0..=256).map(|i| i as f32 / 256.0).collect();
+    }
+    let h: Vec<f32> = (0..n - 1).map(|i| pts[i + 1][0] - pts[i][0]).collect();
+    let d: Vec<f32> = (0..n - 1)
+        .map(|i| (pts[i + 1][1] - pts[i][1]) / h[i])
+        .collect();
+    let mut m = vec![0f32; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        m[i] = if d[i - 1] * d[i] > 0.0 {
+            (d[i - 1] + d[i]) / 2.0
+        } else {
+            0.0
+        };
+    }
+    for i in 0..n - 1 {
+        if d[i] == 0.0 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+            continue;
+        }
+        let (a, b) = (m[i] / d[i], m[i + 1] / d[i]);
+        let r = a * a + b * b;
+        if r > 9.0 {
+            let t = 3.0 / r.sqrt();
+            m[i] = t * a * d[i];
+            m[i + 1] = t * b * d[i];
+        }
+    }
+    let mut seg = 0;
+    (0..=256)
+        .map(|i| {
+            let x = i as f32 / 256.0;
+            if x <= pts[0][0] {
+                return pts[0][1];
+            }
+            if x >= pts[n - 1][0] {
+                return pts[n - 1][1];
+            }
+            while pts[seg + 1][0] < x {
+                seg += 1;
+            }
+            let t = (x - pts[seg][0]) / h[seg];
+            let (t2, t3) = (t * t, t * t * t);
+            let y = (2.0 * t3 - 3.0 * t2 + 1.0) * pts[seg][1]
+                + (t3 - 2.0 * t2 + t) * h[seg] * m[seg]
+                + (-2.0 * t3 + 3.0 * t2) * pts[seg + 1][1]
+                + (t3 - t2) * h[seg] * m[seg + 1];
+            y.clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+/// Read a tabulated curve at `x`, between its entries.
+fn curve_at(lut: &[f32], x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0) * 256.0;
+    let i = (x as usize).min(255);
+    let t = x - i as f32;
+    lut[i] + (lut[i + 1] - lut[i]) * t
+}
+
+/// `lut` is the tabulated curve when `adj` is one — built by the caller
+/// once per pass; built here when the caller has not, so the function
+/// stays total.
+fn apply_adjustment(adj: &Adjustment, lut: Option<&[f32]>, px: LinearRgba) -> LinearRgba {
     if px.a <= 0.0 {
         return px;
     }
@@ -2252,6 +2346,25 @@ fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
             let f = |v: f32| {
                 let v = ((v - in_black) / span).clamp(0.0, 1.0).powf(exponent);
                 (out_black + v * (out_white - out_black)).clamp(0.0, 1.0)
+            };
+            (f(r), f(g), f(b))
+        }
+        Adjustment::Curves { points } => {
+            let table;
+            let lut = match lut {
+                Some(lut) => lut,
+                None => {
+                    table = curve_lut(points);
+                    &table
+                }
+            };
+            // The curve is drawn over the display encoding; the pixel is
+            // linear, so it crosses over and back.
+            let f = |v: f32| {
+                chitrakar_color::srgb_to_linear(curve_at(
+                    lut,
+                    chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)),
+                ))
             };
             (f(r), f(g), f(b))
         }
@@ -4992,6 +5105,106 @@ mod tests {
         );
         // Alpha is untouched: the adjustment is on colour, not coverage.
         assert_eq!(render(&doc).unwrap().get(0, 0).a, 1.0);
+    }
+
+    #[test]
+    fn a_curve_is_monotone_through_its_points_and_flat_past_them() {
+        let identity = curve_lut(&[[0.0, 0.0], [1.0, 1.0]]);
+        assert_eq!(identity.len(), 257);
+        assert!((identity[128] - 0.5).abs() < 1e-6 && identity[256] == 1.0);
+        assert_eq!(curve_lut(&[]), identity, "no points is the identity");
+        assert_eq!(curve_lut(&[[0.3, 0.9]]), identity, "and so is one");
+
+        // Points given out of order, with the middle lifted: the curve
+        // passes through each, rises the whole way and never leaves 0..1.
+        let lut = curve_lut(&[[1.0, 1.0], [0.5, 0.8], [0.0, 0.0]]);
+        assert!(
+            (lut[128] - 0.8).abs() < 1e-5,
+            "through the lifted point ({})",
+            lut[128]
+        );
+        assert!(lut.windows(2).all(|w| w[1] >= w[0]), "monotone");
+        assert!(lut.iter().all(|v| (0.0..=1.0).contains(v)));
+        assert!(
+            lut[64] > 0.25 && lut[64] < 0.8,
+            "lifted between, not overshooting"
+        );
+
+        // Flat beyond the outer points: a curve starting at (0.25, 0)
+        // clips the low quarter to black and one ending at (0.75, 1)
+        // clips the high quarter to white.
+        let clipped = curve_lut(&[[0.25, 0.0], [0.75, 1.0]]);
+        assert!(clipped[..=64].iter().all(|&v| v == 0.0));
+        assert!(clipped[192..].iter().all(|&v| v == 1.0));
+
+        // Two points on one input: the later one placed wins, no step.
+        let twice = curve_lut(&[[0.0, 0.0], [0.5, 0.2], [0.5, 0.9], [1.0, 1.0]]);
+        assert!((twice[128] - 0.9).abs() < 1e-5);
+        assert!(twice.windows(2).all(|w| w[1] >= w[0]));
+    }
+
+    #[test]
+    fn curves_are_drawn_over_the_display_encoding() {
+        // A mid grey — 0.5 as displayed, 0.214 linear — under a rect.
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let mut doc = Document::new(2, 2, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 2.0, 2.0, grey),
+        })
+        .unwrap();
+        let curve = |points: &[[f32; 2]]| {
+            Box::new(Node::adjustment(
+                "curve",
+                Adjustment::Curves {
+                    points: points.to_vec(),
+                },
+            ))
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: curve(&[[0.0, 0.0], [1.0, 1.0]]),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[1];
+        let shown = |doc: &Document| render(doc).unwrap().get(0, 0).to_srgb8()[0];
+        assert_eq!(
+            shown(&doc),
+            128,
+            "the diagonal leaves the grey where it was"
+        );
+
+        // The graph's middle is that grey: lifting it to 0.75 shows 191.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Adjustment(Adjustment::Curves {
+                points: vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]],
+            })),
+        })
+        .unwrap();
+        let lifted = shown(&doc);
+        assert!(
+            (lifted as i32 - 191).abs() <= 1,
+            "the lifted middle lands the grey at three quarters as displayed ({lifted})"
+        );
+        // An inverted curve makes a negative; alpha stays put.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Adjustment(Adjustment::Curves {
+                points: vec![[0.0, 1.0], [1.0, 0.0]],
+            })),
+        })
+        .unwrap();
+        let px = render(&doc).unwrap().get(0, 0);
+        assert!((px.to_srgb8()[0] as i32 - 127).abs() <= 1 && px.a == 1.0);
     }
 
     #[test]

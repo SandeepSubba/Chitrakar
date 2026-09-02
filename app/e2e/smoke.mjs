@@ -382,6 +382,45 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   );
 }
 
+// 4c. Curves: the diagonal changes nothing; pressing on the graph's middle
+// and dragging up adds a point and lifts the midtones in one gesture.
+{
+  await page.selectOption('[aria-label="Add adjustment layer"]', "curves");
+  await page.waitForTimeout(200);
+  const neutral = await canvasPixel(500, 325);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Curves" }).count()) === 1 &&
+      neutral.join() === after.join(),
+    "a curve on the diagonal changes nothing",
+  );
+  await page.locator(".panel ul li", { hasText: "Curves" }).click();
+  const graph = await page.locator('[aria-label="Tone curve"]').boundingBox();
+  const [cx, cy] = [graph.x + graph.width / 2, graph.y + graph.height / 2];
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx, cy - graph.height * 0.25, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const lifted = await canvasPixel(500, 325);
+  assert(
+    lifted[1] > neutral[1] + 20 && (await page.locator('[aria-label="Tone curve"] circle').count()) === 3,
+    `pressing on the curve adds a point, and dragging it up lifts the midtones (g ${neutral[1]} -> ${lifted[1]})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await canvasPixel(500, 325)).join() === after.join() &&
+      (await page.locator('[aria-label="Tone curve"] circle').count()) === 2,
+    "one undo takes the whole press-and-drag back",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Curves" }).count()) === 0,
+    "and the next takes the layer",
+  );
+}
+
 // 5. Undo three times: stops edit, adjustment layer, ellipse all revert.
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(100);

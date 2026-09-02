@@ -176,6 +176,15 @@ pub enum Adjustment {
         out_black: f32,
         out_white: f32,
     },
+    /// A tone curve through `points` (input, output), both 0..1 in the
+    /// display encoding — the way every photo editor draws one, so the
+    /// middle of the graph is a middle grey rather than a linear quarter.
+    /// The renderer sorts the points, interpolates a monotone cubic
+    /// through them and holds the curve flat past the first and last, so
+    /// two points on the diagonal (or fewer) is the identity.
+    Curves {
+        points: Vec<[f32; 2]>,
+    },
 }
 
 /// Non-destructive convolution filters; like adjustments they apply at

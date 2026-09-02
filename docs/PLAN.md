@@ -24,7 +24,8 @@ without reading anything else.*
   ellipses and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
-  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat, levels) and
+  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat, levels,
+  curves drawn on a graph in the panel) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
@@ -108,9 +109,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~148),
+- **Verify before committing:** `cargo test --workspace` (~150),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~306 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~310 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -322,7 +323,8 @@ chitrakar/
   (feColorMatrix-style hue rotation + luminance-relative saturation) — all
   re-editable via the properties panel with live slider preview, one undo
   step per gesture. Levels ✅ (input range, gamma, output range, in linear
-  light). Curves pending.
+  light) and Curves ✅ (monotone cubic through points in the display
+  encoding, tabulated once per pass; press-to-add-and-drag graph editor).
 - Vector styling ✅ first pass: fill and inner stroke (color + width),
   editable on existing objects; stroke-only shapes hit-test on the band.
   Gradients pending. Layer rename ✅ (SetName command, inline edit).

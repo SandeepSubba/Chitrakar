@@ -1068,3 +1068,34 @@ body {
     display: none;
   }
 }
+
+/* The Curves panel: a square graph to press and drag on. */
+.curve-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+.curve-editor {
+  display: block;
+  width: 100%;
+  max-width: 200px;
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.08);
+  touch-action: none;
+  cursor: crosshair;
+}
+.curve-editor .grid {
+  stroke: currentColor;
+  opacity: 0.18;
+}
+.curve-editor .line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+.curve-editor .pt {
+  fill: var(--accent);
+}

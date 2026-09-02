@@ -1460,6 +1460,19 @@ export function App() {
         },
       },
     },
+    curves: {
+      name: "Curves",
+      kind: {
+        Adjustment: {
+          Curves: {
+            points: [
+              [0, 0],
+              [1, 1],
+            ],
+          },
+        },
+      },
+    },
     blur: { name: "Gaussian Blur", kind: { Filter: { GaussianBlur: { sigma: 4 } } } },
     sharpen: {
       name: "Sharpen",
@@ -3905,6 +3918,173 @@ function MenuItem({
   );
 }
 
+/** The curve a set of points implies, sampled for drawing: the same
+ * monotone cubic the renderer tabulates (Fritsch–Carlson), sorted, flat
+ * past the outer points, identity for fewer than two. */
+function curveSamples(points: [number, number][], n = 64): [number, number][] {
+  const pts = [...points]
+    .map(([x, y]) => [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))] as [number, number])
+    .sort((a, b) => a[0] - b[0])
+    .filter((p, i, all) => i === all.length - 1 || Math.abs(all[i + 1][0] - p[0]) >= 1e-6);
+  const k = pts.length;
+  const at = (x: number): number => {
+    if (k < 2) return x;
+    if (x <= pts[0][0]) return pts[0][1];
+    if (x >= pts[k - 1][0]) return pts[k - 1][1];
+    const h = pts.slice(0, -1).map((p, i) => pts[i + 1][0] - p[0]);
+    const d = pts.slice(0, -1).map((p, i) => (pts[i + 1][1] - p[1]) / h[i]);
+    const m = pts.map((_, i) =>
+      i === 0 ? d[0] : i === k - 1 ? d[k - 2] : d[i - 1] * d[i] > 0 ? (d[i - 1] + d[i]) / 2 : 0,
+    );
+    for (let i = 0; i < k - 1; i++) {
+      if (d[i] === 0) {
+        m[i] = m[i + 1] = 0;
+        continue;
+      }
+      const [a, b] = [m[i] / d[i], m[i + 1] / d[i]];
+      const r = a * a + b * b;
+      if (r > 9) {
+        const t = 3 / Math.sqrt(r);
+        m[i] = t * a * d[i];
+        m[i + 1] = t * b * d[i];
+      }
+    }
+    let s = 0;
+    while (pts[s + 1][0] < x) s++;
+    const t = (x - pts[s][0]) / h[s];
+    const [t2, t3] = [t * t, t * t * t];
+    const y =
+      (2 * t3 - 3 * t2 + 1) * pts[s][1] +
+      (t3 - 2 * t2 + t) * h[s] * m[s] +
+      (-2 * t3 + 3 * t2) * pts[s + 1][1] +
+      (t3 - t2) * h[s] * m[s + 1];
+    return Math.min(1, Math.max(0, y));
+  };
+  return Array.from({ length: n + 1 }, (_, i) => [i / n, at(i / n)]);
+}
+
+/** A tone curve to draw on: press anywhere to add a point and drag it in
+ * the same gesture, drag a point to move it (it stays between its
+ * neighbours), double-click one to take it away. The document previews
+ * while the pointer is down and records one entry when it lifts. */
+function CurveEditor({
+  points,
+  onEdit,
+  onGestureEnd,
+}: {
+  points: [number, number][];
+  onEdit: (points: [number, number][], gesture: boolean) => void;
+  onGestureEnd: () => void;
+}) {
+  const SIZE = 160;
+  const svgRef = useRef<SVGSVGElement>(null);
+  const dragging = useRef<number | null>(null);
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  const local = (e: React.PointerEvent | React.MouseEvent): [number, number] => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return [clamp01((e.clientX - r.left) / r.width), clamp01(1 - (e.clientY - r.top) / r.height)];
+  };
+  const nearest = (p: [number, number]) => {
+    let best = -1;
+    let dist = 0.06;
+    points.forEach(([x, y], i) => {
+      const d = Math.hypot(x - p[0], y - p[1]);
+      if (d < dist) {
+        best = i;
+        dist = d;
+      }
+    });
+    return best;
+  };
+  const sorted = (pts: [number, number][]) => [...pts].sort((a, b) => a[0] - b[0]);
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const p = local(e);
+    let index = nearest(p);
+    let next = sorted(points);
+    if (index < 0) {
+      next = sorted([...next, p]);
+      index = next.findIndex((q) => q === p);
+    } else {
+      index = next.findIndex((q) => q === points[index]);
+    }
+    dragging.current = index;
+    svgRef.current!.setPointerCapture(e.pointerId);
+    onEdit(next, true);
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const i = dragging.current;
+    if (i === null) return;
+    const p = local(e);
+    const next = sorted(points);
+    const lo = i > 0 ? next[i - 1][0] + 0.005 : 0;
+    const hi = i < next.length - 1 ? next[i + 1][0] - 0.005 : 1;
+    next[i] = [Math.min(hi, Math.max(lo, p[0])), p[1]];
+    onEdit(next, true);
+  };
+  const onPointerUp = () => {
+    if (dragging.current === null) return;
+    dragging.current = null;
+    onGestureEnd();
+  };
+  const onDoubleClick = (e: React.MouseEvent) => {
+    const i = nearest(local(e));
+    if (i < 0 || points.length <= 2) return;
+    onEdit(
+      points.filter((_, j) => j !== i),
+      false,
+    );
+  };
+  const px = (v: number) => v * SIZE;
+  const py = (v: number) => (1 - v) * SIZE;
+  const line = curveSamples(points)
+    .map(([x, y], i) => `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`)
+    .join(" ");
+  return (
+    <div className="curve-row">
+      <svg
+        ref={svgRef}
+        className="curve-editor"
+        viewBox={`0 0 ${SIZE} ${SIZE}`}
+        role="img"
+        aria-label="Tone curve"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
+      >
+        {[0.25, 0.5, 0.75].map((v) => (
+          <g key={v} className="grid">
+            <line x1={px(v)} y1={0} x2={px(v)} y2={SIZE} />
+            <line x1={0} y1={py(v)} x2={SIZE} y2={py(v)} />
+          </g>
+        ))}
+        <line className="grid" x1={0} y1={SIZE} x2={SIZE} y2={0} />
+        <path className="line" d={line} />
+        {points.map(([x, y], i) => (
+          <circle key={i} className="pt" cx={px(x)} cy={py(y)} r={4} />
+        ))}
+      </svg>
+      <button
+        type="button"
+        onClick={() =>
+          onEdit(
+            [
+              [0, 0],
+              [1, 1],
+            ],
+            false,
+          )
+        }
+        title="Back to the diagonal"
+      >
+        Reset curve
+      </button>
+    </div>
+  );
+}
+
 interface KindPropsProps {
   kind: NodeKind;
   /** gesture=true routes through preview (live, uncommitted). */
@@ -3982,6 +4162,15 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
             wrap({ HueSaturation: { ...p, lightness: v } }),
           )}
         </>
+      );
+    }
+    if ("Curves" in adj) {
+      return (
+        <CurveEditor
+          points={adj.Curves.points}
+          onEdit={(points, gesture) => onEdit(wrap({ Curves: { points } }), gesture)}
+          onGestureEnd={onGestureEnd}
+        />
       );
     }
     if ("Levels" in adj) {

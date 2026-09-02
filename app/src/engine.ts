@@ -50,7 +50,8 @@ export type Adjustment =
         out_black: number;
         out_white: number;
       };
-    };
+    }
+  | { Curves: { points: [number, number][] } };
 
 export interface Transform {
   a: number;
