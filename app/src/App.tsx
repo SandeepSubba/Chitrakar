@@ -469,6 +469,7 @@ export function App() {
       ["DejaVu Sans Bold", "/fonts/DejaVuSans-Bold.ttf"],
       ["DejaVu Serif", "/fonts/DejaVuSerif.ttf"],
       ["DejaVu Sans Mono", "/fonts/DejaVuSansMono.ttf"],
+      ["DejaVu Sans Mono Oblique", "/fonts/DejaVuSansMono-Oblique.ttf"],
     ];
     Promise.all(
       faces.map(async ([name, url]) => {
@@ -1087,6 +1088,7 @@ export function App() {
                 letter_spacing: 0,
                 width: 0,
                 font: "",
+                italic: false,
               },
             },
             x,
@@ -4072,6 +4074,17 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
               </button>
             );
           })()}
+          {/* Italic always works: the face's oblique twin when there is
+              one, a lean the rasterizer synthesizes when there is not. */}
+          <button
+            className={t.italic ? "active" : undefined}
+            title="Italic"
+            aria-label="Italic"
+            aria-pressed={!!t.italic}
+            onClick={() => onEdit({ Text: { ...t, italic: !t.italic } }, false)}
+          >
+            <em>I</em>
+          </button>
           <select
             id="text-font"
             value={t.font || fonts[0]}

@@ -89,9 +89,24 @@ pub fn font_names() -> Vec<String> {
     names
 }
 
+/// The lean of a synthesized italic: horizontal run per unit of rise,
+/// about 11°, which is where most oblique faces sit.
+const SLANT: f32 = 0.2;
+
 /// The face a block is set in — the one it names, or the bundled one when
-/// it names nothing or something this process has not been given.
+/// it names nothing or something this process has not been given. An
+/// italic block gets that face's oblique twin when one is registered;
+/// otherwise the upright face, which the rasterizer leans itself.
 fn fonts_for(spec: &TextSpec) -> &'static Fonts {
+    if spec.italic {
+        if let Some(oblique) = oblique_for(spec) {
+            return oblique;
+        }
+    }
+    upright_for(spec)
+}
+
+fn upright_for(spec: &TextSpec) -> &'static Fonts {
     if spec.font.is_empty() || spec.font == DEFAULT_FONT {
         return bundled();
     }
@@ -100,6 +115,83 @@ fn fonts_for(spec: &TextSpec) -> &'static Fonts {
         .ok()
         .and_then(|r| r.get(&spec.font).copied())
         .unwrap_or_else(bundled)
+}
+
+/// The registered oblique twin of the block's face — "… Oblique" or
+/// "… Italic" — or the face itself when it already is one, so an italic
+/// set directly in an oblique face is not leaned a second time.
+fn oblique_for(spec: &TextSpec) -> Option<&'static Fonts> {
+    let base = if spec.font.is_empty() {
+        DEFAULT_FONT
+    } else {
+        spec.font.as_str()
+    };
+    let registry = registry().read().ok()?;
+    if base.ends_with(" Oblique") || base.ends_with(" Italic") {
+        return registry.get(base).copied();
+    }
+    ["Oblique", "Italic"]
+        .iter()
+        .find_map(|suffix| registry.get(&format!("{base} {suffix}")).copied())
+}
+
+/// Whether the block leans by the rasterizer's hand rather than the font's.
+fn synthesized_lean(spec: &TextSpec) -> bool {
+    spec.italic && oblique_for(spec).is_none()
+}
+
+/// How far a synthesized lean pushes ink past the block's edges: the
+/// descenders lean left of the first glyph's origin, the ascenders right
+/// of the last one's. Nothing, when the lean is the font's own.
+fn lean_room(spec: &TextSpec, font: &impl ScaleFont<&'static FontRef<'static>>) -> (f32, f32) {
+    if synthesized_lean(spec) {
+        (SLANT * -font.descent(), SLANT * font.ascent())
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+/// A glyph's outline leaned by `slant` around its baseline, then scaled
+/// and placed like any other: a synthesized italic. Font units have y up,
+/// so the top of a glyph leans furthest right and a descender leans left.
+fn leaned(
+    font: &FontRef<'static>,
+    glyph: ab_glyph::Glyph,
+    slant: f32,
+    factor: ab_glyph::PxScaleFactor,
+) -> Option<ab_glyph::OutlinedGlyph> {
+    use ab_glyph::{point, OutlineCurve, Point};
+    let lean = |p: Point| point(p.x + slant * p.y, p.y);
+    let mut outline = font.outline(glyph.id)?;
+    for curve in &mut outline.curves {
+        match curve {
+            OutlineCurve::Line(a, b) => {
+                *a = lean(*a);
+                *b = lean(*b);
+            }
+            OutlineCurve::Quad(a, b, c) => {
+                *a = lean(*a);
+                *b = lean(*b);
+                *c = lean(*c);
+            }
+            OutlineCurve::Cubic(a, b, c, d) => {
+                *a = lean(*a);
+                *b = lean(*b);
+                *c = lean(*c);
+                *d = lean(*d);
+            }
+        }
+    }
+    // The lowest point of the box leans furthest left and the highest
+    // furthest right — whichever of the box's corners holds each, since
+    // ab_glyph keeps the top edge in `min` and the bottom in `max`.
+    let b = outline.bounds;
+    let (low, high) = (b.min.y.min(b.max.y), b.min.y.max(b.max.y));
+    outline.bounds = ab_glyph::Rect {
+        min: point(b.min.x + slant * low, b.min.y),
+        max: point(b.max.x + slant * high, b.max.y),
+    };
+    Some(ab_glyph::OutlinedGlyph::new(glyph, outline, factor))
 }
 
 /// One positioned glyph of a shaped line: which glyph, where its origin
@@ -203,6 +295,10 @@ struct Layout {
     widths: Vec<f32>,
     width: f32,
     height: f32,
+    /// Room a synthesized lean takes inside `width`, left and right of
+    /// the lines: where the first glyph's origin sits, and what the block
+    /// holds past the last one's.
+    room: (f32, f32),
 }
 
 fn layout(spec: &TextSpec, scale: f32) -> Layout {
@@ -219,11 +315,13 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
     } else {
         widest
     };
+    let room = lean_room(spec, &font);
     Layout {
         height: (lines.len().max(1) as f32 * step).max(1.0),
         lines,
         widths,
-        width: width.max(1.0),
+        width: (width + room.0 + room.1).max(1.0),
+        room,
     }
 }
 
@@ -305,6 +403,7 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     // and line height are all in raster pixels already.
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
+    let slant = if synthesized_lean(spec) { SLANT } else { 0.0 };
 
     for (line_no, line) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
@@ -312,18 +411,24 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         let line_w = l.widths[line_no];
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
-        let slack = w - line_w;
-        let start = match spec.align {
-            chitrakar_doc::TextAlign::Left => 0.0,
-            chitrakar_doc::TextAlign::Center => slack / 2.0,
-            chitrakar_doc::TextAlign::Right => slack,
-        };
+        let slack = w - l.room.0 - l.room.1 - line_w;
+        let start = l.room.0
+            + match spec.align {
+                chitrakar_doc::TextAlign::Left => 0.0,
+                chitrakar_doc::TextAlign::Center => slack / 2.0,
+                chitrakar_doc::TextAlign::Right => slack,
+            };
         for g in glyphs {
             let glyph = g.id.with_scale_and_position(
                 spec.size.max(0.1) * scale,
                 ab_glyph::point(start + g.x, baseline + g.y),
             );
-            if let Some(outlined) = font.font.outline_glyph(glyph) {
+            let outlined = if slant > 0.0 {
+                leaned(font.font, glyph, slant, font.scale_factor())
+            } else {
+                font.font.outline_glyph(glyph)
+            };
+            if let Some(outlined) = outlined {
                 let bounds = outlined.px_bounds();
                 outlined.draw(|gx, gy, c| {
                     let x = bounds.min.x as i32 + gx as i32;
@@ -596,6 +701,104 @@ mod tests {
         missing.font = "No Such Face".into();
         assert_eq!(measure(&missing), measure(&regular), "unknown falls back");
         assert!(register_font("junk", vec![1, 2, 3]).is_err());
+    }
+
+    /// Where a raster's ink sits horizontally, as its centre of mass over
+    /// the rows `y0..y1`.
+    fn ink_centre(r: &TextRaster, y0: u32, y1: u32) -> f32 {
+        let (mut sum, mut n) = (0.0, 0.0);
+        for y in y0..y1 {
+            for x in 0..r.width {
+                let c = r.sample(x, y);
+                sum += c * (x as f32 + 0.5);
+                n += c;
+            }
+        }
+        sum / n.max(1e-6)
+    }
+
+    /// The rows that carry ink, as `first..last + 1`.
+    fn ink_rows(r: &TextRaster) -> (u32, u32) {
+        let inked = |y: u32| (0..r.width).any(|x| r.sample(x, y) > 0.1);
+        let first = (0..r.height).find(|&y| inked(y)).unwrap_or(0);
+        let last = (0..r.height).rev().find(|&y| inked(y)).unwrap_or(0);
+        (first, last + 1)
+    }
+
+    #[test]
+    fn italic_leans_the_glyphs_when_no_oblique_face_exists() {
+        let upright = spec("l", 48.0);
+        let mut italic = upright.clone();
+        italic.italic = true;
+        let (up, lean) = (rasterize(&upright), rasterize(&italic));
+        assert!(
+            lean.width > up.width,
+            "the block makes room for the lean ({} > {})",
+            lean.width,
+            up.width
+        );
+        assert_eq!(
+            measure(&italic).0.ceil() as u32,
+            lean.width,
+            "and measures as wide as it rasterizes"
+        );
+        let tilt = |r: &TextRaster| {
+            let (y0, y1) = ink_rows(r);
+            let third = (y1 - y0) / 3;
+            ink_centre(r, y0, y0 + third) - ink_centre(r, y1 - third, y1)
+        };
+        assert!(
+            tilt(&up).abs() < 0.5,
+            "a stem stands straight ({})",
+            tilt(&up)
+        );
+        assert!(
+            tilt(&lean) > 3.0,
+            "and its top sits right of its foot once italic ({})",
+            tilt(&lean)
+        );
+    }
+
+    #[test]
+    fn italic_takes_a_registered_oblique_face_over_a_synthesized_lean() {
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
+        register_font("Mono Test", MONO.to_vec()).unwrap();
+        register_font("Mono Test Oblique", OBLIQUE.to_vec()).unwrap();
+
+        let mut italic = spec("Slant", 32.0);
+        italic.font = "Mono Test".into();
+        italic.italic = true;
+        let mut oblique = italic.clone();
+        oblique.font = "Mono Test Oblique".into();
+        oblique.italic = false;
+        let drawn = rasterize(&oblique);
+        assert_eq!(
+            rasterize(&italic).coverage,
+            drawn.coverage,
+            "the oblique face is used as it is"
+        );
+        let mut twice = oblique.clone();
+        twice.italic = true;
+        assert_eq!(
+            rasterize(&twice).coverage,
+            drawn.coverage,
+            "an italic set in the oblique face itself is not leaned again"
+        );
+
+        let mut upright = oblique.clone();
+        upright.font = "Mono Test".into();
+        assert_ne!(
+            rasterize(&upright).coverage,
+            drawn.coverage,
+            "while the upright face is its own face"
+        );
+        assert_eq!(
+            measure(&upright).0.ceil(),
+            measure(&oblique).0.ceil(),
+            "and a real oblique needs no room past the glyphs' own advances"
+        );
     }
 
     #[test]

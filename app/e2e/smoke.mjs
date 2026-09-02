@@ -1438,6 +1438,61 @@ assert(
     (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVu Sans",
     "and again takes it off",
   );
+  // Italic leans the block: with straight stems on the page, the ink's
+  // centre over the top rows moves right of its centre over the bottom
+  // rows, and the block widens to make room for the lean.
+  {
+    await setText("HHHH");
+    await page.waitForTimeout(300);
+    const tilt = () =>
+      page.evaluate(([a, b, c, d]) => {
+        const el = document.getElementById("engine-canvas");
+        const s = Number(el.dataset.frameScale) || 1;
+        const ox = Number(el.dataset.originX) || 0;
+        const oy = Number(el.dataset.originY) || 0;
+        [a, c] = [a, c].map((v) => Math.round(ox + v * s));
+        [b, d] = [b, d].map((v) => Math.round(oy + v * s));
+        const w = c - a;
+        const img = el.getContext("2d").getImageData(a, b, w, d - b).data;
+        const rows = [];
+        for (let i = 0; i < img.length; i += 4) {
+          if (img[i + 3] > 0) rows.push(Math.floor(i / 4 / w));
+        }
+        if (rows.length === 0) return null;
+        const [y0, y1] = [Math.min(...rows), Math.max(...rows) + 1];
+        const third = Math.floor((y1 - y0) / 3);
+        const centre = (r0, r1) => {
+          let sum = 0;
+          let n = 0;
+          for (let y = r0; y < r1; y++) {
+            for (let x = 0; x < w; x++) {
+              const alpha = img[(y * w + x) * 4 + 3];
+              sum += (alpha * (x + 0.5)) / s;
+              n += alpha;
+            }
+          }
+          return sum / n;
+        };
+        return centre(y0, y0 + third) - centre(y1 - third, y1);
+      }, [700, 540, 1320, 740]);
+    const straight = await tilt();
+    const uprightWidth = (await outline())[0];
+    await page.click('button[aria-label="Italic"]');
+    await page.waitForTimeout(300);
+    const leaned = await tilt();
+    assert(
+      Math.abs(straight) < 1 && leaned > 3,
+      `italic leans the stems (tilt ${straight?.toFixed(2)} -> ${leaned?.toFixed(2)})`,
+    );
+    assert(
+      (await outline())[0] > uprightWidth + 2 &&
+        (await page.getAttribute('button[aria-label="Italic"]', "aria-pressed")) === "true",
+      "and the block widens to hold the lean",
+    );
+    await page.click('button[aria-label="Italic"]');
+    await page.waitForTimeout(300);
+    assert(Math.abs((await tilt()) ?? 9) < 1, "and again stands the stems up");
+  }
   // A font loaded from a file joins the list and dresses the picked block.
   await page.locator('input[accept=".ttf,.otf"]').setInputFiles("public/fonts/DejaVuSerif.ttf");
   await page.waitForTimeout(600);

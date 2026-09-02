@@ -72,7 +72,10 @@ without reading anything else.*
   the wasm, the rest are fetched from `app/public/fonts` at startup and
   registered with the engine, so adding a face is dropping a file there;
   File › Load font… registers any TrueType/OpenType file for the page's
-  lifetime, a Bold toggle swaps a face for its "… Bold" twin, and a saved
+  lifetime, a Bold toggle swaps a face for its "… Bold" twin, an Italic
+  toggle sets it in its "… Oblique"/"… Italic" twin when one is registered
+  (Sans Mono's is shipped) and leans the outlines itself when none is, and
+  a saved
   `.chitra` carries the faces its text is set in (all but the bundled one)
   under `fonts/`, registering them on open, so a document reads the same
   wherever it is opened next —
@@ -105,7 +108,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~144),
+- **Verify before committing:** `cargo test --workspace` (~145),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~300 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -118,9 +121,9 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: italic (an oblique face and a toggle, the way bold is done —
-     only DejaVu Sans Mono's oblique is on this machine, so a synthesized
-     slant may be the honest default).
+  3. Depth: another review pass over the last stretch of commits (each
+     one so far has found real defects), then text on a path or
+     underline/strike-through, and a PDF export that carries live text.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

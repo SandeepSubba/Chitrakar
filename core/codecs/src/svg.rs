@@ -206,9 +206,14 @@ fn write_children(
                 } else {
                     String::new()
                 };
+                let style = if spec.italic {
+                    r#" font-style="italic""#
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text font-family="{}, sans-serif" font-size="{}"{spacing}{common} fill="{}">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{}"{spacing}{style}{common} fill="{}">"#,
                     if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {

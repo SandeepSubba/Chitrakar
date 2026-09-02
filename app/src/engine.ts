@@ -132,6 +132,9 @@ export interface TextSpec {
   width: number;
   /** The face's registered name; empty is the bundled DejaVu Sans. */
   font: string;
+  /** Italic: the face's oblique twin when one is registered, else a
+   * lean the rasterizer synthesizes. */
+  italic: boolean;
 }
 
 export interface GradientStop {

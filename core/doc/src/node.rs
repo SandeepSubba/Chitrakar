@@ -241,6 +241,10 @@ pub struct TextSpec {
     /// a document set in a font this machine lacks still renders.
     #[serde(default)]
     pub font: String,
+    /// Italic: set in the face's "… Oblique" (or "… Italic") twin when one
+    /// is registered, and leaned by the rasterizer when none is.
+    #[serde(default)]
+    pub italic: bool,
 }
 
 fn one() -> f32 {
@@ -260,6 +264,7 @@ impl TextSpec {
             letter_spacing: 0.0,
             width: 0.0,
             font: String::new(),
+            italic: false,
         }
     }
 
