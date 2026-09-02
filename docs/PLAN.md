@@ -32,7 +32,9 @@ without reading anything else.*
   rename, labelled history with jump-to-state.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
-  size, chosen from presets or typed, in RGB or CMYK.
+  size, chosen from presets or typed, in RGB or CMYK, and the crop tool
+  re-frames one after the fact — the page becomes the dragged rectangle
+  and the picture stays where it was inside it.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in

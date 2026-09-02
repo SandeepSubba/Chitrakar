@@ -1578,6 +1578,49 @@ assert(
   );
 }
 
+// 8x4. Crop: drag a frame with the crop tool and the page becomes it,
+// with the picture still where it was inside the frame.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-canvas").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(200, 150));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 250), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(300, 200))[3] === 255, "a rect in the middle");
+
+  await page.click('button[aria-label="Crop"]');
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 8 });
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".crop-frame").count()) === 1,
+    "the crop frame shows while dragging",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(
+    await page.isVisible("text=RGB, 400×200"),
+    "the page became the cropped rectangle",
+  );
+  assert(
+    (await page.locator(".crop-frame").count()) === 0,
+    "and the frame clears when the crop lands",
+  );
+  // The rect was at (200,150)-(400,250); after cropping from (100,100) it
+  // sits at (100,50)-(300,150) on the new page.
+  assert((await canvasPixel(200, 100))[3] === 255, "the picture stayed framed");
+  assert((await canvasPixel(20, 20))[3] === 0, "and its surroundings came with it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(await page.isVisible("text=RGB, 600×400"), "undo restores the page");
+  assert((await canvasPixel(300, 200))[3] === 255, "and puts the picture back");
+}
+
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {

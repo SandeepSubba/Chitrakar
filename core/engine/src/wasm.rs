@@ -225,6 +225,26 @@ impl WasmSession {
         self.inner.mask_json(NodeId(id as u64)).map_err(to_js)
     }
 
+    /// Resize the page, shifting top-level layers so the picture stays
+    /// put. Cropping is this with the crop rect's size and negated origin.
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), JsError> {
+        self.inner
+            .resize_canvas(width, height, dx, dy)
+            .map_err(to_js)
+    }
+
+    /// Force the next `render_frame` to redraw everything, for when the
+    /// canvas it is copied into has been replaced.
+    pub fn invalidate(&mut self) {
+        self.inner.invalidate();
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: f64) -> Result<String, JsError> {
         self.inner.effects_json(NodeId(id as u64)).map_err(to_js)

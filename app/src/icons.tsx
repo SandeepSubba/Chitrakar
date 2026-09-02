@@ -30,6 +30,7 @@ export type IconName =
   | "brush"
   | "duplicate"
   | "shadow"
+  | "crop"
   | "trash"
   | "eye"
   | "eyeOff"
@@ -48,6 +49,12 @@ export type IconName =
 
 const PATHS: Record<IconName, JSX.Element> = {
   // Tools
+  crop: (
+    <>
+      <path d="M6.5 2.5v15h15" />
+      <path d="M2.5 6.5h15v15" />
+    </>
+  ),
   move: <path d="M5 3l14 8-6 1.6L10.5 19z" />,
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
   ellipse: <ellipse cx="12" cy="12" rx="8" ry="6" />,

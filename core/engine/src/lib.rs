@@ -143,7 +143,12 @@ impl Session {
     /// The node a command touches, when knowable from the command alone.
     fn command_target(cmd: &Command) -> Option<NodeId> {
         match cmd {
-            Command::AddNode { .. } | Command::RestoreSubtree { .. } | Command::Batch(_) => None,
+            // A resize touches the page and every top-level layer, so
+            // there is no one node to compute a dirty region from.
+            Command::AddNode { .. }
+            | Command::RestoreSubtree { .. }
+            | Command::Batch(_)
+            | Command::ResizeCanvas { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
@@ -175,12 +180,14 @@ impl Session {
     /// Apply a command to the document, computing the dirty region from the
     /// target's bounds before and after. Returns the inverse.
     fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
-        let batch = matches!(cmd, Command::Batch(_));
+        // Both touch more than one node, so the whole canvas is the only
+        // safe dirty region — and a resize changes what "the whole canvas"
+        // even means.
+        let batch = matches!(cmd, Command::Batch(_) | Command::ResizeCanvas { .. });
         let pre = self.bounds_of_target(Self::command_target(&cmd));
         let inverse = self.doc.apply(cmd)?;
         let post = self.bounds_of_target(Self::command_target(&inverse));
         if batch {
-            // Batches touch several nodes; whole-canvas is the safe region.
             self.mark_dirty(Bounds::Everything);
         } else {
             // Filters read pixel neighborhoods, so a change also affects
@@ -232,6 +239,9 @@ impl Session {
                 name(id)
             ),
             Command::MoveNode { id, .. } => format!("Move {}", name(id)),
+            Command::ResizeCanvas { width, height, .. } => {
+                format!("Resize canvas to {width}x{height}")
+            }
             Command::Batch(_) => "Multiple edits".into(),
         }
     }
@@ -955,6 +965,32 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// Change the page's size, shifting top-level layers by `(dx, dy)` so
+    /// the picture stays where it was. Cropping to a rectangle is this with
+    /// the rectangle's size and the negative of its origin.
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), EngineError> {
+        self.apply(Command::ResizeCanvas {
+            width,
+            height,
+            dx,
+            dy,
+        })
+    }
+
+    /// Force the next present to recompute the whole canvas. The surface
+    /// the frame is copied into lives outside the engine, so when that is
+    /// replaced — a resized canvas element, say — the engine has to be
+    /// told that its idea of what is already on screen is gone.
+    pub fn invalidate(&mut self) {
+        self.mark_dirty(Bounds::Everything);
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: NodeId) -> Result<String, EngineError> {
         serde_json::to_string(&self.doc.node(id)?.effects)
@@ -1268,6 +1304,44 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
         assert!(session.undo().unwrap(), "the shadow comes back");
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cropping_keeps_the_picture_where_it_was() {
+        // A crop is a resize plus the shift that cancels it: the page gets
+        // smaller, and what was inside the crop rectangle stays put.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(35, 35).a, 1.0);
+
+        // Crop to (20,20)-(52,52): the rect should land at (10,10).
+        session.resize_canvas(32, 32, -20.0, -20.0).unwrap();
+        assert_eq!(session.document().meta.width, 32);
+        let (after, _) = session.render_cached().unwrap();
+        assert_eq!((after.width, after.height), (32, 32), "the cache resized");
+        assert_eq!(after.get(15, 15).a, 1.0, "the rect moved with the page");
+        assert_eq!(after.get(5, 5).a, 0.0, "and nothing else came with it");
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap());
+        assert_eq!(session.document().meta.width, 64);
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(35, 35).a, 1.0, "undo puts the page back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn a_zero_sized_canvas_is_refused() {
+        let mut session = Session::new(16, 16, ColorMode::Rgb);
+        assert!(session.resize_canvas(0, 10, 0.0, 0.0).is_err());
+        assert_eq!(session.document().meta.width, 16, "and changes nothing");
     }
 
     #[test]

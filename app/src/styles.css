@@ -597,7 +597,8 @@ body {
 }
 
 .pen-overlay,
-.snap-overlay {
+.snap-overlay,
+.crop-overlay {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -624,6 +625,19 @@ body {
 .effect-head span {
   flex: 1;
   font-weight: 500;
+}
+
+/* The crop frame: everything outside it is dimmed, so what survives the
+   crop is what still looks like the picture. */
+.crop-shade {
+  fill: rgb(0 0 0 / 0.55);
+}
+
+.crop-frame {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
 }
 
 /* Alignment guides: one hairline, drawn in the accent so it reads as

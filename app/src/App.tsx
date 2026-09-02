@@ -122,7 +122,7 @@ function seedHandles(
   });
 }
 
-const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Brush", "Text"] as const;
+const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Brush", "Text", "Crop"] as const;
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
  * called Move here. */
@@ -134,6 +134,7 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   p: "Pen",
   b: "Brush",
   t: "Text",
+  c: "Crop",
 };
 
 /** A glyph per layer kind, so the stack is scannable without reading the
@@ -154,6 +155,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Pen: "P",
   Brush: "B",
   Text: "T",
+  Crop: "C",
 };
 
 const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
@@ -163,6 +165,7 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Pen: "pen",
   Brush: "brush",
   Text: "text",
+  Crop: "crop",
 };
 type Tool = (typeof TOOLS)[number];
 const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
@@ -439,6 +442,10 @@ export function App() {
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
   /** Alignment guides drawn while a drag is snapped to something. */
   const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
+  /** The crop frame being dragged, in host coordinates: [x0, y0, x1, y1]. */
+  const [cropRect, setCropRect] = useState<[number, number, number, number] | null>(
+    null,
+  );
   /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
   const [multiSel, setMultiSel] = useState<NodeId[]>([]);
   const groupCount = useRef(0);
@@ -475,7 +482,13 @@ export function App() {
       }
     }
     setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
-  }, []);
+    // The page's size is document state like anything else — undoing a
+    // crop changes it — so it is read back here rather than only being
+    // written where a crop or a new document sets it.
+    if (s.width !== docSizeRef.current[0] || s.height !== docSizeRef.current[1]) {
+      setDocumentSize(s.width, s.height);
+    }
+  }, [setDocumentSize]);
 
   const fitView = useCallback(() => {
     const host = hostRef.current;
@@ -657,14 +670,18 @@ export function App() {
     if (!session) return;
     const dpr = window.devicePixelRatio || 1;
     setFrameScale(session.set_view_scale(view.zoom * dpr));
-  }, [session, view.zoom]);
+  }, [session, view.zoom, docSize]);
 
-  // Repaint once the canvas has been resized to the adopted scale — its
-  // backing store is cleared by that resize, and the engine has a whole
-  // fresh frame waiting.
+  // Repaint once the canvas has been resized — by a change of scale or of
+  // the page itself, either of which clears its backing store, and either
+  // of which leaves the engine with a whole fresh frame waiting.
   useEffect(() => {
-    if (session) refresh(session);
-  }, [session, frameScale, refresh]);
+    if (!session) return;
+    // The engine tracks what it has already presented; a resized canvas
+    // has thrown that away, so tell it before asking for the frame.
+    session.invalidate();
+    refresh(session);
+  }, [session, frameScale, docSize, refresh]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
@@ -988,6 +1005,25 @@ export function App() {
         setPenPoints([...drag.stroke]); // live line while drawing
       }
     }
+    if (drag.tool === "Crop") {
+      // Show the frame where it is being dragged, in host coordinates so
+      // it sits over the canvas without a transform of its own.
+      const toHost = (x: number, y: number): [number, number] => [
+        view.x + x * view.zoom,
+        view.y + y * view.zoom,
+      ];
+      const [ax, ay] = toHost(drag.startX, drag.startY);
+      const [bx, by] = toHost(drag.lastX, drag.lastY);
+      setCropRect([
+        Math.min(ax, bx),
+        Math.min(ay, by),
+        Math.max(ax, bx),
+        Math.max(ay, by),
+      ]);
+      drag.moved = true;
+      return;
+    }
+
     // Move tool: live preview while dragging.
     if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
       // Snap the layer's edges and centre onto the page's and the other
@@ -1023,6 +1059,7 @@ export function App() {
     const drag = toolDragRef.current;
     toolDragRef.current = null;
     setGuides({ x: [], y: [] });
+    setCropRect(null);
     if (!drag || !session) return;
 
     if (drag.tool === "Move") {
@@ -1085,6 +1122,27 @@ export function App() {
     const w = Math.abs(drag.lastX - drag.startX);
     const h = Math.abs(drag.lastY - drag.startY);
     if (w < MIN_SIZE || h < MIN_SIZE) return;
+    if (drag.tool === "Crop") {
+      // Crop to the dragged rectangle, clamped to the page: the document
+      // becomes that rectangle and every layer shifts with it, so what was
+      // framed stays framed.
+      const cx = Math.max(0, Math.round(x0));
+      const cy = Math.max(0, Math.round(y0));
+      const cw = Math.min(Math.round(w), docSize[0] - cx);
+      const ch = Math.min(Math.round(h), docSize[1] - cy);
+      if (cw < 1 || ch < 1) return;
+      try {
+        session.resize_canvas(cw, ch, -cx, -cy);
+      } catch (err) {
+        alert(`Crop: ${err}`);
+        return;
+      }
+      setDocumentSize(cw, ch);
+      refresh(session);
+      fitView();
+      setTool("Move");
+      return;
+    }
     shapeCount.current += 1;
     const shape =
       drag.tool === "Rect"
@@ -2256,6 +2314,29 @@ export function App() {
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
           />
+          {cropRect && (
+            <svg className="crop-overlay" aria-hidden="true">
+              {/* Four panels dimming everything the crop would discard,
+                  which is how the framing reads at a glance. */}
+              {(
+                [
+                  [0, 0, "100%", cropRect[1]],
+                  [0, cropRect[3], "100%", "100%"],
+                  [0, cropRect[1], cropRect[0], cropRect[3] - cropRect[1]],
+                  [cropRect[2], cropRect[1], "100%", cropRect[3] - cropRect[1]],
+                ] as [number, number, number | string, number | string][]
+              ).map(([x, y, w, h], i) => (
+                <rect key={i} className="crop-shade" x={x} y={y} width={w} height={h} />
+              ))}
+              <rect
+                className="crop-frame"
+                x={cropRect[0]}
+                y={cropRect[1]}
+                width={cropRect[2] - cropRect[0]}
+                height={cropRect[3] - cropRect[1]}
+              />
+            </svg>
+          )}
           {(guides.x.length > 0 || guides.y.length > 0) && (
             <svg className="snap-overlay" aria-hidden="true">
               {guides.x.map((x) => (

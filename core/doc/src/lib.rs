@@ -35,6 +35,8 @@ pub enum DocError {
     CannotRemoveRoot,
     #[error("cannot move {0:?} into its own subtree")]
     MoveIntoOwnSubtree(NodeId),
+    #[error("a document cannot be {0}x{1}")]
+    BadCanvasSize(u32, u32),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +334,35 @@ impl Document {
                     mask: prev.map(Box::new),
                 })
             }
+            Command::ResizeCanvas {
+                width,
+                height,
+                dx,
+                dy,
+            } => {
+                if width == 0 || height == 0 {
+                    return Err(DocError::BadCanvasSize(width, height));
+                }
+                let prev = (self.meta.width, self.meta.height);
+                self.meta.width = width;
+                self.meta.height = height;
+                // Top-level layers carry the shift, so cropping keeps the
+                // picture where it was rather than sliding it off the new
+                // page. Anything deeper moves with its group.
+                let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
+                for id in top {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.transform.e += dx;
+                        node.transform.f += dy;
+                    }
+                }
+                Ok(Command::ResizeCanvas {
+                    width: prev.0,
+                    height: prev.1,
+                    dx: -dx,
+                    dy: -dy,
+                })
+            }
             Command::SetEffects { id, effects } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = std::mem::replace(&mut node.effects, effects);
@@ -488,6 +519,15 @@ pub enum Command {
     SetEffects {
         id: NodeId,
         effects: Vec<Effect>,
+    },
+    /// Change the page's size, shifting every top-level layer by
+    /// `(dx, dy)` so a crop keeps the picture where it was. Its own
+    /// inverse in shape: the old size, and the shift the other way.
+    ResizeCanvas {
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).
