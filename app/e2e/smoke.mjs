@@ -80,6 +80,68 @@ let px = await canvasPixel(200, 200);
 assert(px[3] === 255 && px[2] > px[0], "rect rendered with blue-ish fill");
 assert(await page.isVisible("text=Rect 1"), "layer row appeared");
 
+// 2b. Gradient fills: the rect alone on the canvas, so the ramp is readable.
+await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+await page.waitForTimeout(150);
+await page.selectOption('[aria-label="Fill type"]', "linear");
+await page.waitForTimeout(200);
+const left = await canvasPixel(115, 200);
+const right = await canvasPixel(385, 200);
+assert(
+  right[0] > left[0] + 60,
+  `linear gradient ramps left to right (${left} -> ${right})`,
+);
+assert(left[3] === 255 && right[3] === 255, "gradient fill stays opaque");
+
+// The angle slider re-aims the ramp: at 90 degrees it runs top to bottom,
+// so a row becomes flat and a column ramps instead.
+await page.locator('input[aria-label="Gradient angle"]').evaluate((el) => {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    "value",
+  ).set;
+  setter.call(el, "90");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("pointerup", { bubbles: true }));
+});
+await page.waitForTimeout(200);
+const top = await canvasPixel(250, 115);
+const bottom = await canvasPixel(250, 285);
+assert(
+  bottom[0] > top[0] + 60,
+  `angle 90 ramps top to bottom (${top} -> ${bottom})`,
+);
+const rowL = await canvasPixel(115, 200);
+const rowR = await canvasPixel(385, 200);
+assert(
+  Math.abs(rowL[0] - rowR[0]) < 4,
+  `and a row is now flat (${rowL} vs ${rowR})`,
+);
+
+// Radial: first stop at the centre, last at the rim.
+await page.selectOption('[aria-label="Fill type"]', "radial");
+await page.waitForTimeout(200);
+const middle = await canvasPixel(250, 200);
+const corner = await canvasPixel(115, 115);
+assert(
+  corner[0] > middle[0] + 60,
+  `radial ramps outward from the centre (${middle} -> ${corner})`,
+);
+
+// Back to a flat fill: the shape is uniform again and later steps see the
+// same rect they always did.
+await page.selectOption('[aria-label="Fill type"]', "solid");
+await page.waitForTimeout(200);
+const flatA = await canvasPixel(115, 200);
+const flatB = await canvasPixel(385, 200);
+assert(
+  JSON.stringify(flatA) === JSON.stringify(flatB),
+  `solid fill is uniform again (${flatA} vs ${flatB})`,
+);
+// Undo the four fill-type changes so history is where the rest expects it.
+for (let i = 0; i < 4; i++) await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+
 // 3. Draw an ellipse overlapping it.
 await page.click('button[title="Ellipse"]');
 await drag(300, 150, 700, 500);

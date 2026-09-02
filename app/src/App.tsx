@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Adjustment,
   BlendMode,
+  AuthoredColor,
   Command,
+  GradientStop,
   LayerInfo,
   Mask,
   NodeId,
@@ -232,6 +234,7 @@ export function App() {
                   stroke: closed
                     ? null
                     : { color: hexColor(fill), width: 4 },
+                  gradient: null,
                 },
               },
               minX,
@@ -457,6 +460,7 @@ export function App() {
               // (and later export) drives their rendering.
               fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
               stroke: null,
+              gradient: null,
             },
           },
           x0,
@@ -1133,6 +1137,7 @@ export function App() {
                   kind={selectedKind}
                   onEdit={setKind}
                   onGestureEnd={endGesture}
+                  cmyk={cmyk}
                 />
               )}
               {selectedMask === null ? (
@@ -1280,11 +1285,14 @@ interface KindPropsProps {
   /** gesture=true routes through preview (live, uncommitted). */
   onEdit: (kind: NodeKind, gesture: boolean) => void;
   onGestureEnd: () => void;
+  /** Document colour mode, so new colours are authored as ink in a CMYK
+   * document exactly like the shape tools do. */
+  cmyk: boolean;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
  * every layer's settings revisitable (the non-destructive contract). */
-function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
+function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -1415,8 +1423,97 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
     const patch = (changes: Partial<typeof v>): NodeKind => ({
       Vector: { ...v, ...changes },
     });
+
+    const authored = (hex: string) =>
+      cmyk ? hexToCmykColor(hex) : hexColor(hex);
+    const grad = v.gradient;
+    const gradStops = grad
+      ? "Linear" in grad
+        ? grad.Linear.stops
+        : grad.Radial.stops
+      : [];
+    const fillKind = !grad ? "solid" : "Linear" in grad ? "linear" : "radial";
+    // A gradient's ends are the shape's own fill and white, so switching
+    // fill type starts from what is already on screen.
+    const startingStops = (): GradientStop[] => [
+      { offset: 0, color: v.fill ?? authored("#6c8cff") },
+      { offset: 1, color: authored("#ffffff") },
+    ];
+    /** Endpoints of a linear ramp at `deg`, across the shape's box. */
+    const endpoints = (deg: number): { from: [number, number]; to: [number, number] } => {
+      const rad = (deg * Math.PI) / 180;
+      const [dx, dy] = [Math.cos(rad) / 2, Math.sin(rad) / 2];
+      return { from: [0.5 - dx, 0.5 - dy], to: [0.5 + dx, 0.5 + dy] };
+    };
+    const angleOf = (g: typeof grad): number => {
+      if (!g || !("Linear" in g)) return 0;
+      const { from, to } = g.Linear;
+      const deg = (Math.atan2(to[1] - from[1], to[0] - from[0]) * 180) / Math.PI;
+      return Math.round(deg < 0 ? deg + 360 : deg);
+    };
+    const setFillKind = (next: string) => {
+      const stops = gradStops.length ? gradStops : startingStops();
+      if (next === "solid") return patch({ gradient: null });
+      if (next === "linear")
+        return patch({ gradient: { Linear: { ...endpoints(0), stops } } });
+      return patch({
+        gradient: { Radial: { center: [0.5, 0.5], radius: 0.5, stops } },
+      });
+    };
+    const setStop = (i: number, color: AuthoredColor): NodeKind => {
+      const stops = gradStops.map((s, j) => (j === i ? { ...s, color } : s));
+      if (grad && "Linear" in grad)
+        return patch({ gradient: { Linear: { ...grad.Linear, stops } } });
+      if (grad && "Radial" in grad)
+        return patch({ gradient: { Radial: { ...grad.Radial, stops } } });
+      return patch({});
+    };
+
     return (
       <>
+        <label className="row">
+          Fill type
+          <select
+            value={fillKind}
+            onChange={(e) => onEdit(setFillKind(e.target.value), false)}
+            aria-label="Fill type"
+          >
+            <option value="solid">Solid</option>
+            <option value="linear">Linear gradient</option>
+            <option value="radial">Radial gradient</option>
+          </select>
+        </label>
+        {grad && (
+          <>
+            {gradStops.map((stop, i) => (
+              <label className="row" key={i}>
+                {i === 0 ? "From" : i === gradStops.length - 1 ? "To" : `Stop ${i}`}
+                <input
+                  type="color"
+                  value={colorToHex(stop.color)}
+                  onChange={(e) =>
+                    onEdit(setStop(i, authored(e.target.value)), true)
+                  }
+                  onBlur={onGestureEnd}
+                  aria-label={`Gradient stop ${i + 1}`}
+                />
+              </label>
+            ))}
+            {"Linear" in grad
+              ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
+                  patch({
+                    gradient: {
+                      Linear: { ...endpoints(deg), stops: gradStops },
+                    },
+                  }),
+                )
+              : slider("Gradient radius", grad.Radial.radius, 0.05, 1.5, 0.05, (r) =>
+                  patch({
+                    gradient: { Radial: { ...grad.Radial, radius: r } },
+                  }),
+                )}
+          </>
+        )}
         <label className="row">
           <input
             type="checkbox"
@@ -1430,7 +1527,7 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
             aria-label="Fill enabled"
           />
           Fill
-          {v.fill && !("Cmyk" in v.fill) && (
+          {!grad && v.fill && !("Cmyk" in v.fill) && (
             <input
               type="color"
               value={colorToHex(v.fill)}
@@ -1442,7 +1539,7 @@ function KindProps({ kind, onEdit, onGestureEnd }: KindPropsProps) {
             />
           )}
         </label>
-        {v.fill && "Cmyk" in v.fill && (
+        {!grad && v.fill && "Cmyk" in v.fill && (
           <>
             {(["c", "m", "y", "k"] as const).map((ch) => {
               const ink = (v.fill as { Cmyk: Record<string, number> }).Cmyk;

@@ -71,6 +71,22 @@ export interface TextSpec {
   fill: AuthoredColor;
 }
 
+export interface GradientStop {
+  offset: number;
+  color: AuthoredColor;
+}
+
+/** Gradient geometry is in the shape's own bounding box, 0..1 per axis. */
+export type Gradient =
+  | {
+      Linear: {
+        from: [number, number];
+        to: [number, number];
+        stops: GradientStop[];
+      };
+    }
+  | { Radial: { center: [number, number]; radius: number; stops: GradientStop[] } };
+
 export type NodeKind =
   | "Group"
   | {
@@ -78,6 +94,8 @@ export type NodeKind =
         shape: VectorShape;
         fill: AuthoredColor | null;
         stroke: Stroke | null;
+        /** Paints in place of `fill` when set. */
+        gradient: Gradient | null;
       };
     }
   | { Adjustment: Adjustment }
