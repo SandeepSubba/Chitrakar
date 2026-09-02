@@ -193,13 +193,12 @@ fn write_children(
             }
             NodeKind::Text(spec) => {
                 // SVG text is baseline-anchored and single-line; our node
-                // origin is the block's top and its text can hold newlines.
-                // So the first baseline is approximated from the size, and
-                // each line becomes a tspan a line-height further down.
-                // Alignment is not carried: it needs the block's measured
-                // width, which means the font metrics the renderer has and
-                // this crate does not.
-                let step = spec.size * 1.17 * spec.line_scale();
+                // origin is the block's top and its text can hold newlines
+                // and wrap. The renderer says where every line lands, so
+                // each becomes a tspan on its own baseline, aligned by
+                // text-anchor at the same x the raster aligns it at, and
+                // the font-size is the em the face is really scaled to.
+                let block = chitrakar_render::text::set(spec);
                 let track = spec.letter_spacing * spec.size;
                 let spacing = if track.abs() > 1e-4 {
                     format!(r#" letter-spacing="{track:.3}""#)
@@ -211,22 +210,32 @@ fn write_children(
                 } else {
                     ""
                 };
+                let (anchor, x) = match spec.align {
+                    chitrakar_doc::TextAlign::Left => ("", block.inset),
+                    chitrakar_doc::TextAlign::Center => {
+                        (r#" text-anchor="middle""#, block.inset + block.inner / 2.0)
+                    }
+                    chitrakar_doc::TextAlign::Right => {
+                        (r#" text-anchor="end""#, block.inset + block.inner)
+                    }
+                };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text font-family="{}, sans-serif" font-size="{}"{spacing}{style}{common} fill="{}">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{anchor}{common} fill="{}" xml:space="preserve">"#,
                     if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {
                         spec.font.as_str()
                     },
-                    spec.size,
+                    block.em,
                     color_hex(doc, spec.fill),
                 );
-                for (i, line) in spec.text.split('\n').enumerate() {
+                for (i, (line, _)) in block.lines.iter().enumerate() {
                     let _ = writeln!(
                         out,
-                        r#"{pad}  <tspan x="0" y="{:.2}">{}</tspan>"#,
-                        spec.size * 0.93 + i as f32 * step,
+                        r#"{pad}  <tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
+                        x,
+                        block.ascent + i as f32 * block.step,
                         escape_xml(line)
                     );
                 }
@@ -494,7 +503,14 @@ mod tests {
             "raster embedded"
         );
         assert!(svg.contains("a &lt; b"), "text XML-escaped");
-        assert!(svg.contains(r#"font-size="24""#));
+        // The size is the ascent-to-descent height; the font-size written
+        // is the em that scales the face to it, a little smaller.
+        let em: f32 = svg
+            .split(r#"font-size=""#)
+            .nth(1)
+            .and_then(|s| s.split('"').next()?.parse().ok())
+            .unwrap();
+        assert!(em > 19.0 && em < 24.0, "em {em} for a 24px block");
 
         // A rounded rectangle carries its radius as SVG's own rx.
         doc.apply(Command::AddNode {
@@ -546,9 +562,44 @@ mod tests {
             2,
             "two lines, two baselines: {baselines:?}"
         );
+        let step = chitrakar_render::text::set(&{
+            let mut spec = chitrakar_doc::TextSpec::new("one\ntwo", 20.0, RED);
+            spec.line_height = 1.5;
+            spec
+        })
+        .step;
         assert!(
-            (baselines[1] - baselines[0] - 20.0 * 1.17 * 1.5).abs() < 0.1,
-            "the second line sits a scaled line-height down: {baselines:?}"
+            (baselines[1] - baselines[0] - step).abs() < 0.05,
+            "the second line sits the renderer's line step down: {baselines:?} vs {step}"
+        );
+
+        // Alignment lands on text-anchor at the x the raster aligns at,
+        // and a wrap width folds the words into more tspans.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::text("t3", {
+                let mut spec = chitrakar_doc::TextSpec::new("the quick brown fox", 20.0, RED);
+                spec.align = chitrakar_doc::TextAlign::Center;
+                spec.width = 90.0;
+                spec
+            })),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        let block = svg
+            .lines()
+            .skip_while(|l| !l.contains(r#"text-anchor="middle""#))
+            .take_while(|l| !l.contains("</text>"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            block.contains(r#"<tspan x="45.00""#),
+            "centred in the 90px block: {block}"
+        );
+        assert!(
+            block.matches("<tspan").count() >= 2 && block.contains(">the quick<"),
+            "wrapped at the width, as typed: {block}"
         );
     }
 

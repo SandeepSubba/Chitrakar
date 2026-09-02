@@ -306,6 +306,42 @@ impl TextRaster {
     }
 }
 
+/// A block as it is set, for an exporter that places text itself: each
+/// line as the wrapping left it, with its shaped width; where the first
+/// baseline sits below the block's top and how far each next one is
+/// below it; the block's size, the width lines are aligned within and
+/// where that starts (a synthesized lean takes room on the left); and the
+/// em size the face is scaled to — all in document pixels.
+pub struct SetBlock {
+    pub lines: Vec<(String, f32)>,
+    pub width: f32,
+    pub height: f32,
+    pub ascent: f32,
+    pub step: f32,
+    pub inset: f32,
+    pub inner: f32,
+    pub em: f32,
+}
+
+pub fn set(spec: &TextSpec) -> SetBlock {
+    let l = layout(spec, 1.0);
+    let fonts = fonts_for(spec);
+    let px = spec.size.max(0.1);
+    let font = fonts.font.as_scaled(px);
+    SetBlock {
+        inner: l.width - l.room.0 - l.room.1,
+        inset: l.room.0,
+        lines: l.lines.into_iter().zip(l.widths).collect(),
+        width: l.width,
+        height: l.height,
+        ascent: font.ascent(),
+        step: line_step(&font, spec),
+        // `size` is the ascent-to-descent height; the em is what a font
+        // size means everywhere else.
+        em: px * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled(),
+    }
+}
+
 /// Natural (untransformed) size of a text block in document pixels.
 pub fn measure(spec: &TextSpec) -> (f32, f32) {
     measure_at(spec, 1.0)
@@ -871,6 +907,38 @@ mod tests {
             ["Twinless"],
             "a synthesized lean draws with the face alone"
         );
+    }
+
+    #[test]
+    fn a_set_block_says_where_its_lines_land() {
+        let mut block = spec("Hello there!\nhi", 20.0);
+        block.align = chitrakar_doc::TextAlign::Center;
+        let laid = set(&block);
+        assert_eq!(laid.lines.len(), 2);
+        assert_eq!(laid.lines[0].0, "Hello there!");
+        assert!(laid.lines[0].1 > laid.lines[1].1, "the long line is wider");
+        assert!(
+            (laid.width - laid.lines[0].1).abs() < 1e-3,
+            "the block is as wide as its widest line"
+        );
+        assert_eq!(laid.inset, 0.0);
+        assert!((laid.inner - laid.width).abs() < 1e-3);
+        assert!(laid.ascent > 0.0 && laid.ascent < 20.0);
+        assert!((laid.height - 2.0 * laid.step).abs() < 1e-3);
+        assert!(
+            laid.em > 20.0 * 0.8 && laid.em < 20.0,
+            "an em is a little under the ascent-to-descent height ({})",
+            laid.em
+        );
+        let (w, h) = measure(&block);
+        assert!((w - laid.width).abs() < 1e-3 && (h - laid.height).abs() < 1e-3);
+        // A wrap width holds the block to it and folds the words.
+        block.width = 60.0;
+        let folded = set(&block);
+        assert!(folded.lines.len() > 2 && (folded.width - 60.0).abs() < 1e-3);
+        // A synthesized lean insets the lines.
+        block.italic = true;
+        assert!(set(&block).inset > 0.0);
     }
 
     #[test]

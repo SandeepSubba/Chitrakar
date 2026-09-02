@@ -109,7 +109,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~155),
+- **Verify before committing:** `cargo test --workspace` (~156),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~312 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -144,9 +144,10 @@ without reading anything else.*
   clipboard), and images from other applications come *in*, by paste or
   by dropping a file on the canvas (a dropped .chitra opens); effects
   come in three kinds;
-  and export flattens them like everything else; SVG export writes each
-  typed line as its own tspan but cannot carry alignment or a wrap width,
-  both of which need font metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
+  and export flattens them like everything else; SVG export sets each
+  line the renderer set — wrapped, aligned by text-anchor, on its real
+  baseline, at the em the face is scaled to — though a synthesized
+  italic lean and a loaded font are the reader's to supply; a mask is an ellipse, a rectangle, or
   another shape handed down to the layer below, moved and resized on
   canvas but not reshaped there; PDF export is live where PDF has the
   words (paths, solid fills and strokes, groups, images, opacity, blend)
