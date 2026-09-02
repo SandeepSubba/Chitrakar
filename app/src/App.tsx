@@ -2427,6 +2427,24 @@ export function App() {
     );
   };
 
+  /** The picked layers' box as a PNG on the system clipboard, for pasting
+   * into other applications — the in-app clipboard carries layers, which
+   * nothing outside can read. Pasting it back here places it as an image,
+   * which is what a picture on the clipboard is. */
+  const copyAsImage = async () => {
+    if (!session || selectionSet.length === 0) return;
+    const box = unionBounds(selectionSet);
+    if (!box) return;
+    const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
+    try {
+      const png = session.export_png_at(1, x, y, w, h);
+      const blob = new Blob([png as BlobPart], { type: "image/png" });
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+    } catch (err) {
+      alert(`Copy as image: ${err}`);
+    }
+  };
+
   /** Open a .chitra from its bytes, whether chosen or dropped. */
   const openDocumentBytes = (bytes: Uint8Array) => {
     try {
@@ -2666,6 +2684,11 @@ export function App() {
             <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
               Copy
             </MenuItem>
+            {selectionSet.length > 0 && (
+              <MenuItem icon="copy" onClick={copyAsImage}>
+                Copy as image
+              </MenuItem>
+            )}
             <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
               Paste
             </MenuItem>

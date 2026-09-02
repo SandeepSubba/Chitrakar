@@ -111,7 +111,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~150),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~310 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~311 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -139,9 +139,11 @@ without reading anything else.*
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the in-app clipboard carries layers
-  between documents but not out to other applications — images from
-  other applications do come *in*, by paste or by dropping a file on the
-  canvas (a dropped .chitra opens); effects come in three kinds;
+  between documents; out to other applications a selection goes as a
+  picture (Edit › Copy as image puts a PNG of its box on the system
+  clipboard), and images from other applications come *in*, by paste or
+  by dropping a file on the canvas (a dropped .chitra opens); effects
+  come in three kinds;
   and export flattens them like everything else; SVG export writes each
   typed line as its own tspan but cannot carry alignment or a wrap width,
   both of which need font metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or

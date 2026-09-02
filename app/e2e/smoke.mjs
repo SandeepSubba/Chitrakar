@@ -2362,6 +2362,24 @@ assert(
     Math.abs(size[0] - 200) <= 1 && Math.abs(size[1] - 150) <= 1,
     `the selection export is the rect's own size (${size})`,
   );
+  // The same picture goes out to other applications through the system
+  // clipboard, as a PNG of the selection's box.
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://localhost:8123",
+  });
+  await menuClick("Edit", "Copy as image");
+  await page.waitForTimeout(400);
+  const onClipboard = await page.evaluate(async () => {
+    const items = await navigator.clipboard.read();
+    const item = items.find((i) => i.types.includes("image/png"));
+    if (!item) return null;
+    const bitmap = await createImageBitmap(await item.getType("image/png"));
+    return [bitmap.width, bitmap.height];
+  });
+  assert(
+    onClipboard && Math.abs(onClipboard[0] - 200) <= 1 && Math.abs(onClipboard[1] - 150) <= 1,
+    `Copy as image put a PNG of the selection on the system clipboard (${onClipboard})`,
+  );
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a
