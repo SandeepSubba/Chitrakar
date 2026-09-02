@@ -80,7 +80,7 @@ assert(await page.isVisible("text=Drag on the canvas"), "empty layers hint");
 // 1b. Chrome: tools are glyphs, document actions live in menus, and a menu
 // closes the ways a menu is expected to.
 assert(
-  (await page.locator('button[title="Rect"] svg').count()) === 1,
+  (await page.locator('button[aria-label="Rect"] svg').count()) === 1,
   "tools render an icon, not a letter",
 );
 assert(
@@ -109,8 +109,27 @@ assert(
   "escape closes the open menu",
 );
 
+// 1c. Tool shortcuts: a bare letter switches tools, but not while typing —
+// a text layer's content and a layer's name both contain those letters.
+await page.keyboard.press("e");
+await page.waitForTimeout(100);
+assert(
+  await page.locator('button[aria-label="Ellipse"]').evaluate((el) =>
+    el.classList.contains("active"),
+  ),
+  "E selects the ellipse tool",
+);
+await page.keyboard.press("v");
+await page.waitForTimeout(100);
+assert(
+  await page.locator('button[aria-label="Move"]').evaluate((el) =>
+    el.classList.contains("active"),
+  ),
+  "V returns to move",
+);
+
 // 2. Draw a rect with the Rect tool.
-await page.click('button[title="Rect"]');
+await page.click('button[aria-label="Rect"]');
 const box = await page.locator("#engine-canvas").boundingBox();
 const sx = box.width / 1280, sy = box.height / 720;
 const drag = async (x0, y0, x1, y1) => {
@@ -188,7 +207,7 @@ for (let i = 0; i < 4; i++) await page.keyboard.press("Control+z");
 await page.waitForTimeout(200);
 
 // 3. Draw an ellipse overlapping it.
-await page.click('button[title="Ellipse"]');
+await page.click('button[aria-label="Ellipse"]');
 await drag(300, 150, 700, 500);
 assert(await page.isVisible("text=Ellipse 2"), "second layer row");
 
@@ -247,7 +266,7 @@ await page.waitForTimeout(200);
 assert((await page.locator(".panel ul li", { hasText: "Ellipse 2" }).count()) === 1, "redo restored ellipse");
 
 // 7. Move tool: drag the rect, top-left corner vacates.
-await page.click('button[title="Move"]');
+await page.click('button[aria-label="Move"]');
 await drag(150, 150, 350, 350); // grabs rect (ellipse doesn't cover 150,150)
 px = await canvasPixel(101, 101);
 assert(px[3] === 0, "moved rect vacated original corner");
@@ -330,7 +349,7 @@ await page.waitForTimeout(150);
 // 8h. Live move preview: pixels move BEFORE mouseup; Escape cancels.
 // State: opaque rect on top spans (300,300)-(600,500). Probe (310,480) is
 // inside the rect but outside the ellipse.
-await page.click('button[title="Move"]');
+await page.click('button[aria-label="Move"]');
 const box2 = await page.locator("#engine-canvas").boundingBox();
 const sx2 = box2.width / 1280, sy2 = box2.height / 720;
 const toScreen = (x, y) => [box2.x + x * sx2, box2.y + y * sy2];
@@ -395,11 +414,21 @@ assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
 
 await page.screenshot({ path: join(OUT, "editor3.png") });
 // 8l. Rename via double-click.
-await page.locator(".panel ul li", { hasText: "Rect 1" }).locator("span").first().dblclick();
+await page.locator(".panel ul li", { hasText: "Rect 1" }).locator(".layer-name").dblclick();
 await page.locator('input[aria-label="Layer name"]').fill("Hero");
 await page.keyboard.press("Enter");
 await page.waitForTimeout(150);
 assert(await page.isVisible("text=Hero"), "layer renamed inline");
+assert(
+  await page.locator('button[aria-label="Move"]').evaluate((el) =>
+    el.classList.contains("active"),
+  ),
+  "typing a layer name did not switch tools under the cursor",
+);
+assert(
+  (await page.locator(".panel ul li .layer-kind-icon svg").count()) > 0,
+  "layer rows carry a kind glyph",
+);
 
 // 8l2. Masks: inscribed ellipse mask hides the rect's corners, invert
 // flips it, remove restores — all non-destructive.
@@ -438,7 +467,7 @@ px = await canvasPixel(605, 505);
 assert(px[3] === 0, "undo removed the blur layer");
 
 // 8n. Pen tool: click a triangle closed -> filled path object.
-await page.click('button[title="Pen"]');
+await page.click('button[aria-label="Pen"]');
 const penClick = async (x, y) => {
   await page.mouse.click(box.x + x * sx, box.y + y * sy);
   await page.waitForTimeout(80);
@@ -477,7 +506,7 @@ await penClick(700, 40);
 await penClick(760, 100);
 await page.keyboard.press("Escape");
 await page.waitForTimeout(150);
-await page.click('button[title="Move"]');
+await page.click('button[aria-label="Move"]');
 assert(
   (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
   "escape discarded the in-progress path",
@@ -623,7 +652,7 @@ const inkCount = (x0, y0, x1, y1) =>
   }, [x0, y0, x1, y1]);
 
 assert((await inkCount(740, 590, 1100, 710)) === 0, "text target area empty");
-await page.click('button[title="Text"]');
+await page.click('button[aria-label="Text"]');
 await page.mouse.click(box.x + 750 * sx, box.y + 600 * sy);
 await page.waitForTimeout(300);
 assert(
@@ -677,7 +706,7 @@ console.log("ok: SVG export contains live vector markup");
 
 // 9. CMYK doc smoke: new doc, draw, still renders.
 await menuClick("File", "New CMYK document");
-await page.click('button[title="Rect"]');
+await page.click('button[aria-label="Rect"]');
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
 assert(px[3] === 255, "CMYK document renders shapes");
@@ -705,7 +734,7 @@ assert(
 );
 
 // 9c. CMYK fills expose ink sliders; cranking K darkens the shape.
-await page.click('button[title="Move"]');
+await page.click('button[aria-label="Move"]');
 await page.mouse.click(box.x + 100 * sx, box.y + 100 * sy);
 await page.waitForTimeout(150);
 assert(
@@ -736,7 +765,7 @@ await page.locator(".fill-swatch").evaluate((el) => {
   setter.call(el, "#0000ff");
   el.dispatchEvent(new Event("input", { bubbles: true }));
 });
-await page.click('button[title="Rect"]');
+await page.click('button[aria-label="Rect"]');
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
 assert(px[2] === 255 && px[0] === 0, "pure blue before proofing");

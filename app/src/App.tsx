@@ -62,6 +62,37 @@ function seedHandles(
 }
 
 const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Text"] as const;
+/** One letter per tool, the convention every editor shares. `v` for Move
+ * because that is where the muscle memory is; `m` too, since the tool is
+ * called Move here. */
+const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
+  v: "Move",
+  m: "Move",
+  r: "Rect",
+  e: "Ellipse",
+  p: "Pen",
+  t: "Text",
+};
+
+/** A glyph per layer kind, so the stack is scannable without reading the
+ * type label at the end of every row. */
+const KIND_ICONS: Record<string, IconName> = {
+  group: "group-layer",
+  vector: "rect",
+  raster: "image",
+  adjustment: "adjust",
+  filter: "filter",
+  text: "text",
+};
+
+const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
+  Move: "V",
+  Rect: "R",
+  Ellipse: "E",
+  Pen: "P",
+  Text: "T",
+};
+
 const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Move: "move",
   Rect: "rect",
@@ -314,9 +345,24 @@ export function App() {
     [session, layers, fill, cmyk, run],
   );
 
-  // Keyboard: undo/redo, space-to-pan, escape-to-cancel.
+  // Keyboard: tool shortcuts, undo/redo, space-to-pan, escape-to-cancel.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      // A single letter is a tool switch, but only when it isn't being typed
+      // into something: a text layer's content is edited in a textarea and a
+      // layer is renamed in an input, and both contain the letters below.
+      const typing =
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement;
+      if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const shortcut = TOOL_KEYS[e.key.toLowerCase()];
+        if (shortcut) {
+          e.preventDefault();
+          setTool(shortcut);
+          setPenPoints([]);
+        }
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -1156,7 +1202,7 @@ export function App() {
                 setTool(t);
                 setPenPoints([]);
               }}
-              title={t}
+              title={`${t} (${TOOL_HINT[t]})`}
               aria-label={t}
             >
               <Icon name={TOOL_ICONS[t]} size={20} />
@@ -1456,8 +1502,11 @@ export function App() {
                   aria-pressed={l.visible}
                   title={l.visible ? "Hide layer" : "Show layer"}
                 >
-                  {l.visible ? "👁" : "–"}
+                  <Icon name={l.visible ? "eye" : "eyeOff"} size={15} />
                 </button>
+                <span className="layer-kind-icon" title={l.kind}>
+                  <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
+                </span>
                 {renaming?.id === l.id ? (
                   <input
                     className="rename"
@@ -1476,7 +1525,7 @@ export function App() {
                   />
                 ) : (
                   <span
-                    className={l.visible ? "" : "muted"}
+                    className={l.visible ? "layer-name" : "layer-name muted"}
                     onDoubleClick={() =>
                       setRenaming({ id: l.id, value: l.name })
                     }
@@ -1484,10 +1533,11 @@ export function App() {
                     {l.name}
                   </span>
                 )}
-                <span className="kind">
-                  {l.has_mask ? "◐ " : ""}
-                  {l.kind}
-                </span>
+                {l.has_mask && (
+                  <span className="kind" title="This layer has a mask">
+                    <Icon name="mask" size={14} />
+                  </span>
+                )}
               </li>
             ))}
             {layers.length === 0 && (

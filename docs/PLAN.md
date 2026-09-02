@@ -39,7 +39,7 @@ without reading anything else.*
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~90),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~108 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~112 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -56,7 +56,9 @@ without reading anything else.*
 - **Chrome:** document actions live in a File/Edit/View menu bar; the tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is
-  reserved for state — active tool, open menu, live toggle.
+  reserved for state — active tool, open menu, live toggle, selected layer.
+  Tools have single-letter shortcuts (V/M, R, E, P, T), suppressed while
+  typing. Layer rows carry a kind glyph and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add

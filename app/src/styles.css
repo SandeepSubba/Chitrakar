@@ -212,6 +212,10 @@ body {
   gap: 0.4rem;
 }
 
+.panel-head {
+  margin-bottom: 0.35rem;
+}
+
 .panel-head h2 {
   flex: 1;
 }
@@ -240,7 +244,8 @@ body {
 }
 
 .panel li.selected {
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .panel li.multi {
@@ -297,9 +302,11 @@ body {
 }
 
 .panel .kind {
+  display: grid;
+  place-items: center;
   margin-left: auto;
-  font-size: 0.7rem;
-  color: var(--muted);
+  color: var(--accent);
+  flex: none;
 }
 
 .panel li.empty {
@@ -361,27 +368,33 @@ body {
 
 .mask-button {
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 7px;
   background: none;
   color: var(--text);
-  font-size: 0.75rem;
-  padding: 0.2rem 0.5rem;
+  font-size: 0.76rem;
+  padding: 0.3rem 0.6rem;
   cursor: pointer;
   margin-left: auto;
 }
 
 .mask-button:hover {
-  background: var(--border);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .add-adjustment {
   background: none;
-  color: var(--text);
+  color: var(--muted);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  font-size: 0.75rem;
-  padding: 0.15rem 0.2rem;
-  width: 3.4rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.25rem;
+  width: 3.6rem;
+  cursor: pointer;
+}
+
+.add-adjustment:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
 }
 
 .panel .rename {
@@ -565,21 +578,56 @@ body {
 .panel li {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.3rem 0.2rem;
-  border-radius: 4px;
+  gap: 0.45rem;
+  padding: 0.32rem 0.35rem;
+  border-radius: 7px;
+  font-size: 0.84rem;
+  cursor: default;
 }
 
 .panel li:hover {
-  background: var(--border);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
+/* Row furniture stays quiet until the row matters: the eye and the kind
+   glyph are muted, and lift to full contrast on hover or selection. */
 .visibility {
+  display: grid;
+  place-items: center;
   border: none;
+  border-radius: 5px;
   background: none;
-  color: var(--text);
+  color: var(--muted);
   cursor: pointer;
-  width: 1.6rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  flex: none;
+}
+
+.visibility:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.layer-kind-icon {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  flex: none;
+}
+
+.panel li:hover .visibility,
+.panel li:hover .layer-kind-icon,
+.panel li.selected .visibility,
+.panel li.selected .layer-kind-icon {
+  color: var(--text);
+}
+
+.layer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .muted {

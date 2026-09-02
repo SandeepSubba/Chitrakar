@@ -27,7 +27,13 @@ export type IconName =
   | "lower"
   | "group"
   | "ungroup"
-  | "trash";
+  | "trash"
+  | "eye"
+  | "eyeOff"
+  | "mask"
+  | "group-layer"
+  | "adjust"
+  | "filter";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // Tools
@@ -156,6 +162,40 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
       <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
+    </>
+  ),
+  // Layer kinds and row state
+  eye: (
+    <>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </>
+  ),
+  eyeOff: (
+    <>
+      <path d="M4 4l16 16" />
+      <path d="M9.6 6.1A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 4" />
+      <path d="M6.3 8.1A17.6 17.6 0 0 0 2.5 12S6 18.5 12 18.5c1.4 0 2.6-.3 3.7-.8" />
+    </>
+  ),
+  mask: (
+    <>
+      <circle cx="12" cy="12" r="7.5" />
+      <path d="M12 4.5a7.5 7.5 0 0 0 0 15z" fill="currentColor" stroke="none" />
+    </>
+  ),
+  "group-layer": <path d="M3.5 18.5V6.5A1 1 0 0 1 4.5 5.5h4l2 2.5h8a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-14a1 1 0 0 1-1-1z" />,
+  adjust: (
+    <>
+      <path d="M5 7h14M5 12h14M5 17h14" />
+      <circle cx="9" cy="7" r="2" />
+      <circle cx="15" cy="12" r="2" />
+      <circle cx="8" cy="17" r="2" />
+    </>
+  ),
+  filter: (
+    <>
+      <path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 2v-7.4z" />
     </>
   ),
   trash: (
