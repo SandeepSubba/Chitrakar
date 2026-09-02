@@ -147,6 +147,14 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Copy a node and its subtree just above itself; returns the copy's id.
+    pub fn duplicate_node(&mut self, id: f64) -> Result<f64, JsError> {
+        self.inner
+            .duplicate_node(NodeId(id as u64))
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Dissolve a group into its parent (one undo step).
     pub fn ungroup_node(&mut self, id: f64) -> Result<(), JsError> {
         self.inner.ungroup_node(NodeId(id as u64)).map_err(to_js)

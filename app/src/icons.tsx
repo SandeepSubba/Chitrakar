@@ -28,6 +28,7 @@ export type IconName =
   | "group"
   | "ungroup"
   | "brush"
+  | "duplicate"
   | "trash"
   | "eye"
   | "eyeOff"
@@ -203,6 +204,12 @@ const PATHS: Record<IconName, JSX.Element> = {
   filter: (
     <>
       <path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 2v-7.4z" />
+    </>
+  ),
+  duplicate: (
+    <>
+      <rect x="8.5" y="8.5" width="11" height="11" rx="1.5" />
+      <path d="M15.5 5.5h-11v11" />
     </>
   ),
   trash: (

@@ -214,6 +214,19 @@ function pointToSegment(
   return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
 }
 
+/** Is this event going into something that takes text? Only then should a
+ * bare letter or Delete mean a character rather than a shortcut. A checkbox
+ * or a slider is focusable and ignores both, so treating every input as
+ * text entry silently disables the shortcuts after any panel click. */
+function isTextEntry(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  if (!(target instanceof HTMLInputElement)) return false;
+  return ["text", "number", "search", "email", "url", "tel", "password"].includes(
+    target.type,
+  );
+}
+
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
 /** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
 const HANDLE_CORNER = [0, 1, 3, 2];
@@ -503,10 +516,7 @@ export function App() {
       // A single letter is a tool switch, but only when it isn't being typed
       // into something: a text layer's content is edited in a textarea and a
       // layer is renamed in an input, and both contain the letters below.
-      const typing =
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement ||
-        e.target instanceof HTMLSelectElement;
+      const typing = isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
       if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
         const shortcut = TOOL_KEYS[e.key.toLowerCase()];
         if (shortcut) {
@@ -978,6 +988,25 @@ export function App() {
     setSelected(null);
   };
 
+  // Layer shortcuts get their own listener, declared after the actions it
+  // calls: a closure over a `const` declared further down still throws
+  // when it runs, and TypeScript does not flag that inside a callback.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const typing = isTextEntry(e.target);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        duplicateSelected();
+      }
+      if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        deleteSelected();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   /** All picked layers: primary selection plus ctrl-clicked extras. */
   const selectionSet =
     selected === null
@@ -1361,6 +1390,20 @@ export function App() {
       selectedKind = null;
     }
   }
+
+  /** Copy the selected layer and its contents, and select the copy — the
+   * copy is what you want to move next. */
+  const duplicateSelected = () => {
+    if (!session || selected === null) return;
+    try {
+      const copy = session.duplicate_node(selected);
+      setSelected(copy);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Duplicate: ${err}`);
+    }
+  };
 
   /** Attach an ellipse mask inscribed in the layer's current bounds. */
   const addMask = () => {
@@ -2005,9 +2048,17 @@ export function App() {
               <Icon name="ungroup" size={16} />
             </button>
             <button
+              onClick={duplicateSelected}
+              disabled={selected === null}
+              title="Duplicate layer (Ctrl+D)"
+              aria-label="Duplicate layer"
+            >
+              <Icon name="duplicate" size={16} />
+            </button>
+            <button
               onClick={deleteSelected}
               disabled={selected === null}
-              title="Delete selected layer"
+              title="Delete selected layer (Del)"
               aria-label="Delete selected layer"
             >
               <Icon name="trash" size={16} />

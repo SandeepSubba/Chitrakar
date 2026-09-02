@@ -556,6 +556,54 @@ px = await canvasPixel(302, 400); // 2px inside the rect's left edge
 assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
 
 await page.screenshot({ path: join(OUT, "editor3.png") });
+// 8k2. Duplicate and delete: the copy lands above the original, offset so
+// it is visible, and Delete removes a layer from the keyboard.
+{
+  const before = await page.locator(".panel ul li").count();
+  await page.keyboard.press("Control+d");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li").count()) === before + 1,
+    "Ctrl+D added a layer",
+  );
+  assert(
+    (await page.locator(".panel ul li", { hasText: "copy" }).count()) === 1,
+    "and named it as a copy",
+  );
+  // The copy is selected and nudged clear of the original.
+  const copyRow = page.locator(".panel ul li", { hasText: "copy" });
+  assert(
+    await copyRow.evaluate((el) => el.classList.contains("selected")),
+    "the copy is what is selected afterwards",
+  );
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li").count()) === before &&
+      (await page.locator(".panel ul li", { hasText: "copy" }).count()) === 0,
+    "Delete removed it again",
+  );
+  // Both were single history steps.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "copy" }).count()) === 1,
+    "undo brought the copy back in one step",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "copy" }).count()) === 0,
+    "and another undo removed the duplicate in one step",
+  );
+  // Put the selection back where the following steps expect it: deleting
+  // cleared it, and undo restores nodes rather than what was selected.
+  await page.locator(".panel ul li", { hasText: "Hero" }).or(
+    page.locator(".panel ul li", { hasText: "Rect 1" }),
+  ).first().click();
+  await page.waitForTimeout(250);
+}
+
 // 8l. Rename via double-click.
 await page.locator(".panel ul li", { hasText: "Rect 1" }).locator(".layer-name").dblclick();
 await page.locator('input[aria-label="Layer name"]').fill("Hero");

@@ -16,6 +16,9 @@ use serde::Serialize;
 
 pub use chitrakar_color::ColorMode;
 pub use chitrakar_doc::{Command, Document, History, Node, NodeId, NodeKind, Transform};
+
+/// How far a duplicate is nudged from its original, in document units.
+const DUPLICATE_OFFSET: f32 = 12.0;
 pub use chitrakar_render::{Bounds, ClipRect, Surface};
 
 #[derive(Debug)]
@@ -349,6 +352,65 @@ impl Session {
         );
         self.apply_labeled(Command::Batch(cmds), Some(format!("Group into {name}")))?;
         Ok(group_id)
+    }
+
+    /// Copy a node and everything under it, placed just above the original.
+    /// One undo step.
+    ///
+    /// A node carries no children of its own — the tree lives in the
+    /// document — so the copy is a walk that emits an AddNode per node.
+    /// Ids are allocated in order as the batch applies, which is what lets
+    /// each child name the parent that will exist by the time it is added.
+    /// Rasters keep pointing at the same resource: content is immutable and
+    /// shared, so a copy costs no pixels.
+    pub fn duplicate_node(&mut self, id: NodeId) -> Result<NodeId, EngineError> {
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot duplicate the root".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .unwrap_or(0)
+            + 1;
+        let mut next = self.doc.peek_next_id().0;
+        let mut cmds = Vec::new();
+        let copy_id = self.emit_copy(id, parent, index, true, &mut next, &mut cmds)?;
+        let label = format!("Duplicate {}", self.doc.node(id)?.name);
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(copy_id)
+    }
+
+    fn emit_copy(
+        &self,
+        src: NodeId,
+        parent: NodeId,
+        index: usize,
+        rename: bool,
+        next: &mut u64,
+        cmds: &mut Vec<Command>,
+    ) -> Result<NodeId, EngineError> {
+        let mut node = self.doc.node(src)?.clone();
+        if rename {
+            node.name = format!("{} copy", node.name);
+            // Offset the copy so it is visible rather than hiding exactly
+            // behind the original.
+            node.transform.e += DUPLICATE_OFFSET;
+            node.transform.f += DUPLICATE_OFFSET;
+        }
+        let new_id = NodeId(*next);
+        *next += 1;
+        cmds.push(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        });
+        for (i, child) in self.doc.children_of(src)?.to_vec().iter().enumerate() {
+            self.emit_copy(*child, new_id, i, false, next, cmds)?;
+        }
+        Ok(new_id)
     }
 
     /// Dissolve a group: its children move to its position in the parent,
@@ -1029,6 +1091,74 @@ mod tests {
             session.document().node(group).map(|n| &n.kind),
             Ok(NodeKind::Group)
         ));
+    }
+
+    #[test]
+    fn duplicating_a_group_copies_everything_under_it() {
+        // A node carries no children, so a duplicate is a walk. What makes
+        // it worth testing is that the copy's children hang off the copy —
+        // not off the original — and that the whole thing is one undo step.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let group = session.group_nodes(&[a, b], "pair").unwrap();
+
+        let copy = session.duplicate_node(group).unwrap();
+        assert_ne!(copy, group);
+        let kids = session.document().children_of(copy).unwrap().to_vec();
+        assert_eq!(kids.len(), 2, "both children were copied");
+        assert!(
+            !kids.contains(&a) && !kids.contains(&b),
+            "the copy has its own children, not the originals"
+        );
+        assert_eq!(
+            session.document().children_of(group).unwrap(),
+            &[a, b],
+            "and the original is untouched"
+        );
+        assert_eq!(session.document().node(copy).unwrap().name, "pair copy");
+        assert_cache_matches_fresh(&mut session);
+
+        // Sits just above the original, offset so it is visible.
+        let root = session.document().root();
+        let top = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(
+            top.iter().position(|n| *n == copy),
+            top.iter().position(|n| *n == group).map(|i| i + 1),
+        );
+        let (ob, cb) = (
+            session.bounds_of(group).unwrap(),
+            session.bounds_of(copy).unwrap(),
+        );
+        assert!(cb[0] > ob[0] && cb[1] > ob[1], "the copy is nudged clear");
+
+        // One undo takes the whole subtree away again.
+        session.undo().unwrap();
+        assert!(session.document().node(copy).is_err());
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn duplicating_a_raster_shares_its_pixels() {
+        // Resources are content-addressed and immutable, so a copy costs no
+        // pixels — it points at the same entry.
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let png = {
+            let pixels = vec![255u8, 0, 0, 255];
+            chitrakar_codecs::encode_png(1, 1, &pixels).unwrap()
+        };
+        session.place_image(&png, "dot.png").unwrap();
+        let root = session.document().root();
+        let img = session.document().children_of(root).unwrap()[0];
+        let before = session.document().resources().count();
+
+        session.duplicate_node(img).unwrap();
+        assert_eq!(
+            session.document().resources().count(),
+            before,
+            "duplicating a raster adds no new resource"
+        );
     }
 
     #[test]

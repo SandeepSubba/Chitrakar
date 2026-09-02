@@ -25,7 +25,8 @@ without reading anything else.*
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
   filter layers (gaussian blur, sharpen), masks on any layer, groups,
-  reorder, opacity/blend, rename, labelled history with jump-to-state.
+  reorder, duplicate (subtree and all), delete, opacity/blend, rename,
+  labelled history with jump-to-state.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK.
@@ -43,9 +44,9 @@ without reading anything else.*
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~98),
+- **Verify before committing:** `cargo test --workspace` (~100),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~155 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~162 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -67,7 +68,10 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
-- **Known limits, deliberately:** masks aren't editable on-canvas; PDF/TIFF
+- **Known limits, deliberately:** no clipboard yet (duplicate covers the
+  common case; cross-document paste needs a serialized subtree); undo after
+  a delete restores the layer but not the selection; masks aren't editable
+  on-canvas; PDF/TIFF
   embed the composite as an image rather than live vectors.
 
 ---
