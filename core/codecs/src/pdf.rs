@@ -253,6 +253,10 @@ impl<'a> Page<'a> {
     fn draw_page(&mut self) -> Result<(), PdfError> {
         let root = self.doc.root();
         let children = self.doc.children_of(root)?.to_vec();
+        // Layers that go as pixels, waiting to be rendered together: a run
+        // of them composites the same whether drawn one by one or as one
+        // picture, so long as each lands with the default blend.
+        let mut pending: Vec<NodeId> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
             let node = self.doc.node(child)?;
             if !node.visible || node.opacity <= 0.0 {
@@ -262,13 +266,32 @@ impl<'a> Page<'a> {
                 NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                     // Everything under it changes, so everything under it
                     // — what was drawn so far — becomes one picture.
+                    pending.clear();
                     self.content.clear();
                     let shown = children[..=i].to_vec();
-                    self.place_rendered(&shown)?;
+                    self.place_rendered(&shown, BlendMode::Normal)?;
                 }
-                _ if self.is_live(child)? => self.draw_node(child)?,
-                _ => self.place_rendered(&[child])?,
+                _ if self.is_live(child)? => {
+                    self.flush(&mut pending)?;
+                    self.draw_node(child)?;
+                }
+                _ if node.blend == BlendMode::Normal => pending.push(child),
+                // A blend reads what is under it, so the layer is rendered
+                // by itself and lands with that blend.
+                _ => {
+                    self.flush(&mut pending)?;
+                    self.place_rendered(&[child], node.blend)?;
+                }
             }
+        }
+        self.flush(&mut pending)?;
+        Ok(())
+    }
+
+    fn flush(&mut self, pending: &mut Vec<NodeId>) -> Result<(), PdfError> {
+        if !pending.is_empty() {
+            self.place_rendered(pending, BlendMode::Normal)?;
+            pending.clear();
         }
         Ok(())
     }
@@ -283,7 +306,10 @@ impl<'a> Page<'a> {
         }
         Ok(match &node.kind {
             NodeKind::Group => {
-                if node.opacity < 1.0 {
+                // Less than full opacity, or a blend, applies to the
+                // group's composite; its children drawn one by one would
+                // each apply it against each other.
+                if node.opacity < 1.0 || node.blend != BlendMode::Normal {
                     return Ok(false);
                 }
                 for &child in self.doc.children_of(id)? {
@@ -303,8 +329,10 @@ impl<'a> Page<'a> {
     }
 
     /// Render the page with only `shown` of the top-level layers visible
-    /// and place what comes out as an image, trimmed to its ink.
-    fn place_rendered(&mut self, shown: &[NodeId]) -> Result<(), PdfError> {
+    /// and place what comes out as an image, trimmed to its ink, landing
+    /// with `blend`. Opacity is already in the pixels; a blend is not, as
+    /// there was nothing under them to blend with.
+    fn place_rendered(&mut self, shown: &[NodeId], blend: BlendMode) -> Result<(), PdfError> {
         let mut alone = self.doc.clone();
         let root = alone.root();
         for id in alone.children_of(root)?.to_vec() {
@@ -334,9 +362,13 @@ impl<'a> Page<'a> {
             }
         }
         let name = self.image(cw as u32, ch as u32, &rgba)?;
+        let gs = self
+            .gstate(1.0, 1.0, blend)
+            .map(|gs| format!("/{gs} gs\n"))
+            .unwrap_or_default();
         let _ = writeln!(
             self.content,
-            "q\n{cw} 0 0 {} {x0} {} cm\n/{name} Do\nQ",
+            "q\n{gs}{cw} 0 0 {} {x0} {} cm\n/{name} Do\nQ",
             -(ch as i32),
             y1
         );
@@ -481,12 +513,8 @@ impl<'a> Page<'a> {
         }
         match &node.kind {
             NodeKind::Group => {
-                // Full opacity by construction (see is_live); a blend still
-                // applies to each child, which for a group that needs no
-                // isolating is the same thing.
-                if let Some(gs) = self.gstate(1.0, 1.0, node.blend) {
-                    let _ = writeln!(self.content, "/{gs} gs");
-                }
+                // Full opacity and the default blend by construction (see
+                // is_live): nothing to set, just the children in order.
                 for &child in self.doc.children_of(id)? {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 {
@@ -1247,9 +1275,68 @@ mod tests {
             !content.contains("0 0 10 10 re"),
             "the gradient rect is not drawn as a path"
         );
+        assert_eq!(
+            content.matches(" Do").count(),
+            2,
+            "the image, then the text and the gradient rect as one picture: {content}"
+        );
+    }
+
+    #[test]
+    fn pixels_keep_their_blend_and_a_run_of_them_is_one_picture() {
+        let mut doc = everything();
+        // Two more text blocks straight after the first: all three are
+        // one picture rather than three renders of the page.
+        for (i, at) in [[10.0, 62.0], [40.0, 62.0]].iter().enumerate() {
+            add(
+                &mut doc,
+                chitrakar_doc::Node::text(
+                    &format!("t{i}"),
+                    chitrakar_doc::TextSpec::new("x", 12.0, BLUE),
+                ),
+                *at,
+            );
+        }
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert_eq!(
+            content.matches(" Do").count(),
+            2,
+            "the placed image, then one picture of three text blocks: {content}"
+        );
+        // A multiplied text block reads what is under it, so it is its own
+        // picture and lands with the blend.
+        let root = doc.root();
+        let last = *doc.children_of(root).unwrap().last().unwrap();
+        doc.apply(Command::SetBlendMode {
+            id: last,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert_eq!(content.matches(" Do").count(), 3, "{content}");
         assert!(
-            content.matches(" Do").count() == 3,
-            "image, text, gradient: {content}"
+            content.contains("gs\n") && String::from_utf8_lossy(&pdf).contains("/BM /Multiply"),
+            "{content}"
+        );
+        let multiplied = content.rfind(" Do").unwrap();
+        let gs = content[..multiplied].rfind("/GS").unwrap();
+        assert!(
+            content[gs..multiplied].contains(" gs\n"),
+            "the blend is set right before it"
+        );
+        // A multiplied group composites as one, so it goes as pixels too.
+        let group = doc.children_of(root).unwrap()[3];
+        doc.apply(Command::SetBlendMode {
+            id: group,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        assert!(
+            !content.contains("6 0 m\n14 0 l"),
+            "the rounded rect is no longer a path"
         );
     }
 
