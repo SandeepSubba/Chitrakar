@@ -110,7 +110,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~159),
+- **Verify before committing:** `cargo test --workspace` (~160),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~316 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -123,10 +123,9 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: underline/strike-through, text on a path, font subsetting
-     for the PDF (a whole DejaVu face is ~380KB deflated per file), and
-     another review pass over the last stretch of commits (each pass so
-     far has found real defects).
+  3. Depth: underline/strike-through, text on a path, and another
+     review pass over the last stretch of commits (each pass so far has
+     found real defects).
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
@@ -153,7 +152,7 @@ without reading anything else.*
   another shape handed down to the layer below, moved and resized on
   canvas but not reshaped there; PDF export is live where PDF has the
   words (paths, solid fills and strokes, groups, images, opacity, blend,
-  text in embedded faces — whole files, not subsets) and the engine's
+  text in embedded faces, subset to the glyphs used) and the engine's
   pixels where it does not (gradients, effects, masks, varying strokes;
   an adjustment or filter flattens what is under it), and TIFF is the
   composite; a boolean
@@ -380,7 +379,8 @@ chitrakar/
   face embedded once as a CID font addressed by glyph id, glyphs where
   the shaper put them so kerning and ligatures survive, a synthesized
   italic as a text-matrix skew, and a ToUnicode map so the words can be
-  found and copied — checked by reading them back through Ghostscript),
+  found and copied — checked by reading them back through Ghostscript;
+  the face travels as a TrueType subset of the glyphs used, ids kept),
   and the engine's pixels — oversampled towards 300 dpi and trimmed to
   their ink — for what PDF cannot say; with a press
   profile authored ink is written as ink, sRGB is separated through the

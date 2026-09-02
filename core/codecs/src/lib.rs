@@ -7,6 +7,7 @@
 
 pub mod container;
 pub mod pdf;
+mod subset;
 pub mod svg;
 pub mod tiff_export;
 

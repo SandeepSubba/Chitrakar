@@ -696,12 +696,17 @@ impl<'a> Page<'a> {
             }
         };
         for g in glyphs {
-            if !g.text.is_empty() {
-                self.fonts[at]
-                    .unicode
-                    .entry(g.id)
-                    .or_insert_with(|| g.text.clone());
-            }
+            // Every glyph used is noted, so the subset keeps it; only
+            // those standing for text get a ToUnicode entry.
+            self.fonts[at]
+                .unicode
+                .entry(g.id)
+                .and_modify(|t| {
+                    if t.is_empty() {
+                        *t = g.text.clone();
+                    }
+                })
+                .or_insert_with(|| g.text.clone());
         }
         self.fonts[at].resource.clone()
     }
@@ -731,6 +736,11 @@ impl<'a> Page<'a> {
         } else {
             name
         };
+        // Only the glyphs used travel, when the file is one that can be
+        // cut down; ids stay put, so the identity map still holds.
+        let used: std::collections::BTreeSet<u16> = unicode.keys().copied().collect();
+        let subset = crate::subset::subset_ttf(bytes, &used);
+        let bytes = subset.as_deref().unwrap_or(bytes);
         let file = self.push(&stream_object(
             &format!("<< /Length1 {} /Filter /FlateDecode", bytes.len()),
             &deflate(bytes)?,
@@ -748,17 +758,19 @@ impl<'a> Page<'a> {
             )
             .as_bytes(),
         );
-        // Every glyph's advance, so a reader lays the text out as set
+        // The used glyphs' advances, so a reader lays the text out as set
         // even where it reflows it.
         let mut widths = String::new();
-        for g in 0..count.min(u16::MAX as usize) {
-            let _ = write!(widths, "{} ", num(self.fonts[at].face.advance(g as u16)));
+        for &g in unicode.keys() {
+            if (g as usize) < count {
+                let _ = write!(widths, "{g} [{}] ", num(self.fonts[at].face.advance(g)));
+            }
         }
         let cid = self.push(
             format!(
                 "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} \
                  /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
-                 /FontDescriptor {descriptor} 0 R /DW 1000 /W [0 [{}]] /CIDToGIDMap /Identity >>",
+                 /FontDescriptor {descriptor} 0 R /DW 1000 /W [{}] /CIDToGIDMap /Identity >>",
                 widths.trim_end()
             )
             .as_bytes(),
@@ -769,7 +781,8 @@ impl<'a> Page<'a> {
              /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
              1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
         );
-        for chunk in unicode.iter().collect::<Vec<_>>().chunks(100) {
+        let mapped: Vec<(&u16, &String)> = unicode.iter().filter(|(_, t)| !t.is_empty()).collect();
+        for chunk in mapped.chunks(100) {
             let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
             for (gid, text) in chunk {
                 let utf16: String = text.encode_utf16().map(|u| format!("{u:04X}")).collect();
@@ -1719,6 +1732,11 @@ mod tests {
         assert!(
             content_of(&pdf).contains("1 0 0.2 -1 "),
             "the lean is in the text matrix"
+        );
+        assert!(
+            pdf.len() < 60_000,
+            "the face travels as a subset: {} bytes for the whole file",
+            pdf.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
