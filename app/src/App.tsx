@@ -6,6 +6,7 @@ import {
   AuthoredColor,
   Command,
   Effect,
+  EffectKind,
   GradientStop,
   LayerInfo,
   Mask,
@@ -15,6 +16,8 @@ import {
   VectorShape,
   WasmSession,
   colorToHex,
+  effectBody,
+  effectKind,
   getWasmMemory,
   hexColor,
   hexToCmykColor,
@@ -280,6 +283,49 @@ interface ToolDrag {
   b0?: [number, number, number, number];
   snapX?: number[];
   snapY?: number[];
+}
+
+/** Effect names as the panel shows them, in the order the picker offers. */
+const EFFECT_LABELS: Record<EffectKind, string> = {
+  DropShadow: "Drop shadow",
+  Outline: "Outline",
+  InnerShadow: "Inner shadow",
+};
+
+/** The tunable numbers of each effect: [field, label, min, max, step]. */
+const EFFECT_FIELDS: Record<
+  EffectKind,
+  [string, string, number, number, number][]
+> = {
+  DropShadow: [
+    ["dx", "X", -60, 60, 1],
+    ["dy", "Y", -60, 60, 1],
+    ["blur", "Blur", 0, 40, 0.5],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  Outline: [
+    ["width", "Width", 0.5, 40, 0.5],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  InnerShadow: [
+    ["dx", "X", -40, 40, 1],
+    ["dy", "Y", -40, 40, 1],
+    ["blur", "Blur", 0, 30, 0.5],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+};
+
+/** A newly added effect, with defaults that read as the effect's name at
+ * a glance rather than as nothing at all. */
+function newEffect(kind: EffectKind, color: AuthoredColor): Effect {
+  switch (kind) {
+    case "Outline":
+      return { Outline: { width: 4, color, opacity: 1 } };
+    case "InnerShadow":
+      return { InnerShadow: { dx: 4, dy: 4, blur: 6, color, opacity: 0.5 } };
+    default:
+      return { DropShadow: { dx: 6, dy: 6, blur: 6, color, opacity: 0.45 } };
+  }
 }
 
 /** Alignment guides currently showing, in document coordinates. */
@@ -1745,17 +1791,18 @@ export function App() {
     else run(cmd);
   };
 
-  /** Rewrite one field of the layer's single drop shadow. */
-  const tuneShadow = (
-    patch: Partial<Effect["DropShadow"]>,
+  /** Rewrite one field of the effect at `at`, keeping its variant. */
+  const tuneEffect = (
+    at: number,
+    patch: Record<string, number | AuthoredColor>,
     gesture = false,
   ) => {
-    const current = selectedEffects[0];
+    const current = selectedEffects[at];
     if (!current) return;
-    setEffects(
-      [{ DropShadow: { ...current.DropShadow, ...patch } }],
-      gesture,
-    );
+    const kind = effectKind(current);
+    const next = [...selectedEffects];
+    next[at] = { [kind]: { ...effectBody(current), ...patch } } as Effect;
+    setEffects(next, gesture);
   };
 
   /** Copy the selected layer and its contents, and select the copy — the
@@ -2581,73 +2628,84 @@ export function App() {
                   cmyk={cmyk}
                 />
               )}
-              {selectedEffects.length === 0 ? (
-                <button
-                  className="mask-button"
-                  onClick={() =>
-                    setEffects([
-                      {
-                        DropShadow: {
-                          dx: 6,
-                          dy: 6,
-                          blur: 6,
-                          color: cmyk ? hexToCmykColor("#000000") : hexColor("#000000"),
-                          opacity: 0.45,
-                        },
-                      },
-                    ])
-                  }
-                >
-                  Add drop shadow
-                </button>
-              ) : (
-                <div className="effect">
-                  {(
-                    [
-                      ["Shadow X", "dx", -60, 60, 1],
-                      ["Shadow Y", "dy", -60, 60, 1],
-                      ["Shadow blur", "blur", 0, 40, 0.5],
-                      ["Shadow opacity", "opacity", 0, 1, 0.01],
-                    ] as const
-                  ).map(([label, field, min, max, step]) => (
-                    <label key={field}>
-                      {label} {selectedEffects[0].DropShadow[field].toFixed(2)}
-                      <input
-                        type="range"
-                        min={min}
-                        max={max}
-                        step={step}
-                        value={selectedEffects[0].DropShadow[field]}
-                        onChange={(e) =>
-                          tuneShadow({ [field]: Number(e.target.value) }, true)
-                        }
-                        onPointerUp={endGesture}
-                        onKeyUp={endGesture}
-                        onBlur={endGesture}
-                        aria-label={label}
-                      />
-                    </label>
-                  ))}
-                  <label className="row">
-                    Shadow colour
-                    <input
-                      type="color"
-                      value={colorToHex(selectedEffects[0].DropShadow.color)}
-                      onChange={(e) =>
-                        tuneShadow({
-                          color: cmyk
-                            ? hexToCmykColor(e.target.value)
-                            : hexColor(e.target.value),
-                        })
-                      }
-                      aria-label="Shadow colour"
-                    />
-                    <button className="mask-button" onClick={() => setEffects([])}>
-                      Remove
-                    </button>
-                  </label>
-                </div>
-              )}
+              <div className="effects">
+                {selectedEffects.map((effect, at) => {
+                  const kind = effectKind(effect);
+                  const body = effectBody(effect) as Record<string, number>;
+                  return (
+                    <div className="effect" key={`${kind}${at}`}>
+                      <div className="row effect-head">
+                        <span>{EFFECT_LABELS[kind]}</span>
+                        <input
+                          type="color"
+                          value={colorToHex(
+                            (effect as never)[kind]["color"] as AuthoredColor,
+                          )}
+                          onChange={(e) =>
+                            tuneEffect(at, {
+                              color: cmyk
+                                ? hexToCmykColor(e.target.value)
+                                : hexColor(e.target.value),
+                            })
+                          }
+                          aria-label={`${EFFECT_LABELS[kind]} colour`}
+                        />
+                        <button
+                          className="mask-button"
+                          aria-label={`Remove ${EFFECT_LABELS[kind]}`}
+                          onClick={() =>
+                            setEffects(selectedEffects.filter((_, i) => i !== at))
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      {EFFECT_FIELDS[kind].map(([field, label, min, max, step]) => (
+                        <label key={field}>
+                          {label} {(body[field] ?? 0).toFixed(2)}
+                          <input
+                            type="range"
+                            min={min}
+                            max={max}
+                            step={step}
+                            value={body[field] ?? 0}
+                            onChange={(e) =>
+                              tuneEffect(at, { [field]: Number(e.target.value) }, true)
+                            }
+                            onPointerUp={endGesture}
+                            onKeyUp={endGesture}
+                            onBlur={endGesture}
+                            aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  );
+                })}
+                <label className="row">
+                  Add effect
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const kind = e.target.value as EffectKind;
+                      if (!kind) return;
+                      e.target.value = "";
+                      setEffects([
+                        ...selectedEffects,
+                        newEffect(kind, cmyk ? hexToCmykColor("#000000") : hexColor("#000000")),
+                      ]);
+                    }}
+                    aria-label="Add effect"
+                  >
+                    <option value="">Choose…</option>
+                    {(Object.keys(EFFECT_LABELS) as EffectKind[]).map((k) => (
+                      <option key={k} value={k}>
+                        {EFFECT_LABELS[k]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               {selectedMask === null ? (
                 <button className="mask-button" onClick={addMask}>
                   Add ellipse mask

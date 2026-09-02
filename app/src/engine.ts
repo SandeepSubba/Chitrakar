@@ -80,15 +80,38 @@ export interface Mask {
 /** A live effect drawn around a layer, from the layer's own composite.
  * Offsets and blur are in the layer's parent space, so an effect follows
  * the group it is in. */
-export type Effect = {
-  DropShadow: {
-    dx: number;
-    dy: number;
-    blur: number;
-    color: AuthoredColor;
-    opacity: number;
-  };
-};
+export type Effect =
+  | {
+      DropShadow: {
+        dx: number;
+        dy: number;
+        blur: number;
+        color: AuthoredColor;
+        opacity: number;
+      };
+    }
+  | { Outline: { width: number; color: AuthoredColor; opacity: number } }
+  | {
+      InnerShadow: {
+        dx: number;
+        dy: number;
+        blur: number;
+        color: AuthoredColor;
+        opacity: number;
+      };
+    };
+
+/** The variant name of an effect — its single key. */
+export type EffectKind = "DropShadow" | "Outline" | "InnerShadow";
+
+export function effectKind(e: Effect): EffectKind {
+  return Object.keys(e)[0] as EffectKind;
+}
+
+/** The parameters an effect carries, whichever variant it is. */
+export function effectBody(e: Effect): Record<string, number | AuthoredColor> {
+  return Object.values(e)[0];
+}
 
 export type TextAlign = "Left" | "Center" | "Right";
 

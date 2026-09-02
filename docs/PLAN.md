@@ -42,8 +42,9 @@ without reading anything else.*
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments.
-  Any layer can carry a live drop shadow — offset, blur, colour and
-  strength, cast from the layer's silhouette so it follows every edit.
+  Any layer can carry live effects — drop shadow, outline and inner
+  shadow, stacked in any combination, all cast from the layer's
+  silhouette so they follow every edit.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
   free of it. A ctrl-clicked multi-selection moves as one — by drag or by
@@ -101,8 +102,9 @@ without reading anything else.*
 - **Known limits, deliberately:** the clipboard is in-process, so it does
   not exchange with other applications; undo after a delete restores the
   layer but not the selection; snapping applies to moving a layer, not yet
-  to resizing one; drop shadow is the only effect so far, one per layer,
-  and export flattens it like everything else; SVG export writes each
+  to resizing one; effects come in three kinds and stack, but reordering
+  them means removing and re-adding;
+  and export flattens them like everything else; SVG export writes each
   text line as its own tspan but cannot carry alignment, which needs font
   metrics the codecs crate does not have; masks are ellipses only, moved and resized
   on canvas but not reshaped; PDF/TIFF

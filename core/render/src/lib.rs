@@ -505,12 +505,20 @@ fn render_group(
             parent,
             BlendMode::Normal,
         )?;
-        for effect in &node.effects {
+        // Effects behind the layer, then the layer, then the ones that
+        // belong on top of it — an inner shadow shades the pixels it sits
+        // on, so it cannot be painted before they are there.
+        for effect in node.effects.iter().filter(|e| !e.over()) {
             draw_effect(
                 dst, &layer, doc, effect, scale, layer_clip, clip, node.blend,
             );
         }
         composite(dst, &layer, 1.0, node.blend, clip.intersect(layer_clip));
+        for effect in node.effects.iter().filter(|e| e.over()) {
+            draw_effect(
+                dst, &layer, doc, effect, scale, layer_clip, clip, node.blend,
+            );
+        }
     }
     Ok(())
 }
@@ -666,6 +674,13 @@ fn draw_effect(
     clip: ClipRect,
     blend: BlendMode,
 ) {
+    // Every effect is built from the layer's silhouette rather than its
+    // picture. That is what makes a shadow of a photograph a shape, and
+    // what lets all three of these share one path.
+    let write = clip.intersect(layer_clip);
+    if write.is_empty() {
+        return;
+    }
     match effect {
         Effect::DropShadow {
             dx,
@@ -677,52 +692,213 @@ fn draw_effect(
             if *opacity <= 0.0 {
                 return;
             }
-            // The shadow is the layer's alpha in one colour: silhouette,
-            // not picture, which is why a shadow of a photograph is a
-            // shape rather than a grey copy of the photograph.
             let tint = scale_alpha(resolve_color(doc, *color), *opacity);
-            let mut shadow = Surface::new(dst.width, dst.height);
-            for y in layer_clip.y0..layer_clip.y1 {
-                for x in layer_clip.x0..layer_clip.x1 {
-                    let i = (y * dst.width + x) as usize;
-                    shadow.pixels[i] = scale_alpha(tint, layer.pixels[i].a);
+            let field = silhouette(dst, layer, layer_clip, tint, false, blur * scale);
+            stamp(
+                dst,
+                &field,
+                (dx * scale, dy * scale),
+                layer_clip,
+                write,
+                blend,
+                None,
+            );
+        }
+        Effect::InnerShadow {
+            dx,
+            dy,
+            blur,
+            color,
+            opacity,
+        } => {
+            if *opacity <= 0.0 {
+                return;
+            }
+            // Cast from the hole around the layer instead of the layer, then
+            // kept inside it: what shows is the part of that shadow the
+            // silhouette itself covers, which is the edge, from inside.
+            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let field = silhouette(dst, layer, layer_clip, tint, true, blur * scale);
+            stamp(
+                dst,
+                &field,
+                (dx * scale, dy * scale),
+                layer_clip,
+                write,
+                blend,
+                Some(layer),
+            );
+        }
+        Effect::Outline {
+            width,
+            color,
+            opacity,
+        } => {
+            let w = width * scale;
+            if *opacity <= 0.0 || w <= 0.0 {
+                return;
+            }
+            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let field = outline_band(dst, layer, layer_clip, tint, w);
+            stamp(dst, &field, (0.0, 0.0), layer_clip, write, blend, None);
+        }
+    }
+}
+
+/// The layer's silhouette (or, inverted, the hole around it) in one flat
+/// colour, blurred. Tinting before the blur rather than after is the same
+/// answer — the tint is constant and the blur is linear — and it means one
+/// surface instead of two.
+fn silhouette(
+    dst: &Surface,
+    layer: &Surface,
+    clip: ClipRect,
+    tint: LinearRgba,
+    invert: bool,
+    sigma: f32,
+) -> Surface {
+    let mut out = Surface::new(dst.width, dst.height);
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let i = (y * dst.width + x) as usize;
+            let a = layer.pixels[i].a;
+            out.pixels[i] = scale_alpha(tint, if invert { 1.0 - a } else { a });
+        }
+    }
+    blur::gaussian_blur(&mut out, clip, sigma);
+    out
+}
+
+/// A band of colour reaching `width` device pixels out from the layer's
+/// edge, filled solid and feathered over the last pixel.
+///
+/// Blurring the silhouette and lifting the result would give a band whose
+/// softness grew with its width; what an outline wants is a distance. So
+/// this measures one: a two-pass chamfer transform from the silhouette,
+/// which is a couple of passes over the region and rounds corners the way
+/// a pen would.
+fn outline_band(
+    dst: &Surface,
+    layer: &Surface,
+    clip: ClipRect,
+    tint: LinearRgba,
+    width: f32,
+) -> Surface {
+    let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
+    let far = width + 4.0;
+    let mut dist = vec![far; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y as u32 + clip.y0) * dst.width + x as u32 + clip.x0) as usize;
+            if layer.pixels[i].a >= 0.5 {
+                dist[y * w + x] = 0.0;
+            }
+        }
+    }
+    // Chamfer weights: a step sideways costs one, a diagonal costs root two.
+    const D1: f32 = 1.0;
+    const D2: f32 = std::f32::consts::SQRT_2;
+    let relax = |dist: &mut Vec<f32>, at: usize, from: usize, cost: f32| {
+        let candidate = dist[from] + cost;
+        if candidate < dist[at] {
+            dist[at] = candidate;
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let at = y * w + x;
+            if y > 0 {
+                relax(&mut dist, at, at - w, D1);
+                if x > 0 {
+                    relax(&mut dist, at, at - w - 1, D2);
+                }
+                if x + 1 < w {
+                    relax(&mut dist, at, at - w + 1, D2);
                 }
             }
-            blur::gaussian_blur(&mut shadow, layer_clip, blur * scale);
-            // The offset is applied on the way out, sampled between pixels
-            // so a sub-pixel offset (or a fractional zoom) doesn't jump.
-            let (ox, oy) = (dx * scale, dy * scale);
-            let write = clip.intersect(ClipRect {
-                x0: layer_clip.x0,
-                y0: layer_clip.y0,
-                x1: layer_clip.x1,
-                y1: layer_clip.y1,
-            });
-            let (lo_x, hi_x) = (layer_clip.x0 as f32, layer_clip.x1 as f32 - 1.0);
-            let (lo_y, hi_y) = (layer_clip.y0 as f32, layer_clip.y1 as f32 - 1.0);
-            for y in write.y0..write.y1 {
-                for x in write.x0..write.x1 {
-                    let (sx, sy) = (x as f32 - ox, y as f32 - oy);
-                    if sx < lo_x - 1.0 || sy < lo_y - 1.0 || sx > hi_x + 1.0 || sy > hi_y + 1.0 {
-                        continue;
-                    }
-                    let (fx, fy) = (sx.floor(), sy.floor());
-                    let (tx, ty) = (sx - fx, sy - fy);
-                    let at = |px: f32, py: f32| {
-                        let px = px.clamp(lo_x, hi_x) as u32;
-                        let py = py.clamp(lo_y, hi_y) as u32;
-                        shadow.pixels[(py * shadow.width + px) as usize]
-                    };
-                    let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
-                    let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
-                    let src = lerp(top, bottom, ty);
-                    if src.a <= 0.0 {
-                        continue;
-                    }
-                    let i = (y * dst.width + x) as usize;
-                    dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
+            if x > 0 {
+                relax(&mut dist, at, at - 1, D1);
+            }
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let at = y * w + x;
+            if y + 1 < h {
+                relax(&mut dist, at, at + w, D1);
+                if x > 0 {
+                    relax(&mut dist, at, at + w - 1, D2);
+                }
+                if x + 1 < w {
+                    relax(&mut dist, at, at + w + 1, D2);
                 }
             }
+            if x + 1 < w {
+                relax(&mut dist, at, at + 1, D1);
+            }
+        }
+    }
+    let mut out = Surface::new(dst.width, dst.height);
+    for y in 0..h {
+        for x in 0..w {
+            // The chamfer counts steps between pixel centres, and the
+            // centre of an edge pixel already sits half a pixel inside the
+            // shape — so the distance to the edge itself is one less half
+            // at each end.
+            let cover = (width + 1.0 - dist[y * w + x]).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let i = ((y as u32 + clip.y0) * dst.width + x as u32 + clip.x0) as usize;
+            out.pixels[i] = scale_alpha(tint, cover);
+        }
+    }
+    out
+}
+
+/// Paint a prepared effect field into the destination, displaced by
+/// `offset` device pixels and sampled between pixels so a sub-pixel offset
+/// (or a fractional zoom) does not jump. `keep_inside`, when given, limits
+/// what lands to that surface's own alpha — how an inner shadow stays in.
+fn stamp(
+    dst: &mut Surface,
+    field: &Surface,
+    offset: (f32, f32),
+    field_clip: ClipRect,
+    write: ClipRect,
+    blend: BlendMode,
+    keep_inside: Option<&Surface>,
+) {
+    let (ox, oy) = offset;
+    let (lo_x, hi_x) = (field_clip.x0 as f32, field_clip.x1 as f32 - 1.0);
+    let (lo_y, hi_y) = (field_clip.y0 as f32, field_clip.y1 as f32 - 1.0);
+    if hi_x < lo_x || hi_y < lo_y {
+        return;
+    }
+    for y in write.y0..write.y1 {
+        for x in write.x0..write.x1 {
+            let (sx, sy) = (x as f32 - ox, y as f32 - oy);
+            if sx < lo_x - 1.0 || sy < lo_y - 1.0 || sx > hi_x + 1.0 || sy > hi_y + 1.0 {
+                continue;
+            }
+            let (fx, fy) = (sx.floor(), sy.floor());
+            let (tx, ty) = (sx - fx, sy - fy);
+            let at = |px: f32, py: f32| {
+                let px = px.clamp(lo_x, hi_x) as u32;
+                let py = py.clamp(lo_y, hi_y) as u32;
+                field.pixels[(py * field.width + px) as usize]
+            };
+            let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
+            let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
+            let mut src = lerp(top, bottom, ty);
+            let i = (y * dst.width + x) as usize;
+            if let Some(inside) = keep_inside {
+                src = scale_alpha(src, inside.pixels[i].a);
+            }
+            if src.a <= 0.0 {
+                continue;
+            }
+            dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
         }
     }
 }
@@ -2682,6 +2858,135 @@ mod tests {
             }
             other => panic!("expected a rect, got {other:?}"),
         }
+    }
+
+    /// A 20x20 red square at (20,20) on a 64x64 canvas, with `effects`.
+    fn square_with(effects: Vec<chitrakar_doc::Effect>) -> Surface {
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects { id, effects }).unwrap();
+        render(&doc).unwrap()
+    }
+
+    const BLACK: AuthoredColor = AuthoredColor::Srgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    #[test]
+    fn an_outline_hugs_the_shape_to_the_width_it_is_given() {
+        // The band reaches the width asked for and stops: solid just
+        // outside the edge, gone just past the width, and the layer itself
+        // untouched underneath it.
+        let s = square_with(vec![chitrakar_doc::Effect::Outline {
+            width: 5.0,
+            color: BLACK,
+            opacity: 1.0,
+        }]);
+        assert_eq!(
+            s.get(30, 30),
+            square_with(vec![]).get(30, 30),
+            "layer intact"
+        );
+        let just_out = s.get(17, 30);
+        assert!(
+            just_out.a > 0.9 && just_out.r < 0.05,
+            "solid outline three pixels out: {just_out:?}"
+        );
+        assert!(
+            s.get(15, 30).a > 0.9,
+            "still solid at the far edge of the band"
+        );
+        assert_eq!(s.get(14, 30).a, 0.0, "and nothing beyond it");
+        // It goes all the way round.
+        assert!(s.get(30, 15).a > 0.9 && s.get(44, 30).a > 0.9 && s.get(30, 44).a > 0.9);
+        // The corner is rounded rather than squared off: five pixels out
+        // along a diagonal is further than five pixels out sideways.
+        assert_eq!(
+            s.get(15, 15).a,
+            0.0,
+            "the band turns the corner instead of filling it"
+        );
+        // Wider means wider.
+        let wide = square_with(vec![chitrakar_doc::Effect::Outline {
+            width: 10.0,
+            color: BLACK,
+            opacity: 1.0,
+        }]);
+        assert!(
+            wide.get(13, 30).a > 0.9,
+            "ten pixels reaches where five did not"
+        );
+    }
+
+    #[test]
+    fn an_inner_shadow_stays_inside_the_shape() {
+        // Cast from the hole around the layer and kept to the silhouette:
+        // it darkens the inside of the edge it is aimed from, leaves the
+        // middle alone, and never spills outside.
+        let plain = square_with(vec![]);
+        let s = square_with(vec![chitrakar_doc::Effect::InnerShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 2.0,
+            color: BLACK,
+            opacity: 1.0,
+        }]);
+        for (x, y) in [(18, 30), (30, 18), (42, 30), (30, 42)] {
+            assert_eq!(s.get(x, y), plain.get(x, y), "nothing outside at ({x},{y})");
+        }
+        let shaded = s.get(22, 22);
+        assert!(
+            shaded.r < 0.5 && shaded.a >= 1.0,
+            "the top-left inside edge is darkened but still opaque: {shaded:?}"
+        );
+        assert_eq!(
+            s.get(30, 30),
+            plain.get(30, 30),
+            "the middle is out of its reach"
+        );
+        let away = s.get(38, 38);
+        assert!(
+            (away.r - plain.get(38, 38).r).abs() < 0.1 && away.r > shaded.r * 2.0,
+            "and the side it is aimed away from is barely touched: {away:?}"
+        );
+    }
+
+    #[test]
+    fn effects_stack_in_order_around_the_layer() {
+        // An outline goes behind, an inner shadow on top: with both, the
+        // band still shows outside and the shading still shows inside.
+        let both = square_with(vec![
+            chitrakar_doc::Effect::Outline {
+                width: 4.0,
+                color: BLACK,
+                opacity: 1.0,
+            },
+            chitrakar_doc::Effect::InnerShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 2.0,
+                color: BLACK,
+                opacity: 1.0,
+            },
+        ]);
+        assert!(both.get(18, 30).a > 0.9, "the outline is there");
+        assert!(both.get(22, 22).r < 0.5, "and so is the inner shadow");
+        assert_eq!(both.get(30, 30), square_with(vec![]).get(30, 30));
     }
 
     #[test]

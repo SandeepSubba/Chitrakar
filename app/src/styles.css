@@ -605,14 +605,25 @@ body {
   pointer-events: none;
 }
 
-/* The effect block sits with the other layer properties but reads as one
-   unit, so it gets a hairline rule above it rather than a heading. */
+/* Each effect reads as one unit stacked on the next, so it gets a hairline
+   rule above it rather than a heading of its own. */
+.effects {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
 .effect {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
   padding-top: 0.4rem;
   border-top: 1px solid var(--line, rgb(255 255 255 / 0.08));
+}
+
+.effect-head span {
+  flex: 1;
+  font-weight: 500;
 }
 
 /* Alignment guides: one hairline, drawn in the accent so it reads as

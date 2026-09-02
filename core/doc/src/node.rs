@@ -309,6 +309,23 @@ pub enum Effect {
         color: AuthoredColor,
         opacity: f32,
     },
+    /// A band of colour hugging the layer's silhouette from outside, the
+    /// way a headline is given an outline. `width` is in the layer's
+    /// parent space.
+    Outline {
+        width: f32,
+        color: AuthoredColor,
+        opacity: f32,
+    },
+    /// The same shadow, cast inward: it darkens the inside of the
+    /// silhouette against its own edge and never leaves it.
+    InnerShadow {
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: AuthoredColor,
+        opacity: f32,
+    },
 }
 
 impl Effect {
@@ -321,6 +338,29 @@ impl Effect {
             Effect::DropShadow { dx, dy, blur, .. } => {
                 blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
             }
+            Effect::Outline { width, .. } => width.abs() + 2.0,
+            // An inner shadow stays inside the layer, but it still needs
+            // the silhouette read from a ring outside it to know where the
+            // edge is.
+            Effect::InnerShadow { dx, dy, blur, .. } => {
+                blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
+            }
+        }
+    }
+
+    /// Whether the effect is painted over the layer rather than behind it.
+    /// An inner shadow is inside the silhouette, so it has to land on top
+    /// of the pixels it is shading.
+    pub fn over(&self) -> bool {
+        matches!(self, Effect::InnerShadow { .. })
+    }
+
+    /// A short name for history labels and the effect list.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Effect::DropShadow { .. } => "Drop shadow",
+            Effect::Outline { .. } => "Outline",
+            Effect::InnerShadow { .. } => "Inner shadow",
         }
     }
 }

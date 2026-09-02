@@ -1407,7 +1407,7 @@ assert(
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   assert((await canvasPixel(503, 200))[3] === 0, "ground beside the rect is clear");
-  await page.click("text=Add drop shadow");
+  await page.selectOption('select[aria-label="Add effect"]', "DropShadow");
   await page.waitForTimeout(300);
   await page.screenshot({ path: join(OUT, "drop-shadow.png") });
   const shade = await canvasPixel(503, 200);
@@ -1421,7 +1421,7 @@ assert(
     "the layer row marks that it carries effects",
   );
   // Aiming it the other way moves the shadow with it.
-  const xSlider = page.locator('input[aria-label="Shadow X"]');
+  const xSlider = page.locator('input[aria-label="Drop shadow x"]');
   await xSlider.fill("-30");
   await xSlider.dispatchEvent("pointerup");
   await page.waitForTimeout(300);
@@ -1431,7 +1431,7 @@ assert(
   );
   const behind = await canvasPixel(80, 200);
   assert(behind[3] > 20, `and it now falls to the left (${behind})`);
-  await page.click("text=Remove");
+  await page.click('button[aria-label="Remove Drop shadow"]');
   await page.waitForTimeout(300);
   assert((await canvasPixel(80, 200))[3] === 0, "removing it clears the ground");
   await page.keyboard.press("Control+z");
@@ -1443,6 +1443,42 @@ assert(
   assert(
     (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
     "undo unwinds the shadow entirely",
+  );
+
+  // Outline: a band hugging the shape, and effects stack rather than
+  // replacing one another.
+  await page.selectOption('select[aria-label="Add effect"]', "Outline");
+  await page.waitForTimeout(300);
+  const band = await canvasPixel(502, 200); // two pixels outside the edge
+  assert(band[3] > 200 && band[0] < 120, `an outline band appeared (${band})`);
+  assert((await canvasPixel(515, 200))[3] === 0, "and stops at the width given");
+  assert(
+    (await canvasPixel(300, 200))[0] > 100,
+    "the layer shows through above its own outline",
+  );
+  await setSlider("Outline width", 20);
+  await page.waitForTimeout(300);
+  const wider = await canvasPixel(515, 200);
+  assert(wider[3] > 200 && wider[0] < 120, `a wider outline reaches further out (${wider})`);
+  await page.selectOption('select[aria-label="Add effect"]', "InnerShadow");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".effect").count()) === 2,
+    "both effects are listed, stacked",
+  );
+  assert(
+    (await canvasPixel(515, 200))[3] > 200,
+    "and adding one did not replace the other",
+  );
+  await page.click('button[aria-label="Remove Outline"]');
+  await page.waitForTimeout(300);
+  assert((await page.locator(".effect").count()) === 1, "removing one leaves the other");
+  assert((await canvasPixel(515, 200))[3] === 0, "and the band is gone");
+  await page.click('button[aria-label="Remove Inner shadow"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
+    "the layer carries no effects again",
   );
 }
 
