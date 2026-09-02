@@ -654,13 +654,19 @@ impl<'a> Page<'a> {
                     self.color_op(spec.fill, false)?
                 );
                 // Each glyph on its own matrix: the shaper's position,
-                // y turned back up for the glyph, and the lean a
-                // synthesized italic would draw with.
+                // turned the way its baseline runs, y turned back up for
+                // the glyph, and the lean a synthesized italic would
+                // draw with.
                 for g in &typeset.glyphs {
+                    let (sin, cos) = g.angle.sin_cos();
+                    let lean = typeset.lean;
                     let _ = writeln!(
                         self.content,
-                        "1 0 {} -1 {} {} Tm <{:04X}> Tj",
-                        num(typeset.lean),
+                        "{} {} {} {} {} {} Tm <{:04X}> Tj",
+                        num(cos),
+                        num(sin),
+                        num(lean * cos + sin),
+                        num(lean * sin - cos),
                         num(g.x),
                         num(g.y),
                         g.id
@@ -899,6 +905,9 @@ impl<'a> Page<'a> {
 /// A number as PDF wants it: no exponent, no more digits than the page
 /// can show.
 fn num(v: f32) -> String {
+    if v == 0.0 {
+        return "0".to_string(); // and not "-0"
+    }
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-" {
@@ -1743,6 +1752,23 @@ mod tests {
         assert!(
             content_of(&pdf).contains("1 0 0.2 -1 "),
             "the lean is in the text matrix"
+        );
+        // Along a guide running down the page every glyph is a quarter
+        // turn: the text matrix turns with it.
+        let mut spec = chitrakar_doc::TextSpec::new("Down", 20.0, BLUE);
+        spec.along = Some(chitrakar_doc::VectorShape::Path {
+            points: vec![[20.0, 0.0], [20.0, 200.0]],
+            closed: false,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        });
+        let mut along = Document::new(60, 200, chitrakar_color::ColorMode::Rgb);
+        add(&mut along, chitrakar_doc::Node::text("d", spec), [0.0, 0.0]);
+        let content = content_of(&export_pdf_document(&along).unwrap());
+        assert!(
+            content.contains("0 1 1 0 20 "),
+            "a quarter turn, up-axis to the guide's left: {content}"
         );
         // An underline is a band after the glyphs, in the text's colour.
         let mut spec = chitrakar_doc::TextSpec::new("Under", 20.0, BLUE);

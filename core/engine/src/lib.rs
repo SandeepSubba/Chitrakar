@@ -970,6 +970,86 @@ impl Session {
         self.apply_labeled(Command::Batch(cmds), Some(label.to_string()))
     }
 
+    /// Set a text block along a shape layer's outline: the shape's
+    /// geometry is copied into the block's own space, so the block stands
+    /// alone afterwards and the shape layer can go or stay. One undo step.
+    pub fn text_along(&mut self, text: NodeId, shape: NodeId) -> Result<(), EngineError> {
+        let NodeKind::Text(spec) = &self.doc.node(text)?.kind else {
+            return Err(EngineError::BadCommand(
+                "only text goes along a path".into(),
+            ));
+        };
+        let NodeKind::Vector { shape: guide, .. } = &self.doc.node(shape)?.kind else {
+            return Err(EngineError::BadCommand("the guide must be a shape".into()));
+        };
+        // Shape space → document → text space.
+        let to_doc = chitrakar_render::ancestor_space(&self.doc, shape)
+            .compose(self.doc.node(shape)?.transform);
+        let text_to_doc = chitrakar_render::ancestor_space(&self.doc, text)
+            .compose(self.doc.node(text)?.transform);
+        let d = text_to_doc.a * text_to_doc.d - text_to_doc.b * text_to_doc.c;
+        if d.abs() < 1e-9 {
+            return Err(EngineError::BadCommand("the text block has no size".into()));
+        }
+        let t = text_to_doc;
+        let from_doc = Transform {
+            a: t.d / d,
+            b: -t.b / d,
+            c: -t.c / d,
+            d: t.a / d,
+            e: (t.c * t.f - t.d * t.e) / d,
+            f: (t.b * t.e - t.a * t.f) / d,
+        };
+        let m = from_doc.compose(to_doc);
+        let map = |p: [f32; 2]| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+        let map_offset = |p: [f32; 2]| [m.a * p[0] + m.c * p[1], m.b * p[0] + m.d * p[1]];
+        let along = match guide {
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed,
+                smooth,
+                handles,
+                ..
+            } => chitrakar_doc::VectorShape::Path {
+                points: points.iter().map(|p| map(*p)).collect(),
+                closed: *closed,
+                smooth: *smooth,
+                handles: handles
+                    .iter()
+                    .map(|h| {
+                        let i = map_offset([h[0], h[1]]);
+                        let o = map_offset([h[2], h[3]]);
+                        [i[0], i[1], o[0], o[1]]
+                    })
+                    .collect(),
+                subpaths: Vec::new(),
+            },
+            other => chitrakar_doc::VectorShape::Path {
+                points: chitrakar_render::shape_rings(other)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(map)
+                    .collect(),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        };
+        let mut spec = spec.clone();
+        spec.along = Some(along);
+        spec.along_offset = 0.0;
+        self.apply_labeled(
+            Command::SetKind {
+                id: text,
+                kind: Box::new(NodeKind::Text(spec)),
+            },
+            Some("Text on path".to_string()),
+        )
+    }
+
     /// Dissolve a group: its children move to its position in the parent,
     /// the empty group is removed. One undo step.
     pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
@@ -3098,6 +3178,82 @@ mod tests {
                 .zip(after.iter())
                 .all(|(a, b)| (a - b).abs() < 1e-3),
             "{boxed:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn text_goes_along_a_shape_in_the_shapes_own_place() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(text_in("")),
+            })
+            .unwrap();
+        let text = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: text,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        // A circle over on the right; the text should end up around it,
+        // wherever the block itself sits.
+        let circle = add_rect(&mut session, "c", 1.0, 1.0);
+        session
+            .apply(Command::SetKind {
+                id: circle,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+                    fill: None,
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: circle,
+                transform: Transform::translation(120.0, 100.0),
+            })
+            .unwrap();
+        let before = session.bounds_of(text).unwrap();
+        session.text_along(text, circle).unwrap();
+        let after = session.bounds_of(text).unwrap();
+        assert!(
+            after[0] > 100.0 && after[0] + after[2] < 200.0 && after[1] > 50.0,
+            "the text now sits around the circle at (120..180, 100..160): {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Text on path")
+        );
+        let NodeKind::Text(spec) = &session.document().node(text).unwrap().kind else {
+            unreachable!()
+        };
+        let Some(VectorShape::Path { points, closed, .. }) = &spec.along else {
+            panic!("a path was copied in")
+        };
+        assert!(*closed && points.len() >= 16);
+        // The ellipse's own origin is its top-left, so its centre is at
+        // (150, 130) on the page — (130, 110) in the block's own space.
+        let (cx, cy) = points.iter().fold((0.0, 0.0), |(x, y), p| {
+            (
+                x + p[0] / points.len() as f32,
+                y + p[1] / points.len() as f32,
+            )
+        });
+        assert!(
+            (cx - 130.0).abs() < 1.0 && (cy - 110.0).abs() < 1.0,
+            "{cx} {cy}"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(session.bounds_of(text).unwrap(), before);
+        assert!(
+            session.text_along(circle, text).is_err(),
+            "a shape is not text"
         );
     }
 

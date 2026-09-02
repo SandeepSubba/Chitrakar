@@ -370,6 +370,10 @@ fn bounds_in_parent_space_inner(
             }
             bounds
         }
+        NodeKind::Text(spec) => {
+            let [x0, y0, x1, y1] = text::bounds(spec);
+            transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+        }
         kind => {
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
@@ -391,6 +395,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             let (x0, y0, x1, y1) = local_bounds(flat.as_ref());
             (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
         }
+        NodeKind::Text(spec) => Some(text::bounds(spec)),
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
             // A group's own box is the union of its children, which are
@@ -2156,7 +2161,8 @@ fn draw_text(
     // layer sharpens the outlines instead of enlarging their pixels. The
     // cap keeps a wildly zoomed layer from asking for an enormous bitmap;
     // past it the glyphs are already far finer than the screen.
-    let natural = text::measure(spec);
+    let [bx0, by0, bx1, by1] = text::bounds(spec);
+    let natural = (bx1 - bx0, by1 - by0);
     let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
     let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
     let raster = text::rasterize_at(spec, scale);
@@ -2164,15 +2170,16 @@ fn draw_text(
     // The box is the block's natural size, not the raster's: those agree
     // only while the raster is at natural scale, and a minified one would
     // otherwise clip its own right and bottom edges away.
-    let bbox = match transformed_local_bounds(t, (0.0, 0.0, natural.0, natural.1))
-        .to_clip(dst.width, dst.height)
-    {
-        Some(b) => b.intersect(clip),
-        None => return,
-    };
+    let bbox =
+        match transformed_local_bounds(t, (bx0, by0, bx1, by1)).to_clip(dst.width, dst.height) {
+            Some(b) => b.intersect(clip),
+            None => return,
+        };
+    let (ox, oy) = raster.origin;
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+            let (lx, ly) = (lx - ox, ly - oy);
             if lx < 0.0 || ly < 0.0 {
                 continue;
             }
@@ -2436,8 +2443,8 @@ fn hit_in_group(
             }
             NodeKind::Text(spec) => {
                 if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
-                    let (w, h) = text::measure(spec);
-                    if lx >= 0.0 && ly >= 0.0 && lx < w && ly < h {
+                    let [x0, y0, x1, y1] = text::bounds(spec);
+                    if lx >= x0 && ly >= y0 && lx < x1 && ly < y1 {
                         return Ok(Some(child));
                     }
                 }

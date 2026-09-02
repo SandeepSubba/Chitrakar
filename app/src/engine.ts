@@ -148,6 +148,10 @@ export interface TextSpec {
   /** A line under each line of text, and one through it. */
   underline: boolean;
   strike: boolean;
+  /** A guide in the block's own space to set the text along, and how far
+   * along it the text starts. */
+  along: VectorShape | null;
+  along_offset: number;
 }
 
 export interface GradientStop {

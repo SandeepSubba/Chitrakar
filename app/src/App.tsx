@@ -1096,6 +1096,8 @@ export function App() {
                 italic: false,
                 underline: false,
                 strike: false,
+                along: null,
+                along_offset: 0,
               },
             },
             x,
@@ -3626,6 +3628,24 @@ export function App() {
                   onGestureEnd={endGesture}
                   cmyk={cmyk}
                   fonts={fontNames}
+                  shapes={layers
+                    .filter((l) => l.kind === "vector" && l.id !== selectedLayer.id)
+                    .map((l) => ({ id: l.id, name: l.name }))}
+                  onAlong={(shape) => {
+                    if (!session || !selectedLayer) return;
+                    if (shape === null) {
+                      if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) {
+                        setKind({ Text: { ...selectedKind.Text, along: null } }, false);
+                      }
+                      return;
+                    }
+                    try {
+                      session.text_along(selectedLayer.id, shape);
+                      refresh(session);
+                    } catch (err) {
+                      alert(`Text on path: ${err}`);
+                    }
+                  }}
                 />
               )}
               <div className="effects">
@@ -4246,11 +4266,15 @@ interface KindPropsProps {
   cmyk: boolean;
   /** Faces a text block may be set in, bundled one first. */
   fonts: string[];
+  /** Shape layers a text block could be set along, and what to do when
+   * one is picked (null takes the text off its path). */
+  shapes: { id: number; name: string }[];
+  onAlong: (shape: number | null) => void;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
  * every layer's settings revisitable (the non-destructive contract). */
-function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) {
+function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts, shapes, onAlong }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -4477,6 +4501,29 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
             ))}
           </select>
         </div>
+        {/* A guide to run along: picking a shape copies its outline into
+            the block, so the block stands alone afterwards. */}
+        <div className="row">
+          <label htmlFor="text-along">Along</label>
+          <select
+            id="text-along"
+            aria-label="Along"
+            value={t.along ? "on" : ""}
+            onChange={(e) => onAlong(e.target.value === "" ? null : Number(e.target.value))}
+          >
+            <option value="">None</option>
+            {t.along && <option value="on">This path</option>}
+            {shapes.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {t.along &&
+          slider("Path offset", t.along_offset, 0, 2000, 1, (v) => ({
+            Text: { ...t, along_offset: v },
+          }))}
         {/* Zero is a block that fits its text; anything else wraps to it. */}
         {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
           Text: { ...t, width: v },

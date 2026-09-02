@@ -239,16 +239,44 @@ fn write_children(
                 // No indentation inside: the block preserves its space
                 // (an indent typed into a line is meant), so the only
                 // whitespace between the tags is the newline.
-                for (i, (line, _)) in block.lines.iter().enumerate() {
+                // Along a guide the text is one run on a textPath: the
+                // guide goes into the defs as the renderer flattens it,
+                // with the offset as startOffset.
+                if let Some((points, closed)) = chitrakar_render::text::guide_points(spec) {
+                    let name = format!("guide{}", child.0);
+                    let mut d = String::new();
+                    for (i, p) in points.iter().enumerate() {
+                        let _ = write!(
+                            d,
+                            "{}{:.2},{:.2}",
+                            if i == 0 { "M" } else { " L" },
+                            p[0],
+                            p[1]
+                        );
+                    }
+                    if closed {
+                        d.push_str(" Z");
+                    }
+                    let _ = writeln!(defs, r#"<path id="{name}" d="{d}"/>"#);
                     let _ = writeln!(
                         out,
-                        r#"<tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
-                        x,
-                        block.ascent + i as f32 * block.step,
-                        escape_xml(line)
+                        r##"<textPath href="#{name}" startOffset="{:.2}">{}</textPath>"##,
+                        spec.along_offset,
+                        escape_xml(&spec.text.replace('\n', " "))
                     );
+                    let _ = writeln!(out, "</text>");
+                } else {
+                    for (i, (line, _)) in block.lines.iter().enumerate() {
+                        let _ = writeln!(
+                            out,
+                            r#"<tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
+                            x,
+                            block.ascent + i as f32 * block.step,
+                            escape_xml(line)
+                        );
+                    }
+                    let _ = writeln!(out, "</text>");
                 }
-                let _ = writeln!(out, "</text>");
             }
             NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                 let _ = writeln!(
@@ -623,6 +651,29 @@ mod tests {
                 .unwrap()
                 .contains(r#" text-decoration="underline line-through""#),
             "decorations ride on the text element"
+        );
+        // Text along a guide is a textPath over a path in the defs.
+        let along = {
+            let mut spec = chitrakar_doc::TextSpec::new("round", 20.0, RED);
+            spec.along = Some(chitrakar_doc::VectorShape::Ellipse { rx: 40.0, ry: 40.0 });
+            spec.along_offset = 12.0;
+            spec
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::text("t5", along)),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"<path id="guide"#) && svg.contains(r#" Z"/>"#),
+            "the guide is in the defs"
+        );
+        assert!(
+            svg.contains(r##"<textPath href="#guide"##)
+                && svg.contains(r#" startOffset="12.00">round</textPath>"#),
+            "{svg}"
         );
         assert!(
             block.matches("<tspan").count() >= 2 && block.contains(">the quick<"),

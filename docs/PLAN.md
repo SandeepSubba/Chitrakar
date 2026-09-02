@@ -82,7 +82,11 @@ without reading anything else.*
   double-click on a block types into it on the canvas (the engine draws
   the letters under a transparent textarea placed by the block's own
   matrix; Escape cancels, Ctrl+Enter or a click away keeps, one history
-  entry either way), and a saved
+  entry either way), a block can be set along any shape layer's outline
+  (the panel's Along picker copies the outline into the block, each
+  glyph turns to follow it, an offset slides it along, open guides drop
+  what runs off the end and closed ones wrap; SVG gets a textPath and
+  the PDF turned text matrices), and a saved
   `.chitra` carries the faces its text is set in (all but the bundled one)
   under `fonts/`, registering them on open, so a document reads the same
   wherever it is opened next —
@@ -115,9 +119,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~171),
+- **Verify before committing:** `cargo test --workspace` (~174),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~324 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~328 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -128,8 +132,10 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: text on a path, and another review pass over the last
-     stretch of commits (each pass so far has found real defects).
+  3. Depth: another review pass over the last stretch of commits (each
+     pass so far has found real defects), then whatever the next user
+     of the editor misses first — a layer panel that drags to reorder,
+     artboards, a brush that paints pixels.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

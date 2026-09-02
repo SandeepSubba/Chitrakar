@@ -172,6 +172,14 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// Set a text block along a shape layer's outline (see
+    /// `Session::text_along`).
+    pub fn text_along(&mut self, text: f64, shape: f64) -> Result<(), JsError> {
+        self.inner
+            .text_along(NodeId(text as u64), NodeId(shape as u64))
+            .map_err(to_js)
+    }
+
     /// Mirror layers about their shared box, left for right when
     /// `horizontal`, else top for bottom (see `Session::flip_nodes`).
     pub fn flip_nodes(&mut self, ids: Vec<f64>, horizontal: bool) -> Result<(), JsError> {

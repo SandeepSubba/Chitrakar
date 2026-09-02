@@ -271,6 +271,15 @@ pub struct TextSpec {
     pub underline: bool,
     #[serde(default)]
     pub strike: bool,
+    /// A guide to set the text along instead of in lines: a shape in the
+    /// block's own space (copied from a layer when attached, so the block
+    /// stands alone), with each glyph turned to follow it. Text that runs
+    /// off an open guide's end is not drawn; a closed one wraps.
+    #[serde(default)]
+    pub along: Option<VectorShape>,
+    /// How far along the guide, in document pixels, the text starts.
+    #[serde(default)]
+    pub along_offset: f32,
 }
 
 fn one() -> f32 {
@@ -293,6 +302,8 @@ impl TextSpec {
             italic: false,
             underline: false,
             strike: false,
+            along: None,
+            along_offset: 0.0,
         }
     }
 

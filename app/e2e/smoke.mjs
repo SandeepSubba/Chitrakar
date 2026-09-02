@@ -2496,6 +2496,45 @@ assert(
     (await filled(150, 175)) && !(await filled(150, 340)) && !(await filled(450, 340)),
     "three undos: both flips and the ellipse are gone",
   );
+
+  // 8x9. Text on a path: a block set along the ellipse's outline leaves
+  // its own spot and rings the ellipse; undo takes it off again.
+  await page.click('button[aria-label="Ellipse"]');
+  await page.mouse.move(...at(400, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 380), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Text"]');
+  await page.mouse.click(...at(60, 350));
+  await page.waitForTimeout(300);
+  await page.click('button[aria-label="Move"]');
+  await page.mouse.click(...at(75, 365));
+  await page.waitForTimeout(200);
+  assert((await inkCount(40, 340, 260, 420)) > 50, "the block sits where it was placed");
+  const guide = await page
+    .locator('select[aria-label="Along"] option', { hasText: "Ellipse" })
+    .first()
+    .getAttribute("value");
+  await page.selectOption('select[aria-label="Along"]', guide);
+  await page.waitForTimeout(300);
+  assert(
+    (await inkCount(40, 340, 260, 420)) === 0 && (await inkCount(370, 240, 570, 440)) > 50,
+    "set along the ellipse, the text leaves its spot and rings it",
+  );
+  assert(
+    (await page.locator('select[aria-label="Along"]').inputValue()) === "on" &&
+      (await page.locator('input[aria-label="Path offset"]').count()) === 1,
+    "the panel says so and offers an offset",
+  );
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(120);
+  }
+  assert(
+    (await inkCount(370, 240, 570, 440)) === 0 && (await inkCount(40, 340, 260, 420)) === 0,
+    "three undos: the attachment, the text and the ellipse are gone",
+  );
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

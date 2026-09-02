@@ -8,7 +8,7 @@
 //! given a width wraps words to it.
 
 use ab_glyph::{Font, FontRef, ScaleFont};
-use chitrakar_doc::TextSpec;
+use chitrakar_doc::{TextSpec, VectorShape};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
@@ -233,6 +233,8 @@ struct Shaped {
     id: ab_glyph::GlyphId,
     x: f32,
     y: f32,
+    /// How far the pen moves past this glyph, tracking aside.
+    advance: f32,
     /// Byte offset into the line of the text this glyph came from.
     cluster: usize,
 }
@@ -262,6 +264,7 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
             id: ab_glyph::GlyphId(info.glyph_id as u16),
             x: pen + pos.x_offset as f32 * unit,
             y: -(pos.y_offset as f32) * unit,
+            advance: pos.x_advance as f32 * unit,
             cluster: info.cluster as usize,
         });
         pen += pos.x_advance as f32 * unit + track;
@@ -320,6 +323,227 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<[f32; 4]> {
     bands
 }
 
+/// A guide flattened to the polyline the text walks: the points and
+/// whether it closes. An open path keeps its ends; a rectangle or an
+/// ellipse is a ring.
+pub fn guide_points(spec: &TextSpec) -> Option<(Vec<[f32; 2]>, bool)> {
+    let shape = spec.along.as_ref()?;
+    match shape {
+        VectorShape::Path { closed, .. } => {
+            let flat = crate::flatten_shape(shape);
+            let VectorShape::Path { points, .. } = flat.as_ref() else {
+                return None;
+            };
+            (points.len() >= 2).then(|| (points.clone(), *closed))
+        }
+        _ => crate::shape_rings(shape)
+            .into_iter()
+            .next()
+            .filter(|ring| ring.len() >= 2)
+            .map(|ring| (ring, true)),
+    }
+}
+
+/// A guide with its arc length tabulated, so a distance along it finds
+/// a point and the direction there.
+struct Guide {
+    points: Vec<[f32; 2]>,
+    /// Arc length at each point, and at the closing segment's end.
+    at: Vec<f32>,
+    closed: bool,
+}
+
+impl Guide {
+    fn new(points: Vec<[f32; 2]>, closed: bool, scale: f32) -> Guide {
+        let points: Vec<[f32; 2]> = points
+            .iter()
+            .map(|p| [p[0] * scale, p[1] * scale])
+            .collect();
+        let mut at = vec![0.0];
+        let n = points.len();
+        let segments = if closed { n } else { n - 1 };
+        for i in 0..segments {
+            let (a, b) = (points[i], points[(i + 1) % n]);
+            at.push(at[i] + ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt());
+        }
+        Guide { points, at, closed }
+    }
+
+    fn length(&self) -> f32 {
+        *self.at.last().unwrap_or(&0.0)
+    }
+
+    /// The point `s` along the guide and the unit direction there, or
+    /// nothing when an open guide has ended.
+    fn at(&self, s: f32) -> Option<([f32; 2], [f32; 2])> {
+        let total = self.length();
+        if total <= 0.0 {
+            return None;
+        }
+        let s = if self.closed {
+            s.rem_euclid(total)
+        } else if s < 0.0 || s > total {
+            return None;
+        } else {
+            s
+        };
+        let n = self.points.len();
+        let mut i = self.at.partition_point(|&a| a <= s).saturating_sub(1);
+        i = i.min(self.at.len() - 2);
+        let (a, b) = (self.points[i], self.points[(i + 1) % n]);
+        let len = (self.at[i + 1] - self.at[i]).max(1e-6);
+        let t = ((s - self.at[i]) / len).clamp(0.0, 1.0);
+        let dir = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+        Some(([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], dir))
+    }
+}
+
+/// One glyph placed along a guide: where its origin lands, which way
+/// its baseline runs, and the text it stands for.
+struct AlongGlyph {
+    id: ab_glyph::GlyphId,
+    origin: [f32; 2],
+    angle: f32,
+    cluster: usize,
+}
+
+/// The text as one run of glyphs along its guide, at `scale`: lines are
+/// joined with spaces, since a guide has no lines. Each glyph's middle
+/// sits on the guide, `along_offset` in from its start, turned to the
+/// direction there; glyphs past an open guide's end are left out.
+fn along_glyphs(spec: &TextSpec, scale: f32) -> (Vec<AlongGlyph>, String) {
+    let line = spec.text.replace('\n', " ");
+    let Some((points, closed)) = guide_points(spec) else {
+        return (Vec::new(), line);
+    };
+    let guide = Guide::new(points, closed, scale);
+    let (shaped, _) = shape_line(&line, spec, scale);
+    let mut out = Vec::with_capacity(shaped.len());
+    for g in shaped {
+        let s = spec.along_offset * scale + g.x + g.advance / 2.0;
+        let Some((p, t)) = guide.at(s) else {
+            continue;
+        };
+        // "Up" for the glyph is the left of the direction of travel, in
+        // a y-down space; a mark's offset rides along that.
+        let n = [t[1], -t[0]];
+        let half = g.advance / 2.0;
+        out.push(AlongGlyph {
+            id: g.id,
+            origin: [
+                p[0] - t[0] * half - n[0] * g.y,
+                p[1] - t[1] * half - n[1] * g.y,
+            ],
+            angle: t[1].atan2(t[0]),
+            cluster: g.cluster,
+        });
+    }
+    (out, line)
+}
+
+/// A glyph's outline leaned by `slant` and turned by `angle`, then scaled
+/// and placed like any other. The outline is in font units with y up, so
+/// a turn of `angle` on the page is a turn of `-angle` here.
+fn turned(
+    font: &FontRef<'static>,
+    glyph: ab_glyph::Glyph,
+    slant: f32,
+    angle: f32,
+    factor: ab_glyph::PxScaleFactor,
+) -> Option<ab_glyph::OutlinedGlyph> {
+    use ab_glyph::{point, OutlineCurve, Point};
+    let (sin, cos) = angle.sin_cos();
+    let turn = |p: Point| {
+        let x = p.x + slant * p.y;
+        point(x * cos + p.y * sin, -x * sin + p.y * cos)
+    };
+    let mut outline = font.outline(glyph.id)?;
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut note = |p: Point| {
+        x0 = x0.min(p.x);
+        x1 = x1.max(p.x);
+        y0 = y0.min(p.y);
+        y1 = y1.max(p.y);
+        p
+    };
+    for curve in &mut outline.curves {
+        match curve {
+            OutlineCurve::Line(a, b) => {
+                *a = note(turn(*a));
+                *b = note(turn(*b));
+            }
+            OutlineCurve::Quad(a, b, c) => {
+                *a = note(turn(*a));
+                *b = note(turn(*b));
+                *c = note(turn(*c));
+            }
+            OutlineCurve::Cubic(a, b, c, d) => {
+                *a = note(turn(*a));
+                *b = note(turn(*b));
+                *c = note(turn(*c));
+                *d = note(turn(*d));
+            }
+        }
+    }
+    if x0 > x1 {
+        return None;
+    }
+    // ab_glyph keeps the top edge in `min` and the bottom in `max`.
+    outline.bounds = ab_glyph::Rect {
+        min: point(x0, y1),
+        max: point(x1, y0),
+    };
+    Some(ab_glyph::OutlinedGlyph::new(glyph, outline, factor))
+}
+
+/// The glyphs of a block along its guide as outlines ready to draw, at
+/// `scale`, with the box they cover: `(outlines, [x0, y0, x1, y1])`.
+fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<ab_glyph::OutlinedGlyph>, [f32; 4]) {
+    let fonts = fonts_for(spec);
+    let px = spec.size.max(0.1) * scale;
+    let font = fonts.font.as_scaled(px);
+    let slant = if synthesized_lean(spec) { SLANT } else { 0.0 };
+    let (glyphs, _) = along_glyphs(spec, scale);
+    let mut out = Vec::with_capacity(glyphs.len());
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for g in glyphs {
+        let glyph =
+            g.id.with_scale_and_position(px, ab_glyph::point(g.origin[0], g.origin[1]));
+        if let Some(outlined) = turned(font.font, glyph, slant, g.angle, font.scale_factor()) {
+            let b = outlined.px_bounds();
+            bounds = [
+                bounds[0].min(b.min.x),
+                bounds[1].min(b.min.y),
+                bounds[2].max(b.max.x),
+                bounds[3].max(b.max.y),
+            ];
+            out.push(outlined);
+        }
+    }
+    if out.is_empty() {
+        bounds = [0.0, 0.0, 0.0, 0.0];
+    }
+    (out, bounds)
+}
+
+/// The box a block covers in its own space, `[x0, y0, x1, y1]`: from the
+/// origin for text in lines, wherever the glyphs land for text along a
+/// guide.
+pub fn bounds(spec: &TextSpec) -> [f32; 4] {
+    if spec.along.is_some() {
+        let (_, b) = along_outlines(spec, 1.0);
+        [
+            b[0].floor(),
+            b[1].floor(),
+            b[2].ceil().max(b[0].floor() + 1.0),
+            b[3].ceil().max(b[1].floor() + 1.0),
+        ]
+    } else {
+        let (w, h) = measure(spec);
+        [0.0, 0.0, w, h]
+    }
+}
+
 /// The file behind the face a block draws with, for an exporter that
 /// embeds it, and what an embedder needs to know: the name the face was
 /// registered under, its units per em, the ascent-to-descent height in
@@ -353,6 +577,9 @@ pub struct PlacedGlyph {
     pub id: u16,
     pub x: f32,
     pub y: f32,
+    /// Which way the baseline runs, in radians on the page; zero for
+    /// text in lines.
+    pub angle: f32,
     pub text: String,
 }
 
@@ -395,6 +622,28 @@ fn fonts_named(name: &str) -> &'static Fonts {
         .unwrap_or_else(bundled)
 }
 
+/// The text each glyph of a shaped run stands for: from its cluster to
+/// the next that differs, so a ligature keeps both its letters and the
+/// pieces of a decomposed character share one (the later ones get none).
+fn cluster_texts(line: &str, clusters: &[usize]) -> Vec<String> {
+    clusters
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            if i > 0 && clusters[i - 1] == c {
+                return String::new();
+            }
+            let end = clusters[i..]
+                .iter()
+                .copied()
+                .find(|&d| d != c)
+                .unwrap_or(line.len())
+                .max(c);
+            line.get(c..end).unwrap_or("").to_string()
+        })
+        .collect()
+}
+
 pub fn placed(spec: &TextSpec) -> PlacedText {
     let l = layout(spec, 1.0);
     let fonts = fonts_for(spec);
@@ -402,29 +651,33 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
     let font = fonts.font.as_scaled(px);
     let step = line_step(&font, spec);
     let mut glyphs = Vec::new();
+    if spec.along.is_some() {
+        let (along, line) = along_glyphs(spec, 1.0);
+        let clusters: Vec<usize> = along.iter().map(|g| g.cluster).collect();
+        for (g, text) in along.iter().zip(cluster_texts(&line, &clusters)) {
+            glyphs.push(PlacedGlyph {
+                id: g.id.0,
+                x: g.origin[0],
+                y: g.origin[1],
+                angle: g.angle,
+                text,
+            });
+        }
+    }
     for (line_no, line) in l.lines.iter().enumerate() {
+        if spec.along.is_some() {
+            break;
+        }
         let baseline = line_no as f32 * step + font.ascent();
         let (shaped, _) = shape_line(line, spec, 1.0);
         let start = line_start(spec, &l, line_no);
-        for (i, g) in shaped.iter().enumerate() {
-            // The glyph's text runs from its cluster to the next cluster
-            // that differs, so a ligature keeps both its letters and the
-            // pieces of a decomposed character share one.
-            let text = if i > 0 && shaped[i - 1].cluster == g.cluster {
-                String::new()
-            } else {
-                let end = shaped[i..]
-                    .iter()
-                    .map(|s| s.cluster)
-                    .find(|&c| c != g.cluster)
-                    .unwrap_or(line.len())
-                    .max(g.cluster);
-                line.get(g.cluster..end).unwrap_or("").to_string()
-            };
+        let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
+        for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
             glyphs.push(PlacedGlyph {
                 id: g.id.0,
                 x: start + g.x,
                 y: baseline + g.y,
+                angle: 0.0,
                 text,
             });
         }
@@ -443,7 +696,11 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         },
         em: px * upem / fonts.font.height_unscaled(),
         lean: if synthesized_lean(spec) { SLANT } else { 0.0 },
-        decorations: decoration_bands(spec, &l, 1.0),
+        decorations: if spec.along.is_some() {
+            Vec::new()
+        } else {
+            decoration_bands(spec, &l, 1.0)
+        },
         glyphs,
     }
 }
@@ -453,6 +710,10 @@ pub struct TextRaster {
     pub width: u32,
     pub height: u32,
     pub coverage: Vec<f32>,
+    /// Where the raster's top-left sits in the block's own space, in
+    /// natural (unscaled) pixels: the origin for text in lines, and the
+    /// glyphs' extent for text along a guide, which can run anywhere.
+    pub origin: (f32, f32),
 }
 
 impl TextRaster {
@@ -640,6 +901,9 @@ pub fn rasterize(spec: &TextSpec) -> TextRaster {
 /// result by natural-size coordinates times the same scale.
 pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let scale = scale.max(0.01);
+    if spec.along.is_some() {
+        return rasterize_along(spec, scale);
+    }
     let l = layout(spec, scale);
     let (w, h) = (l.width, l.height);
     let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
@@ -700,6 +964,36 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         width,
         height,
         coverage,
+        origin: (0.0, 0.0),
+    }
+}
+
+/// Text along its guide: the turned outlines, drawn into a raster just
+/// big enough for where they land.
+fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
+    let (outlines, b) = along_outlines(spec, scale);
+    let (x0, y0) = (b[0].floor(), b[1].floor());
+    let (width, height) = (
+        (b[2].ceil() - x0).max(1.0) as u32,
+        (b[3].ceil() - y0).max(1.0) as u32,
+    );
+    let mut coverage = vec![0f32; (width * height) as usize];
+    for outlined in outlines {
+        let bounds = outlined.px_bounds();
+        outlined.draw(|gx, gy, c| {
+            let x = (bounds.min.x - x0) as i32 + gx as i32;
+            let y = (bounds.min.y - y0) as i32 + gy as i32;
+            if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
+                let i = (y as u32 * width + x as u32) as usize;
+                coverage[i] = coverage[i].max(c);
+            }
+        });
+    }
+    TextRaster {
+        width,
+        height,
+        coverage,
+        origin: (x0 / scale, y0 / scale),
     }
 }
 
@@ -1217,6 +1511,77 @@ mod tests {
         let typeset = placed(&lined);
         assert_eq!(typeset.decorations.len(), 2);
         assert!((typeset.decorations[0][2] - typeset.decorations[0][0] - first_w).abs() < 1e-3);
+    }
+
+    #[test]
+    fn text_along_a_guide_follows_it_glyph_by_glyph() {
+        // A straight guide running down the page: the glyphs turn a
+        // quarter turn and the block's box is tall, not wide.
+        let mut down = spec("Hello", 20.0);
+        down.along = Some(VectorShape::Path {
+            points: vec![[10.0, 0.0], [10.0, 200.0]],
+            closed: false,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        });
+        let b = bounds(&down);
+        assert!(b[3] - b[1] > (b[2] - b[0]) * 2.0, "tall box {b:?}");
+        assert!(
+            b[0] > 10.0 - 20.0 && b[2] > 10.0,
+            "hangs to the left of the guide? {b:?}"
+        );
+        let r = rasterize(&down);
+        assert!(
+            r.origin.0 < 10.0 && r.origin.1 >= -1.0,
+            "origin {:?}",
+            r.origin
+        );
+        let ink: f32 = r.coverage.iter().sum();
+        assert!(ink > 50.0);
+        let typeset = placed(&down);
+        assert_eq!(typeset.glyphs.len(), 5);
+        assert!(
+            (typeset.glyphs[0].angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "turned down"
+        );
+        assert!(
+            typeset.glyphs[1].y > typeset.glyphs[0].y,
+            "each glyph further down"
+        );
+        assert!(typeset.decorations.is_empty());
+
+        // Past an open guide's end nothing is drawn; a closed one wraps.
+        let mut short = down.clone();
+        short.along = Some(VectorShape::Path {
+            points: vec![[10.0, 0.0], [10.0, 30.0]],
+            closed: false,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        });
+        assert!(placed(&short).glyphs.len() < 5, "the rest runs off the end");
+        let mut ring = down.clone();
+        ring.along = Some(VectorShape::Ellipse { rx: 30.0, ry: 30.0 });
+        ring.text = "Round and round and round".into();
+        let on_ring = placed(&ring);
+        assert_eq!(
+            on_ring.glyphs.len(),
+            ring.text.chars().count(),
+            "wrapping keeps every glyph"
+        );
+        let rb = bounds(&ring);
+        assert!(
+            rb[0] < 0.0 && rb[2] > 60.0,
+            "glyphs sit around the ring {rb:?}"
+        );
+        // An offset slides the text along.
+        let mut slid = down.clone();
+        slid.along_offset = 40.0;
+        assert!((placed(&slid).glyphs[0].y - typeset.glyphs[0].y - 40.0).abs() < 1e-3);
+        // The guide reads back flattened for exporters.
+        let (pts, closed) = guide_points(&ring).unwrap();
+        assert!(closed && pts.len() >= 16);
     }
 
     #[test]
