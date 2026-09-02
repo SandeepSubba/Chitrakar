@@ -128,7 +128,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~175),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~343 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~342 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

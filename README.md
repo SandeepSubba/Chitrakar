@@ -3,10 +3,24 @@
 A modern, multiplatform photo + vector editing app with fully non-destructive
 objects and layers, and real color management (RGB and CMYK, ICC-correct).
 
-**Targets:** Windows, macOS, Linux, iPadOS, iOS, Android.
+**Targets:** Windows, macOS, Linux (shipping); iPadOS, iOS, Android (shells
+pending).
 
-**Stack:** Rust engine (document model, GPU render graph via wgpu/vello, ICC color
-pipeline) + Tauri 2 shells + TypeScript/React UI.
+**Stack:** Rust engine (document model, a CPU renderer that compiles natively
+and to WASM, moxcms ICC color pipeline, codecs) + Tauri 2 shells +
+TypeScript/React UI. The UI never touches pixels: it sends commands over
+the WASM boundary and presents the frames the engine renders.
+
+**Today:** shapes, pen and brush paths with bezier handles and booleans,
+placed images, live text (shaped by the font, any face loaded, bold /
+italic / underline, wrapped, aligned, set along a path, typed on the
+canvas), adjustment and filter layers (exposure, brightness/contrast,
+hue/saturation, levels, curves, blur, sharpen), masks, live effects
+(shadows, outlines), groups, alignment, snapping, guides and rulers in
+pixels or millimetres, crop, flip, rotate, a labelled undo history,
+CMYK documents with press profiles and soft proofing, autosaved drafts,
+and export to PNG, JPEG, SVG, CMYK TIFF and PDF (live vectors and text,
+ink as ink). `docs/PLAN.md` §0 says exactly where things stand.
 
 See [docs/PLAN.md](docs/PLAN.md) for the full architecture and roadmap.
 

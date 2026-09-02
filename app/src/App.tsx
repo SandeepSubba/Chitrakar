@@ -541,7 +541,10 @@ export function App() {
     getDraft().then((bytes) => bytes && bytes.length > 0 && setRecoverable(bytes));
   }, []);
   useEffect(() => {
-    if (!session || saveTick === 0) return;
+    // Nothing to keep until there is something on the page: the empty
+    // document every visit starts with must not overwrite a draft that
+    // has not been taken back yet.
+    if (!session || saveTick === 0 || layers.length === 0) return;
     const t = setTimeout(() => {
       try {
         putDraft(session.save());
@@ -550,7 +553,7 @@ export function App() {
       }
     }, 1500);
     return () => clearTimeout(t);
-  }, [session, saveTick]);
+  }, [session, saveTick, layers.length]);
 
   /** Faces a text block can be set in. The bundled one is always there;
    * the rest are fetched from /fonts once per page load and registered
