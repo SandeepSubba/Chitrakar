@@ -138,32 +138,37 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~183),
+- **Verify before committing:** `cargo test --workspace` (~184),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~365 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
   locally is the clippy that runs in CI; bump it deliberately.
-- **GPU backend, first slice:** `core/gpu` (chitrakar-gpu) draws
-  solid-filled rectangles (rounded too) and ellipses through nested group
-  transforms, in painter's order, with per-layer opacity, composited
-  premultiplied in linear light on an Rgba16Float target; edges come from
-  each shape's signed distance, so they are as smooth as the pixel they
-  land on. It declines anything else — strokes, gradients, paths, text,
-  rasters, masks, effects, filters, adjustments, blend modes, a group that
-  needs isolating, ink authored for a press — and the caller falls back to
-  the CPU. Its tests render the same page both ways and compare: mean
-  channel difference under 0.004, interiors and bare page exact, the
-  antialiased rim tracking the CPU's row for row. Nothing depends on it
-  yet: the engine still renders on the CPU. On llvmpipe (a CPU driver, so
-  this measures plumbing rather than a graphics card) a 1280×720 page
-  costs ~22ms against the CPU renderer's ~8ms; CI installs
-  mesa-vulkan-drivers so the comparison runs there too.
+- **GPU backend, first slice:** `core/gpu` (chitrakar-gpu) draws solid
+  fills — rectangles (rounded too), ellipses and paths, compound ones
+  included — through nested group transforms, in painter's order, with
+  per-layer opacity, composited premultiplied in linear light on a
+  four-sample Rgba16Float target. Rectangles and ellipses take their
+  coverage from their own signed distance, so an edge is as smooth as the
+  pixel it lands on; a path is stencilled (a fan over its rings flips the
+  stencil, so even-odd falls out of the parity and a hole is a hole
+  however the ring is wound) and covered, and the multisampling softens
+  it. It declines anything else — strokes, gradients, text, rasters,
+  masks, effects, filters, adjustments, blend modes, a group that needs
+  isolating, ink authored for a press — and the caller falls back to the
+  CPU. Its tests render the same page both ways and compare: mean channel
+  difference under 0.004 for the analytic shapes and 0.012 for the
+  stencilled paths, interiors, holes and bare page exact, the antialiased
+  edges tracking the CPU's. Nothing depends on it yet: the engine still
+  renders on the CPU. On llvmpipe (a CPU driver, so this measures plumbing
+  rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
+  renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
+  there too.
 - **Next up (rough priority):**
-  1. Extend the GPU backend to paths, strokes, gradients, rasters and
-     text, then wire it into the engine behind a feature and let the
-     viewport present from it (see docs/spikes/gpu-rendering.md).
+  1. Extend the GPU backend to strokes, gradients, rasters and text,
+     then wire it into the engine behind a feature and let the viewport
+     present from it (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

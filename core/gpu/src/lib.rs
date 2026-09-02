@@ -6,13 +6,18 @@
 //! Vulkan driver — llvmpipe — makes that comparison runnable in CI; see
 //! docs/spikes/gpu-rendering.md).
 //!
-//! What it draws today: solid-filled rectangles (rounded too) and
-//! ellipses, nested through group transforms, in painter's order, with
-//! per-layer opacity, composited premultiplied in linear light on an
-//! `Rgba16Float` target. Everything else — strokes, gradients, paths,
-//! text, rasters, masks, effects, filters, adjustments, blend modes, a
-//! group that has to be composited on its own, ink authored for a press
-//! — is declined, and the caller falls back to the CPU.
+//! What it draws today: solid fills — rectangles (rounded too),
+//! ellipses and paths, compound ones included — nested through group
+//! transforms, in painter's order, with per-layer opacity, composited
+//! premultiplied in linear light on a four-sample `Rgba16Float` target.
+//! Rectangles and ellipses find their coverage from their own signed
+//! distance; a path is filled the way a stencil buffer fills one — a fan
+//! over its rings flips the stencil, so even-odd falls out of the parity
+//! and a hole is a hole however the ring is wound — and the multisampling
+//! is what softens its edges. Everything else — strokes, gradients, text,
+//! rasters, masks, effects, filters, adjustments, blend modes, a group
+//! that has to be composited on its own, ink authored for a press — is
+//! declined, and the caller falls back to the CPU.
 
 use chitrakar_color::LinearRgba;
 use chitrakar_doc::{BlendMode, Document, NodeId, NodeKind, Transform, VectorShape};
@@ -31,11 +36,71 @@ struct Vertex {
     color: [f32; 4],
 }
 
-/// A device, a queue and the one pipeline that draws every shape.
+/// Samples per pixel. A path's edge is as smooth as the stencil is
+/// finely sampled, and four is what every adapter offers.
+const SAMPLES: u32 = 4;
+
+const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+
+/// Premultiplied source over destination: the same arithmetic the CPU
+/// compositor does.
+const PREMULTIPLIED_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// A depth-stencil state that only ever touches the stencil: `op` on the
+/// pixels that pass `compare`, and the same on those that do not, so a
+/// cover pass leaves the buffer as clean as it found it.
+fn stencil_state(
+    op: wgpu::StencilOperation,
+    compare: wgpu::CompareFunction,
+) -> wgpu::DepthStencilState {
+    let face = wgpu::StencilFaceState {
+        compare,
+        fail_op: op,
+        depth_fail_op: op,
+        pass_op: op,
+    };
+    wgpu::DepthStencilState {
+        format: STENCIL_FORMAT,
+        depth_write_enabled: false,
+        depth_compare: wgpu::CompareFunction::Always,
+        stencil: wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask: 0xff,
+            write_mask: 0xff,
+        },
+        bias: Default::default(),
+    }
+}
+
+/// One thing to draw, in painter's order: a shape whose fragment finds
+/// its own coverage, or a path stencilled and then covered.
+enum Draw {
+    Shape(std::ops::Range<u32>),
+    Path {
+        stencil: std::ops::Range<u32>,
+        cover: std::ops::Range<u32>,
+    },
+}
+
+/// A device, a queue and the pipelines that draw every shape.
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    stencil: wgpu::RenderPipeline,
+    cover: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     /// What the adapter calls itself, for tests and diagnostics.
     pub adapter: String,
@@ -81,6 +146,76 @@ impl GpuRenderer {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
+        let target = wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: Some(PREMULTIPLIED_OVER),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let multisample = wgpu::MultisampleState {
+            count: SAMPLES,
+            ..Default::default()
+        };
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4
+            ],
+        };
+        // The stencil pass writes no colour and flips the buffer under
+        // every triangle of the fan; the cover pass paints where the
+        // parity says the fill reached and clears up behind itself.
+        let stencil = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("path stencil"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_stencil"),
+                compilation_options: Default::default(),
+                buffers: &[vertex_layout.clone()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_stencil"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    write_mask: wgpu::ColorWrites::empty(),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Invert,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        let cover = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("path cover"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_cover"),
+                compilation_options: Default::default(),
+                buffers: &[vertex_layout.clone()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cover"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Zero,
+                wgpu::CompareFunction::NotEqual,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes"),
             layout: Some(&pipeline_layout),
@@ -88,40 +223,22 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4
-                    ],
-                }],
+                buffers: &[vertex_layout],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    // Premultiplied source over destination: the same
-                    // arithmetic the CPU compositor does.
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[Some(target)],
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            // The same attachment the paths use, left alone: a pass has
+            // one set of attachments whatever is drawing into it.
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
             multiview: None,
             cache: None,
         });
@@ -129,6 +246,8 @@ impl GpuRenderer {
             device,
             queue,
             pipeline,
+            stencil,
+            cover,
             layout,
             adapter: info.name,
         })
@@ -138,32 +257,56 @@ impl GpuRenderer {
     /// this backend does not know how to draw.
     pub fn render(&self, doc: &Document) -> Option<Surface> {
         let (width, height) = (doc.meta.width, doc.meta.height);
-        let mut vertices = Vec::new();
-        collect(doc, doc.root(), Transform::default(), 1.0, &mut vertices)?;
-        Some(self.draw(width, height, &vertices))
+        let mut scene = Scene::default();
+        collect(doc, doc.root(), Transform::default(), 1.0, &mut scene)?;
+        Some(self.draw(width, height, &scene))
     }
 
     /// Whether [`render`](Self::render) would draw this document.
     pub fn can_render(doc: &Document) -> bool {
-        let mut vertices = Vec::new();
-        collect(doc, doc.root(), Transform::default(), 1.0, &mut vertices).is_some()
+        let mut scene = Scene::default();
+        collect(doc, doc.root(), Transform::default(), 1.0, &mut scene).is_some()
     }
 
-    fn draw(&self, width: u32, height: u32, vertices: &[Vertex]) -> Surface {
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("page"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+    fn draw(&self, width: u32, height: u32, scene: &Scene) -> Surface {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let make = |label, samples, format, usage| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        // Drawn multisampled, resolved into the texture that is read back.
+        let multi = make(
+            "page (multisampled)",
+            SAMPLES,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let texture = make(
+            "page",
+            1,
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let stencil = make(
+            "stencil",
+            SAMPLES,
+            STENCIL_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        let multi_view = multi.create_view(&Default::default());
+        let stencil_view = stencil.create_view(&Default::default());
         let view = texture.create_view(&Default::default());
         let page = self
             .device
@@ -184,7 +327,7 @@ impl GpuRenderer {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("shapes"),
-                contents: bytemuck::cast_slice(vertices),
+                contents: bytemuck::cast_slice(&scene.vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
         // Rows of the readback buffer are aligned, so a narrow page is
@@ -202,22 +345,43 @@ impl GpuRenderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("page"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: &multi_view,
+                    resolve_target: Some(&view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &stencil_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if !vertices.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.set_vertex_buffer(0, quads.slice(..));
-                pass.draw(0..vertices.len() as u32, 0..1);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.set_vertex_buffer(0, quads.slice(..));
+            pass.set_stencil_reference(0);
+            for draw in &scene.draws {
+                match draw {
+                    Draw::Shape(range) => {
+                        pass.set_pipeline(&self.pipeline);
+                        pass.draw(range.clone(), 0..1);
+                    }
+                    Draw::Path { stencil, cover } => {
+                        pass.set_pipeline(&self.stencil);
+                        pass.draw(stencil.clone(), 0..1);
+                        pass.set_pipeline(&self.cover);
+                        pass.draw(cover.clone(), 0..1);
+                    }
+                }
             }
         }
         encoder.copy_texture_to_buffer(
@@ -292,6 +456,22 @@ fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(out)
 }
 
+/// The vertices and the order to draw them in.
+#[derive(Default)]
+struct Scene {
+    vertices: Vec<Vertex>,
+    draws: Vec<Draw>,
+}
+
+impl Scene {
+    /// Take a run of vertices as the range it occupies.
+    fn push(&mut self, verts: Vec<Vertex>) -> std::ops::Range<u32> {
+        let start = self.vertices.len() as u32;
+        self.vertices.extend(verts);
+        start..self.vertices.len() as u32
+    }
+}
+
 /// Walk the tree in painter's order, turning what can be drawn into
 /// quads; `None` the moment something cannot be.
 fn collect(
@@ -299,7 +479,7 @@ fn collect(
     group: NodeId,
     parent: Transform,
     opacity: f32,
-    out: &mut Vec<Vertex>,
+    out: &mut Scene,
 ) -> Option<()> {
     for &child in doc.children_of(group).ok()? {
         let node = doc.node(child).ok()?;
@@ -336,6 +516,14 @@ fn collect(
                 let chitrakar_color::AuthoredColor::Srgb { .. } = fill else {
                     return None;
                 };
+                let color = chitrakar_color::to_working(fill);
+                let alpha = node.opacity * opacity;
+                let color = [
+                    color.r * alpha,
+                    color.g * alpha,
+                    color.b * alpha,
+                    color.a * alpha,
+                ];
                 let (size, radius, kind) = match shape {
                     VectorShape::Rect {
                         width,
@@ -346,24 +534,74 @@ fn collect(
                         ([*width, *height], r, 0.0)
                     }
                     VectorShape::Ellipse { rx, ry } => ([rx * 2.0, ry * 2.0], 0.0, 1.0),
-                    VectorShape::Path { .. } => return None,
+                    // A path is stencilled from its rings and covered:
+                    // parity gives the even-odd fill the CPU draws,
+                    // holes and crossings included.
+                    VectorShape::Path { .. } => {
+                        let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
+                            .into_iter()
+                            .map(|ring| {
+                                ring.into_iter()
+                                    .map(|p| {
+                                        [
+                                            t.a * p[0] + t.c * p[1] + t.e,
+                                            t.b * p[0] + t.d * p[1] + t.f,
+                                        ]
+                                    })
+                                    .collect()
+                            })
+                            .filter(|ring: &Vec<[f32; 2]>| ring.len() >= 3)
+                            .collect();
+                        if rings.is_empty() {
+                            continue;
+                        }
+                        let mut fan = Vec::new();
+                        let mut box_ = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                        for ring in &rings {
+                            for p in ring {
+                                box_ = [
+                                    box_[0].min(p[0]),
+                                    box_[1].min(p[1]),
+                                    box_[2].max(p[0]),
+                                    box_[3].max(p[1]),
+                                ];
+                            }
+                            for i in 1..ring.len() - 1 {
+                                for p in [ring[0], ring[i], ring[i + 1]] {
+                                    fan.push(Vertex {
+                                        doc: p,
+                                        local: [0.0, 0.0],
+                                        params: [0.0; 4],
+                                        color,
+                                    });
+                                }
+                            }
+                        }
+                        let stencil = out.push(fan);
+                        let corner = |x: f32, y: f32| Vertex {
+                            doc: [x, y],
+                            local: [0.0, 0.0],
+                            params: [0.0; 4],
+                            color,
+                        };
+                        let (x0, y0, x1, y1) = (box_[0], box_[1], box_[2], box_[3]);
+                        let cover = out.push(vec![
+                            corner(x0, y0),
+                            corner(x1, y0),
+                            corner(x1, y1),
+                            corner(x0, y0),
+                            corner(x1, y1),
+                            corner(x0, y1),
+                        ]);
+                        out.draws.push(Draw::Path { stencil, cover });
+                        continue;
+                    }
                 };
                 if !(size[0] > 0.0 && size[1] > 0.0) {
                     continue;
                 }
-                let color = chitrakar_color::to_working(fill);
-                let alpha = node.opacity * opacity;
-                out.extend(quad(
-                    t,
-                    size,
-                    [size[0], size[1], radius, kind],
-                    [
-                        color.r * alpha,
-                        color.g * alpha,
-                        color.b * alpha,
-                        color.a * alpha,
-                    ],
-                ));
+                let range = out.push(quad(t, size, [size[0], size[1], radius, kind], color));
+                out.draws.push(Draw::Shape(range));
             }
             _ => return None,
         }
@@ -565,6 +803,73 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_filled_the_way_the_cpu_fills_them() {
+        let Some(gpu) = GpuRenderer::new() else {
+            eprintln!("skipped: no GPU adapter");
+            return;
+        };
+        let mut doc = Document::new(90, 90, ColorMode::Rgb);
+        // A square with a square hole, and a curved petal beside it: the
+        // hole tests the parity, the curve tests the flattening.
+        add(
+            &mut doc,
+            filled(
+                "ring",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: vec![vec![[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]]],
+                },
+                RED,
+            ),
+            Transform::translation(5.0, 5.0),
+        );
+        add(
+            &mut doc,
+            filled(
+                "petal",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 30.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: vec![[0.0, 0.0, 6.0, -14.0], [-6.0, -14.0, 0.0, 0.0], [0.0; 4]],
+                    subpaths: Vec::new(),
+                },
+                BLUE,
+            ),
+            Transform::translation(52.0, 50.0),
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        // Wider than the analytic shapes: a stencil's edge is as fine as
+        // the sampling, not exact.
+        assert!(
+            mean < 0.012,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        assert_eq!(drawn.get(8, 8).a, 1.0, "inside the ring");
+        assert_eq!(drawn.get(25, 25).a, 0.0, "and the hole is a hole");
+        assert!(drawn.get(60, 55).a > 0.9, "the petal is filled");
+        assert_eq!(drawn.get(85, 10).a, 0.0, "bare page stays bare");
+        // A slanted edge is soft, and as soft as the CPU draws it: across
+        // the petal's diagonal, coverage falls through partial values.
+        let scan = |s: &Surface| (68..76).map(|x| s.get(x, 70).a).collect::<Vec<f32>>();
+        let (edge, want) = (scan(&drawn), scan(&reference));
+        assert!(
+            edge.iter().any(|a| *a > 0.05 && *a < 0.95),
+            "a soft edge: {edge:?}"
+        );
+        assert!(
+            edge.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.3),
+            "close to the CPU's edge: {edge:?} vs {want:?}"
+        );
+    }
+
+    #[test]
     fn opacity_and_groups_composite_as_they_do_on_the_cpu() {
         let Some(gpu) = GpuRenderer::new() else {
             eprintln!("skipped: no GPU adapter");
@@ -669,26 +974,6 @@ mod tests {
             })
             .unwrap();
         assert!(!GpuRenderer::can_render(&with_stroke));
-
-        let mut with_path = doc.clone();
-        with_path
-            .apply(Command::SetKind {
-                id,
-                kind: Box::new(NodeKind::Vector {
-                    shape: VectorShape::Path {
-                        points: vec![[0.0, 0.0], [10.0, 0.0], [5.0, 8.0]],
-                        closed: true,
-                        smooth: false,
-                        handles: Vec::new(),
-                        subpaths: Vec::new(),
-                    },
-                    fill: Some(RED),
-                    stroke: None,
-                    gradient: None,
-                }),
-            })
-            .unwrap();
-        assert!(!GpuRenderer::can_render(&with_path));
 
         let mut blended = doc.clone();
         blended

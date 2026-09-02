@@ -60,3 +60,40 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let cov = clamp(0.5 - d / max(fwidth(d), 1e-6), 0.0, 1.0);
     return in.color * cov;
 }
+
+// Stencil pass for a path: nothing but position, no colour written. The
+// triangles of a fan over its rings flip the stencil, so a pixel ends up
+// set exactly where an even-odd fill covers it.
+@vertex
+fn vs_stencil(@location(0) doc: vec2f) -> @builtin(position) vec4f {
+    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
+    return vec4f(ndc, 0.0, 1.0);
+}
+
+// A pipeline in a pass that has a colour attachment must name one too,
+// even when — as here — it writes nothing to it.
+@fragment
+fn fs_stencil() -> @location(0) vec4f {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+}
+
+// The cover pass paints the path's colour wherever the stencil says the
+// fill reached, and clears the stencil behind it.
+struct CoverOut {
+    @builtin(position) pos: vec4f,
+    @location(0) @interpolate(flat) color: vec4f,
+};
+
+@vertex
+fn vs_cover(@location(0) doc: vec2f, @location(3) color: vec4f) -> CoverOut {
+    var out: CoverOut;
+    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
+    out.pos = vec4f(ndc, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_cover(in: CoverOut) -> @location(0) vec4f {
+    return in.color;
+}
