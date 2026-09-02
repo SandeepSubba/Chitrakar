@@ -1,9 +1,11 @@
 //! Text rasterization: live [`TextSpec`] objects render to a coverage
 //! bitmap at their natural size, then blit through the node transform like
-//! any raster. Built on ab_glyph with a bundled DejaVu Sans (Bitstream Vera
-//! license — see assets/DejaVuSans-LICENSE.txt). Font selection and shaping
-//! (rustybuzz/parley) come later; this is deliberate MVP layout: per-glyph
-//! advances with kerning, `\n` line breaks.
+//! any raster. A bundled DejaVu Sans (Bitstream Vera license — see
+//! assets/DejaVuSans-LICENSE.txt) is shaped by rustybuzz — so the font's
+//! own kerning, ligatures and mark positioning apply, and a script that
+//! reorders or joins will work the day a font for it is bundled — and its
+//! glyphs are rasterized by ab_glyph. Lines break on `\n`; there is no
+//! wrapping yet.
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 use chitrakar_doc::TextSpec;
@@ -14,6 +16,55 @@ const FONT_BYTES: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
 fn font() -> &'static FontRef<'static> {
     static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
     FONT.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).expect("bundled font must parse"))
+}
+
+/// The same bytes as the shaper sees them. Parsed once; shaping a line is
+/// then a lookup through the font's own tables rather than a parse.
+fn face() -> &'static rustybuzz::Face<'static> {
+    static FACE: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
+    FACE.get_or_init(|| {
+        rustybuzz::Face::from_slice(FONT_BYTES, 0).expect("bundled font must parse")
+    })
+}
+
+/// One positioned glyph of a shaped line: which glyph, where its origin
+/// sits along the baseline, and how far the pen moves past it — all in
+/// raster pixels at the scale the line was shaped for.
+struct Shaped {
+    id: ab_glyph::GlyphId,
+    x: f32,
+    y: f32,
+}
+
+/// Shape one line: the font decides which glyphs the text becomes and where
+/// each goes, which is what turns "fi" into a ligature, tightens "AV", and
+/// puts an accent over its base. Tracking is added after each glyph, the
+/// way a typesetter letter-spaces: between the glyphs, never inside a
+/// ligature's own shape.
+fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
+    let face = face();
+    let px = spec.size.max(0.1) * scale;
+    let unit = px / face.units_per_em() as f32;
+    let track = tracking(spec, scale);
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(line);
+    let out = rustybuzz::shape(face, &[], buffer);
+    let mut glyphs = Vec::with_capacity(out.len());
+    let mut pen = 0f32;
+    for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+        glyphs.push(Shaped {
+            id: ab_glyph::GlyphId(info.glyph_id as u16),
+            x: pen + pos.x_offset as f32 * unit,
+            y: -(pos.y_offset as f32) * unit,
+        });
+        pen += pos.x_advance as f32 * unit + track;
+    }
+    // The last glyph's tracking is not part of the line's width: nothing
+    // follows it to be spaced from.
+    if !glyphs.is_empty() {
+        pen -= track;
+    }
+    (glyphs, pen.max(0.0))
 }
 
 /// A rasterized text block: alpha coverage (0..=1) at natural size.
@@ -66,7 +117,7 @@ fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
     let mut lines = 0u32;
     for line in spec.text.split('\n') {
         lines += 1;
-        widest = widest.max(line_width(&font, line, spec, scale));
+        widest = widest.max(line_width(line, spec, scale));
     }
     (widest.max(1.0), (lines.max(1) as f32 * step).max(1.0))
 }
@@ -82,24 +133,8 @@ fn tracking(spec: &TextSpec, scale: f32) -> f32 {
     spec.letter_spacing * spec.size.max(0.1) * scale
 }
 
-fn line_width(
-    font: &impl ScaleFont<&'static FontRef<'static>>,
-    line: &str,
-    spec: &TextSpec,
-    scale: f32,
-) -> f32 {
-    let track = tracking(spec, scale);
-    let mut width = 0f32;
-    let mut prev = None;
-    for ch in line.chars() {
-        let id = font.glyph_id(ch);
-        if let Some(prev) = prev {
-            width += font.kern(prev, id) + track;
-        }
-        width += font.h_advance(id);
-        prev = Some(id);
-    }
-    width
+fn line_width(line: &str, spec: &TextSpec, scale: f32) -> f32 {
+    shape_line(line, spec, scale).1
 }
 
 /// Rasterize the block at natural size.
@@ -123,27 +158,22 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     // and line height are all in raster pixels already.
     let font = font().as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
-    let track = tracking(spec, scale);
 
     for (line_no, line) in spec.text.split('\n').enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
+        let (glyphs, line_w) = shape_line(line, spec, scale);
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
-        let slack = w - line_width(&font, line, spec, scale);
-        let mut pen_x = match spec.align {
+        let slack = w - line_w;
+        let start = match spec.align {
             chitrakar_doc::TextAlign::Left => 0.0,
             chitrakar_doc::TextAlign::Center => slack / 2.0,
             chitrakar_doc::TextAlign::Right => slack,
         };
-        let mut prev = None;
-        for ch in line.chars() {
-            let id = font.glyph_id(ch);
-            if let Some(prev) = prev {
-                pen_x += font.kern(prev, id) + track;
-            }
-            let glyph = id.with_scale_and_position(
+        for g in glyphs {
+            let glyph = g.id.with_scale_and_position(
                 spec.size.max(0.1) * scale,
-                ab_glyph::point(pen_x, baseline),
+                ab_glyph::point(start + g.x, baseline + g.y),
             );
             if let Some(outlined) = font.font.outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
@@ -156,8 +186,6 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
                     }
                 });
             }
-            pen_x += font.h_advance(id);
-            prev = Some(id);
         }
     }
     TextRaster {
@@ -290,6 +318,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_font_shapes_the_line_rather_than_the_characters() {
+        // Shaping is the font's say over what the text becomes: two
+        // letters can be one glyph, a pair can sit closer than their
+        // advances add up to, and a base plus a combining mark is the same
+        // as the precomposed letter. None of that falls out of walking
+        // characters one at a time.
+        let at = |t: &str| shape_line(t, &spec(t, 40.0), 1.0);
+        assert_eq!(at("fi").0.len(), 1, "fi is a ligature in DejaVu Sans");
+        assert_eq!(at("office").0.len(), 4, "and so is ffi");
+        let (_, av) = at("AV");
+        let apart = at("A").1 + at("V").1;
+        assert!(av < apart - 1.0, "AV is kerned closer: {av} vs {apart}");
+        let composed = at("\u{e9}");
+        let decomposed = at("e\u{301}");
+        assert_eq!(decomposed.0.len(), 1, "e + combining acute is one glyph");
+        assert_eq!(
+            decomposed.0[0].id, composed.0[0].id,
+            "and it is the same glyph as the precomposed letter"
+        );
+        // Tracking spaces glyphs, not the letters inside a ligature, so a
+        // ligature still counts as one.
+        let mut tracked = spec("fi", 40.0);
+        tracked.letter_spacing = 0.5;
+        assert_eq!(shape_line("fi", &tracked, 1.0).0.len(), 1);
     }
 
     #[test]

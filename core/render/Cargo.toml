@@ -10,3 +10,4 @@ repository.workspace = true
 chitrakar-doc.workspace = true
 chitrakar-color.workspace = true
 ab_glyph = "0.2"
+rustybuzz = "0.20"

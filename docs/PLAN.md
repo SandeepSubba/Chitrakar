@@ -64,8 +64,10 @@ without reading anything else.*
   viewport at the resolution the canvas is displayed at, so outlines,
   gradients and glyphs are re-solved instead of interpolated, and a page
   costs a screenful of pixels to show however big it is.
-  Text likewise rasterizes at the size it is actually seen at, and
-  carries alignment, line spacing and tracking.
+  Text is shaped by the font (rustybuzz: ligatures, kerning, combining
+  marks; complex scripts once a font for them is bundled), rasterizes at
+  the size it is actually seen at, and carries alignment, line spacing
+  and tracking.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
@@ -92,7 +94,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~141),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~174 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~280 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -103,7 +105,8 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: text shaping via rustybuzz/parley.
+  3. Depth: font choice and weights (shaping is done; only one face is
+     bundled), and line wrapping.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

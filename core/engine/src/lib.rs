@@ -1964,6 +1964,52 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn many_layers_probe() {
+        // A document with hundreds of small layers: what one drag frame
+        // costs, and what the panel's per-refresh reads cost.
+        let mut session = Session::new(1600, 1000, ColorMode::Rgb);
+        let mut ids = Vec::new();
+        for i in 0..300 {
+            let id = add_rect(&mut session, &format!("r{i}"), 40.0, 30.0);
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(
+                        (i % 30) as f32 * 52.0,
+                        (i / 30) as f32 * 95.0,
+                    ),
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        session.set_viewport(0.8, 0.0, 0.0, 1400, 900);
+        session.render_cached().unwrap();
+        let t0 = std::time::Instant::now();
+        for k in 0..20 {
+            session
+                .preview(Command::SetTransform {
+                    id: ids[150],
+                    transform: Transform::translation(300.0 + k as f32, 400.0),
+                })
+                .unwrap();
+            session.render_cached().unwrap();
+        }
+        println!("300 layers, drag frame: {:?}", t0.elapsed() / 20);
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = session.layers();
+            for id in &ids {
+                let _ = session.bounds_of(*id);
+            }
+        }
+        println!(
+            "300 layers, panel refresh (layers + every bounds_of): {:?}",
+            t0.elapsed() / 20
+        );
+    }
+
+    #[test]
     fn json_command_roundtrip_drives_the_engine() {
         let mut session = Session::new(16, 16, ColorMode::Rgb);
         let root = session.document().root();
