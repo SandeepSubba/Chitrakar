@@ -18,7 +18,16 @@ export type AuthoredColor =
 export type VectorShape =
   | { Rect: { width: number; height: number } }
   | { Ellipse: { rx: number; ry: number } }
-  | { Path: { points: [number, number][]; closed: boolean; smooth: boolean } };
+  | {
+      Path: {
+        points: [number, number][];
+        closed: boolean;
+        smooth: boolean;
+        /** Per-anchor bezier control offsets, [inX, inY, outX, outY]. Empty
+         * means a plain polyline; when present they override `smooth`. */
+        handles: [number, number, number, number][];
+      };
+    };
 
 export type Adjustment =
   | { BrightnessContrast: { brightness: number; contrast: number } }

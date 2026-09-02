@@ -300,6 +300,18 @@ body {
   z-index: 2;
 }
 
+.curve-handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1.5px solid #fff;
+  cursor: grab;
+  touch-action: none;
+  z-index: 2;
+}
+
 .sel-overlay {
   position: absolute;
   border: 1px solid var(--accent);

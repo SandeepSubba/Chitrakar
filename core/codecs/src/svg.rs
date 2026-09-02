@@ -86,11 +86,45 @@ fn write_children(
                         points,
                         closed,
                         smooth,
+                        handles,
                     } => {
+                        // With handles the path exports as real cubic
+                        // segments, so a curve stays a curve downstream
+                        // instead of arriving as a flattened polyline.
+                        let curved = handles.len() == points.len()
+                            && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
                         let mut d = String::new();
-                        for (i, p) in points.iter().enumerate() {
-                            let _ =
-                                write!(d, "{}{},{}", if i == 0 { "M" } else { " L" }, p[0], p[1]);
+                        if curved && points.len() >= 2 {
+                            let _ = write!(d, "M{},{}", points[0][0], points[0][1]);
+                            let segments = if *closed {
+                                points.len()
+                            } else {
+                                points.len() - 1
+                            };
+                            for i in 0..segments {
+                                let j = (i + 1) % points.len();
+                                let (a, b) = (points[i], points[j]);
+                                let _ = write!(
+                                    d,
+                                    " C{},{} {},{} {},{}",
+                                    a[0] + handles[i][2],
+                                    a[1] + handles[i][3],
+                                    b[0] + handles[j][0],
+                                    b[1] + handles[j][1],
+                                    b[0],
+                                    b[1]
+                                );
+                            }
+                        } else {
+                            for (i, p) in points.iter().enumerate() {
+                                let _ = write!(
+                                    d,
+                                    "{}{},{}",
+                                    if i == 0 { "M" } else { " L" },
+                                    p[0],
+                                    p[1]
+                                );
+                            }
                         }
                         if *closed {
                             d.push_str(" Z");
@@ -397,6 +431,35 @@ mod tests {
     }
 
     #[test]
+    fn bezier_paths_export_as_cubic_curves() {
+        // A curve must leave as a curve: C segments, not a polyline of the
+        // flattened samples, or every round trip loses the geometry.
+        let mut doc = Document::new(100, 100, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::vector(
+                "curve",
+                chitrakar_doc::VectorShape::Path {
+                    points: vec![[0.0, 0.0], [40.0, 0.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: vec![[0.0, 0.0, 10.0, -20.0], [-10.0, -20.0, 0.0, 0.0]],
+                },
+            )),
+        })
+        .unwrap();
+
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains("C10,-20 30,-20 40,0"),
+            "cubic segment written from the handles:\n{svg}"
+        );
+        assert!(!svg.contains(" L"), "not flattened to a polyline:\n{svg}");
+    }
+
+    #[test]
     fn gradients_export_as_live_svg_gradients() {
         // Our stops are already in objectBoundingBox units, SVG's default,
         // so a gradient exports as a real <linearGradient> the shape
@@ -488,6 +551,7 @@ mod tests {
                 points: vec![[0.0, 0.0], [10.0, 0.0], [5.0, 8.0]],
                 closed: true,
                 smooth: false,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut path.kind {

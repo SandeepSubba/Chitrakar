@@ -521,6 +521,52 @@ assert(px[3] > 0, "smooth spline bows past the chord");
 await page.uncheck('input[aria-label="Smooth path"]');
 await page.waitForTimeout(150);
 
+// 8u2. Curve handles: converting keeps the shape and hands over its
+// controls, then dragging a handle bends the outline where it was straight.
+const straightAt = await canvasPixel(92, 80);
+assert(straightAt[3] === 0, "still straight before converting");
+assert(
+  (await page.locator(".curve-handle").count()) === 0,
+  "a straight path shows no curve handles",
+);
+await page.click("text=Convert to curves");
+await page.waitForTimeout(200);
+const handleCount = await page.locator(".curve-handle").count();
+assert(handleCount > 0, `converting exposes handles (${handleCount})`);
+assert(
+  (await canvasPixel(92, 80))[3] === 0,
+  "converting hands over controls without changing the shape",
+);
+assert(
+  await page.isDisabled('input[aria-label="Smooth path"]'),
+  "smooth is disabled once explicit handles define the shape",
+);
+
+// Drag one handle far to the left; the outline follows it out there.
+const handle = page.locator(".curve-handle").first();
+const hbox = await handle.boundingBox();
+await page.mouse.move(hbox.x + 4, hbox.y + 4);
+await page.mouse.down();
+await page.mouse.move(hbox.x - 120, hbox.y + 40, { steps: 6 });
+await page.mouse.up();
+await page.waitForTimeout(200);
+const bent = await canvasPixel(92, 80);
+assert(bent[3] > 0, `dragging a handle bent the outline (got ${bent})`);
+
+// One undo step for the whole drag, one more for the conversion.
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(150);
+assert(
+  (await canvasPixel(92, 80))[3] === 0,
+  "the handle drag undoes as a single step",
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(150);
+assert(
+  (await page.locator(".curve-handle").count()) === 0,
+  "and the conversion undoes too",
+);
+
 // 8v. Text tool: click to add a live text object, edit it via the panel.
 const inkCount = (x0, y0, x1, y1) =>
   page.evaluate(([a, b, c, d]) => {

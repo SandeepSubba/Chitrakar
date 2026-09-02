@@ -10,6 +10,7 @@ import {
   NodeId,
   NodeKind,
   Transform,
+  VectorShape,
   WasmSession,
   colorToHex,
   getWasmMemory,
@@ -20,6 +21,44 @@ import {
   sendCommand,
   sendPreview,
 } from "./engine";
+
+/** A path's handles, padded to one per anchor so callers can index freely.
+ * Stored empty when nothing is curved, which is what keeps older files (and
+ * plain polylines) free of the field entirely. */
+function withHandles(path: Extract<VectorShape, { Path: unknown }>["Path"]) {
+  const zero = () => [0, 0, 0, 0] as [number, number, number, number];
+  return path.points.map((_, i) => path.handles[i] ?? zero());
+}
+
+/** Explicit handles that reproduce exactly what the path already draws, so
+ * converting hands you controls without changing the shape under you.
+ *
+ * A straight segment is a cubic whose controls lie on the chord at thirds,
+ * and a Catmull-Rom spline is a cubic whose controls are a sixth of the
+ * neighbour-to-neighbour span — so which seed preserves the shape depends on
+ * whether `smooth` was on. */
+function seedHandles(
+  path: Extract<VectorShape, { Path: unknown }>["Path"],
+): [number, number, number, number][] {
+  const pts = path.points;
+  const n = pts.length;
+  const at = (i: number) =>
+    path.closed ? pts[((i % n) + n) % n] : pts[Math.min(Math.max(i, 0), n - 1)];
+  return pts.map((p, i) => {
+    const [prev, next] = [at(i - 1), at(i + 1)];
+    if (path.smooth) {
+      const tx = (next[0] - prev[0]) / 6;
+      const ty = (next[1] - prev[1]) / 6;
+      return [-tx, -ty, tx, ty];
+    }
+    return [
+      (prev[0] - p[0]) / 3,
+      (prev[1] - p[1]) / 3,
+      (next[0] - p[0]) / 3,
+      (next[1] - p[1]) / 3,
+    ];
+  });
+}
 
 const TOOLS = ["Move", "Rect", "Ellipse", "Pen", "Text"] as const;
 type Tool = (typeof TOOLS)[number];
@@ -225,7 +264,7 @@ export function App() {
               `Path ${shapeCount.current}`,
               {
                 Vector: {
-                  shape: { Path: { points, closed, smooth: false } },
+                  shape: { Path: { points, closed, smooth: false, handles: [] } },
                   fill: closed
                     ? cmyk
                       ? hexToCmykColor(fill)
@@ -671,6 +710,72 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** Curve-handle editing. Same capture-at-drag-start discipline as
+   * anchors; unlike anchors, handles are offsets from their anchor, so
+   * nothing needs renormalizing and the transform is left alone. */
+  const curveDragRef = useRef<{
+    idx: number;
+    /** 0 = incoming handle, 2 = outgoing (index into the [in, out] pair). */
+    side: 0 | 2;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    t0: Transform;
+  } | null>(null);
+
+  const onCurveHandleDown = (
+    e: React.PointerEvent,
+    idx: number,
+    side: 0 | 2,
+  ) => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    e.stopPropagation();
+    curveDragRef.current = {
+      idx,
+      side,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onCurveHandleMove = (e: React.PointerEvent) => {
+    const drag = curveDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (!("Path" in drag.vector.shape)) return;
+    const [dx, dy] = docPoint(e);
+    const { t0, idx, side } = drag;
+    const path = drag.vector.shape.Path;
+    const anchor = path.points[idx];
+    // Offsets are in the path's own space, like the anchors themselves.
+    const ox = (dx - t0.e) / t0.a - anchor[0];
+    const oy = (dy - t0.f) / t0.d - anchor[1];
+    const handles = withHandles(path).map(
+      (h, i) => (i === idx ? [...h] : h) as [number, number, number, number],
+    );
+    handles[idx][side] = ox;
+    handles[idx][side + 1] = oy;
+    // Mirror the opposite handle so a curve stays smooth through its
+    // anchor, which is what dragging one of a pair is understood to mean.
+    handles[idx][side === 0 ? 2 : 0] = -ox;
+    handles[idx][side === 0 ? 3 : 1] = -oy;
+    preview({
+      SetKind: {
+        id: selected,
+        kind: {
+          Vector: {
+            ...drag.vector,
+            shape: { Path: { ...path, handles } },
+          },
+        },
+      },
+    });
+  };
+
+  const onCurveHandleUp = () => {
+    handleDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const jumpHistory = (delta: number) => {
     if (!session || delta === 0) return;
     session.jump(delta);
@@ -997,20 +1102,48 @@ export function App() {
             "Path" in selectedKind.Vector.shape &&
             (() => {
               const t = toTransform(session.transform_of(selected));
-              return selectedKind.Vector.shape.Path.points.map((p, i) => (
-                <div
-                  key={i}
-                  className="anchor"
-                  data-anchor={i}
-                  style={{
-                    left: view.x + (t.e + p[0] * t.a) * view.zoom - 5,
-                    top: view.y + (t.f + p[1] * t.d) * view.zoom - 5,
-                  }}
-                  onPointerDown={(e) => onAnchorPointerDown(e, i)}
-                  onPointerMove={onAnchorPointerMove}
-                  onPointerUp={onAnchorPointerUp}
-                />
-              ));
+              const path = selectedKind.Vector.shape.Path;
+              const handles = withHandles(path);
+              const screen = (x: number, y: number) => ({
+                left: view.x + (t.e + x * t.a) * view.zoom,
+                top: view.y + (t.f + y * t.d) * view.zoom,
+              });
+              return path.points.flatMap((p, i) => {
+                const at = screen(p[0], p[1]);
+                const dots = [
+                  <div
+                    key={`a${i}`}
+                    className="anchor"
+                    data-anchor={i}
+                    style={{ left: at.left - 5, top: at.top - 5 }}
+                    onPointerDown={(e) => onAnchorPointerDown(e, i)}
+                    onPointerMove={onAnchorPointerMove}
+                    onPointerUp={onAnchorPointerUp}
+                  />,
+                ];
+                // Only handles that are actually out from their anchor get a
+                // dot: one sitting on the anchor would cover it and swallow
+                // its drags. "Convert to curves" is what brings them out.
+                for (const side of [0, 2] as const) {
+                  const [ox, oy] = [handles[i][side], handles[i][side + 1]];
+                  if (ox === 0 && oy === 0) continue;
+                  const hx = p[0] + ox;
+                  const hy = p[1] + oy;
+                  const h = screen(hx, hy);
+                  dots.push(
+                    <div
+                      key={`h${i}-${side}`}
+                      className="curve-handle"
+                      data-handle={`${i}-${side}`}
+                      style={{ left: h.left - 4, top: h.top - 4 }}
+                      onPointerDown={(e) => onCurveHandleDown(e, i, side)}
+                      onPointerMove={onCurveHandleMove}
+                      onPointerUp={onCurveHandleUp}
+                    />,
+                  );
+                }
+                return dots;
+              });
             })()}
           {selBounds && selBounds.length === 4 && (
             <div
@@ -1597,28 +1730,66 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
           )}
         {"Path" in v.shape &&
           (() => {
-            const path = ("Path" in v.shape && v.shape.Path) as {
-              points: [number, number][];
-              closed: boolean;
-              smooth: boolean;
-            };
+            const path = ("Path" in v.shape && v.shape.Path) as Extract<
+              VectorShape,
+              { Path: unknown }
+            >["Path"];
+            const curved = path.handles.some((h) => h.some((v) => v !== 0));
             return (
-              <label className="row">
-                <input
-                  type="checkbox"
-                  checked={path.smooth}
-                  onChange={(e) =>
-                    onEdit(
-                      patch({
-                        shape: { Path: { ...path, smooth: e.target.checked } },
-                      }),
-                      false,
-                    )
-                  }
-                  aria-label="Smooth path"
-                />
-                Smooth
-              </label>
+              <>
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={path.smooth}
+                    disabled={curved}
+                    onChange={(e) =>
+                      onEdit(
+                        patch({
+                          shape: {
+                            Path: { ...path, smooth: e.target.checked, handles: path.handles },
+                          },
+                        }),
+                        false,
+                      )
+                    }
+                    aria-label="Smooth path"
+                  />
+                  Smooth
+                </label>
+                {curved ? (
+                  <>
+                    <p className="muted">
+                      Curve handles are set, so they define the shape. Drag
+                      them on the canvas.
+                    </p>
+                    <button
+                      className="mask-button"
+                      onClick={() =>
+                        onEdit(
+                          patch({ shape: { Path: { ...path, handles: [] } } }),
+                          false,
+                        )
+                      }
+                    >
+                      Straighten curves
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="mask-button"
+                    onClick={() =>
+                      onEdit(
+                        patch({
+                          shape: { Path: { ...path, handles: seedHandles(path) } },
+                        }),
+                        false,
+                      )
+                    }
+                  >
+                    Convert to curves
+                  </button>
+                )}
+              </>
             );
           })()}
       </>

@@ -495,25 +495,59 @@ fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
     Some(((x - t.e) / t.a, (y - t.f) / t.d))
 }
 
-/// Expand a smooth path into its rendered polyline: a uniform Catmull-Rom
-/// spline through the anchors, sampled per segment. Everything else (and
-/// paths already polyline) borrows unchanged. Call once per operation, not
-/// per pixel.
+/// Expand a curved path into the polyline everything else works on — paint,
+/// hit test, bounds all run on the result, so curves need no special cases
+/// downstream. Bezier handles win when present because they are authored;
+/// `smooth` infers a Catmull-Rom spline through the anchors instead.
+/// Everything else (and paths already polyline) borrows unchanged. Call once
+/// per operation, not per pixel.
 fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     use std::borrow::Cow;
+    const STEPS: usize = 12;
     let VectorShape::Path {
         points,
         closed,
-        smooth: true,
+        smooth,
+        handles,
     } = shape
     else {
         return Cow::Borrowed(shape);
     };
     let n = points.len();
-    if n < 3 {
+    let curved = handles.len() == n && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+    if curved && n >= 2 {
+        let segments = if *closed { n } else { n - 1 };
+        let mut out = Vec::with_capacity(segments * STEPS + 1);
+        for i in 0..segments {
+            let j = (i + 1) % n;
+            let (a, b) = (points[i], points[j]);
+            // Control points are offsets from their anchors: the outgoing
+            // handle of this anchor and the incoming one of the next.
+            let c1 = [a[0] + handles[i][2], a[1] + handles[i][3]];
+            let c2 = [b[0] + handles[j][0], b[1] + handles[j][1]];
+            for s in 0..STEPS {
+                let t = s as f32 / STEPS as f32;
+                let u = 1.0 - t;
+                let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                out.push([
+                    w0 * a[0] + w1 * c1[0] + w2 * c2[0] + w3 * b[0],
+                    w0 * a[1] + w1 * c1[1] + w2 * c2[1] + w3 * b[1],
+                ]);
+            }
+        }
+        if !closed {
+            out.push(points[n - 1]);
+        }
+        return Cow::Owned(VectorShape::Path {
+            points: out,
+            closed: *closed,
+            smooth: false,
+            handles: Vec::new(),
+        });
+    }
+    if !smooth || n < 3 {
         return Cow::Borrowed(shape);
     }
-    const STEPS: usize = 12;
     let get = |i: isize| -> [f32; 2] {
         if *closed {
             points[i.rem_euclid(n as isize) as usize]
@@ -549,6 +583,7 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
         points: out,
         closed: *closed,
         smooth: false,
+        handles: Vec::new(),
     })
 }
 
@@ -1413,6 +1448,7 @@ mod tests {
                 points: pts,
                 closed: true,
                 smooth: true,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut p.kind {
@@ -1504,6 +1540,7 @@ mod tests {
                 points: vec![[0.0, 0.0], [32.0, 0.0], [0.0, 32.0]],
                 closed: true,
                 smooth: false,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut tri.kind {
@@ -1665,6 +1702,102 @@ mod tests {
     }
 
     #[test]
+    fn bezier_handles_bow_the_edge_and_beat_smooth() {
+        // Two anchors and a big outward handle: the segment between them has
+        // to bulge past the straight chord. And when handles are present
+        // they win over `smooth`, because they are authored rather than
+        // inferred — same shape either way.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        let straight = VectorShape::Path {
+            points: vec![[8.0, 32.0], [56.0, 32.0], [32.0, 56.0]],
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+        };
+        let mut node = Node::vector("p", straight.clone());
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+
+        // A point above the straight top edge, so outside to begin with.
+        let probe = (32, 24);
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(probe.0, probe.1).a, 0.0, "flat chord leaves it empty");
+
+        // Pull the first segment upward with out/in handles.
+        let curved = VectorShape::Path {
+            points: vec![[8.0, 32.0], [56.0, 32.0], [32.0, 56.0]],
+            closed: true,
+            smooth: true, // ignored: explicit handles take precedence
+            handles: vec![
+                [0.0, 0.0, 0.0, -24.0],
+                [0.0, -24.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+        };
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: curved.clone(),
+                fill: Some(RED),
+                stroke: None,
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(probe.0, probe.1).a,
+            1.0,
+            "the curve bulges over the probe"
+        );
+        assert_eq!(
+            hit_test(&doc, probe.0 as f32, probe.1 as f32).unwrap(),
+            Some(id),
+            "hit testing follows the curve, not the chord"
+        );
+
+        // Bounds grow to contain the overshoot, or incremental rendering
+        // would leave the bulge stale.
+        match node_bounds(&doc, id).unwrap() {
+            Bounds::Rect(_, y0, _, _) => {
+                assert!(y0 < 24.0, "bounds must contain the overshoot, got {y0}")
+            }
+            other => panic!("expected a rect, got {other:?}"),
+        }
+
+        // Handles all zero is the same as having none.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Path {
+                    points: vec![[8.0, 32.0], [56.0, 32.0], [32.0, 56.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: vec![[0.0; 4]; 3],
+                },
+                fill: Some(RED),
+                stroke: None,
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        assert_eq!(
+            render(&doc).unwrap().get(probe.0, probe.1).a,
+            0.0,
+            "zero handles leave the path straight"
+        );
+    }
+
+    #[test]
     fn ellipse_rim_is_partially_covered() {
         // A curved edge cannot land on pixel boundaries, so the rim has to
         // carry intermediate coverage while the inside stays solid.
@@ -1805,6 +1938,7 @@ mod tests {
                 points: vec![[2.0, 2.0], [26.0, 8.0], [8.0, 27.0]],
                 closed: true,
                 smooth: false,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut tri.kind {
@@ -2317,6 +2451,7 @@ mod tests {
                 points: vec![[0.0, 0.0], [16.0, 8.0], [0.0, 16.0], [6.0, 8.0]],
                 closed: true,
                 smooth: false,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -2434,6 +2569,7 @@ mod tests {
                     points: vec![[0.0, 0.0], [30.0, 0.0], [15.0, 20.0]],
                     closed: true,
                     smooth,
+                    handles: Vec::new(),
                 },
             );
             if let NodeKind::Vector { fill, .. } = &mut node.kind {
@@ -2462,6 +2598,7 @@ mod tests {
                     points: vec![[0.0, 0.0], [30.0, 0.0], [15.0, 20.0]],
                     closed: true,
                     smooth: true,
+                    handles: Vec::new(),
                 },
                 fill: Some(RED),
                 stroke: None,
@@ -2505,6 +2642,7 @@ mod tests {
                 points: vec![[0.0, 0.0], [8.0, 16.0], [16.0, 0.0]],
                 closed: false,
                 smooth: false,
+                handles: Vec::new(),
             },
         );
         if let NodeKind::Vector { stroke, .. } = &mut node.kind {

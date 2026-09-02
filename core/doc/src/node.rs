@@ -103,6 +103,12 @@ pub enum VectorShape {
         closed: bool,
         #[serde(default)]
         smooth: bool,
+        /// Per-anchor bezier control offsets, `[in_x, in_y, out_x, out_y]`
+        /// relative to the anchor. Empty means none, which is why old files
+        /// keep loading; when present they are explicit and override
+        /// `smooth`, whose curve is inferred rather than authored.
+        #[serde(default)]
+        handles: Vec<[f32; 4]>,
     },
 }
 

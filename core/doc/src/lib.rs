@@ -908,6 +908,27 @@ mod tests {
     }
 
     #[test]
+    fn a_path_written_before_bezier_handles_still_loads() {
+        // Same additive contract as gradients: an older path has no handles
+        // field, and must load as a plain polyline rather than failing.
+        let json = r#"{ "Path": { "points": [[0.0, 0.0], [4.0, 4.0]], "closed": false } }"#;
+        let shape: VectorShape = serde_json::from_str(json).unwrap();
+        match shape {
+            VectorShape::Path {
+                handles,
+                smooth,
+                points,
+                ..
+            } => {
+                assert!(handles.is_empty(), "absent handles default to none");
+                assert!(!smooth, "and absent smooth defaults to off");
+                assert_eq!(points.len(), 2);
+            }
+            other => panic!("expected a path, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_document_written_before_gradients_still_loads() {
         // File compatibility is additive: a Vector node serialized without
         // the gradient field must load, not fail the whole document.
