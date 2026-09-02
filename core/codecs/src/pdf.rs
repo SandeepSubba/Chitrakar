@@ -14,7 +14,10 @@
 //! vocabulary: rectangles (rounded too), ellipses and paths as paths with
 //! solid fills and strokes, groups as nested transforms, placed images as
 //! image XObjects with their alpha as a soft mask, opacity and blend as
-//! graphics states. What PDF cannot say — text, gradients, effects, masks,
+//! graphics states, text as text — each face embedded once as a CID font
+//! addressed by glyph id, every glyph placed where the shaper put it (so
+//! kerning and ligatures survive) with a ToUnicode map so the words can
+//! be found and copied. What PDF cannot say — gradients, effects, masks,
 //! varying strokes, a group that needs isolating — is rendered by the
 //! engine alone on the page and placed as an image, trimmed to its ink;
 //! an adjustment or filter layer, which changes everything under it,
@@ -30,6 +33,7 @@ use chitrakar_doc::{
     BlendMode, Command, DocError, Document, NodeId, NodeKind, Transform, VectorShape,
 };
 use flate2::{write::ZlibEncoder, Compression};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
 
@@ -202,6 +206,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
+        fonts: Vec::new(),
     };
     // 1 catalog, 2 pages, 3 page, 4 contents: reserved, written last,
     // once everything they refer to has a number.
@@ -235,6 +240,16 @@ struct Page<'a> {
     content: String,
     /// (profile stream, colour space array) object numbers, in ink.
     icc_objects: Option<(usize, usize)>,
+    /// Faces the page sets type in, each written once at the end: the
+    /// file to embed, the resource name the content uses, and the text
+    /// each glyph used so far stands for, for the ToUnicode map.
+    fonts: Vec<FontUse>,
+}
+
+struct FontUse {
+    face: chitrakar_render::text::FaceFile,
+    resource: String,
+    unicode: BTreeMap<u16, String>,
 }
 
 fn stream_object(dict_head: &str, data: &[u8]) -> Vec<u8> {
@@ -323,8 +338,8 @@ impl<'a> Page<'a> {
             NodeKind::Vector {
                 gradient, stroke, ..
             } => gradient.is_none() && stroke.as_ref().is_none_or(|s| s.widths.is_empty()),
-            NodeKind::Raster(_) => true,
-            NodeKind::Text(_) | NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
+            NodeKind::Raster(_) | NodeKind::Text(_) => true,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
         })
     }
 
@@ -623,7 +638,37 @@ impl<'a> Page<'a> {
                     }
                 }
             }
-            NodeKind::Text(_) | NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
+            NodeKind::Text(spec) => {
+                let alpha = match spec.fill {
+                    AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
+                };
+                if let Some(gs) = self.gstate(node.opacity * alpha, 1.0, node.blend) {
+                    let _ = writeln!(self.content, "/{gs} gs");
+                }
+                let typeset = chitrakar_render::text::placed(spec);
+                let font = self.font_resource(typeset.face, &typeset.glyphs);
+                let _ = writeln!(
+                    self.content,
+                    "BT\n/{font} {} Tf\n{}",
+                    num(typeset.em),
+                    self.color_op(spec.fill, false)?
+                );
+                // Each glyph on its own matrix: the shaper's position,
+                // y turned back up for the glyph, and the lean a
+                // synthesized italic would draw with.
+                for g in &typeset.glyphs {
+                    let _ = writeln!(
+                        self.content,
+                        "1 0 {} -1 {} {} Tm <{:04X}> Tj",
+                        num(typeset.lean),
+                        num(g.x),
+                        num(g.y),
+                        g.id
+                    );
+                }
+                self.content.push_str("ET\n");
+            }
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                 unreachable!("not live: see is_live")
             }
         }
@@ -631,8 +676,124 @@ impl<'a> Page<'a> {
         Ok(())
     }
 
+    /// The resource name of the font a face is embedded as, noting the
+    /// text its glyphs stand for. A face is written once however many
+    /// blocks set type in it.
+    fn font_resource(
+        &mut self,
+        face: chitrakar_render::text::FaceFile,
+        glyphs: &[chitrakar_render::text::PlacedGlyph],
+    ) -> String {
+        let at = match self.fonts.iter().position(|f| f.face.name == face.name) {
+            Some(at) => at,
+            None => {
+                self.fonts.push(FontUse {
+                    resource: format!("F{}", self.fonts.len() + 1),
+                    face,
+                    unicode: BTreeMap::new(),
+                });
+                self.fonts.len() - 1
+            }
+        };
+        for g in glyphs {
+            if !g.text.is_empty() {
+                self.fonts[at]
+                    .unicode
+                    .entry(g.id)
+                    .or_insert_with(|| g.text.clone());
+            }
+        }
+        self.fonts[at].resource.clone()
+    }
+
+    /// Write a face out: the file itself, its descriptor, the CID font
+    /// addressed by glyph id, the ToUnicode map, and the Type0 font the
+    /// content names. Returns the Type0 object.
+    fn write_font(&mut self, at: usize) -> Result<usize, PdfError> {
+        let (name, bytes, ascent, descent, count, unicode) = {
+            let f = &self.fonts[at];
+            let per_mille = 1000.0 / f.face.units_per_em;
+            (
+                f.face
+                    .name
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .collect::<String>(),
+                f.face.bytes,
+                f.face.ascent * per_mille,
+                f.face.descent * per_mille,
+                f.face.glyph_count,
+                f.unicode.clone(),
+            )
+        };
+        let name = if name.is_empty() {
+            "Face".to_string()
+        } else {
+            name
+        };
+        let file = self.push(&stream_object(
+            &format!("<< /Length1 {} /Filter /FlateDecode", bytes.len()),
+            &deflate(bytes)?,
+        ));
+        let descriptor = self.push(
+            format!(
+                "<< /Type /FontDescriptor /FontName /{name} /Flags 4 \
+                 /FontBBox [-1000 {} 2000 {}] /ItalicAngle 0 /Ascent {} /Descent {} \
+                 /CapHeight {} /StemV 80 /FontFile2 {file} 0 R >>",
+                num(descent),
+                num(ascent),
+                num(ascent),
+                num(descent),
+                num(ascent * 0.7)
+            )
+            .as_bytes(),
+        );
+        // Every glyph's advance, so a reader lays the text out as set
+        // even where it reflows it.
+        let mut widths = String::new();
+        for g in 0..count.min(u16::MAX as usize) {
+            let _ = write!(widths, "{} ", num(self.fonts[at].face.advance(g as u16)));
+        }
+        let cid = self.push(
+            format!(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} \
+                 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+                 /FontDescriptor {descriptor} 0 R /DW 1000 /W [0 [{}]] /CIDToGIDMap /Identity >>",
+                widths.trim_end()
+            )
+            .as_bytes(),
+        );
+        let mut cmap = String::from(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+             /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+        );
+        for chunk in unicode.iter().collect::<Vec<_>>().chunks(100) {
+            let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
+            for (gid, text) in chunk {
+                let utf16: String = text.encode_utf16().map(|u| format!("{u:04X}")).collect();
+                let _ = writeln!(cmap, "<{gid:04X}> <{utf16}>");
+            }
+            cmap.push_str("endbfchar\n");
+        }
+        cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+        let to_unicode = self.push(&stream_object("<<", cmap.as_bytes()));
+        Ok(self.push(
+            format!(
+                "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H \
+                 /DescendantFonts [{cid} 0 R] /ToUnicode {to_unicode} 0 R >>"
+            )
+            .as_bytes(),
+        ))
+    }
+
     /// Fill in the reserved objects and write the file out.
     fn finish(mut self) -> Result<Vec<u8>, PdfError> {
+        let mut font_objects = Vec::new();
+        for at in 0..self.fonts.len() {
+            font_objects.push((self.fonts[at].resource.clone(), self.write_font(at)?));
+        }
         let meta = &self.doc.meta;
         let pt = 72.0 / meta.dpi.max(1.0);
         let (page_w, page_h) = (meta.width as f32 * pt, meta.height as f32 * pt);
@@ -662,6 +823,13 @@ impl<'a> Page<'a> {
         }
         if let Some((_, space)) = self.icc_objects {
             let _ = write!(resources, " /ColorSpace << /CS0 {space} 0 R >>");
+        }
+        if !font_objects.is_empty() {
+            resources.push_str(" /Font <<");
+            for (name, obj) in &font_objects {
+                let _ = write!(resources, " /{name} {obj} 0 R");
+            }
+            resources.push_str(" >>");
         }
         self.objects[2] = format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
@@ -1020,6 +1188,36 @@ mod tests {
         node
     }
 
+    /// A 10px rect with a gradient fill: a layer PDF has to take as pixels.
+    fn shaded(name: &str) -> chitrakar_doc::Node {
+        let mut node = shape(
+            name,
+            VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+            Some(RED),
+        );
+        if let NodeKind::Vector { gradient, .. } = &mut node.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: RED,
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: BLUE,
+                    },
+                ],
+            });
+        }
+        node
+    }
+
     fn add(doc: &mut Document, node: chitrakar_doc::Node, at: [f32; 2]) -> NodeId {
         let root = doc.root();
         let index = doc.children_of(root).unwrap().len();
@@ -1190,33 +1388,24 @@ mod tests {
             "{content}"
         );
         // The image: flipped into its unit square, with a soft mask for
-        // the clear pixel; the text: rendered, placed as its own image.
+        // the clear pixel.
         assert!(content.contains("2 0 0 -1 0 1 cm\n/Im1 Do"), "{content}");
         assert!(text.contains("/SMask"));
-        assert!(
-            content.contains("/Im2 Do"),
-            "text becomes the second image: {content}"
-        );
         assert!(text.contains("/Width 2 /Height 1"));
-        // At 72 dpi the text is rendered four times over for print: its
-        // image holds more samples than the document pixels it covers.
-        let placed = content
-            .lines()
-            .rev()
-            .find(|l| l.ends_with(" cm") && !l.starts_with("1 0 0"))
-            .unwrap();
-        let placed_w: f32 = placed.split_whitespace().next().unwrap().parse().unwrap();
-        let widths: Vec<u32> = text
-            .split("/Width ")
-            .skip(1)
-            .filter_map(|s| s.split_whitespace().next()?.parse().ok())
-            .collect();
-        assert!(
-            widths
-                .iter()
-                .any(|&w| (w as f32 - placed_w * 4.0).abs() < 1.5),
-            "the text image is 4x its placed width {placed_w}: {widths:?}"
+        // The text: live, in the embedded face, glyph by glyph.
+        assert!(content.contains("BT\n/F1 "), "{content}");
+        assert_eq!(
+            content.matches(" Tm <").count(),
+            2,
+            "two glyphs of 'Hi': {content}"
         );
+        assert!(
+            content.contains("1 0 0 -1 0 "),
+            "upright, from the block's own origin: {content}"
+        );
+        assert!(text.contains("/FontFile2") && text.contains("/Identity-H"));
+        assert!(text.contains("/CIDToGIDMap /Identity") && text.contains("/ToUnicode"));
+        assert!(text.contains("/Font << /F1 "));
         // Nothing of the hidden layer.
         assert!(!content.contains("0 0 120 80 re"));
         assert!(!text.contains(
@@ -1320,36 +1509,43 @@ mod tests {
             !content.contains("0 0 10 10 re"),
             "the gradient rect is not drawn as a path"
         );
+        // At 72 dpi it is rendered four times over for print: a 10px rect
+        // is a 40-sample image placed 10 wide.
+        let pdf_text = String::from_utf8_lossy(&export_pdf_document(&doc).unwrap()).to_string();
+        assert!(
+            pdf_text.contains("/Width 40 /Height 40"),
+            "oversampled for print"
+        );
+        assert!(
+            content.contains("10 0 0 -10 100 10 cm"),
+            "placed in document pixels: {content}"
+        );
         assert_eq!(
             content.matches(" Do").count(),
             2,
-            "the image, then the text and the gradient rect as one picture: {content}"
+            "the image, then the gradient rect as a picture: {content}"
         );
     }
 
     #[test]
     fn pixels_keep_their_blend_and_a_run_of_them_is_one_picture() {
         let mut doc = everything();
-        // Two more text blocks straight after the first: all three are
-        // one picture rather than three renders of the page.
-        for (i, at) in [[10.0, 62.0], [40.0, 62.0]].iter().enumerate() {
-            add(
-                &mut doc,
-                chitrakar_doc::Node::text(
-                    &format!("t{i}"),
-                    chitrakar_doc::TextSpec::new("x", 12.0, BLUE),
-                ),
-                *at,
-            );
+        // Three gradient rects in a row: one picture rather than three
+        // renders of the page.
+        for (i, at) in [[100.0, 0.0], [100.0, 20.0], [100.0, 40.0]]
+            .iter()
+            .enumerate()
+        {
+            add(&mut doc, shaded(&format!("g{i}")), *at);
         }
         let pdf = export_pdf_document(&doc).unwrap();
         let content = content_of(&pdf);
         assert_eq!(
             content.matches(" Do").count(),
             2,
-            "the placed image, then one picture of three text blocks: {content}"
+            "the placed image, then one picture of three gradients: {content}"
         );
-        // A multiplied text block reads what is under it, so it is its own
+        // A multiplied gradient reads what is under it, so it is its own
         // picture and lands with the blend.
         let root = doc.root();
         let last = *doc.children_of(root).unwrap().last().unwrap();
@@ -1458,6 +1654,72 @@ mod tests {
             at(85, 55)
         );
         assert_eq!(at(95, 55), &[255, 255, 255], "its clear pixel shows paper");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reader can find the words: Ghostscript's text extractor reads
+    /// them back through the ToUnicode map. Self-skips without `gs`.
+    #[test]
+    fn the_text_in_the_pdf_can_be_read_back() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no ghostscript");
+            return;
+        }
+        let mut doc = Document::new(200, 60, chitrakar_color::ColorMode::Rgb);
+        let mut spec = chitrakar_doc::TextSpec::new("Office fi AV", 20.0, BLUE);
+        spec.italic = true; // a synthesized lean: still text
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [5.0, 5.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let dir = std::env::temp_dir().join(format!("chitrakar-pdftext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf_path = dir.join("text.pdf");
+        std::fs::write(&pdf_path, &pdf).unwrap();
+        let out = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=txtwrite",
+                "-o",
+                "-",
+            ])
+            .arg(&pdf_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ghostscript read the file");
+        let read = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            read.contains("fi AV") && read.contains("ce"),
+            "the words come back through ToUnicode: {read:?}"
+        );
+        // The "ffi" ligature is one glyph standing for three letters, and
+        // the map says so (Ghostscript's extractor prints a three-letter
+        // entry oddly, so this is checked in the file rather than through
+        // it).
+        let typeset = chitrakar_render::text::placed(&{
+            let mut spec = chitrakar_doc::TextSpec::new("Office fi AV", 20.0, BLUE);
+            spec.italic = true;
+            spec
+        });
+        let ligature = typeset
+            .glyphs
+            .iter()
+            .find(|g| g.text == "ffi")
+            .expect("the face ligates ffi");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(
+            text.contains(&format!("<{:04X}> <006600660069>", ligature.id)),
+            "the ligature maps back to its three letters"
+        );
+        assert!(
+            content_of(&pdf).contains("1 0 0.2 -1 "),
+            "the lean is in the text matrix"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

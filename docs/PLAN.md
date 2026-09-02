@@ -110,7 +110,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~157),
+- **Verify before committing:** `cargo test --workspace` (~159),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~316 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -123,10 +123,10 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: a review pass over the PDF exporter and the last stretch of
-     commits (each pass so far has found real defects); then live text in
-     PDF (embed the face, glyph ids from the shaper, a ToUnicode map),
-     underline/strike-through, and text on a path.
+  3. Depth: underline/strike-through, text on a path, font subsetting
+     for the PDF (a whole DejaVu face is ~380KB deflated per file), and
+     another review pass over the last stretch of commits (each pass so
+     far has found real defects).
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
@@ -152,10 +152,11 @@ without reading anything else.*
   italic lean and a loaded font are the reader's to supply; a mask is an ellipse, a rectangle, or
   another shape handed down to the layer below, moved and resized on
   canvas but not reshaped there; PDF export is live where PDF has the
-  words (paths, solid fills and strokes, groups, images, opacity, blend)
-  and the engine's pixels where it does not (text, gradients, effects,
-  masks, varying strokes; an adjustment or filter flattens what is under
-  it), and TIFF is the composite; a boolean
+  words (paths, solid fills and strokes, groups, images, opacity, blend,
+  text in embedded faces — whole files, not subsets) and the engine's
+  pixels where it does not (gradients, effects, masks, varying strokes;
+  an adjustment or filter flattens what is under it), and TIFF is the
+  composite; a boolean
   operation flattens curves to line segments and declines outlines that
   touch or overlap exactly, rather than guessing.
 
@@ -375,8 +376,13 @@ chitrakar/
   embedded; refuses rather than guessing when no profile is loaded).
   and PDF ✅ (one page sized from the document dpi; live paths, solid
   fills and inner/centred strokes, nested groups, image XObjects with
-  soft masks, opacity and blend as graphics states, and the engine's
-  pixels — trimmed to their ink — for what PDF cannot say; with a press
+  soft masks, opacity and blend as graphics states, text as text (each
+  face embedded once as a CID font addressed by glyph id, glyphs where
+  the shaper put them so kerning and ligatures survive, a synthesized
+  italic as a text-matrix skew, and a ToUnicode map so the words can be
+  found and copied — checked by reading them back through Ghostscript),
+  and the engine's pixels — oversampled towards 300 dpi and trimmed to
+  their ink — for what PDF cannot say; with a press
   profile authored ink is written as ink, sRGB is separated through the
   profile, and the profile is both the ICCBased colour space and the
   page's output intent; a Ghostscript test checks the page against the

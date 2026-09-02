@@ -233,6 +233,8 @@ struct Shaped {
     id: ab_glyph::GlyphId,
     x: f32,
     y: f32,
+    /// Byte offset into the line of the text this glyph came from.
+    cluster: usize,
 }
 
 /// Shape one line: the font decides which glyphs the text becomes and where
@@ -260,6 +262,7 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
             id: ab_glyph::GlyphId(info.glyph_id as u16),
             x: pen + pos.x_offset as f32 * unit,
             y: -(pos.y_offset as f32) * unit,
+            cluster: info.cluster as usize,
         });
         pen += pos.x_advance as f32 * unit + track;
     }
@@ -269,6 +272,136 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
         pen -= track;
     }
     (glyphs, pen.max(0.0))
+}
+
+/// The file behind the face a block draws with, for an exporter that
+/// embeds it, and what an embedder needs to know: the name the face was
+/// registered under, its units per em, the ascent-to-descent height in
+/// those units — what `size` scales — and the ascent and descent.
+pub struct FaceFile {
+    pub name: String,
+    pub bytes: &'static [u8],
+    pub units_per_em: f32,
+    pub height: f32,
+    pub ascent: f32,
+    pub descent: f32,
+    pub glyph_count: usize,
+}
+
+impl FaceFile {
+    /// A glyph's advance, in thousandths of an em — a PDF width.
+    pub fn advance(&self, glyph: u16) -> f32 {
+        fonts_named(&self.name)
+            .font
+            .h_advance_unscaled(ab_glyph::GlyphId(glyph))
+            * 1000.0
+            / self.units_per_em
+    }
+}
+
+/// One glyph as placed: which, where its origin sits (document pixels
+/// from the block's top-left, on its line's baseline), and the text it
+/// stands for — empty for a glyph that shares its text with the one
+/// before it, as the pieces of a decomposed character do.
+pub struct PlacedGlyph {
+    pub id: u16,
+    pub x: f32,
+    pub y: f32,
+    pub text: String,
+}
+
+/// A block as glyphs, for an exporter that sets type itself: the face,
+/// the em it is scaled to, the lean the rasterizer would add (zero when
+/// the face leans by itself), and every glyph placed as the raster
+/// places it.
+pub struct PlacedText {
+    pub face: FaceFile,
+    pub em: f32,
+    pub lean: f32,
+    pub glyphs: Vec<PlacedGlyph>,
+}
+
+/// The name of the face a block draws with.
+fn face_name(spec: &TextSpec) -> String {
+    if spec.italic {
+        if let Some(twin) = oblique_name(spec) {
+            return twin;
+        }
+    }
+    if !spec.font.is_empty() && spec.font != DEFAULT_FONT && has_font(&spec.font) {
+        spec.font.clone()
+    } else {
+        DEFAULT_FONT.to_string()
+    }
+}
+
+fn fonts_named(name: &str) -> &'static Fonts {
+    if name == DEFAULT_FONT {
+        return bundled();
+    }
+    registry()
+        .read()
+        .ok()
+        .and_then(|r| r.get(name).copied())
+        .unwrap_or_else(bundled)
+}
+
+pub fn placed(spec: &TextSpec) -> PlacedText {
+    let l = layout(spec, 1.0);
+    let fonts = fonts_for(spec);
+    let px = spec.size.max(0.1);
+    let font = fonts.font.as_scaled(px);
+    let step = line_step(&font, spec);
+    let mut glyphs = Vec::new();
+    for (line_no, line) in l.lines.iter().enumerate() {
+        let baseline = line_no as f32 * step + font.ascent();
+        let (shaped, _) = shape_line(line, spec, 1.0);
+        let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
+        let start = l.room.0
+            + match spec.align {
+                chitrakar_doc::TextAlign::Left => 0.0,
+                chitrakar_doc::TextAlign::Center => slack / 2.0,
+                chitrakar_doc::TextAlign::Right => slack,
+            };
+        for (i, g) in shaped.iter().enumerate() {
+            // The glyph's text runs from its cluster to the next cluster
+            // that differs, so a ligature keeps both its letters and the
+            // pieces of a decomposed character share one.
+            let text = if i > 0 && shaped[i - 1].cluster == g.cluster {
+                String::new()
+            } else {
+                let end = shaped[i..]
+                    .iter()
+                    .map(|s| s.cluster)
+                    .find(|&c| c != g.cluster)
+                    .unwrap_or(line.len())
+                    .max(g.cluster);
+                line.get(g.cluster..end).unwrap_or("").to_string()
+            };
+            glyphs.push(PlacedGlyph {
+                id: g.id.0,
+                x: start + g.x,
+                y: baseline + g.y,
+                text,
+            });
+        }
+    }
+    let name = face_name(spec);
+    let upem = fonts.font.units_per_em().unwrap_or(1000.0);
+    PlacedText {
+        face: FaceFile {
+            bytes: fonts.bytes,
+            units_per_em: upem,
+            height: fonts.font.height_unscaled(),
+            ascent: fonts.font.ascent_unscaled(),
+            descent: fonts.font.descent_unscaled(),
+            glyph_count: fonts.font.glyph_count(),
+            name,
+        },
+        em: px * upem / fonts.font.height_unscaled(),
+        lean: if synthesized_lean(spec) { SLANT } else { 0.0 },
+        glyphs,
+    }
 }
 
 /// A rasterized text block: alpha coverage (0..=1) at natural size.
@@ -939,6 +1072,46 @@ mod tests {
         // A synthesized lean insets the lines.
         block.italic = true;
         assert!(set(&block).inset > 0.0);
+    }
+
+    #[test]
+    fn placed_glyphs_carry_their_text_and_land_where_the_raster_puts_them() {
+        let mut block = spec("fi AV\nhi", 24.0);
+        block.align = chitrakar_doc::TextAlign::Right;
+        let typeset = placed(&block);
+        assert_eq!(typeset.face.name, DEFAULT_FONT);
+        assert!(
+            typeset.face.bytes.len() > 100_000,
+            "the whole file, to embed"
+        );
+        assert!(typeset.lean == 0.0);
+        let text: String = typeset.glyphs.iter().map(|g| g.text.as_str()).collect();
+        assert_eq!(
+            text, "fi AVhi",
+            "every character is accounted for, ligature or not"
+        );
+        // Two lines: the second's glyphs sit a line step lower, and being
+        // right-aligned the short line starts further right than the long.
+        let laid = set(&block);
+        let (first, second): (Vec<_>, Vec<_>) =
+            typeset.glyphs.iter().partition(|g| g.y < laid.step);
+        assert!(!first.is_empty() && !second.is_empty());
+        assert!((first[0].y - laid.ascent).abs() < 1e-3);
+        assert!((second[0].y - laid.ascent - laid.step).abs() < 1e-3);
+        assert!(
+            second[0].x > first[0].x,
+            "right aligned: {} > {}",
+            second[0].x,
+            first[0].x
+        );
+        // Widths are in thousandths of an em and an em is what the block
+        // is scaled to.
+        let h = typeset.face.advance(typeset.glyphs[3].id);
+        assert!(h > 400.0 && h < 900.0, "advance of 'A' in 1/1000 em: {h}");
+        assert!((typeset.em - laid.em).abs() < 1e-3);
+        // A synthesized italic reports its lean; an oblique face does not.
+        block.italic = true;
+        assert_eq!(placed(&block).lean, SLANT);
     }
 
     #[test]
