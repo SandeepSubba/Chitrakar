@@ -625,6 +625,21 @@ fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
     }
 }
 
+/// Exact coverage of an axis-aligned local-space rect over one device pixel:
+/// the area the pixel square and the mapped rect share. Transforms carry
+/// scale and translation only, so the mapped rect stays axis-aligned and the
+/// answer is a product of two 1-D overlaps.
+fn rect_coverage(width: f32, height: f32, t: Transform, px: u32, py: u32) -> f32 {
+    if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
+        return 0.0;
+    }
+    let span = |lo: f32, hi: f32, at: u32| {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+    };
+    span(t.e, t.e + width * t.a, px) * span(t.f, t.f + height * t.d, py)
+}
+
 /// Anti-aliased coverage of a shape over one device pixel, in 0..=1.
 ///
 /// The corners plus the centre are tested first: when all five agree the
@@ -646,16 +661,11 @@ fn pixel_coverage(
     if t.a.abs() < 1e-6 || t.d.abs() < 1e-6 {
         return 0.0;
     }
-    // An axis-aligned rect fill has an exact answer — the area the pixel
-    // square and the mapped rect share — so take it. Rect fills cover the
-    // largest areas, and this is both cheaper than sampling and not an
-    // approximation of it.
+    // An axis-aligned rect fill has an exact answer, so take it. Rect fills
+    // cover the largest areas, and this is both cheaper than sampling and
+    // not an approximation of it.
     if let (VectorShape::Rect { width, height }, None) = (shape, stroke_width) {
-        let span = |lo: f32, hi: f32, at: u32| {
-            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-            (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
-        };
-        return span(t.e, t.e + width * t.a, px) * span(t.f, t.f + height * t.d, py);
+        return rect_coverage(*width, *height, t, px, py);
     }
     let covers = |sx: f32, sy: f32| match to_local(t, sx, sy) {
         Some((x, y)) => match stroke_width {
@@ -827,8 +837,10 @@ fn paint_shape(
     }
 }
 
-/// Blit a source image through its transform (nearest sample; filtered
-/// sampling arrives with the GPU path).
+/// Blit a source image through its transform, sampled bilinearly in
+/// premultiplied linear space (so edges against transparency don't halo)
+/// and clamped at the image border. An identity blit lands exactly on texel
+/// centres, so a 1:1 image stays pixel-exact rather than being softened.
 #[allow(clippy::too_many_arguments)]
 fn draw_raster(
     dst: &mut Surface,
@@ -846,30 +858,46 @@ fn draw_raster(
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
     }
     let bbox = draw_bbox(t, res.width as f32, res.height as f32, dst, clip);
+    // One texel, premultiplied so interpolation never mixes colour across a
+    // transparent neighbour.
+    let texel = |x: u32, y: u32| -> LinearRgba {
+        let s = ((y * res.width + x) * 4) as usize;
+        let a = res.rgba8[s + 3] as f32 / 255.0;
+        LinearRgba {
+            r: lut[res.rgba8[s] as usize] * a,
+            g: lut[res.rgba8[s + 1] as usize] * a,
+            b: lut[res.rgba8[s + 2] as usize] * a,
+            a,
+        }
+    };
+    let (last_x, last_y) = (res.width as f32 - 1.0, res.height as f32 - 1.0);
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
-                return;
-            };
-            if lx < 0.0 || ly < 0.0 {
+            // The image is a rect in local space, so its outline gets the
+            // same exact coverage a rect fill does.
+            let edge = rect_coverage(res.width as f32, res.height as f32, t, px, py);
+            if edge <= 0.0 {
                 continue;
             }
-            let (sx, sy) = (lx as u32, ly as u32);
-            if sx >= res.width || sy >= res.height {
-                continue;
-            }
-            let cov = coverage_at(doc, mask, px, py);
+            let cov = coverage_at(doc, mask, px, py) * edge * opacity;
             if cov <= 0.0 {
                 continue;
             }
-            let s = ((sy * res.width + sx) * 4) as usize;
-            let a = res.rgba8[s + 3] as f32 / 255.0 * opacity * cov;
-            let src = LinearRgba {
-                r: lut[res.rgba8[s] as usize] * a,
-                g: lut[res.rgba8[s + 1] as usize] * a,
-                b: lut[res.rgba8[s + 2] as usize] * a,
-                a,
+            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
+                return;
             };
+            // Texel centres sit at (i + 0.5), so the sample lands between
+            // the four texels around (lx - 0.5, ly - 0.5).
+            let (u, v) = (lx - 0.5, ly - 0.5);
+            let (u0, v0) = (u.floor(), v.floor());
+            let (fx, fy) = (u - u0, v - v0);
+            let cx = |i: f32| i.clamp(0.0, last_x) as u32;
+            let cy = |i: f32| i.clamp(0.0, last_y) as u32;
+            let (x0, x1) = (cx(u0), cx(u0 + 1.0));
+            let (y0, y1) = (cy(v0), cy(v0 + 1.0));
+            let top = lerp(texel(x0, y0), texel(x1, y0), fx);
+            let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
+            let src = scale_alpha(lerp(top, bottom, fy), cov);
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
         }
@@ -1730,6 +1758,96 @@ mod tests {
             inside.r,
             outside.r
         );
+    }
+
+    #[test]
+    fn magnified_raster_interpolates_between_texels() {
+        // A black and a white texel blown up 8x. Halfway between their
+        // centres the blit must land between them; nearest sampling would
+        // return one or the other and stair-step the boundary.
+        let mut doc = Document::new(16, 8, ColorMode::Rgb);
+        let root = doc.root();
+        let rgba8 = vec![0, 0, 0, 255, /**/ 255, 255, 255, 255];
+        let id = doc.add_resource(2, 1, rgba8);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: 2,
+                    height: 1,
+                },
+            )),
+        })
+        .unwrap();
+        let node = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: node,
+            transform: Transform {
+                a: 8.0,
+                d: 8.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        // Texel centres map to x = 4 and x = 12; x = 8 is the midpoint.
+        let mid = s.get(8, 4).to_srgb8();
+        assert!(
+            mid[0] > 100 && mid[0] < 200,
+            "midpoint should be a blend, got {mid:?}"
+        );
+        assert_eq!(s.get(0, 4).to_srgb8()[0], 0, "clamped to black at the edge");
+        assert_eq!(
+            s.get(15, 4).to_srgb8()[0],
+            255,
+            "clamped to white at the edge"
+        );
+        // Ramp is monotonic across the interpolated span.
+        let ramp: Vec<u8> = (4..=12).map(|x| s.get(x, 4).to_srgb8()[0]).collect();
+        assert!(
+            ramp.windows(2).all(|w| w[1] >= w[0]),
+            "ramp should rise monotonically, got {ramp:?}"
+        );
+    }
+
+    #[test]
+    fn raster_edge_is_antialiased_on_a_half_pixel() {
+        // The image outline is a rect in local space, so it gets the same
+        // exact coverage a rect fill does instead of a hard jagged border.
+        let mut doc = Document::new(8, 8, ColorMode::Rgb);
+        let root = doc.root();
+        let id = doc.add_resource(2, 2, vec![255; 16]);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: 2,
+                    height: 2,
+                },
+            )),
+        })
+        .unwrap();
+        let node = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: node,
+            transform: Transform::translation(2.5, 2.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert!(
+            (s.get(2, 2).a - 0.5).abs() < 0.05,
+            "half-covered column, got {}",
+            s.get(2, 2).a
+        );
+        assert_eq!(s.get(3, 2).a, 1.0, "fully covered column stays opaque");
     }
 
     #[test]

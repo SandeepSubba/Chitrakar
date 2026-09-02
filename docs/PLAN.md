@@ -27,12 +27,13 @@ without reading anything else.*
   reorder, opacity/blend, rename, labelled history with jump-to-state.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
-  mask edges feather the same way.
+  mask edges feather the same way. Placed images sample bilinearly in
+  premultiplied linear space, with the image outline antialiased too.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~81),
+- **Verify before committing:** `cargo test --workspace` (~83),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~87 browser
   assertions). Both suites self-skip CMYK-profile steps unless
