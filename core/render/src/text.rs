@@ -30,6 +30,25 @@ impl TextRaster {
         }
         self.coverage[(y * self.width + x) as usize]
     }
+
+    /// Coverage at a fractional position, interpolated between the four
+    /// texels around it. Off the edge reads as no ink, so glyphs fade out
+    /// rather than smearing their border row.
+    pub fn sample_at(&self, x: f32, y: f32) -> f32 {
+        let (u, v) = (x - 0.5, y - 0.5);
+        let (u0, v0) = (u.floor(), v.floor());
+        let (fx, fy) = (u - u0, v - v0);
+        let at = |i: f32, j: f32| {
+            if i < 0.0 || j < 0.0 {
+                0.0
+            } else {
+                self.sample(i as u32, j as u32)
+            }
+        };
+        let top = at(u0, v0) * (1.0 - fx) + at(u0 + 1.0, v0) * fx;
+        let bottom = at(u0, v0 + 1.0) * (1.0 - fx) + at(u0 + 1.0, v0 + 1.0) * fx;
+        top * (1.0 - fy) + bottom * fy
+    }
 }
 
 /// Natural (untransformed) size of a text block in document pixels.
@@ -64,10 +83,27 @@ fn line_width(font: &impl ScaleFont<&'static FontRef<'static>>, line: &str) -> f
 
 /// Rasterize the block at natural size.
 pub fn rasterize(spec: &TextSpec) -> TextRaster {
+    rasterize_at(spec, 1.0)
+}
+
+/// Rasterize the block at `scale` times its natural size.
+///
+/// Text is outlines, not pixels, so it should be rasterized at the size it
+/// will actually be seen at: rendering at natural size and then magnifying
+/// the bitmap is the one thing that makes vector type look like a scanned
+/// letter. Callers pass the scale their transform imposes and index the
+/// result by natural-size coordinates times the same scale.
+pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
+    let scale = scale.max(0.01);
     let (w, h) = measure(spec);
-    let (width, height) = (w.ceil() as u32, h.ceil() as u32);
+    let (width, height) = (
+        (w * scale).ceil().max(1.0) as u32,
+        (h * scale).ceil().max(1.0) as u32,
+    );
     let mut coverage = vec![0f32; (width * height) as usize];
-    let font = font().as_scaled(spec.size.max(0.1));
+    // Every metric below comes from the scaled font, so advances, kerning
+    // and line height are all in raster pixels already.
+    let font = font().as_scaled(spec.size.max(0.1) * scale);
     let line_height = font.ascent() - font.descent() + font.line_gap();
 
     for (line_no, line) in spec.text.split('\n').enumerate() {
@@ -79,8 +115,10 @@ pub fn rasterize(spec: &TextSpec) -> TextRaster {
             if let Some(prev) = prev {
                 pen_x += font.kern(prev, id);
             }
-            let glyph =
-                id.with_scale_and_position(spec.size.max(0.1), ab_glyph::point(pen_x, baseline));
+            let glyph = id.with_scale_and_position(
+                spec.size.max(0.1) * scale,
+                ab_glyph::point(pen_x, baseline),
+            );
             if let Some(outlined) = font.font.outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
                 outlined.draw(|gx, gy, c| {

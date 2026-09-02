@@ -1495,10 +1495,17 @@ fn draw_text(
     clip: ClipRect,
     mask: MaskRef<'_>,
 ) {
-    let raster = text::rasterize(spec);
     let Some(inv) = Inverse::of(t) else {
         return;
     };
+    // Rasterize at the size the text will be seen at, so magnifying a text
+    // layer sharpens the outlines instead of enlarging their pixels. The
+    // cap keeps a wildly zoomed layer from asking for an enormous bitmap;
+    // past it the glyphs are already far finer than the screen.
+    let natural = text::measure(spec);
+    let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
+    let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
+    let raster = text::rasterize_at(spec, scale);
     let color = resolve_color(doc, spec.fill);
     let bbox =
         match transformed_local_bounds(t, (0.0, 0.0, raster.width as f32, raster.height as f32))
@@ -1513,7 +1520,7 @@ fn draw_text(
             if lx < 0.0 || ly < 0.0 {
                 continue;
             }
-            let c = raster.sample(lx as u32, ly as u32);
+            let c = raster.sample_at(lx * scale, ly * scale);
             if c <= 0.0 {
                 continue;
             }
@@ -2379,6 +2386,56 @@ mod tests {
             .unwrap();
         }
         doc
+    }
+
+    /// Render a one-line text layer of `size`, magnified by `zoom`.
+    fn text_at(size: f32, zoom: f32) -> Surface {
+        let mut doc = Document::new(96, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "t",
+                chitrakar_doc::TextSpec {
+                    text: "Ag".into(),
+                    size,
+                    fill: RED,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: zoom,
+                d: zoom,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        render(&doc).unwrap()
+    }
+
+    #[test]
+    fn magnified_text_is_rasterized_at_the_size_it_is_seen_at() {
+        // Type is outlines, so scaling a text layer up must re-rasterize
+        // the outlines, not enlarge the pixels of a natural-size bitmap.
+        // Small-and-magnified therefore has to land on the same pixels as
+        // large-and-unmagnified; blowing up a bitmap would not.
+        let magnified = text_at(8.0, 8.0);
+        let native = text_at(64.0, 1.0);
+        let n = magnified.pixels.len();
+        let diff: f32 = (0..n)
+            .map(|i| (magnified.pixels[i].a - native.pixels[i].a).abs())
+            .sum();
+        let ink: f32 = native.pixels.iter().map(|p| p.a).sum();
+        assert!(ink > 20.0, "the reference actually drew something: {ink}");
+        assert!(
+            diff < ink * 0.1,
+            "magnified text differs from native by {diff} over {ink} of ink"
+        );
     }
 
     #[test]

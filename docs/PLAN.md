@@ -42,6 +42,8 @@ without reading anything else.*
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments.
+  Text rasterizes at the size it is actually seen at, so a magnified text
+  layer sharpens its outlines instead of enlarging its pixels.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
