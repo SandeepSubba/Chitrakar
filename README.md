@@ -7,8 +7,9 @@ objects and layers, and real color management (RGB and CMYK, ICC-correct).
 pending).
 
 **Stack:** Rust engine (document model, a CPU renderer that compiles natively
-and to WASM, moxcms ICC color pipeline, codecs) + Tauri 2 shells +
-TypeScript/React UI. The UI never touches pixels: it sends commands over
+and to WASM, a wgpu backend growing beside it and checked against that
+renderer pixel for pixel, moxcms ICC color pipeline, codecs) + Tauri 2
+shells + TypeScript/React UI. The UI never touches pixels: it sends commands over
 the WASM boundary and presents the frames the engine renders.
 
 **Today:** shapes, pen and brush paths with bezier handles and booleans,

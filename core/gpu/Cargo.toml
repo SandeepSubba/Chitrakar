@@ -1,0 +1,15 @@
+[package]
+name = "chitrakar-gpu"
+description = "GPU render backend (wgpu), validated against the CPU reference renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+chitrakar-render.workspace = true
+wgpu = "23"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
