@@ -171,6 +171,15 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
     if a.is_empty() || b.is_empty() {
         return None;
     }
+    if op == BoolOp::Exclude {
+        // Exclude is the one operation whose answer is not a selection of
+        // edges: it is everything either shape covers minus everything
+        // both do, which even-odd already means. So keep both outlines
+        // whole, and do none of the work below.
+        let mut rings: Vec<Ring> = a.to_vec();
+        rings.extend(b.iter().cloned());
+        return Some(rings);
+    }
     // Which side of the other shape each operand contributes, and whether
     // that contribution runs backwards. Reversing is what turns the inside
     // of the subtracted shape into the wall of the hole it leaves.
@@ -178,6 +187,7 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         BoolOp::Union => (false, false, false),
         BoolOp::Intersect => (true, true, false),
         BoolOp::Subtract => (false, true, true),
+        // Handled above; the arm is here so the match stays total.
         BoolOp::Exclude => (false, false, false),
     };
     let mut fragments = Vec::new();
@@ -191,14 +201,6 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         if covers(a, mid(&f)) == keep_b_inside {
             fragments.push(if flip_b { (f.1, f.0) } else { f });
         }
-    }
-    if op == BoolOp::Exclude {
-        // Exclude is the one operation whose answer is not a selection of
-        // edges: it is everything either shape covers minus everything both
-        // do, which even-odd already means. So keep both outlines whole.
-        let mut rings: Vec<Ring> = a.to_vec();
-        rings.extend(b.iter().cloned());
-        return Some(rings);
     }
     if fragments.is_empty() {
         return None;

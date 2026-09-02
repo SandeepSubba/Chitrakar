@@ -1256,11 +1256,14 @@ export function App() {
     if (drag.tool === "Crop") {
       // Crop to the dragged rectangle, clamped to the page: the document
       // becomes that rectangle and every layer shifts with it, so what was
-      // framed stays framed.
-      const cx = Math.max(0, Math.round(x0));
-      const cy = Math.max(0, Math.round(y0));
-      const cw = Math.min(Math.round(w), docSize[0] - cx);
-      const ch = Math.min(Math.round(h), docSize[1] - cy);
+      // framed stays framed. Both corners are clamped, not just the
+      // origin — a frame started off the page would otherwise keep the
+      // width it was dragged with and come out bigger than it looked.
+      const clamp = (v: number, hi: number) => Math.min(Math.max(v, 0), hi);
+      const cx = Math.round(clamp(x0, docSize[0]));
+      const cy = Math.round(clamp(y0, docSize[1]));
+      const cw = Math.round(clamp(x0 + w, docSize[0])) - cx;
+      const ch = Math.round(clamp(y0 + h, docSize[1])) - cy;
       if (cw < 1 || ch < 1) return;
       try {
         session.resize_canvas(cw, ch, -cx, -cy);
@@ -1514,7 +1517,13 @@ export function App() {
     };
     const onKey = (e: KeyboardEvent) => {
       const step = STEPS[e.key];
-      if (!step || !session || isTextEntry(e.target) || selectionSet.length === 0) {
+      // Any form control gets its arrows first: they step a slider, open a
+      // select, move a caret. Only a bare canvas nudges the layer.
+      const inControl =
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLSelectElement ||
+        isTextEntry(e.target);
+      if (!step || !session || inControl || selectionSet.length === 0) {
         return;
       }
       e.preventDefault();

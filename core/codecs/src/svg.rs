@@ -77,7 +77,9 @@ fn write_children(
                     } => {
                         // SVG rounds corners with rx, clamped the same way
                         // the renderer clamps its own radius.
-                        let r = radius.clamp(0.0, (width / 2.0).min(height / 2.0));
+                        let r = radius
+                            .max(0.0)
+                            .min((width / 2.0).min(height / 2.0).max(0.0));
                         let round = if r > 0.0 {
                             format!(r#" rx="{r}""#)
                         } else {

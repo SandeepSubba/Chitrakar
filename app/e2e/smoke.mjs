@@ -1969,6 +1969,32 @@ assert(
   await page.waitForTimeout(400);
   assert(await page.isVisible("text=RGB, 600×400"), "undo restores the page");
   assert((await canvasPixel(300, 200))[3] === 255, "and puts the picture back");
+
+  // A frame dragged from off the page crops to the page's own edge, so
+  // the document comes out the size of what was actually framed rather
+  // than the size the pointer travelled. The page is back to 600x400, and
+  // the view is wherever the last crop left it, so both are re-read.
+  await menuClick("View", "Fit document to window");
+  await page.waitForTimeout(250);
+  const cropped = await page.locator("#engine-page").boundingBox();
+  await page.click('button[aria-label="Crop"]');
+  // Just left of the page but still over the canvas, clear of the ruler.
+  await page.mouse.move(cropped.x - 20, cropped.y + (100 / 400) * cropped.height);
+  await page.mouse.down();
+  await page.mouse.move(
+    cropped.x + (200 / 600) * cropped.width,
+    cropped.y + (150 / 400) * cropped.height,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(
+    await page.isVisible("text=RGB, 200×50"),
+    "a crop started off the page stops at its edge",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

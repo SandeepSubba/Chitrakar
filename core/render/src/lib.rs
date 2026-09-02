@@ -280,7 +280,22 @@ fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
 
 /// Doc-space bounds of a node, ancestors included.
 pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
-    let local = bounds_in_parent_space(doc, id)?;
+    node_bounds_inner(doc, id, true)
+}
+
+/// The box the layer itself occupies — what a selection outline is drawn
+/// around and what "W" in the panel means.
+///
+/// Distinct from [`node_bounds`], which answers what the layer can *touch*
+/// and so includes the reach of its effects. A drop shadow changes where
+/// pixels must be repainted; it does not change how wide the layer is, and
+/// laying out against a box inflated by one would be nonsense.
+pub fn node_visual_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    node_bounds_inner(doc, id, false)
+}
+
+fn node_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bounds, DocError> {
+    let local = bounds_in_parent_space_inner(doc, id, effects)?;
     Ok(match local {
         Bounds::Rect(x0, y0, x1, y1) => {
             transformed_local_bounds(ancestor_space(doc, id), (x0, y0, x1, y1))
@@ -293,15 +308,27 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
 /// parent's. Groups union their children here, which is why this is the
 /// recursive form and `node_bounds` is the one that finishes the job.
 fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    bounds_in_parent_space_inner(doc, id, true)
+}
+
+fn bounds_in_parent_space_inner(
+    doc: &Document,
+    id: NodeId,
+    effects: bool,
+) -> Result<Bounds, DocError> {
     let node = doc.node(id)?;
     // Effects reach past the layer's own edges, in the parent space this
-    // whole function answers in, so they widen the box everything else —
-    // dirty regions, group extents, hit-test culling — is cut from.
-    let effect_pad = node
-        .effects
-        .iter()
-        .map(Effect::reach)
-        .fold(0.0f32, f32::max);
+    // whole function answers in, so they widen the box the renderer and
+    // the dirty tracking are cut from — but not the one the layer is said
+    // to occupy, which is why the caller chooses.
+    let effect_pad = if effects {
+        node.effects
+            .iter()
+            .map(Effect::reach)
+            .fold(0.0f32, f32::max)
+    } else {
+        0.0
+    };
     let grow = |b: Bounds| match b {
         Bounds::Rect(x0, y0, x1, y1) if effect_pad > 0.0 => Bounds::Rect(
             x0 - effect_pad,
@@ -316,7 +343,7 @@ fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError
         NodeKind::Group => {
             let mut acc = Bounds::None;
             for &child in doc.children_of(id)? {
-                acc = acc.union(bounds_in_parent_space(doc, child)?);
+                acc = acc.union(bounds_in_parent_space_inner(doc, child, effects)?);
                 if acc == Bounds::Everything {
                     break;
                 }
@@ -372,7 +399,10 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             None if matches!(node.kind, NodeKind::Group) => {
                 let mut acc = Bounds::None;
                 for &child in doc.children_of(id)? {
-                    acc = acc.union(bounds_in_parent_space(doc, child)?);
+                    // The box the group occupies, so without the reach of
+                    // anything's effects: this is what gets an outline and
+                    // handles drawn round it.
+                    acc = acc.union(bounds_in_parent_space_inner(doc, child, false)?);
                 }
                 match acc {
                     Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
@@ -394,12 +424,17 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
 /// correct values for the unpadded interior even next to stale surroundings.
 pub fn filter_reach(doc: &Document) -> u32 {
     doc.nodes()
-        .map(|(_, node)| match &node.kind {
+        .map(|(id, node)| match &node.kind {
             NodeKind::Filter(Filter::GaussianBlur { sigma })
             | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
+                // A filter's radius is written in the space it sits in, so
+                // a blur inside a group scaled up reaches further than its
+                // sigma says — and the padding has to know that or the
+                // region render leaves a halo of stale pixels behind.
+                let scale = max_scale(ancestor_space(doc, *id));
                 // Three iterated box blurs reach ~3 * box radius ≈ 2.9σ;
                 // round up generously.
-                (sigma * 3.0).ceil() as u32 + 2
+                (sigma * scale * 3.0).ceil() as u32 + 2
             }
             _ => 0,
         })
@@ -542,13 +577,29 @@ fn render_group(
         // on, so it cannot be painted before they are there.
         for effect in node.effects.iter().filter(|e| !e.over()) {
             draw_effect(
-                dst, &layer, doc, effect, scale, layer_clip, clip, node.blend,
+                dst,
+                &layer,
+                doc,
+                effect,
+                scale,
+                layer_clip,
+                clip,
+                node.blend,
+                node.opacity,
             );
         }
         composite(dst, &layer, 1.0, node.blend, clip.intersect(layer_clip));
         for effect in node.effects.iter().filter(|e| e.over()) {
             draw_effect(
-                dst, &layer, doc, effect, scale, layer_clip, clip, node.blend,
+                dst,
+                &layer,
+                doc,
+                effect,
+                scale,
+                layer_clip,
+                clip,
+                node.blend,
+                node.opacity,
             );
         }
     }
@@ -705,6 +756,7 @@ fn draw_effect(
     layer_clip: ClipRect,
     clip: ClipRect,
     blend: BlendMode,
+    layer_opacity: f32,
 ) {
     // Every effect is built from the layer's silhouette rather than its
     // picture. That is what makes a shadow of a photograph a shape, and
@@ -771,7 +823,7 @@ fn draw_effect(
                 return;
             }
             let tint = scale_alpha(resolve_color(doc, *color), *opacity);
-            let field = outline_band(dst, layer, layer_clip, tint, w);
+            let field = outline_band(dst, layer, layer_clip, tint, w, layer_opacity);
             stamp(dst, &field, (0.0, 0.0), layer_clip, write, blend, None);
         }
     }
@@ -815,6 +867,7 @@ fn outline_band(
     clip: ClipRect,
     tint: LinearRgba,
     width: f32,
+    layer_opacity: f32,
 ) -> Surface {
     let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
     let far = width + 4.0;
@@ -822,7 +875,11 @@ fn outline_band(
     for y in 0..h {
         for x in 0..w {
             let i = ((y as u32 + clip.y0) * dst.width + x as u32 + clip.x0) as usize;
-            if layer.pixels[i].a >= 0.5 {
+            // Half covered is inside. The layer was staged with its own
+            // opacity already applied, so half of *that* is where its edge
+            // is: a layer at a third opacity would otherwise have no
+            // inside at all, and cast no outline.
+            if layer.pixels[i].a >= 0.5 * layer_opacity.max(1e-3) {
                 dist[y * w + x] = 0.0;
             }
         }
@@ -1188,7 +1245,7 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
             height,
             radius,
         } => {
-            let r = radius.clamp(0.0, (width / 2.0).min(height / 2.0));
+            let r = corner_radius(*width, *height, *radius);
             if r <= 0.0 {
                 return vec![vec![
                     [0.0, 0.0],
@@ -1319,13 +1376,22 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     }
 }
 
+/// How round a rectangle's corners can actually be: never negative, never
+/// past half the shorter side — and never asked to clamp to a range that
+/// runs backwards, which a rectangle with a negative dimension (from a
+/// file rather than from the editor) would otherwise do.
+fn corner_radius(width: f32, height: f32, radius: f32) -> f32 {
+    let limit = (width / 2.0).min(height / 2.0).max(0.0);
+    radius.clamp(0.0, limit)
+}
+
 /// Signed distance from a point to a rounded rectangle's edge: negative
 /// inside, zero on the edge, positive outside. One formula covers the
 /// sides, the corners and a radius of zero, which is why the square case
 /// needs no branch of its own.
 fn rounded_rect_distance(width: f32, height: f32, radius: f32, x: f32, y: f32) -> f32 {
     let (hw, hh) = (width / 2.0, height / 2.0);
-    let r = radius.clamp(0.0, hw.min(hh));
+    let r = corner_radius(width, height, radius);
     let qx = (x - hw).abs() - (hw - r);
     let qy = (y - hh).abs() - (hh - r);
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
@@ -3086,13 +3152,20 @@ mod tests {
             0.0,
             "and nothing falls on the side it points away from"
         );
-        // It reaches outside the layer, so the layer's bounds must say so.
+        // It reaches outside the layer, so what must be repainted grows —
+        // but the layer is still the size it was, and the panel, the
+        // selection outline and alignment all go by that.
         match node_bounds(&doc, id).unwrap() {
             Bounds::Rect(_, _, x1, y1) => {
-                assert!(x1 > 46.0 && y1 > 46.0, "bounds grew for the shadow");
+                assert!(x1 > 46.0 && y1 > 46.0, "the repaint region grew");
             }
             other => panic!("expected a rect, got {other:?}"),
         }
+        assert_eq!(
+            node_visual_bounds(&doc, id).unwrap(),
+            Bounds::Rect(20.0, 20.0, 40.0, 40.0),
+            "the layer itself is not one pixel wider for having a shadow"
+        );
     }
 
     /// A 20x20 red square at (20,20) on a 64x64 canvas, with `effects`.
@@ -3175,6 +3248,43 @@ mod tests {
     }
 
     #[test]
+    fn a_backwards_rectangle_renders_rather_than_panicking() {
+        // Nothing in the editor makes a negative-sized rect, but a file
+        // can carry one, and clamping a radius into a range that runs
+        // backwards is a panic rather than a wrong picture.
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "r",
+            VectorShape::Rect {
+                width: -20.0,
+                height: 10.0,
+                radius: 4.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        render(&doc).unwrap();
+        assert!(hit_test(&doc, 1.0, 1.0).is_ok());
+        assert!(
+            shape_rings(match &doc.node(id).unwrap().kind {
+                NodeKind::Vector { shape, .. } => shape,
+                _ => unreachable!(),
+            })
+            .len()
+                <= 1
+        );
+    }
+
+    #[test]
     fn a_rounded_rectangle_strokes_round_the_corner() {
         // The inner band follows the rounded edge: present just inside the
         // curve, absent in the middle.
@@ -3252,6 +3362,86 @@ mod tests {
             wide.get(13, 30).a > 0.9,
             "ten pixels reaches where five did not"
         );
+    }
+
+    #[test]
+    fn a_filter_reaches_as_far_as_the_space_it_sits_in_stretches_it() {
+        // The sigma is written in the filter's own space, so a group
+        // scaled up carries the blur with it — and the padding a region
+        // render needs has to say so, or it leaves a stale ring behind.
+        let build = |scale: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+            let g = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: g,
+                transform: Transform {
+                    a: scale,
+                    d: scale,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: g,
+                index: 0,
+                node: Box::new(Node::filter("blur", Filter::GaussianBlur { sigma: 4.0 })),
+            })
+            .unwrap();
+            filter_reach(&doc)
+        };
+        let plain = build(1.0);
+        assert!(plain >= 14, "a sigma of four reaches about twelve: {plain}");
+        let scaled = build(3.0);
+        assert!(
+            scaled >= plain * 5 / 2,
+            "tripling the space it sits in roughly triples its reach: {plain} -> {scaled}"
+        );
+    }
+
+    #[test]
+    fn an_outline_survives_a_faint_layer() {
+        // The layer is staged with its own opacity already applied, so the
+        // edge is at half of that rather than at half of one. Take that
+        // for granted and a layer under half opacity has no inside at all,
+        // and casts no outline.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetOpacity { id, opacity: 0.3 }).unwrap();
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::Outline {
+                width: 4.0,
+                color: BLACK,
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert!(
+            s.get(18, 30).a > 0.9,
+            "a faint layer still gets a solid outline: {:?}",
+            s.get(18, 30)
+        );
+        assert_eq!(s.get(14, 30).a, 0.0, "and it still stops at its width");
     }
 
     #[test]

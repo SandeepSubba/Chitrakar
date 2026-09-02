@@ -365,6 +365,15 @@ impl Document {
                         node.transform.f += dy;
                     }
                 }
+                // Guides were placed against the artwork, so they travel
+                // with it; a crop that left them behind would detach every
+                // one of them from what it was lining up.
+                for guide in &mut self.guides {
+                    *guide = match *guide {
+                        Guide::Vertical(v) => Guide::Vertical(v + dx),
+                        Guide::Horizontal(v) => Guide::Horizontal(v + dy),
+                    };
+                }
                 Ok(Command::ResizeCanvas {
                     width: prev.0,
                     height: prev.1,

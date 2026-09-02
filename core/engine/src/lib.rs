@@ -1198,7 +1198,10 @@ impl Session {
 
     /// Doc-space bounds of a node as `[x, y, w, h]`, if it has any.
     pub fn bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
-        match chitrakar_render::node_bounds(&self.doc, id).ok()? {
+        // The layer's own box, not what its effects can reach: this is the
+        // number the panel shows, the box alignment lines up, and the
+        // lines snapping catches on.
+        match chitrakar_render::node_visual_bounds(&self.doc, id).ok()? {
             Bounds::None => None,
             Bounds::Everything => Some([
                 0.0,
@@ -1594,6 +1597,321 @@ mod tests {
         let bytes = session.save().unwrap();
         let reopened = Session::load(&bytes).unwrap();
         assert_eq!(reopened.document().guides(), &[Guide::Vertical(12.5)]);
+    }
+
+    /// Two 40x40 squares on a 100x100 page, overlapping in a 20x20 corner.
+    fn two_overlapping_squares() -> (Session, Vec<NodeId>) {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let b = add_rect(&mut session, "b", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: b,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        (session, vec![a, b])
+    }
+
+    /// How many pixels the composite covers.
+    fn ink(session: &mut Session) -> usize {
+        session
+            .render()
+            .unwrap()
+            .pixels
+            .iter()
+            .filter(|p| p.a > 0.5)
+            .count()
+    }
+
+    #[test]
+    fn booleans_combine_two_shapes_into_one_layer() {
+        // Areas are the check: union is both minus the overlap counted
+        // twice, intersect is the overlap, subtract is the lower shape
+        // less the overlap.
+        for (op, expected) in [
+            ("union", 40 * 40 * 2 - 20 * 20),
+            ("intersect", 20 * 20),
+            ("subtract", 40 * 40 - 20 * 20),
+        ] {
+            let (mut session, ids) = two_overlapping_squares();
+            let before = ink(&mut session);
+            assert_eq!(before, 40 * 40 * 2 - 20 * 20, "the two squares as drawn");
+            let id = session.boolean_nodes(&ids, op).unwrap();
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap(),
+                &[id],
+                "{op} left one layer"
+            );
+            let got = ink(&mut session);
+            assert!(
+                (got as i32 - expected).abs() < 200,
+                "{op}: covered {got}, expected about {expected}"
+            );
+            assert!(session.undo().unwrap());
+            assert_eq!(ink(&mut session), before, "{op} undoes as one step");
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap()
+                    .len(),
+                2,
+                "{op} brings both shapes back"
+            );
+        }
+    }
+
+    #[test]
+    fn subtracting_an_enclosed_shape_punches_a_hole() {
+        // The result is one layer whose middle is empty — a compound path,
+        // which is the whole reason a path can carry extra rings.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let outer = add_rect(&mut session, "outer", 60.0, 60.0);
+        session
+            .apply(Command::SetTransform {
+                id: outer,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        session.boolean_nodes(&[outer, inner], "subtract").unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(25, 25).a, 1.0, "the ring is filled");
+        assert_eq!(s.get(50, 50).a, 0.0, "and the middle is a hole");
+        assert_eq!(s.get(10, 10).a, 0.0, "outside is still outside");
+    }
+
+    #[test]
+    fn combining_refuses_what_it_cannot_answer_for() {
+        let (mut session, ids) = two_overlapping_squares();
+        assert!(
+            session.boolean_nodes(&ids[..1], "union").is_err(),
+            "needs two"
+        );
+        assert!(session.boolean_nodes(&ids, "invert").is_err(), "unknown op");
+        // A text layer has no outline to combine.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::text(
+                    "t",
+                    chitrakar_doc::TextSpec::new(
+                        "hi",
+                        12.0,
+                        AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    ),
+                )),
+            })
+            .unwrap();
+        let text = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        assert!(session.boolean_nodes(&[ids[0], text], "union").is_err());
+        // And nothing was half-applied.
+        assert_eq!(session.document().children_of(root).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_drop_shadow_repaints_the_ground_it_covers() {
+        // The shadow reaches outside the layer, so the dirty region has to
+        // as well. If it does not, adding or removing one leaves a stain
+        // where the cache was never revisited.
+        let mut session = Session::new(48, 48, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 16.0, 16.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(12.0, 12.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 7.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![shadow],
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        // And taking it away has to clear the ground it covered.
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        assert!(session.undo().unwrap(), "the shadow comes back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cropping_keeps_the_picture_where_it_was() {
+        // A crop is a resize plus the shift that cancels it: the page gets
+        // smaller, and what was inside the crop rectangle stays put.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(35, 35).a, 1.0);
+
+        // Crop to (20,20)-(52,52): the rect should land at (10,10).
+        session.resize_canvas(32, 32, -20.0, -20.0).unwrap();
+        assert_eq!(session.document().meta.width, 32);
+        let (after, _) = session.render_cached().unwrap();
+        assert_eq!((after.width, after.height), (32, 32), "the cache resized");
+        assert_eq!(after.get(15, 15).a, 1.0, "the rect moved with the page");
+        assert_eq!(after.get(5, 5).a, 0.0, "and nothing else came with it");
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap());
+        assert_eq!(session.document().meta.width, 64);
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(35, 35).a, 1.0, "undo puts the page back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cropping_carries_the_guides_with_the_artwork() {
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(40.0), Guide::Horizontal(50.0)],
+            })
+            .unwrap();
+        session.resize_canvas(60, 60, -20.0, -20.0).unwrap();
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(20.0), Guide::Horizontal(30.0)],
+            "a guide placed against the rect's edge is still against it"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(40.0), Guide::Horizontal(50.0)],
+            "and undo puts them back"
+        );
+    }
+
+    #[test]
+    fn a_blur_inside_a_scaled_group_pads_by_what_it_actually_reaches() {
+        // A filter's sigma is written in the space it sits in, so a group
+        // scaled up multiplies its reach. Padding a region render by the
+        // unscaled figure leaves a ring of stale pixels at the edge, which
+        // comparing against a full render catches.
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("under", 40.0, 40.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+        let group = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 3.0,
+                    d: 3.0,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 4.0 },
+                )),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let rect = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .first()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(6.0, 6.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn a_zero_sized_canvas_is_refused() {
+        let mut session = Session::new(16, 16, ColorMode::Rgb);
+        assert!(session.resize_canvas(0, 10, 0.0, 0.0).is_err());
+        assert_eq!(session.document().meta.width, 16, "and changes nothing");
     }
 
     #[test]
