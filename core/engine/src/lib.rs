@@ -128,6 +128,10 @@ pub struct Session {
     preview_inverse: Option<HistoryEntry>,
     /// Total pixels re-rendered so far (observability for tests and tuning).
     pixels_recomputed: u64,
+    /// The node the most recent command touched, when there was one. What
+    /// undo hands back so a selection can follow the layer it brings back
+    /// rather than being left pointing at nothing.
+    last_touched: Option<NodeId>,
     /// Soft-proofing (display-only): round-trip presented pixels through the
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
@@ -154,6 +158,7 @@ impl Session {
             viewport: None,
             preview_inverse: None,
             pixels_recomputed: 0,
+            last_touched: None,
             proof_cms: None,
             soft_proof: false,
             gamut_warn: false,
@@ -173,8 +178,11 @@ impl Session {
         match cmd {
             // A resize touches the page and every top-level layer, so
             // there is no one node to compute a dirty region from.
+            // A restored subtree knows its own root; an add does not know
+            // its id until it has happened, which is why apply_internal
+            // consults the inverse too.
+            Command::RestoreSubtree { subtree, .. } => Some(subtree.root_id()),
             Command::AddNode { .. }
-            | Command::RestoreSubtree { .. }
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
@@ -215,9 +223,12 @@ impl Session {
         // safe dirty region — and a resize changes what "the whole canvas"
         // even means.
         let batch = matches!(cmd, Command::Batch(_) | Command::ResizeCanvas { .. });
-        let pre = self.bounds_of_target(Self::command_target(&cmd));
+        let target = Self::command_target(&cmd);
+        let pre = self.bounds_of_target(target);
         let inverse = self.doc.apply(cmd)?;
-        let post = self.bounds_of_target(Self::command_target(&inverse));
+        let post_target = Self::command_target(&inverse);
+        let post = self.bounds_of_target(post_target);
+        self.last_touched = post_target.or(target);
         if batch {
             self.mark_dirty(Bounds::Everything);
         } else {
@@ -1116,13 +1127,14 @@ impl Session {
 
     /// Decode image bytes, pool them as a resource, and add a raster object
     /// referencing them at the top of the root group (one undo step).
-    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<(), EngineError> {
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
         let img =
             chitrakar_codecs::decode(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
         let (width, height) = (img.width, img.height);
         let resource_id = self.doc.add_resource(width, height, img.rgba8);
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
+        let id = self.doc.peek_next_id();
         self.apply(Command::AddNode {
             parent: root,
             index,
@@ -1134,7 +1146,14 @@ impl Session {
                     height,
                 },
             )),
-        })
+        })?;
+        Ok(id)
+    }
+
+    /// The node the last command — an undo or redo included — touched, if
+    /// it still exists, so a selection can follow it.
+    pub fn last_touched_node(&self) -> Option<NodeId> {
+        self.last_touched.filter(|id| self.doc.node(*id).is_ok())
     }
 
     /// Topmost clickable node at a document-space point.
@@ -1905,6 +1924,36 @@ mod tests {
             })
             .unwrap();
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn undo_says_which_layer_it_brought_back() {
+        // Undoing a delete restores the layer; what it hands back is that
+        // layer's id, so a selection can follow it instead of pointing at
+        // nothing. Undoing an add removes the layer again, so nothing.
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 8.0, 8.0);
+        assert_eq!(session.last_touched_node(), Some(id), "the add touched it");
+        session.apply(Command::RemoveNode { id }).unwrap();
+        assert_eq!(
+            session.last_touched_node(),
+            None,
+            "gone, so nothing to point at"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.last_touched_node(),
+            Some(id),
+            "undo brought it back"
+        );
+        assert!(session.undo().unwrap(), "undo the add itself");
+        assert_eq!(session.last_touched_node(), None);
+        assert!(session.redo().unwrap());
+        assert_eq!(
+            session.last_touched_node(),
+            Some(id),
+            "and redo restores it"
+        );
     }
 
     #[test]

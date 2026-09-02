@@ -290,8 +290,17 @@ impl WasmSession {
     }
 
     /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
-    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<(), JsError> {
-        self.inner.place_image(bytes, name).map_err(to_js)
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
+        self.inner
+            .place_image(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// The node the last command touched, or undefined. Undo hands the
+    /// layer it brought back here so the selection can follow it.
+    pub fn last_touched_node(&self) -> Option<f64> {
+        self.inner.last_touched_node().map(|id| id.0 as f64)
     }
 
     /// Set the CMYK press profile from ICC bytes.

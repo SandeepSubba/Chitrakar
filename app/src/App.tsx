@@ -599,12 +599,34 @@ export function App() {
     [session, refresh],
   );
 
+  /** After an undo or redo, point the selection at the layer it touched —
+   * undoing a delete brings the layer back and should bring the selection
+   * back with it — and drop it when that layer is gone. */
+  const followHistory = useCallback(
+    (s: WasmSession) => {
+      const alive = new Set(
+        (JSON.parse(s.layers_json()) as LayerInfo[]).map((l) => l.id as NodeId),
+      );
+      const touched = s.last_touched_node();
+      // A selection that survived the step is left alone: undoing an edit
+      // to one layer while another is picked should not steal the pick.
+      // Only a selection the step took away — a delete undone, an add
+      // redone — is pointed at what came back.
+      setSelected((prev) =>
+        prev !== null && alive.has(prev) ? prev : touched === undefined ? null : touched,
+      );
+      setMultiSel((prev) => prev.filter((id) => alive.has(id)));
+      refresh(s);
+    },
+    [refresh],
+  );
+
   const undo = useCallback(() => {
-    if (session?.undo()) refresh(session);
-  }, [session, refresh]);
+    if (session?.undo()) followHistory(session);
+  }, [session, followHistory]);
   const redo = useCallback(() => {
-    if (session?.redo()) refresh(session);
-  }, [session, refresh]);
+    if (session?.redo()) followHistory(session);
+  }, [session, followHistory]);
 
   /** Pick every top-level layer. */
   const selectAll = useCallback(() => {
@@ -1473,10 +1495,7 @@ export function App() {
           copySelected();
           deleteSelected();
         }
-        if (k === "v") {
-          e.preventDefault();
-          pasteClipboard();
-        }
+        // Ctrl+V is left to the paste event, which can see the clipboard.
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
@@ -2302,12 +2321,10 @@ export function App() {
     );
   };
 
-  const openFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    file.arrayBuffer().then((buf) => {
-      const s = WasmSession.open(new Uint8Array(buf));
+  /** Open a .chitra from its bytes, whether chosen or dropped. */
+  const openDocumentBytes = (bytes: Uint8Array) => {
+    try {
+      const s = WasmSession.open(bytes);
       setSession(s);
       setDocumentSize(s.width, s.height);
       setCmyk(s.cmyk);
@@ -2317,18 +2334,71 @@ export function App() {
       setGamutWarn(false);
       refresh(s);
       fitView();
-    });
+    } catch (err) {
+      alert(`Could not open document: ${err}`);
+    }
   };
+
+  const openFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    file.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
+  };
+
+  /** Bring an image file in as a layer and pick it — whichever way it
+   * arrived: the file dialog, a drop on the canvas, or a paste. */
+  const placeImageFile = useCallback(
+    (file: File) => {
+      if (!session) return;
+      file.arrayBuffer().then((buf) => {
+        try {
+          const id = session.place_image(new Uint8Array(buf), file.name || "Pasted image");
+          setSelected(id);
+          setMultiSel([]);
+          refresh(session);
+        } catch (err) {
+          alert(`Could not place image: ${err}`);
+        }
+      });
+    },
+    [session, refresh],
+  );
 
   const placeImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
-    if (!file || !session) return;
-    file.arrayBuffer().then((buf) => {
-      session.place_image(new Uint8Array(buf), file.name);
-      refresh(session);
-    });
+    if (file) placeImageFile(file);
   };
+
+  /** Files dropped on the canvas: images become layers, a .chitra opens. */
+  const onHostDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    for (const file of Array.from(e.dataTransfer.files)) {
+      if (file.name.toLowerCase().endsWith(".chitra")) {
+        file.arrayBuffer().then((buf) => openDocumentBytes(new Uint8Array(buf)));
+      } else if (file.type.startsWith("image/")) {
+        placeImageFile(file);
+      }
+    }
+  };
+
+  // Paste is handled at the event rather than the keystroke, because only
+  // the event knows what the clipboard holds: an image from another app
+  // becomes a layer, anything else falls back to the in-app clipboard.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTextEntry(e.target)) return;
+      const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
+        f.type.startsWith("image/"),
+      );
+      e.preventDefault();
+      if (image) placeImageFile(image);
+      else pasteClipboard();
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
 
   const [hasIcc, setHasIcc] = useState(false);
   const [proofing, setProofing] = useState(false);
@@ -2615,6 +2685,8 @@ export function App() {
         <main
           className="canvas-host"
           ref={hostRef}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={onHostDrop}
           onPointerDown={onHostPointerDown}
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}

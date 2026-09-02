@@ -489,6 +489,13 @@ pub struct Subtree {
     children: Vec<(NodeId, Vec<NodeId>)>,
 }
 
+impl Subtree {
+    /// The node this subtree restores at its top.
+    pub fn root_id(&self) -> NodeId {
+        self.root_id
+    }
+}
+
 /// Every mutation of a [`Document`]. Serializable — the foundation for undo,
 /// history persistence, and future collaboration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

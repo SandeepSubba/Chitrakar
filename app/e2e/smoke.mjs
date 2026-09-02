@@ -1997,6 +1997,68 @@ assert(
 
 }
 
+// 8x5. Images from anywhere: dropped on the canvas or pasted from another
+// application, they become layers. And undo after a delete brings the
+// selection back with the layer.
+{
+  await newDocument(600, 400, "rgb");
+  // A 40x30 solid red PNG made in the page, handed over as a File the way
+  // a drop or a paste would hand it.
+  const makeImage = () =>
+    page.evaluateHandle(async () => {
+      const c = document.createElement("canvas");
+      c.width = 40;
+      c.height = 30;
+      const g = c.getContext("2d");
+      g.fillStyle = "#ff0000";
+      g.fillRect(0, 0, 40, 30);
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+      return new File([blob], "shot.png", { type: "image/png" });
+    });
+  const dropped = await makeImage();
+  await page.evaluate((file) => {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const host = document.querySelector(".canvas-host");
+    host.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, dropped);
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "shot.png" }).count()) === 1,
+    "a dropped image file became a layer named after the file",
+  );
+  assert((await canvasPixel(10, 10))[0] > 200, "and its pixels landed at the origin");
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 1,
+    "and it is picked, ready to move",
+  );
+
+  const pasted = await makeImage();
+  await page.evaluate((file) => {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    window.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }));
+  }, pasted);
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "a pasted image became a second layer",
+  );
+
+  // Delete the picked layer, undo, and the selection is back on it.
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(250);
+  assert((await page.locator(".panel ul li").count()) === 1, "delete took it away");
+  assert((await page.locator(".panel ul li.selected").count()) === 0, "nothing picked");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await page.locator(".panel ul li").count()) === 2, "undo brought it back");
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 1,
+    "and the selection came back with it",
+  );
+}
+
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {

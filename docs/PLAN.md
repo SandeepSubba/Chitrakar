@@ -117,9 +117,10 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
-- **Known limits, deliberately:** the clipboard is in-process, so it does
-  not exchange with other applications; undo after a delete restores the
-  layer but not the selection; effects come in three kinds;
+- **Known limits, deliberately:** the in-app clipboard carries layers
+  between documents but not out to other applications — images from
+  other applications do come *in*, by paste or by dropping a file on the
+  canvas (a dropped .chitra opens); effects come in three kinds;
   and export flattens them like everything else; SVG export writes each
   text line as its own tspan but cannot carry alignment, which needs font
   metrics the codecs crate does not have; a mask is an ellipse, a rectangle, or
