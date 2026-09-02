@@ -42,6 +42,9 @@ without reading anything else.*
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments.
+  Dragging a layer snaps its edges and centre to the page's and to the
+  other layers', showing a guide on the line it caught; ctrl/cmd drags
+  free of it.
   Zooming in re-renders rather than magnifies: the engine composites at
   the resolution the canvas is displayed at (capped by a pixel budget), so
   outlines, gradients and glyphs are re-solved instead of interpolated.
@@ -93,7 +96,8 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the clipboard is in-process, so it does
   not exchange with other applications; undo after a delete restores the
-  layer but not the selection; masks are ellipses only, moved and resized
+  layer but not the selection; snapping applies to moving a layer, not yet
+  to resizing one; masks are ellipses only, moved and resized
   on canvas but not reshaped; PDF/TIFF
   embed the composite as an image rather than live vectors.
 

@@ -481,6 +481,46 @@ await page.waitForTimeout(150);
 px = await canvasPixel(310, 480);
 assert(px[3] === 255, "Escape cancelled the drag, rect back in place");
 
+// 8h2. Snapping: a drag that lands near an alignment line is pulled onto
+// it, and a guide is shown while it holds. The rect is dragged toward the
+// page centre but stopped a few document pixels short.
+{
+  const centreOf = async () => {
+    const quad = await page.$eval(".sel-outline polygon", (el) =>
+      el.getAttribute("points").split(" ").map((p) => p.split(",").map(Number)),
+    );
+    return quad.reduce((a, p) => a + p[0], 0) / quad.length;
+  };
+  await page.mouse.click(...toScreen(450, 400));
+  await page.waitForTimeout(150);
+  const before = await centreOf();
+  await page.mouse.move(...toScreen(450, 400));
+  await page.mouse.down();
+  await page.mouse.move(...toScreen(637, 400), { steps: 8 });
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".snap-overlay line").count()) > 0,
+    "a guide appears while the drag is snapped",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const moved = ((await centreOf()) - before) / sx2;
+  assert(
+    Math.abs(moved - 187) > 0.5 && Math.abs(moved - 187) < 9,
+    `the drop was pulled onto the alignment line (moved ${moved} doc px, aimed at 187)`,
+  );
+  assert(
+    (await page.locator(".snap-overlay line").count()) === 0,
+    "and the guide clears when the drag ends",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    Math.abs((await centreOf()) - before) < 1,
+    "the snapped move undoes as one step",
+  );
+}
+
 // 8i. Resize via the se handle: rect grows past its old right edge.
 await page.mouse.click(...toScreen(450, 400)); // select rect
 await page.waitForTimeout(150);

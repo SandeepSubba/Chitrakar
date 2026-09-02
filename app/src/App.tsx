@@ -271,6 +271,46 @@ interface ToolDrag {
   widths?: number[];
   /** Brush: when the last sample was taken, for the speed that sets it. */
   lastAt?: number;
+  /** Move: the dragged layer's document-space box when the drag began, and
+   * the edges and centres worth snapping it to. */
+  b0?: [number, number, number, number];
+  snapX?: number[];
+  snapY?: number[];
+}
+
+/** Alignment guides currently showing, in document coordinates. */
+interface Guides {
+  x: number[];
+  y: number[];
+}
+
+/** How close, in screen pixels, an edge has to come before it snaps. A
+ * fixed screen distance rather than a document one, so snapping feels the
+ * same however far you are zoomed in. */
+const SNAP_PX = 6;
+
+/** The three lines a box offers on each axis: its edges and its middle. */
+const snapLines = (lo: number, hi: number) => [lo, (lo + hi) / 2, hi];
+
+/** Nudge `moving` onto the nearest of `targets`, if one is within `tol`.
+ * Returns the correction to apply and the line it landed on. */
+function snapAxis(
+  moving: number[],
+  targets: number[],
+  tol: number,
+): { delta: number; guide: number | null } {
+  let best = { delta: 0, guide: null as number | null };
+  let bestGap = tol;
+  for (const m of moving) {
+    for (const t of targets) {
+      const gap = Math.abs(t - m);
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = { delta: t - m, guide: t };
+      }
+    }
+  }
+  return best;
 }
 
 interface HandleDrag {
@@ -344,6 +384,8 @@ export function App() {
   const shapeCount = useRef(0);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** Alignment guides drawn while a drag is snapped to something. */
+  const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
   /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
   const [multiSel, setMultiSel] = useState<NodeId[]>([]);
   const groupCount = useRef(0);
@@ -655,6 +697,27 @@ export function App() {
     return false;
   };
 
+  /** Whether `id` travels with `target` — it is the node itself, one of its
+   * ancestors, or one of its descendants. Such a layer is no use to snap
+   * against, because it moves too. */
+  const relatedTo = (id: NodeId, target: NodeId): boolean => {
+    if (id === target) return true;
+    const parentOf = (n: NodeId) =>
+      layers.find((l) => l.id === n)?.parent as NodeId | undefined;
+    const climbs = (from: NodeId, to: NodeId) => {
+      let up = parentOf(from);
+      // The root is its own parent, so bound the walk by the tree's depth.
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        if (up === to) return true;
+        const next = parentOf(up);
+        if (next === up) return false;
+        up = next;
+      }
+      return false;
+    };
+    return climbs(id, target) || climbs(target, id);
+  };
+
   const isPanTrigger = (e: React.PointerEvent) =>
     e.button === 1 || (e.button === 0 && spaceRef.current);
 
@@ -750,6 +813,30 @@ export function App() {
       const target = inSelectedGroup(hit) ? selected! : hit;
       drag.target = target;
       drag.t0 = toTransform(session.transform_of(target));
+      // Collect what this drag can snap to, once, while nothing is moving:
+      // the page's own edges and middle, and the same three lines from
+      // every layer that is not the one being dragged (nor an ancestor or
+      // descendant of it, which move along with it).
+      // bounds_of answers [x, y, w, h]; keep the two corners instead.
+      const corners = (b: ArrayLike<number>) =>
+        [b[0], b[1], b[0] + b[2], b[1] + b[3]] as [number, number, number, number];
+      const box = session.bounds_of(target);
+      if (box.length === 4) {
+        drag.b0 = corners(box);
+        const xs = snapLines(0, docSize[0]);
+        const ys = snapLines(0, docSize[1]);
+        for (const layer of layers) {
+          const id = layer.id as NodeId;
+          if (relatedTo(id, target)) continue;
+          const b = session.bounds_of(id);
+          if (b.length !== 4) continue;
+          const [x0, y0, x1, y1] = corners(b);
+          xs.push(...snapLines(x0, x1));
+          ys.push(...snapLines(y0, y1));
+        }
+        drag.snapX = xs;
+        drag.snapY = ys;
+      }
       setSelected(target);
     }
     toolDragRef.current = drag;
@@ -785,11 +872,26 @@ export function App() {
     }
     // Move tool: live preview while dragging.
     if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
-      const [dx, dy] = layerVector(
-        drag.target,
-        drag.lastX - drag.startX,
-        drag.lastY - drag.startY,
-      );
+      // Snap the layer's edges and centre onto the page's and the other
+      // layers', in document space, before the delta is carried into the
+      // layer's own space. Ctrl (or Cmd) drags free of it.
+      let [mx, my] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+      const snapping = drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
+      const next: Guides = { x: [], y: [] };
+      if (snapping) {
+        const tol = SNAP_PX / view.zoom;
+        const b = drag.b0!;
+        const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX!, tol);
+        const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY!, tol);
+        mx += sx.delta;
+        my += sy.delta;
+        if (sx.guide !== null) next.x.push(sx.guide);
+        if (sy.guide !== null) next.y.push(sy.guide);
+      }
+      // Only re-render when the guides actually change: this runs on every
+      // pointer sample.
+      setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
+      const [dx, dy] = layerVector(drag.target, mx, my);
       if (dx !== 0 || dy !== 0) {
         drag.moved = true;
         preview({
@@ -805,6 +907,7 @@ export function App() {
   const onCanvasPointerUp = () => {
     const drag = toolDragRef.current;
     toolDragRef.current = null;
+    setGuides({ x: [], y: [] });
     if (!drag || !session) return;
 
     if (drag.tool === "Move") {
@@ -1966,6 +2069,28 @@ export function App() {
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
           />
+          {(guides.x.length > 0 || guides.y.length > 0) && (
+            <svg className="snap-overlay" aria-hidden="true">
+              {guides.x.map((x) => (
+                <line
+                  key={`x${x}`}
+                  x1={view.x + x * view.zoom}
+                  y1={view.y}
+                  x2={view.x + x * view.zoom}
+                  y2={view.y + docSize[1] * view.zoom}
+                />
+              ))}
+              {guides.y.map((y) => (
+                <line
+                  key={`y${y}`}
+                  x1={view.x}
+                  y1={view.y + y * view.zoom}
+                  x2={view.x + docSize[0] * view.zoom}
+                  y2={view.y + y * view.zoom}
+                />
+              ))}
+            </svg>
+          )}
           {penPoints.length > 0 && (
             <svg className="pen-overlay" aria-hidden="true">
               <polyline
