@@ -17,8 +17,38 @@ use serde::Serialize;
 pub use chitrakar_color::ColorMode;
 pub use chitrakar_doc::{Command, Document, History, Node, NodeId, NodeKind, Transform};
 
-/// How far a duplicate is nudged from its original, in document units.
+/// How far a duplicate or a paste is nudged from its original, in document
+/// units.
 const DUPLICATE_OFFSET: f32 = 12.0;
+
+/// A copied subtree, held whole rather than serialized: the clipboard is
+/// in-process state, and JSON would only cost a round trip through text.
+/// Resource pixels travel with it so a paste into a *different* document
+/// still has its image — resource ids are content-addressed, so re-adding
+/// the same bytes there yields the id the nodes already reference.
+#[derive(Clone)]
+struct ClipNode {
+    node: Node,
+    children: Vec<ClipNode>,
+}
+
+#[derive(Clone)]
+struct Clipboard {
+    root: ClipNode,
+    resources: Vec<(u32, u32, Vec<u8>)>,
+}
+
+thread_local! {
+    /// Outlives any one Session, which is what makes copy in one document
+    /// and paste in the next work at all.
+    static CLIPBOARD: std::cell::RefCell<Option<Clipboard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Is there anything to paste?
+pub fn clipboard_has_content() -> bool {
+    CLIPBOARD.with(|c| c.borrow().is_some())
+}
 pub use chitrakar_render::{Bounds, ClipRect, Surface};
 
 #[derive(Debug)]
@@ -411,6 +441,97 @@ impl Session {
             self.emit_copy(*child, new_id, i, false, next, cmds)?;
         }
         Ok(new_id)
+    }
+
+    /// Put a node and everything under it on the clipboard, pixels included.
+    pub fn copy_node(&self, id: NodeId) -> Result<(), EngineError> {
+        let root = self.clip_of(id)?;
+        let mut resources = Vec::new();
+        self.collect_resources(&root, &mut resources);
+        CLIPBOARD.with(|c| *c.borrow_mut() = Some(Clipboard { root, resources }));
+        Ok(())
+    }
+
+    fn clip_of(&self, id: NodeId) -> Result<ClipNode, EngineError> {
+        Ok(ClipNode {
+            node: self.doc.node(id)?.clone(),
+            children: self
+                .doc
+                .children_of(id)?
+                .to_vec()
+                .iter()
+                .map(|c| self.clip_of(*c))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn collect_resources(&self, clip: &ClipNode, out: &mut Vec<(u32, u32, Vec<u8>)>) {
+        let mut take = |rid: &str| {
+            if let Some(r) = self.doc.resource(rid) {
+                if !r.rgba8.is_empty() {
+                    out.push((r.width, r.height, r.rgba8.clone()));
+                }
+            }
+        };
+        if let NodeKind::Raster(r) = &clip.node.kind {
+            take(&r.resource_id);
+        }
+        if let Some(m) = &clip.node.mask {
+            if let chitrakar_doc::MaskKind::Raster { resource_id, .. } = &m.kind {
+                take(resource_id);
+            }
+        }
+        for child in &clip.children {
+            self.collect_resources(child, out);
+        }
+    }
+
+    /// Paste the clipboard into `parent` (the root when None), nudged clear
+    /// of wherever it was copied from. One undo step; `Ok(None)` when there
+    /// is nothing to paste.
+    pub fn paste(&mut self, parent: Option<NodeId>) -> Result<Option<NodeId>, EngineError> {
+        let Some(clip) = CLIPBOARD.with(|c| c.borrow().clone()) else {
+            return Ok(None);
+        };
+        // Restore pixels first: content-addressed ids mean this is a no-op
+        // when pasting back into the document the copy came from.
+        for (w, h, bytes) in &clip.resources {
+            self.doc.add_resource(*w, *h, bytes.clone());
+        }
+        let parent = parent.unwrap_or_else(|| self.doc.root());
+        let index = self.doc.children_of(parent)?.len();
+        let mut next = self.doc.peek_next_id().0;
+        let mut cmds = Vec::new();
+        let id = Self::emit_clip(&clip.root, parent, index, true, &mut next, &mut cmds);
+        let label = format!("Paste {}", clip.root.node.name);
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(Some(id))
+    }
+
+    fn emit_clip(
+        clip: &ClipNode,
+        parent: NodeId,
+        index: usize,
+        offset: bool,
+        next: &mut u64,
+        cmds: &mut Vec<Command>,
+    ) -> NodeId {
+        let mut node = clip.node.clone();
+        if offset {
+            node.transform.e += DUPLICATE_OFFSET;
+            node.transform.f += DUPLICATE_OFFSET;
+        }
+        let new_id = NodeId(*next);
+        *next += 1;
+        cmds.push(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        });
+        for (i, child) in clip.children.iter().enumerate() {
+            Self::emit_clip(child, new_id, i, false, next, cmds);
+        }
+        new_id
     }
 
     /// Dissolve a group: its children move to its position in the parent,
@@ -1159,6 +1280,54 @@ mod tests {
             before,
             "duplicating a raster adds no new resource"
         );
+    }
+
+    #[test]
+    fn the_clipboard_carries_a_subtree_into_another_document() {
+        // The point of a clipboard over duplicate: it survives the document
+        // it was copied from. Pixels travel with it, and because resource
+        // ids are content-addressed, the pasted node's reference resolves in
+        // the new document without any remapping.
+        let mut a = Session::new(64, 64, ColorMode::Rgb);
+        let png = chitrakar_codecs::encode_png(1, 1, &[0, 200, 0, 255]).unwrap();
+        a.place_image(&png, "dot.png").unwrap();
+        let root_a = a.document().root();
+        let img = a.document().children_of(root_a).unwrap()[0];
+        let rect = add_rect(&mut a, "r", 8.0, 8.0);
+        let group = a.group_nodes(&[img, rect], "pair").unwrap();
+        a.copy_node(group).unwrap();
+
+        let mut b = Session::new(64, 64, ColorMode::Rgb);
+        assert_eq!(b.document().resources().count(), 0);
+        let pasted = b.paste(None).unwrap().expect("clipboard had content");
+        assert_eq!(b.document().node(pasted).unwrap().name, "pair");
+        assert_eq!(
+            b.document().children_of(pasted).unwrap().len(),
+            2,
+            "the whole subtree came across"
+        );
+        assert_eq!(
+            b.document().resources().count(),
+            1,
+            "and its pixels came with it"
+        );
+        // The pasted raster resolves to real pixels, not an empty entry.
+        let kids = b.document().children_of(pasted).unwrap().to_vec();
+        let raster = kids
+            .iter()
+            .find_map(|k| match &b.document().node(*k).unwrap().kind {
+                NodeKind::Raster(r) => Some(r.resource_id.clone()),
+                _ => None,
+            })
+            .expect("a raster child");
+        assert!(!b.document().resource(&raster).unwrap().rgba8.is_empty());
+        assert_cache_matches_fresh(&mut b);
+
+        // One undo step, and the clipboard is still there to paste again.
+        b.undo().unwrap();
+        assert!(b.document().node(pasted).is_err());
+        assert!(crate::clipboard_has_content());
+        assert!(b.paste(None).unwrap().is_some(), "paste is repeatable");
     }
 
     #[test]

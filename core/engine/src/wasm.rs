@@ -147,6 +147,25 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Put a node and its subtree on the clipboard.
+    pub fn copy_node(&self, id: f64) -> Result<(), JsError> {
+        self.inner.copy_node(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Paste the clipboard into the root; returns the new node's id, or
+    /// undefined when the clipboard is empty.
+    pub fn paste(&mut self) -> Result<Option<f64>, JsError> {
+        self.inner
+            .paste(None)
+            .map(|id| id.map(|i| i.0 as f64))
+            .map_err(to_js)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_clipboard(&self) -> bool {
+        crate::clipboard_has_content()
+    }
+
     /// Copy a node and its subtree just above itself; returns the copy's id.
     pub fn duplicate_node(&mut self, id: f64) -> Result<f64, JsError> {
         self.inner

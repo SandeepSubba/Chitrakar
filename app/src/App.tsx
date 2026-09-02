@@ -988,6 +988,20 @@ export function App() {
     setSelected(null);
   };
 
+  const copySelected = () => {
+    if (!session || selected === null) return;
+    session.copy_node(selected);
+  };
+
+  const pasteClipboard = () => {
+    if (!session) return;
+    const id = session.paste();
+    if (id === undefined) return;
+    setSelected(id);
+    setMultiSel([]);
+    refresh(session);
+  };
+
   // Layer shortcuts get their own listener, declared after the actions it
   // calls: a closure over a `const` declared further down still throws
   // when it runs, and TypeScript does not flag that inside a callback.
@@ -997,6 +1011,22 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicateSelected();
+      }
+      if ((e.metaKey || e.ctrlKey) && !typing) {
+        const k = e.key.toLowerCase();
+        if (k === "c") {
+          e.preventDefault();
+          copySelected();
+        }
+        if (k === "x") {
+          e.preventDefault();
+          copySelected();
+          deleteSelected();
+        }
+        if (k === "v") {
+          e.preventDefault();
+          pasteClipboard();
+        }
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();

@@ -1113,6 +1113,41 @@ assert(
   assert((await canvasPixel(20, 20))[3] === 0, "and not outside the drag");
 }
 
+// 8y. The clipboard survives the document it was copied from: copy a
+// shape, start a fresh document, paste it back.
+{
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+c");
+  await page.waitForTimeout(150);
+  await newDocument(600, 400, "rgb");
+  assert(
+    (await page.locator(".panel ul li.empty").count()) === 1,
+    "the new document starts empty",
+  );
+  await page.keyboard.press("Control+v");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "paste brought the copied layer into the new document",
+  );
+  // It renders, rather than arriving as an empty node.
+  const shot = await page.evaluate(() => {
+    const c = document.getElementById("engine-canvas");
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let ink = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) ink++;
+    return ink;
+  });
+  assert(shot > 100, `and it renders (${shot} covered pixels)`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li.empty").count()) === 1,
+    "and the paste undoes as one step",
+  );
+}
+
 // 9. CMYK doc smoke: new doc, draw, still renders.
 await newDocument(1280, 720, "cmyk");
 await page.click('button[aria-label="Rect"]');
