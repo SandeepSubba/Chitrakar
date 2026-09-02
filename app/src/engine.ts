@@ -52,6 +52,9 @@ export interface Transform {
 export interface Stroke {
   color: AuthoredColor;
   width: number;
+  /** Per-anchor multipliers in 0..1 scaling `width` along the path. Empty
+   * means a constant width. */
+  widths: number[];
 }
 
 export type Filter =

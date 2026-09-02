@@ -198,6 +198,12 @@ pub enum NodeKind {
 pub struct Stroke {
     pub color: AuthoredColor,
     pub width: f32,
+    /// Per-anchor width multipliers in 0..=1, scaling `width` along the
+    /// path so a stroke can swell and taper. Empty means a constant width,
+    /// which is why older files keep loading; a path's own anchors index
+    /// it, and the renderer interpolates between them.
+    #[serde(default)]
+    pub widths: Vec<f32>,
 }
 
 /// A non-destructive mask attachable to any node: it modulates the node's

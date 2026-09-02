@@ -435,7 +435,18 @@ fn render_group(
                     }
                 };
                 if let Some(paint) = fill_paint {
-                    paint_shape(dst, doc, shape, t, &paint, node.blend, clip, None, mask);
+                    paint_shape(
+                        dst,
+                        doc,
+                        shape,
+                        t,
+                        &paint,
+                        node.blend,
+                        clip,
+                        None,
+                        &[],
+                        mask,
+                    );
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
@@ -448,6 +459,7 @@ fn render_group(
                         node.blend,
                         clip,
                         Some(stroke.width),
+                        &flatten_widths(shape, &stroke.widths),
                         mask,
                     );
                 }
@@ -572,6 +584,10 @@ fn max_scale(t: Transform) -> f32 {
     t.a.hypot(t.b).max(t.c.hypot(t.d))
 }
 
+/// Samples per curve segment when flattening. Shared so per-anchor data
+/// can be resampled to match the polyline exactly.
+const FLATTEN_STEPS: usize = 12;
+
 /// Expand a curved path into the polyline everything else works on — paint,
 /// hit test, bounds all run on the result, so curves need no special cases
 /// downstream. Bezier handles win when present because they are authored;
@@ -580,7 +596,7 @@ fn max_scale(t: Transform) -> f32 {
 /// per operation, not per pixel.
 fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     use std::borrow::Cow;
-    const STEPS: usize = 12;
+    const STEPS: usize = FLATTEN_STEPS;
     let VectorShape::Path {
         points,
         closed,
@@ -664,6 +680,44 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     })
 }
 
+/// Per-anchor widths resampled onto the flattened polyline, so index i of
+/// the result describes point i of the flattened shape. Flattening turns
+/// each segment into a fixed number of samples, so the width at a sample is
+/// just the lerp between its segment's two anchors.
+fn flatten_widths(shape: &VectorShape, widths: &[f32]) -> Vec<f32> {
+    let VectorShape::Path {
+        points,
+        closed,
+        smooth,
+        handles,
+    } = shape
+    else {
+        return widths.to_vec();
+    };
+    let n = points.len();
+    if widths.len() != n || n < 2 {
+        return Vec::new();
+    }
+    let curved = (handles.len() == n && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6)))
+        || (*smooth && n >= 3);
+    if !curved {
+        return widths.to_vec();
+    }
+    let segments = if *closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(segments * FLATTEN_STEPS + 1);
+    for i in 0..segments {
+        let (a, b) = (widths[i], widths[(i + 1) % n]);
+        for s in 0..FLATTEN_STEPS {
+            let t = s as f32 / FLATTEN_STEPS as f32;
+            out.push(a + (b - a) * t);
+        }
+    }
+    if !closed {
+        out.push(widths[n - 1]);
+    }
+    out
+}
+
 /// Local-space coverage test for a shape (shape origin at 0,0). Paths fill
 /// by the even-odd rule over their anchor polygon (open paths close
 /// implicitly, the SVG convention).
@@ -694,6 +748,17 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
     }
 }
 
+/// Where the closest point on a segment lies along it, 0 at `a` and 1 at
+/// `b` — the parameter the width is interpolated at.
+fn segment_parameter(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    if len2 <= 1e-12 {
+        return 0.0;
+    }
+    (((px - a[0]) * dx + (py - a[1]) * dy) / len2).clamp(0.0, 1.0)
+}
+
 /// Distance from a point to a line segment.
 fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
@@ -710,7 +775,7 @@ fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
 /// Stroke coverage. Rects and ellipses use an inner band of the given width
 /// (bounds stay stable); paths use a stroke centered on the line so open
 /// paths render as line art.
-fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
+fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32) -> bool {
     if let VectorShape::Path { points, closed, .. } = shape {
         if points.len() < 2 {
             return false;
@@ -720,9 +785,23 @@ fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
         } else {
             points.len() - 1
         };
+        // A varying stroke is still a distance test, just against a width
+        // that changes along the segment — which keeps caps round and
+        // self-crossings solid, where building an outline polygon would
+        // have to decide what those mean.
+        let at = |i: usize| -> f32 { widths.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0) };
+        let varying = !widths.is_empty();
         let half = width / 2.0;
-        return (0..segments)
-            .any(|i| segment_distance(x, y, points[i], points[(i + 1) % points.len()]) <= half);
+        return (0..segments).any(|i| {
+            let j = (i + 1) % points.len();
+            let (a, b) = (points[i], points[j]);
+            if !varying {
+                return segment_distance(x, y, a, b) <= half;
+            }
+            let t = segment_parameter(x, y, a, b);
+            let w = half * (at(i) + (at(j) - at(i)) * t);
+            segment_distance(x, y, a, b) <= w
+        });
     }
     if !shape_covers(shape, x, y) {
         return false;
@@ -913,6 +992,7 @@ fn rect_coverage(width: f32, height: f32, t: Transform, px: u32, py: u32) -> f32
 fn pixel_coverage(
     shape: &VectorShape,
     stroke_width: Option<f32>,
+    stroke_widths: &[f32],
     t: Transform,
     px: u32,
     py: u32,
@@ -930,7 +1010,7 @@ fn pixel_coverage(
     let covers = |sx: f32, sy: f32| match to_local(t, sx, sy) {
         Some((x, y)) => match stroke_width {
             None => shape_covers(shape, x, y),
-            Some(sw) => stroke_covers(shape, sw, x, y),
+            Some(sw) => stroke_covers(shape, sw, stroke_widths, x, y),
         },
         None => false,
     };
@@ -1055,6 +1135,7 @@ fn paint_shape(
     mode: BlendMode,
     clip: ClipRect,
     stroke_width: Option<f32>,
+    stroke_widths: &[f32],
     mask: MaskRef<'_>,
 ) {
     // Smooth paths render as their flattened spline polyline.
@@ -1088,7 +1169,7 @@ fn paint_shape(
     }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let a = pixel_coverage(shape, stroke_width, t, px, py);
+            let a = pixel_coverage(shape, stroke_width, stroke_widths, t, px, py);
             if a <= 0.0 {
                 continue;
             }
@@ -1187,7 +1268,9 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     };
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
-        MaskKind::Vector { shape, transform } => pixel_coverage(shape, None, *transform, x, y),
+        MaskKind::Vector { shape, transform } => {
+            pixel_coverage(shape, None, &[], parent.compose(*transform), x, y)
+        }
         MaskKind::Raster {
             resource_id,
             transform,
@@ -1447,7 +1530,7 @@ fn hit_in_group(
                     let hit = if fill.is_some() || gradient.is_some() {
                         shape_covers(shape, lx, ly)
                     } else if let Some(s) = stroke {
-                        stroke_covers(shape, s.width, lx, ly)
+                        stroke_covers(shape, s.width, &flatten_widths(shape, &s.widths), lx, ly)
                     } else {
                         false
                     };
@@ -2172,6 +2255,103 @@ mod tests {
             1.0,
             "the child swung a quarter turn about the group's origin"
         );
+    }
+
+    #[test]
+    fn a_mask_travels_with_its_layer_inside_a_moved_group() {
+        // A mask is authored in the space its layer lives in, so an
+        // ancestor's transform has to reach it too. Miss that and the layer
+        // slides out from under its own mask when the group moves.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("r", 16.0, 16.0, RED),
+        })
+        .unwrap();
+        let child = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id: child,
+            // Covers the left half of the rect only.
+            mask: Some(Box::new(ellipse_mask(0.0, 8.0, 8.0, 8.0, false))),
+        })
+        .unwrap();
+
+        let inside = render(&doc).unwrap().get(4, 8).a;
+        let outside = render(&doc).unwrap().get(13, 8).a;
+        assert!(inside > 0.5 && outside < 0.5, "mask cuts the rect in half");
+
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: Transform::translation(30.0, 20.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert!(
+            (s.get(34, 28).a - inside).abs() < 0.05,
+            "the masked half moved with the group, got {}",
+            s.get(34, 28).a
+        );
+        assert!(
+            (s.get(43, 28).a - outside).abs() < 0.05,
+            "and the cut-away half stayed cut away, got {}",
+            s.get(43, 28).a
+        );
+    }
+
+    #[test]
+    fn a_stroke_can_swell_and_taper() {
+        // Per-anchor widths scale the stroke along the path, so one end can
+        // be fat and the other thin — the difference between a line and a
+        // brush stroke.
+        let mut doc = Document::new(64, 32, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "s",
+            VectorShape::Path {
+                points: vec![[4.0, 16.0], [60.0, 16.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 12.0,
+                widths: vec![1.0, 0.15],
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        let band = |x: u32| (0..32).filter(|y| s.get(x, *y).a > 0.5).count();
+        let (near, far) = (band(8), band(56));
+        assert!(near > 8, "the fat end is fat, got {near}");
+        assert!(far < 4, "the thin end is thin, got {far}");
+        assert!(
+            near > far * 2,
+            "and it tapers between them: {near} vs {far}"
+        );
+
+        // Hit testing follows the same width, so the thin end is not
+        // clickable where the fat end would have been.
+        let id = doc.children_of(root).unwrap()[0];
+        assert_eq!(hit_test(&doc, 8.0, 21.0).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 56.0, 21.0).unwrap(), None);
     }
 
     #[test]
@@ -3031,6 +3211,7 @@ mod tests {
                     a: 1.0,
                 },
                 width: 4.0,
+                widths: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {
@@ -3092,6 +3273,7 @@ mod tests {
                     a: 1.0,
                 },
                 width: 2.0,
+                widths: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {

@@ -167,31 +167,34 @@ const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 const BRUSH_STEP = 3;
 const BRUSH_TOLERANCE = 2;
 
-/** Ramer-Douglas-Peucker: drop anchors that the line between their
- * neighbours already accounts for. A raw stroke is hundreds of points at
- * screen resolution, which renders the same and cannot be edited by hand;
- * this keeps the shape within `tol` of what was drawn and leaves a handful
- * of anchors to grab afterwards. */
-function simplifyStroke(
-  pts: [number, number][],
-  tol: number,
-): [number, number][] {
-  if (pts.length < 3) return pts;
-  const [first, last] = [pts[0], pts[pts.length - 1]];
-  let worst = 0;
-  let at = 0;
-  for (let i = 1; i < pts.length - 1; i++) {
-    const d = pointToSegment(pts[i], first, last);
-    if (d > worst) {
-      worst = d;
-      at = i;
+/** Ramer-Douglas-Peucker, returning the *indices* it keeps so per-sample
+ * data (the widths) can be carried along with the points. A raw stroke is
+ * hundreds of points at screen resolution, which renders the same and
+ * cannot be edited by hand; this keeps the shape within `tol` of what was
+ * drawn and leaves a handful of anchors to grab afterwards. */
+function simplifyStroke(pts: [number, number][], tol: number): number[] {
+  const walk = (lo: number, hi: number): number[] => {
+    let worst = 0;
+    let at = lo;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = pointToSegment(pts[i], pts[lo], pts[hi]);
+      if (d > worst) {
+        worst = d;
+        at = i;
+      }
     }
-  }
-  if (worst <= tol) return [first, last];
-  return [
-    ...simplifyStroke(pts.slice(0, at + 1), tol).slice(0, -1),
-    ...simplifyStroke(pts.slice(at), tol),
-  ];
+    if (worst <= tol) return [lo, hi];
+    return [...walk(lo, at).slice(0, -1), ...walk(at, hi)];
+  };
+  if (pts.length < 3) return pts.map((_, i) => i);
+  return walk(0, pts.length - 1);
+}
+
+/** Stroke width from how fast the cursor is travelling, in document units
+ * per millisecond: slow strokes lay down a full-width line, fast ones thin
+ * out. Clamped so a flick still leaves a visible mark. */
+function speedWidth(speed: number): number {
+  return Math.max(0.25, Math.min(1, 1 - speed * 0.35));
 }
 
 function pointToSegment(
@@ -251,6 +254,10 @@ interface ToolDrag {
   t0?: Transform;
   /** Brush: the stroke so far, in document coordinates. */
   stroke?: [number, number][];
+  /** Brush: a width multiplier per recorded sample. */
+  widths?: number[];
+  /** Brush: when the last sample was taken, for the speed that sets it. */
+  lastAt?: number;
 }
 
 interface HandleDrag {
@@ -475,7 +482,7 @@ export function App() {
                     : null,
                   stroke: closed
                     ? null
-                    : { color: hexColor(fill), width: 4 },
+                    : { color: hexColor(fill), width: 4, widths: [] },
                   gradient: null,
                 },
               },
@@ -696,6 +703,8 @@ export function App() {
       lastY: y,
       moved: false,
       stroke: tool === "Brush" ? [[x, y]] : undefined,
+      widths: tool === "Brush" ? [1] : undefined,
+      lastAt: performance.now(),
     };
     if (tool === "Move") {
       const hit = session.hit_test(x, y);
@@ -724,7 +733,20 @@ export function App() {
       // Only keep points that add something: a stroke sampled at screen
       // resolution carries hundreds of anchors nobody can edit.
       const last = drag.stroke[drag.stroke.length - 1];
-      if (Math.hypot(drag.lastX - last[0], drag.lastY - last[1]) >= BRUSH_STEP) {
+      const step = Math.hypot(drag.lastX - last[0], drag.lastY - last[1]);
+      if (step >= BRUSH_STEP) {
+        const now = performance.now();
+        // A pen reports real pressure; a mouse always reads 0.5, so fall
+        // back to speed — a fast stroke thins out, the way ink does.
+        const w =
+          e.pointerType === "pen" && e.pressure > 0
+            ? 0.25 + e.pressure * 0.75
+            : speedWidth(step / Math.max(1, now - (drag.lastAt ?? now)));
+        const prev = drag.widths?.[drag.widths.length - 1] ?? 1;
+        // Ease toward the new width: sample-to-sample jitter would show up
+        // as a lumpy edge.
+        drag.widths?.push(prev + (w - prev) * 0.35);
+        drag.lastAt = now;
         drag.stroke.push([drag.lastX, drag.lastY]);
         drag.moved = true;
         setPenPoints([...drag.stroke]); // live line while drawing
@@ -762,8 +784,10 @@ export function App() {
 
     if (drag.tool === "Brush") {
       setPenPoints([]);
-      const pts = simplifyStroke(drag.stroke ?? [], BRUSH_TOLERANCE);
-      if (pts.length < 2) return;
+      const kept = simplifyStroke(drag.stroke ?? [], BRUSH_TOLERANCE);
+      if (kept.length < 2) return;
+      const pts = kept.map((i) => drag.stroke![i]);
+      const widths = kept.map((i) => drag.widths?.[i] ?? 1);
       // Anchors are stored relative to the stroke's own origin, like every
       // other path, so the node's transform carries its position.
       const minX = Math.min(...pts.map((p) => p[0]));
@@ -793,6 +817,7 @@ export function App() {
                 stroke: {
                   color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
                   width: brushSize,
+                  widths,
                 },
                 gradient: null,
               },
@@ -2704,7 +2729,7 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
               onEdit(
                 patch({
                   stroke: e.target.checked
-                    ? { color: hexColor("#1a1a1e"), width: 4 }
+                    ? { color: hexColor("#1a1a1e"), width: 4, widths: [] }
                     : null,
                 }),
                 false,

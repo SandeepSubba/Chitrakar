@@ -923,6 +923,32 @@ assert(
   anchors >= 2 && anchors <= 8,
   `the stroke simplifies to a handful of anchors (${anchors})`,
 );
+// Width follows the hand: a slow stretch lays down more ink than a flick,
+// so the band is measurably wider at the slow end.
+const bandAt = async (x) => {
+  let n = 0;
+  for (let y = 560; y < 700; y++) if ((await canvasPixel(x, y))[3] > 128) n++;
+  return n;
+};
+await page.mouse.move(...toScreen(200, 600));
+await page.mouse.down();
+for (let x = 220; x <= 340; x += 20) {
+  await page.mouse.move(...toScreen(x, 600), { steps: 8 }); // slow
+}
+for (let x = 380; x <= 620; x += 60) {
+  await page.mouse.move(...toScreen(x, 600), { steps: 1 }); // fast
+}
+await page.mouse.up();
+await page.waitForTimeout(300);
+const slowBand = await bandAt(260);
+const fastBand = await bandAt(560);
+assert(
+  slowBand > fastBand,
+  `a slow stroke lays down more ink than a flick (${slowBand} vs ${fastBand})`,
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(200);
 assert(
