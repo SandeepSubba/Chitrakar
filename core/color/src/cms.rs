@@ -153,7 +153,7 @@ impl ProofCms {
         for chunk in pixels.chunks_mut(CHUNK * 4) {
             let n = chunk.len() / 4;
             rgb.clear();
-            for px in chunk.chunks_exact(4) {
+            for px in chunk.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&[
                     px[0] as f32 / 255.0,
                     px[1] as f32 / 255.0,
@@ -171,7 +171,7 @@ impl ProofCms {
             {
                 return; // leave pixels unproofed rather than corrupt them
             }
-            for (i, px) in chunk.chunks_exact_mut(4).enumerate() {
+            for (i, px) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let proofed = &back[i * 3..i * 3 + 3];
                 let out_of_gamut =
                     (0..3).any(|k| (proofed[k] - rgb[i * 3 + k]).abs() > GAMUT_TOLERANCE);

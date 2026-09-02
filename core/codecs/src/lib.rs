@@ -39,7 +39,9 @@ impl SourceImage {
     /// Convert to working-space pixels (linear float, premultiplied).
     pub fn to_working(&self) -> Vec<LinearRgba> {
         self.rgba8
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| LinearRgba::from_srgb8(p[0], p[1], p[2], p[3]))
             .collect()
     }

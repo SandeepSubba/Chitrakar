@@ -33,7 +33,9 @@ without reading anything else.*
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~81 browser
   assertions). Both suites self-skip CMYK-profile steps unless
-  `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc.
+  `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
+  in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
+  locally is the clippy that runs in CI; bump it deliberately.
 - **Next up (rough priority):**
   1. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
      reference renderer (llvmpipe makes this CI-able — see
