@@ -56,9 +56,17 @@ export type IconName =
   | "distributeH"
   | "distributeV"
   | "flipH"
-  | "flipV";
+  | "flipV"
+  | "units";
 
 const PATHS: Record<IconName, JSX.Element> = {
+  // A ruler: a bar with its ticks.
+  units: (
+    <>
+      <rect x="3" y="8" width="18" height="8" rx="1" />
+      <path d="M7 8v3M11 8v4M15 8v3M19 8v4" />
+    </>
+  ),
   // Mirror: a shape and its reflection either side of a dashed axis.
   flipH: (
     <>

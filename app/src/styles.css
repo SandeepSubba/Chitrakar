@@ -1190,3 +1190,9 @@ body {
   border-radius: 4px;
   padding: 0.1rem 0.6rem;
 }
+
+.modal .row .hint {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  white-space: nowrap;
+}

@@ -1522,6 +1522,23 @@ impl Session {
             .flatten()
     }
 
+    /// The document's resolution, which sizes its page in print.
+    pub fn dpi(&self) -> f32 {
+        self.doc.meta.dpi
+    }
+
+    /// Set the resolution. Not a command: like the press profile, it is
+    /// document setup, not an edit — nothing on the page moves.
+    pub fn set_dpi(&mut self, dpi: f32) -> Result<(), EngineError> {
+        if !(dpi.is_finite() && (1.0..=2400.0).contains(&dpi)) {
+            return Err(EngineError::BadCommand(format!(
+                "resolution {dpi} is out of range (1..=2400 dpi)"
+            )));
+        }
+        self.doc.meta.dpi = dpi;
+        Ok(())
+    }
+
     /// Set the CMYK press profile authored CMYK colors render through.
     /// Not a command: like resources, it is document setup, not an edit.
     pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), EngineError> {
@@ -3254,6 +3271,25 @@ mod tests {
         assert!(
             session.text_along(circle, text).is_err(),
             "a shape is not text"
+        );
+    }
+
+    #[test]
+    fn the_resolution_is_document_setup_that_saves_with_it() {
+        let mut session = Session::new(300, 300, ColorMode::Rgb);
+        assert_eq!(session.dpi(), 72.0);
+        session.set_dpi(300.0).unwrap();
+        assert!(session.set_dpi(0.0).is_err() && session.set_dpi(f32::NAN).is_err());
+        assert_eq!(session.dpi(), 300.0, "a bad value changes nothing");
+        assert!(session.history_labels().0.is_empty(), "not an edit");
+        let bytes = session.save().unwrap();
+        assert_eq!(Session::load(&bytes).unwrap().dpi(), 300.0);
+        // A 300-dpi page is an inch across in the PDF: 72 points.
+        let pdf = String::from_utf8_lossy(&session.export_pdf().unwrap()).to_string();
+        assert!(
+            pdf.contains("/MediaBox [0 0 72.000 72.000]"),
+            "{}",
+            &pdf[..300]
         );
     }
 

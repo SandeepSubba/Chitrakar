@@ -50,6 +50,17 @@ impl WasmSession {
         self.inner.document().meta.height
     }
 
+    /// The document's resolution, in pixels per inch.
+    #[wasm_bindgen(getter)]
+    pub fn dpi(&self) -> f32 {
+        self.inner.dpi()
+    }
+
+    /// Set the resolution (document setup, not an edit).
+    pub fn set_dpi(&mut self, dpi: f32) -> Result<(), JsError> {
+        self.inner.set_dpi(dpi).map_err(to_js)
+    }
+
     #[wasm_bindgen(getter)]
     pub fn cmyk(&self) -> bool {
         self.inner.document().meta.color_mode == ColorMode::Cmyk

@@ -281,14 +281,36 @@ type Handle = (typeof HANDLES)[number];
 const DOC_WIDTH = 1280;
 const DOC_HEIGHT = 720;
 
-/** Starting points offered in the new-document dialog. */
-const DOC_PRESETS: [string, number, number][] = [
-  ["HD 1280×720", 1280, 720],
-  ["Full HD 1920×1080", 1920, 1080],
-  ["Square 1080×1080", 1080, 1080],
-  ["A4 at 300dpi", 2480, 3508],
-  ["Postcard at 300dpi", 1748, 1240],
+/** Starting points offered in the new-document dialog: name, pixels, and
+ * the resolution that gives them their size on paper. */
+const DOC_PRESETS: [string, number, number, number][] = [
+  ["HD 1280×720", 1280, 720, 72],
+  ["Full HD 1920×1080", 1920, 1080, 72],
+  ["Square 1080×1080", 1080, 1080, 72],
+  ["A4 at 300dpi", 2480, 3508, 300],
+  ["Postcard at 300dpi", 1748, 1240, 300],
 ];
+
+/** Units the rulers and the geometry fields can read in. Pixels are the
+ * document's own; the others go through its resolution. */
+type Units = "px" | "mm" | "in";
+const UNIT_LABELS: Record<Units, string> = { px: "Pixels", mm: "Millimetres", in: "Inches" };
+/** How many of the unit one document pixel is. */
+function perPixel(units: Units, dpi: number): number {
+  return units === "px" ? 1 : units === "mm" ? 25.4 / dpi : 1 / dpi;
+}
+/** Tick spacings a ruler chooses between, per unit. */
+const UNIT_TICKS: Record<Units, number[]> = {
+  px: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+  mm: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
+  in: [0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100],
+};
+/** A length in the unit, trimmed to what the unit can tell apart. */
+function inUnits(px: number, units: Units, dpi: number): number {
+  const v = px * perPixel(units, dpi);
+  const places = units === "px" ? 2 : units === "mm" ? 2 : 3;
+  return Math.round(v * 10 ** places) / 10 ** places;
+}
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
 const MIN_SIZE = 2; // doc pixels, resize clamp
@@ -377,10 +399,6 @@ interface Guides {
 /** Thickness of the rulers, in CSS pixels. */
 const RULER = 18;
 
-/** Tick spacings a ruler will choose between, in document units. The first
- * that puts ticks at least sixty screen pixels apart wins, so the labels
- * stay readable at any zoom. */
-const TICK_STEPS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
 
 /** A guide the user placed, mirroring `chitrakar_doc::Guide`. */
 type DocGuide = { Vertical: number } | { Horizontal: number };
@@ -476,6 +494,25 @@ export function App() {
   const fontInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
+  /** The open document's resolution, and the units the rulers and the
+   * geometry fields read in — the latter remembered across visits. */
+  const [docDpi, setDocDpi] = useState(72);
+  const [units, setUnitsState] = useState<Units>(() => {
+    try {
+      const saved = localStorage.getItem("chitrakar.units");
+      return saved === "mm" || saved === "in" ? saved : "px";
+    } catch {
+      return "px";
+    }
+  });
+  const setUnits = (u: Units) => {
+    setUnitsState(u);
+    try {
+      localStorage.setItem("chitrakar.units", u);
+    } catch {
+      // Not remembered, then.
+    }
+  };
   /** The viewport's size in CSS pixels. The canvas covers it, and the
    * engine composites only what fits — so a print-sized page costs a
    * screenful of pixels to show, not nine megapixels. */
@@ -644,8 +681,10 @@ export function App() {
   }, []);
 
   const newDocument = useCallback(
-    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT) => {
+    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
       const s = new WasmSession(width, height, useCmyk);
+      s.set_dpi(dpi);
+      setDocDpi(dpi);
       setSession(s);
       setDocumentSize(width, height);
       setCmyk(useCmyk);
@@ -2653,6 +2692,7 @@ export function App() {
       const s = WasmSession.open(bytes);
       // Faces the file carried are registered by the open; offer them.
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      setDocDpi(s.dpi);
       setSession(s);
       setDocumentSize(s.width, s.height);
       setCmyk(s.cmyk);
@@ -2945,6 +2985,17 @@ export function App() {
             onHover={() => openMenu && setOpenMenu("view")}
             onClose={() => setOpenMenu(null)}
           >
+            {(["px", "mm", "in"] as Units[]).map((u) => (
+              <MenuItem
+                key={u}
+                icon="units"
+                onClick={() => setUnits(u)}
+                hint={units === u ? "✓" : undefined}
+              >
+                {UNIT_LABELS[u]}
+              </MenuItem>
+            ))}
+            <hr />
             <MenuItem icon="fit" onClick={fitView}>
               Fit document to window
             </MenuItem>
@@ -3018,8 +3069,14 @@ export function App() {
               ICC ✓
             </span>
           )}
-          {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]} ·{" "}
-          {Math.round(view.zoom * 100)}%
+          {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
+          {units !== "px" && (
+            <>
+              {" "}
+              ({inUnits(docSize[0], units, docDpi)}×{inUnits(docSize[1], units, docDpi)} {units})
+            </>
+          )}{" "}
+          · {docDpi} dpi · {Math.round(view.zoom * 100)}%
         </span>
 
         {/* The file inputs live here, outside the menus, so they stay mounted
@@ -3056,9 +3113,9 @@ export function App() {
       {newDocOpen && (
         <NewDocDialog
           onCancel={() => setNewDocOpen(false)}
-          onCreate={(w, h, useCmyk) => {
+          onCreate={(w, h, useCmyk, dpi) => {
             setNewDocOpen(false);
-            newDocument(useCmyk, w, h);
+            newDocument(useCmyk, w, h, dpi);
           }}
         />
       )}
@@ -3113,16 +3170,21 @@ export function App() {
               units and following the view. Dragging out of one places a
               guide; dropping a guide back on one throws it away. */}
           {(() => {
+            // Ticks are chosen in the unit the rulers read in, then
+            // placed in pixels: a step is the first that puts ticks at
+            // least sixty screen pixels apart.
+            const unitPx = 1 / perPixel(units, docDpi);
+            const candidates = UNIT_TICKS[units];
             const step =
-              TICK_STEPS.find((s) => s * view.zoom >= 60) ??
-              TICK_STEPS[TICK_STEPS.length - 1];
+              candidates.find((s) => s * unitPx * view.zoom >= 60) ??
+              candidates[candidates.length - 1];
             const ticks = (vertical: boolean) => {
               const span = vertical ? viewport[1] : viewport[0];
               const origin = vertical ? view.y : view.x;
-              const first = Math.floor(-origin / view.zoom / step) * step;
-              const last = (span - origin) / view.zoom;
+              const first = Math.floor(-origin / view.zoom / unitPx / step) * step;
+              const last = (span - origin) / view.zoom / unitPx;
               const out: number[] = [];
-              for (let v = first; v <= last; v += step) out.push(v);
+              for (let v = first; v <= last; v += step) out.push(Math.round(v * 1000) / 1000);
               return out;
             };
             const ruler = (vertical: boolean) => (
@@ -3134,7 +3196,7 @@ export function App() {
                 <svg>
                   {ticks(vertical).map((v) => {
                     const at =
-                      (vertical ? view.y : view.x) + v * view.zoom;
+                      (vertical ? view.y : view.x) + v * unitPx * view.zoom;
                     return vertical ? (
                       <g key={v}>
                         <line x1={RULER - 5} y1={at} x2={RULER} y2={at} />
@@ -3733,20 +3795,21 @@ export function App() {
                       {label}
                       <input
                         type="number"
-                        step="1"
+                        step={units === "px" ? "1" : "0.01"}
                         // Keyed by the value so a committed edit re-reads
                         // from the document rather than keeping a stale
                         // draft: the box moves for reasons other than this
-                        // field (a drag, an undo, an align).
-                        key={`${field}${Math.round(value * 100)}`}
-                        defaultValue={Math.round(value * 100) / 100}
+                        // field (a drag, an undo, an align). Shown and
+                        // read in the chosen units.
+                        key={`${field}${units}${Math.round(value * 100)}`}
+                        defaultValue={inUnits(value, units, docDpi)}
                         onKeyDown={(e) => {
                           e.stopPropagation();
                           if (e.key === "Enter") e.currentTarget.blur();
                         }}
                         onBlur={(e) => {
                           const v = Number(e.currentTarget.value);
-                          if (Number.isFinite(v)) setGeometry(field, v);
+                          if (Number.isFinite(v)) setGeometry(field, v / perPixel(units, docDpi));
                         }}
                         aria-label={
                           field === "w" || field === "h"
@@ -4094,21 +4157,22 @@ function NewDocDialog({
   onCreate,
   onCancel,
 }: {
-  onCreate: (w: number, h: number, cmyk: boolean) => void;
+  onCreate: (w: number, h: number, cmyk: boolean, dpi: number) => void;
   onCancel: () => void;
 }) {
   const [w, setW] = useState(DOC_WIDTH);
   const [h, setH] = useState(DOC_HEIGHT);
+  const [dpi, setDpi] = useState(72);
   const [mode, setMode] = useState("rgb");
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
-      if (e.key === "Enter") onCreate(w, h, mode === "cmyk");
+      if (e.key === "Enter") onCreate(w, h, mode === "cmyk", dpi);
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [w, h, mode, onCreate, onCancel]);
+  }, [w, h, mode, dpi, onCreate, onCancel]);
 
   const size = (label: string, value: number, set: (v: number) => void) => (
     <label className="row">
@@ -4136,13 +4200,14 @@ function NewDocDialog({
       >
         <h2>New document</h2>
         <div className="preset-list">
-          {DOC_PRESETS.map(([name, pw, ph]) => (
+          {DOC_PRESETS.map(([name, pw, ph, pdpi]) => (
             <button
               key={name}
-              className={w === pw && h === ph ? "preset active" : "preset"}
+              className={w === pw && h === ph && dpi === pdpi ? "preset active" : "preset"}
               onClick={() => {
                 setW(pw);
                 setH(ph);
+                setDpi(pdpi);
               }}
             >
               {name}
@@ -4151,6 +4216,20 @@ function NewDocDialog({
         </div>
         {size("Width", w, setW)}
         {size("Height", h, setH)}
+        <label className="row">
+          Resolution
+          <input
+            type="number"
+            min={1}
+            max={2400}
+            value={dpi}
+            onChange={(e) => setDpi(Math.max(1, Math.min(2400, Math.round(Number(e.target.value)))))}
+            aria-label="Resolution"
+          />
+          <span className="hint">
+            dpi · {inUnits(w, "mm", dpi)} × {inUnits(h, "mm", dpi)} mm
+          </span>
+        </label>
         <label className="row">
           Colour
           <select
@@ -4168,7 +4247,7 @@ function NewDocDialog({
           </button>
           <button
             className="mask-button primary"
-            onClick={() => onCreate(w, h, mode === "cmyk")}
+            onClick={() => onCreate(w, h, mode === "cmyk", dpi)}
           >
             Create
           </button>

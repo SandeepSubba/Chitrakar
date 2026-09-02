@@ -62,7 +62,10 @@ without reading anything else.*
   multi-selection moves as one — by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels.
-  Rulers run along the canvas edges; dragging out of one places a guide
+  Documents carry a resolution (presets and the New dialog set it, with
+  the page's size on paper shown), and View › Pixels/Millimetres/Inches
+  reads the rulers, the geometry fields and the status line in that
+  unit through it. Rulers run along the canvas edges; dragging out of one places a guide
   that layers snap to and that saves with the document, and dropping it
   back throws it away.
   Zooming in re-renders rather than magnifies: the engine composites a
@@ -123,9 +126,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~174),
+- **Verify before committing:** `cargo test --workspace` (~175),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~336 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~343 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

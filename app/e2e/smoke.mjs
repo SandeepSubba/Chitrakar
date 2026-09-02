@@ -79,11 +79,12 @@ const menuItem = async (menu, item) => {
   return page.locator(".menu-item", { hasText: item });
 };
 /** Create a document through the New-document dialog. */
-const newDocument = async (w, h, mode) => {
+const newDocument = async (w, h, mode, dpi) => {
   await menuClick("File", "New document…");
   await page.locator('input[aria-label="Width"]').fill(String(w));
   await page.locator('input[aria-label="Height"]').fill(String(h));
   await page.selectOption('[aria-label="Colour mode"]', mode);
+  if (dpi) await page.locator('input[aria-label="Resolution"]').fill(String(dpi));
   await page.click("text=Create");
   await page.waitForTimeout(400);
 };
@@ -2434,6 +2435,32 @@ assert(
   assert((await pngSize(twoX)).join("x") === "1200x800", "2x export is twice the page");
   await page.click('button[aria-label="Move"]');
   await page.locator(".panel ul li").first().click();
+  // Units: the geometry fields and rulers can read in millimetres or
+  // inches through the document's resolution (72 dpi here), and a value
+  // typed in those units lands in pixels.
+  await page.waitForTimeout(200);
+  await menuClick("View", "Millimetres");
+  await page.waitForTimeout(200);
+  const wMm = Number(await page.locator('input[aria-label="W size"]').inputValue());
+  assert(Math.abs(wMm - 70.56) < 0.05, `200px at 72dpi reads as 70.56 mm (${wMm})`);
+  assert(
+    (await page.locator(".topbar").innerText()).includes("mm"),
+    "the status line says the page's size on paper",
+  );
+  const rulerLabels = await page.locator(".ruler-top text").allTextContents();
+  assert(
+    rulerLabels.every((l) => Number(l) <= 300),
+    `ruler ticks are millimetres now (${rulerLabels.slice(0, 5)})`,
+  );
+  await page.locator('input[aria-label="W size"]').fill("35.28");
+  await page.locator('input[aria-label="W size"]').press("Enter");
+  await page.waitForTimeout(250);
+  await menuClick("View", "Pixels");
+  await page.waitForTimeout(200);
+  const wPx = Number(await page.locator('input[aria-label="W size"]').inputValue());
+  assert(Math.abs(wPx - 100) < 0.6, `35.28 mm typed is 100 px (${wPx})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
   await page.waitForTimeout(200);
   const [sel] = await Promise.all([
     page.waitForEvent("download"),
@@ -2716,6 +2743,30 @@ assert(
   "PDF carries live paths in ink, with the profile as its output intent",
 );
 }
+
+// 9e2. A document's resolution sizes its page in print: at 300 dpi the
+// 600×400 page is two inches by one and a third — 144 by 96 points.
+{
+  await newDocument(600, 400, "rgb", 300);
+  assert((await page.locator(".topbar").innerText()).includes("300 dpi"), "the status line carries the dpi");
+  await page.click('button[aria-label="Rect"]');
+  const b = await page.locator("#engine-page").boundingBox();
+  await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * 0.2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width * 0.6, b.y + b.height * 0.6, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const [dl] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export PDF")).click(),
+  ]);
+  const text = (await readFile(await dl.path())).toString("latin1");
+  assert(
+    text.includes("/MediaBox [0 0 144.000 96.000]") && text.includes(" re\n"),
+    "the PDF page is sized by the resolution, with the rect live on it",
+  );
+}
+
 
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
