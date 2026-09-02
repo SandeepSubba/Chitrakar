@@ -543,6 +543,17 @@ export function App() {
     });
   }, []);
 
+  /** Set the zoom outright, keeping the viewport's centre where it is. */
+  const zoomTo = useCallback((zoom: number) => {
+    const host = hostRef.current;
+    if (!host) return;
+    setView((v) => {
+      const k = Math.min(8, Math.max(0.05, zoom)) / v.zoom;
+      const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      return { zoom: v.zoom * k, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+    });
+  }, []);
+
   const newDocument = useCallback(
     (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT) => {
       const s = new WasmSession(width, height, useCmyk);
@@ -594,6 +605,19 @@ export function App() {
   const redo = useCallback(() => {
     if (session?.redo()) refresh(session);
   }, [session, refresh]);
+
+  /** Pick every top-level layer. */
+  const selectAll = useCallback(() => {
+    const top = layers.filter((l) => l.depth === 0).map((l) => l.id as NodeId);
+    if (top.length === 0) return;
+    setSelected(top[0]);
+    setMultiSel(top);
+  }, [layers]);
+
+  const deselect = useCallback(() => {
+    setSelected(null);
+    setMultiSel([]);
+  }, []);
 
   const cancelGesture = useCallback(() => {
     if (!session) return;
@@ -670,7 +694,16 @@ export function App() {
         if (e.shiftKey) redo();
         else undo();
       }
-      if (e.key === "Escape") cancelGesture();
+      // Escape cancels whatever is in flight; with nothing in flight it
+      // drops the selection, which is what every editor does with it.
+      if (e.key === "Escape") {
+        cancelGesture();
+        deselect();
+      }
+      if (!typing && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        selectAll();
+      }
       if (e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
         finishPath(false); // pen tool: finish as an open (stroked) path
       }
@@ -688,7 +721,7 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo, cancelGesture, finishPath]);
+  }, [undo, redo, cancelGesture, finishPath, selectAll, deselect]);
 
   // Keep the viewport measurement in step with the element it describes.
   useEffect(() => {
@@ -1517,6 +1550,33 @@ export function App() {
     ["exclude", "exclude", "Keep everything but the overlap"],
   ];
 
+  /** Copy the picked layer and take it out, as the shortcut does. */
+  const cutSelected = () => {
+    copySelected();
+    deleteSelected();
+  };
+
+  /** Frame the picked layers, or the whole page when nothing is picked. */
+  const zoomToSelection = () => {
+    const host = hostRef.current;
+    if (!host) return;
+    const box = selectionSet.length > 0 ? unionBounds(selectionSet) : null;
+    if (!box) {
+      fitView();
+      return;
+    }
+    const [w, h] = [Math.max(1, box[2] - box[0]), Math.max(1, box[3] - box[1])];
+    const zoom = Math.min(
+      8,
+      Math.max(0.05, Math.min(host.clientWidth / w, host.clientHeight / h) * 0.8),
+    );
+    setView({
+      zoom,
+      x: host.clientWidth / 2 - (box[0] + w / 2) * zoom,
+      y: host.clientHeight / 2 - (box[1] + h / 2) * zoom,
+    });
+  };
+
   const ALIGN_BUTTONS: [string, IconName, string][] = [
     ["left", "alignLeft", "Align left edges"],
     ["center-h", "alignCenterH", "Align horizontal centres"],
@@ -2316,6 +2376,27 @@ export function App() {
             <MenuItem icon="redo" onClick={redo} hint="Ctrl+Shift+Z">
               Redo
             </MenuItem>
+            <MenuItem icon="cut" onClick={cutSelected} hint="Ctrl+X">
+              Cut
+            </MenuItem>
+            <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
+              Copy
+            </MenuItem>
+            <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
+              Paste
+            </MenuItem>
+            <MenuItem icon="duplicate" onClick={duplicateSelected} hint="Ctrl+D">
+              Duplicate
+            </MenuItem>
+            <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
+              Delete
+            </MenuItem>
+            <MenuItem icon="selectAll" onClick={selectAll} hint="Ctrl+A">
+              Select all
+            </MenuItem>
+            <MenuItem icon="check" onClick={deselect} hint="Esc">
+              Deselect
+            </MenuItem>
           </MenuButton>
 
           <MenuButton
@@ -2333,6 +2414,12 @@ export function App() {
             </MenuItem>
             <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)}>
               Zoom out
+            </MenuItem>
+            <MenuItem icon="actualSize" onClick={() => zoomTo(1)}>
+              Actual size
+            </MenuItem>
+            <MenuItem icon="selectAll" onClick={zoomToSelection}>
+              Zoom to selection
             </MenuItem>
             <MenuItem
               icon={showGuides ? "check" : "fit"}

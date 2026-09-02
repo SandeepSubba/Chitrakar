@@ -31,6 +31,11 @@ export type IconName =
   | "duplicate"
   | "shadow"
   | "crop"
+  | "copy"
+  | "cut"
+  | "paste"
+  | "selectAll"
+  | "actualSize"
   | "union"
   | "subtract"
   | "intersect"
@@ -326,6 +331,41 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="8" y="8" width="12" height="12" rx="1.5" fill="currentColor" stroke="none" opacity="0.45" />
       <rect x="4" y="4" width="12" height="12" rx="1.5" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect x="9" y="9" width="11" height="11" rx="1.5" />
+      <path d="M15.5 5.5h-10a1 1 0 0 0-1 1v10" />
+    </>
+  ),
+  cut: (
+    <>
+      <circle cx="6.5" cy="17.5" r="2.5" />
+      <circle cx="17.5" cy="17.5" r="2.5" />
+      <path d="M8.3 15.7L18 4M15.7 15.7L6 4" />
+    </>
+  ),
+  paste: (
+    <>
+      <path d="M9 4.5H6.5a1.5 1.5 0 0 0-1.5 1.5v13A1.5 1.5 0 0 0 6.5 20.5h11a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H15" />
+      <rect x="9" y="3" width="6" height="3.5" rx="1" />
+    </>
+  ),
+  selectAll: (
+    <>
+      <path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8" />
+      <path d="M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8" />
+      <path d="M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16" />
+      <path d="M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" />
+      <path d="M11 4h2M11 20h2M4 11v2M20 11v2" />
+    </>
+  ),
+  actualSize: (
+    <>
+      <rect x="4" y="6" width="16" height="12" rx="1.5" />
+      <path d="M8.5 14.5v-5l-1.5 1" />
+      <path d="M12.5 14.5h3M12.5 14.5v-2h3v-3h-3" />
     </>
   ),
   duplicate: (

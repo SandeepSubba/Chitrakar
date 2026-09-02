@@ -1593,6 +1593,80 @@ assert(
   );
 }
 
+// 8x2a. The Edit and View menus carry what the shortcuts do, so it can
+// be found without knowing it; select-all and zoom-to-selection work.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  for (const [x0, y0, x1, y1] of [
+    [60, 60, 160, 160],
+    [400, 250, 500, 350],
+  ]) {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  }
+  await page.click('button[aria-label="Move"]');
+  await page.waitForTimeout(150);
+  for (const item of ["Cut", "Copy", "Paste", "Duplicate", "Delete", "Select all"]) {
+    const found = await menuItem("Edit", item);
+    assert((await found.count()) >= 1, `the Edit menu offers ${item}`);
+    await page.keyboard.press("Escape");
+  }
+  await menuClick("Edit", "Select all");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
+    "select all picked both layers",
+  );
+  assert(
+    (await page.locator('button[aria-label="Unite shapes"]').count()) === 1,
+    "and a two-layer selection offers what two-layer selections offer",
+  );
+  // The shortcut does the same thing the menu item does.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
+    "escape dropped it again",
+  );
+  await page.keyboard.press("Control+a");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
+    "ctrl+a picked both layers",
+  );
+  // Zoom to selection frames both, so the page no longer fits the window.
+  const fitted = await page.locator("#engine-page").boundingBox();
+  await menuClick("View", "Zoom to selection");
+  await page.waitForTimeout(300);
+  const framed = await page.locator("#engine-page").boundingBox();
+  assert(
+    framed.width > fitted.width * 1.1,
+    `zoom to selection framed the picked layers (${fitted.width} -> ${framed.width})`,
+  );
+  await menuClick("View", "Actual size");
+  await page.waitForTimeout(300);
+  assert(
+    await page.isVisible("text=· 100%"),
+    "actual size reports one hundred per cent",
+  );
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 0,
+    "escape let the selection go",
+  );
+  await menuClick("View", "Fit document to window");
+  await page.waitForTimeout(200);
+}
+
 // 8x2b. Rulers and guides: drag one out of a ruler, snap to it, put it
 // back. Guides are document state, so they undo.
 {

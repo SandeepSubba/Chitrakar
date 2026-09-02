@@ -103,7 +103,10 @@ without reading anything else.*
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: text shaping via rustybuzz/parley.
-- **Chrome:** document actions live in a File/Edit/View menu bar; the tool
+- **Chrome:** document actions live in a File/Edit/View menu bar — Edit
+  carries cut/copy/paste/duplicate/delete and select-all beside undo, View
+  carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
+  none of it depends on knowing the shortcut; the tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is
   reserved for state — active tool, open menu, live toggle, selected layer.
