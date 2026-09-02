@@ -182,6 +182,52 @@ assert(
   `and a row is now flat (${rowL} vs ${rowR})`,
 );
 
+// Multi-stop: adding one changes nothing until it is moved, then it
+// recolours the middle of the ramp while both ends stay put.
+const midBefore = await canvasPixel(250, 200);
+await page.click("text=Add stop");
+await page.waitForTimeout(200);
+assert(
+  (await page.locator('input[aria-label^="Gradient stop"][type="color"]').count()) === 3,
+  "a third stop appeared",
+);
+const midNow = await canvasPixel(250, 200);
+assert(
+  midNow.every((v, i) => Math.abs(v - midBefore[i]) <= 1),
+  `adding a stop leaves the ramp as it was (${midBefore} -> ${midNow})`,
+);
+await page.locator('input[aria-label="Gradient stop 2"]').evaluate((el) => {
+  const set = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    "value",
+  ).set;
+  set.call(el, "#00ff00");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+});
+await page.waitForTimeout(250);
+const midAfter = await canvasPixel(250, 200);
+assert(
+  midAfter[1] > midAfter[0] && midAfter[1] > midAfter[2],
+  `the middle stop recoloured the middle of the ramp (${midAfter})`,
+);
+// The ramp runs top-to-bottom here, so the untouched end is the top edge.
+const endStill = await canvasPixel(250, 115);
+assert(
+  endStill[2] > endStill[1],
+  `while the first stop stayed where it was (${endStill})`,
+);
+await page.click('button[aria-label="Remove gradient stop 2"]');
+await page.waitForTimeout(250);
+assert(
+  (await page.locator('input[aria-label^="Gradient stop"][type="color"]').count()) === 2,
+  "and removing it puts the ramp back to two stops",
+);
+assert(
+  await page.isDisabled('button[aria-label="Remove gradient stop 1"]'),
+  "the last two stops cannot be removed",
+);
+
 // Radial: first stop at the centre, last at the rim.
 await page.selectOption('[aria-label="Fill type"]', "radial");
 await page.waitForTimeout(200);
@@ -202,9 +248,9 @@ assert(
   JSON.stringify(flatA) === JSON.stringify(flatB),
   `solid fill is uniform again (${flatA} vs ${flatB})`,
 );
-// Undo the four fill-type changes so history is where the rest expects it.
-for (let i = 0; i < 4; i++) await page.keyboard.press("Control+z");
-await page.waitForTimeout(200);
+// No undo here: switching back to Solid already restored the fill the rest
+// of the suite draws on, and a fixed undo count would drift every time this
+// step grows.
 
 // 3. Draw an ellipse overlapping it.
 await page.click('button[aria-label="Ellipse"]');

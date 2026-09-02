@@ -381,6 +381,58 @@ body {
   background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
+.ramp-preview {
+  height: 0.85rem;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+}
+
+.stop-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.stop-row input[type="color"] {
+  width: 1.9rem;
+  height: 1.5rem;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.stop-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.stop-remove {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.stop-remove:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.stop-remove:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 .add-adjustment {
   background: none;
   color: var(--muted);

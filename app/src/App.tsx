@@ -23,6 +23,50 @@ import {
   sendPreview,
 } from "./engine";
 
+/** The colour a ramp shows partway between two stops.
+ *
+ * The engine blends stops in linear light like every other blend, so this
+ * has to as well: interpolating the encoded sRGB values instead lands a
+ * visibly different colour at the midpoint, and inserting a stop there
+ * would bend a ramp that should have been left alone. CMYK stops resolve
+ * through the press profile in the engine, which the UI cannot reproduce
+ * without it, so those interpolate by ink — close enough to place a stop,
+ * and it is the same ink the flat-fill editor authors. */
+function mixAuthored(
+  a: AuthoredColor,
+  b: AuthoredColor,
+  t: number,
+): AuthoredColor {
+  const at = (x: number, y: number) => x + (y - x) * t;
+  if ("Srgb" in a && "Srgb" in b) {
+    const lin = (v: number) =>
+      v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    const enc = (v: number) =>
+      v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
+    const mix = (x: number, y: number) => enc(at(lin(x), lin(y)));
+    return {
+      Srgb: {
+        r: mix(a.Srgb.r, b.Srgb.r),
+        g: mix(a.Srgb.g, b.Srgb.g),
+        b: mix(a.Srgb.b, b.Srgb.b),
+        a: at(a.Srgb.a, b.Srgb.a),
+      },
+    };
+  }
+  if ("Cmyk" in a && "Cmyk" in b) {
+    return {
+      Cmyk: {
+        c: at(a.Cmyk.c, b.Cmyk.c),
+        m: at(a.Cmyk.m, b.Cmyk.m),
+        y: at(a.Cmyk.y, b.Cmyk.y),
+        k: at(a.Cmyk.k, b.Cmyk.k),
+        a: at(a.Cmyk.a, b.Cmyk.a),
+      },
+    };
+  }
+  return a;
+}
+
 /** A path's handles, padded to one per anchor so callers can index freely.
  * Stored empty when nothing is curved, which is what keeps older files (and
  * plain polylines) free of the field entirely. */
@@ -1837,14 +1881,46 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
         gradient: { Radial: { center: [0.5, 0.5], radius: 0.5, stops } },
       });
     };
-    const setStop = (i: number, color: AuthoredColor): NodeKind => {
-      const stops = gradStops.map((s, j) => (j === i ? { ...s, color } : s));
+    /** Put a new stop list back into whichever gradient kind is set. */
+    const withStops = (stops: GradientStop[]): NodeKind => {
       if (grad && "Linear" in grad)
         return patch({ gradient: { Linear: { ...grad.Linear, stops } } });
       if (grad && "Radial" in grad)
         return patch({ gradient: { Radial: { ...grad.Radial, stops } } });
       return patch({});
     };
+    const setStop = (i: number, changes: Partial<GradientStop>): NodeKind =>
+      withStops(gradStops.map((s, j) => (j === i ? { ...s, ...changes } : s)));
+    /** Insert a stop in the widest gap, coloured by what the ramp already
+     * shows there, so adding one changes nothing until it is moved. */
+    const addStop = (): NodeKind => {
+      let at = 0;
+      for (let i = 1; i < gradStops.length; i++) {
+        if (
+          gradStops[i].offset - gradStops[i - 1].offset >
+          gradStops[at + 1].offset - gradStops[at].offset
+        )
+          at = i - 1;
+      }
+      const [a, b] = [gradStops[at], gradStops[at + 1]];
+      const stop: GradientStop = {
+        offset: (a.offset + b.offset) / 2,
+        color: mixAuthored(a.color, b.color, 0.5),
+      };
+      return withStops([
+        ...gradStops.slice(0, at + 1),
+        stop,
+        ...gradStops.slice(at + 1),
+      ]);
+    };
+    const removeStop = (i: number): NodeKind =>
+      withStops(gradStops.filter((_, j) => j !== i));
+    // A preview of the ramp itself, so the stop list is readable as a whole.
+    // sRGB interpolation here against the engine's linear-light blend: this
+    // is a locator strip, not a proof of the render.
+    const rampCss = `linear-gradient(90deg, ${gradStops
+      .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
+      .join(", ")})`;
 
     return (
       <>
@@ -1862,20 +1938,57 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
         </label>
         {grad && (
           <>
+            <div
+              className="ramp-preview"
+              style={{ background: rampCss }}
+              aria-hidden="true"
+            />
             {gradStops.map((stop, i) => (
-              <label className="row" key={i}>
-                {i === 0 ? "From" : i === gradStops.length - 1 ? "To" : `Stop ${i}`}
+              <div className="stop-row" key={i}>
                 <input
                   type="color"
                   value={colorToHex(stop.color)}
                   onChange={(e) =>
-                    onEdit(setStop(i, authored(e.target.value)), true)
+                    onEdit(setStop(i, { color: authored(e.target.value) }), true)
                   }
                   onBlur={onGestureEnd}
                   aria-label={`Gradient stop ${i + 1}`}
                 />
-              </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={stop.offset}
+                  onChange={(e) =>
+                    onEdit(setStop(i, { offset: Number(e.target.value) }), true)
+                  }
+                  onPointerUp={onGestureEnd}
+                  onKeyUp={onGestureEnd}
+                  onBlur={onGestureEnd}
+                  aria-label={`Gradient stop ${i + 1} position`}
+                />
+                <button
+                  className="stop-remove"
+                  disabled={gradStops.length <= 2}
+                  onClick={() => onEdit(removeStop(i), false)}
+                  title={
+                    gradStops.length <= 2
+                      ? "A gradient needs at least two stops"
+                      : `Remove stop ${i + 1}`
+                  }
+                  aria-label={`Remove gradient stop ${i + 1}`}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
             ))}
+            <button
+              className="mask-button"
+              onClick={() => onEdit(addStop(), false)}
+            >
+              Add stop
+            </button>
             {"Linear" in grad
               ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
                   patch({
