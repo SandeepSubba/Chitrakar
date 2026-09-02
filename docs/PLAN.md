@@ -46,6 +46,19 @@ without reading anything else.*
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
+- **Renderer performance:** the transform inverse is solved once per shape
+  (`Inverse`), not per coverage sample — a boundary pixel asks for up to
+  twenty-one. Groups only paint where their contents can land, and a group
+  that nothing inside reads the backdrop through (opacity 1, Normal, no
+  mask, no blended/adjustment/filter descendant) skips its isolation
+  surface entirely. Together those took a full A4/300dpi render from
+  ~370 ms to ~240 ms, and one plain folder in an A4 document from ~250 ms
+  of overhead to none. What remains at that size is mostly memory
+  bandwidth: the surface is 16 bytes a pixel (139 MB at A4), and each
+  full-canvas pass over it costs ~55 ms. `cargo test --release -p
+  chitrakar-render -- --ignored --nocapture --test-threads=1` runs the
+  timing probes; the next win there is avoiding the whole-canvas
+  allocation an isolated group still makes.
 - **Verify before committing:** `cargo test --workspace` (~103),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~174 browser

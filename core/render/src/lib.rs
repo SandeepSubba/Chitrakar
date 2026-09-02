@@ -252,6 +252,26 @@ pub fn ancestor_space(doc: &Document, id: NodeId) -> Transform {
         .fold(Transform::default(), |acc, t| acc.compose(*t))
 }
 
+/// Whether anything inside a group can see the pixels underneath it, which
+/// is what forces the group onto a surface of its own. Blend modes other
+/// than Normal read the backdrop, and so do adjustment and filter layers;
+/// a nested group that isolates itself does not, because it hands back a
+/// composite either way.
+fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
+    for &child in doc.children_of(group)? {
+        let node = doc.node(child)?;
+        if node.blend != BlendMode::Normal {
+            return Ok(true);
+        }
+        match &node.kind {
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) => return Ok(true),
+            NodeKind::Group if reads_backdrop(doc, child)? => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 /// Doc-space bounds of a node, ancestors included.
 pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     let local = bounds_in_parent_space(doc, id)?;
@@ -367,7 +387,10 @@ pub fn filter_reach(doc: &Document) -> u32 {
 pub fn render(doc: &Document) -> Result<Surface, DocError> {
     let mut surface = Surface::new(doc.meta.width, doc.meta.height);
     let clip = surface.full_clip();
-    render_region(doc, &mut surface, clip)?;
+    // A fresh surface is already transparent, so paint straight into it
+    // rather than going through render_region, whose first act would be to
+    // clear the region again — a whole-canvas write of zeroes over zeroes.
+    render_group(doc, doc.root(), &mut surface, clip, Transform::default())?;
     Ok(surface)
 }
 
@@ -406,20 +429,49 @@ fn render_group(
         // transform is composed onto whatever its ancestors contribute; a
         // mask is authored in that same parent space.
         let t = parent.compose(node.transform);
-        let mask = MaskRef {
-            mask: node.mask.as_ref(),
-            parent,
-        };
+        let mask = MaskRef::new(node.mask.as_ref(), parent);
         match &node.kind {
             NodeKind::Group => {
                 // Isolate the group on its own surface so group opacity,
                 // blend, and mask apply to the composite, not per child.
-                let mut sub = Surface::new(dst.width, dst.height);
-                render_group(doc, child, &mut sub, clip, t)?;
-                if let Some(m) = mask.mask {
-                    apply_mask(doc, m, &mut sub, clip, parent);
+                //
+                // Bound every pass that follows by where the group can
+                // actually land. Outside those bounds its surface stays
+                // transparent, and compositing a transparent source leaves
+                // the destination alone under every blend mode — so the
+                // work was always discarded, but at A4 a group holding one
+                // small shape still paid two whole-canvas passes for it.
+                let extent = match bounds_in_parent_space(doc, child)? {
+                    Bounds::Rect(x0, y0, x1, y1) => {
+                        transformed_local_bounds(parent, (x0, y0, x1, y1))
+                    }
+                    other => other,
+                };
+                let sub_clip = match extent.to_clip(dst.width, dst.height) {
+                    Some(b) => b.intersect(clip),
+                    None => continue,
+                };
+                if sub_clip.is_empty() {
+                    continue;
                 }
-                composite(dst, &sub, node.opacity, node.blend, clip);
+                // A group that composites like its children individually
+                // would needs no surface of its own: source-over is
+                // associative, so painting straight into the destination
+                // gives the same pixels for a fraction of the cost.
+                if node.opacity >= 1.0
+                    && node.blend == BlendMode::Normal
+                    && mask.mask.is_none()
+                    && !reads_backdrop(doc, child)?
+                {
+                    render_group(doc, child, dst, sub_clip, t)?;
+                    continue;
+                }
+                let mut sub = Surface::new(dst.width, dst.height);
+                render_group(doc, child, &mut sub, sub_clip, t)?;
+                if let Some(m) = mask.mask {
+                    apply_mask(doc, m, &mut sub, sub_clip, parent);
+                }
+                composite(dst, &sub, node.opacity, node.blend, sub_clip);
             }
             NodeKind::Vector {
                 shape,
@@ -566,15 +618,52 @@ fn to_device(t: Transform, x: f32, y: f32) -> (f32, f32) {
     (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f)
 }
 
-/// The inverse map, or `None` when the transform collapses space (a zero
-/// determinant), which would make every device pixel map nowhere.
-fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
-    let det = t.a * t.d - t.b * t.c;
-    if det.abs() < 1e-9 {
-        return None;
+/// A transform's inverse, solved once and then applied as a plain multiply.
+///
+/// Coverage sampling asks for the local coordinate of up to twenty-one
+/// points per boundary pixel; re-deriving the determinant and dividing by
+/// it at each one made the inverse the hot spot of the whole renderer.
+/// Inverting per shape instead leaves two multiply-adds per sample.
+#[derive(Clone, Copy)]
+struct Inverse {
+    a: f32,
+    b: f32,
+    c: f32,
+    d: f32,
+    e: f32,
+    f: f32,
+}
+
+impl Inverse {
+    /// `None` when the transform collapses space (a zero determinant),
+    /// which would make every device pixel map nowhere.
+    fn of(t: Transform) -> Option<Inverse> {
+        let det = t.a * t.d - t.b * t.c;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        Some(Inverse {
+            a: t.d / det,
+            b: -t.b / det,
+            c: -t.c / det,
+            d: t.a / det,
+            e: t.e,
+            f: t.f,
+        })
     }
-    let (dx, dy) = (x - t.e, y - t.f);
-    Some(((t.d * dx - t.c * dy) / det, (t.a * dy - t.b * dx) / det))
+
+    /// Map a device point into the local space the transform came from.
+    #[inline]
+    fn at(&self, x: f32, y: f32) -> (f32, f32) {
+        let (dx, dy) = (x - self.e, y - self.f);
+        (self.a * dx + self.c * dy, self.b * dx + self.d * dy)
+    }
+}
+
+/// The inverse map for a one-off point. Per-pixel callers invert once with
+/// [`Inverse::of`] and call [`Inverse::at`] instead.
+fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
+    Inverse::of(t).map(|inv| inv.at(x, y))
 }
 
 /// How much the transform can stretch a length, used to pad bounds for
@@ -948,10 +1037,7 @@ fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
 /// the area the pixel square and the mapped rect share. Transforms carry
 /// scale and translation only, so the mapped rect stays axis-aligned and the
 /// answer is a product of two 1-D overlaps.
-fn rect_coverage(width: f32, height: f32, t: Transform, px: u32, py: u32) -> f32 {
-    if to_local(t, 0.0, 0.0).is_none() {
-        return 0.0;
-    }
+fn rect_coverage(width: f32, height: f32, t: Transform, inv: Inverse, px: u32, py: u32) -> f32 {
     // Rotated or sheared, the mapped rect is no longer axis-aligned and the
     // area is no longer a product of two 1-D overlaps, so fall back to
     // sampling the pixel.
@@ -960,14 +1046,11 @@ fn rect_coverage(width: f32, height: f32, t: Transform, px: u32, py: u32) -> f32
         let hits = (0..N * N)
             .filter(|k| {
                 let (i, j) = (k % N, k / N);
-                match to_local(
-                    t,
+                let (x, y) = inv.at(
                     px as f32 + (i as f32 + 0.5) / N as f32,
                     py as f32 + (j as f32 + 0.5) / N as f32,
-                ) {
-                    Some((x, y)) => x >= 0.0 && y >= 0.0 && x < width && y < height,
-                    None => false,
-                }
+                );
+                x >= 0.0 && y >= 0.0 && x < width && y < height
             })
             .count();
         return hits as f32 / (N * N) as f32;
@@ -994,25 +1077,23 @@ fn pixel_coverage(
     stroke_width: Option<f32>,
     stroke_widths: &[f32],
     t: Transform,
+    inv: Inverse,
     px: u32,
     py: u32,
 ) -> f32 {
     const N: u32 = 4;
-    if to_local(t, 0.0, 0.0).is_none() {
-        return 0.0;
-    }
     // An axis-aligned rect fill has an exact answer, so take it. Rect fills
     // cover the largest areas, and this is both cheaper than sampling and
     // not an approximation of it.
     if let (VectorShape::Rect { width, height }, None) = (shape, stroke_width) {
-        return rect_coverage(*width, *height, t, px, py);
+        return rect_coverage(*width, *height, t, inv, px, py);
     }
-    let covers = |sx: f32, sy: f32| match to_local(t, sx, sy) {
-        Some((x, y)) => match stroke_width {
+    let covers = |sx: f32, sy: f32| {
+        let (x, y) = inv.at(sx, sy);
+        match stroke_width {
             None => shape_covers(shape, x, y),
             Some(sw) => stroke_covers(shape, sw, stroke_widths, x, y),
-        },
-        None => false,
+        }
     };
     let (fx, fy) = (px as f32, py as f32);
     let inside = covers(fx + 0.5, fy + 0.5);
@@ -1052,13 +1133,14 @@ fn fill_path_scanlines(
     doc: &Document,
     points: &[[f32; 2]],
     t: Transform,
+    inv: Inverse,
     paint: &Paint,
     mode: BlendMode,
     bbox: ClipRect,
     mask: MaskRef<'_>,
 ) {
     const N: u32 = 4;
-    if points.len() < 3 || bbox.is_empty() || to_local(t, 0.0, 0.0).is_none() {
+    if points.len() < 3 || bbox.is_empty() {
         return;
     }
     // Map the polygon into device space once, then scan there. Doing it the
@@ -1105,7 +1187,7 @@ fn fill_path_scanlines(
             if c <= 0.0 {
                 continue;
             }
-            let (lx, ly) = to_local(t, px as f32 + 0.5, py as f32 + 0.5).unwrap_or((0.0, 0.0));
+            let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
         }
@@ -1158,18 +1240,19 @@ fn paint_shape(
         .intersect(clip);
     }
     // A degenerate transform maps nothing; bail before walking the bbox.
-    if to_local(t, 0.0, 0.0).is_none() {
+    // Inverting once here is what keeps the loops below free of it.
+    let Some(inv) = Inverse::of(t) else {
         return;
-    }
+    };
     // Path fills go through the scanline rasterizer; strokes stay on the
     // sampler, whose distance test has no scanline form.
     if let (VectorShape::Path { points, .. }, None) = (shape, stroke_width) {
-        fill_path_scanlines(dst, doc, points, t, paint, mode, bbox, mask);
+        fill_path_scanlines(dst, doc, points, t, inv, paint, mode, bbox, mask);
         return;
     }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let a = pixel_coverage(shape, stroke_width, stroke_widths, t, px, py);
+            let a = pixel_coverage(shape, stroke_width, stroke_widths, t, inv, px, py);
             if a <= 0.0 {
                 continue;
             }
@@ -1177,7 +1260,7 @@ fn paint_shape(
             if c <= 0.0 {
                 continue;
             }
-            let (lx, ly) = to_local(t, px as f32 + 0.5, py as f32 + 0.5).unwrap_or((0.0, 0.0));
+            let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
         }
@@ -1205,6 +1288,9 @@ fn draw_raster(
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
     }
     let bbox = draw_bbox(t, res.width as f32, res.height as f32, dst, clip);
+    let Some(inv) = Inverse::of(t) else {
+        return;
+    };
     // One texel, premultiplied so interpolation never mixes colour across a
     // transparent neighbour.
     let texel = |x: u32, y: u32| -> LinearRgba {
@@ -1222,7 +1308,7 @@ fn draw_raster(
         for px in bbox.x0..bbox.x1 {
             // The image is a rect in local space, so its outline gets the
             // same exact coverage a rect fill does.
-            let edge = rect_coverage(res.width as f32, res.height as f32, t, px, py);
+            let edge = rect_coverage(res.width as f32, res.height as f32, t, inv, px, py);
             if edge <= 0.0 {
                 continue;
             }
@@ -1230,9 +1316,7 @@ fn draw_raster(
             if cov <= 0.0 {
                 continue;
             }
-            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
-                return;
-            };
+            let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             // Texel centres sit at (i + 0.5), so the sample lands between
             // the four texels around (lx - 0.5, ly - 0.5).
             let (u, v) = (lx - 0.5, ly - 0.5);
@@ -1259,42 +1343,60 @@ fn draw_raster(
 #[derive(Clone, Copy)]
 struct MaskRef<'a> {
     mask: Option<&'a Mask>,
-    parent: Transform,
+    /// The mask's own transform already composed into device space, with
+    /// its inverse solved. Both were being recomputed at every pixel of
+    /// every masked layer; neither varies across the region.
+    t: Transform,
+    inv: Option<Inverse>,
+}
+
+impl<'a> MaskRef<'a> {
+    /// `parent` is the space the mask is authored in — its owner's parent,
+    /// since a mask describes the document as the layer sees it.
+    fn new(mask: Option<&'a Mask>, parent: Transform) -> MaskRef<'a> {
+        let t = match mask.map(|m| &m.kind) {
+            Some(MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. }) => {
+                parent.compose(*transform)
+            }
+            None => parent,
+        };
+        MaskRef {
+            mask,
+            t,
+            inv: Inverse::of(t),
+        }
+    }
 }
 
 fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
-    let (Some(mask), parent) = (m.mask, m.parent) else {
+    let Some(mask) = m.mask else {
         return 1.0;
     };
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
-        MaskKind::Vector { shape, transform } => {
-            pixel_coverage(shape, None, &[], parent.compose(*transform), x, y)
-        }
-        MaskKind::Raster {
-            resource_id,
-            transform,
-            ..
-        } => match (
-            doc.resource(resource_id),
-            to_local(parent.compose(*transform), fx, fy),
-        ) {
-            (Some(res), Some((lx, ly)))
-                if !res.rgba8.is_empty()
-                    && lx >= 0.0
-                    && ly >= 0.0
-                    && (lx as u32) < res.width
-                    && (ly as u32) < res.height =>
-            {
-                let i = ((ly as u32 * res.width + lx as u32) * 4) as usize;
-                let lum = |v: u8| chitrakar_color::srgb_to_linear(v as f32 / 255.0);
-                let luma = 0.2126 * lum(res.rgba8[i])
-                    + 0.7152 * lum(res.rgba8[i + 1])
-                    + 0.0722 * lum(res.rgba8[i + 2]);
-                luma * (res.rgba8[i + 3] as f32 / 255.0)
-            }
-            _ => 0.0,
+        MaskKind::Vector { shape, .. } => match m.inv {
+            Some(inv) => pixel_coverage(shape, None, &[], m.t, inv, x, y),
+            None => 0.0,
         },
+        MaskKind::Raster { resource_id, .. } => {
+            match (doc.resource(resource_id), m.inv.map(|inv| inv.at(fx, fy))) {
+                (Some(res), Some((lx, ly)))
+                    if !res.rgba8.is_empty()
+                        && lx >= 0.0
+                        && ly >= 0.0
+                        && (lx as u32) < res.width
+                        && (ly as u32) < res.height =>
+                {
+                    let i = ((ly as u32 * res.width + lx as u32) * 4) as usize;
+                    let lum = |v: u8| chitrakar_color::srgb_to_linear(v as f32 / 255.0);
+                    let luma = 0.2126 * lum(res.rgba8[i])
+                        + 0.7152 * lum(res.rgba8[i + 1])
+                        + 0.0722 * lum(res.rgba8[i + 2]);
+                    luma * (res.rgba8[i + 3] as f32 / 255.0)
+                }
+                _ => 0.0,
+            }
+        }
     };
     if mask.invert {
         1.0 - c
@@ -1311,17 +1413,10 @@ fn apply_mask(
     clip: ClipRect,
     parent: Transform,
 ) {
+    let m = MaskRef::new(Some(mask), parent);
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
-            let c = coverage_at(
-                doc,
-                MaskRef {
-                    mask: Some(mask),
-                    parent,
-                },
-                x,
-                y,
-            );
+            let c = coverage_at(doc, m, x, y);
             if c < 1.0 {
                 let i = (y * surface.width + x) as usize;
                 surface.pixels[i] = scale_alpha(surface.pixels[i], c);
@@ -1401,6 +1496,9 @@ fn draw_text(
     mask: MaskRef<'_>,
 ) {
     let raster = text::rasterize(spec);
+    let Some(inv) = Inverse::of(t) else {
+        return;
+    };
     let color = resolve_color(doc, spec.fill);
     let bbox =
         match transformed_local_bounds(t, (0.0, 0.0, raster.width as f32, raster.height as f32))
@@ -1411,9 +1509,7 @@ fn draw_text(
         };
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let Some((lx, ly)) = to_local(t, px as f32 + 0.5, py as f32 + 0.5) else {
-                return;
-            };
+            let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             if lx < 0.0 || ly < 0.0 {
                 continue;
             }
@@ -1626,6 +1722,67 @@ mod tests {
     /// one (a canvas-filling 480-point spline) cost 435 ms while path fills
     /// still went through the per-pixel sampler. Run with
     /// `--release --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_timing_probe() {
+        // A4 at 300dpi, the largest preset the app offers.
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("bg", 2480.0, 3508.0, RED),
+        })
+        .unwrap();
+        let mut e = Node::vector(
+            "e",
+            VectorShape::Ellipse {
+                rx: 900.0,
+                ry: 900.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut e.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(e),
+        })
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            render(&doc).unwrap();
+        }
+        println!("TIMING A4 300dpi (rect + ellipse): {:?}", t0.elapsed() / 3);
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_group_probe() {
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        let root = doc.root();
+        let g = Node::group("g");
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(g),
+        })
+        .unwrap();
+        let gid = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: gid,
+            index: 0,
+            node: filled_rect("r", 100.0, 100.0, RED),
+        })
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            render(&doc).unwrap();
+        }
+        println!("GROUP one group, tiny child: {:?}", t0.elapsed() / 3);
+    }
+
     #[test]
     #[ignore = "timing probe, not an assertion"]
     fn render_timing_probe() {
@@ -2182,6 +2339,151 @@ mod tests {
                 assert_eq!(patched.get(x, y), full.get(x, y), "pixel ({x},{y})");
             }
         }
+    }
+
+    /// Build `doc` with two overlapping half-transparent rects, either as
+    /// siblings at the root or wrapped in a group, so the two arrangements
+    /// can be compared pixel for pixel.
+    fn two_overlapping_rects(grouped: bool) -> Document {
+        const HALF_BLUE: AuthoredColor = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 0.5,
+        };
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        let parent = if grouped {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[0]
+        } else {
+            root
+        };
+        for (i, (color, dx)) in [(RED, 2.0), (HALF_BLUE, 8.0)].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent,
+                index: i,
+                node: filled_rect(&format!("r{i}"), 14.0, 14.0, color),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(dx, 4.0),
+            })
+            .unwrap();
+        }
+        doc
+    }
+
+    #[test]
+    fn a_plain_group_composites_exactly_as_its_children_would() {
+        // Wrapping shapes in a folder must not change a single pixel: the
+        // renderer skips the group's isolation surface when nothing inside
+        // reads the backdrop, and this is what says that shortcut is
+        // faithful rather than merely fast.
+        let flat = render(&two_overlapping_rects(false)).unwrap();
+        let grouped = render(&two_overlapping_rects(true)).unwrap();
+        assert_eq!(flat.pixels, grouped.pixels);
+    }
+
+    #[test]
+    fn a_group_still_isolates_a_child_that_reads_the_backdrop() {
+        // Multiply inside a group sees only the group's own contents, not
+        // the document underneath — that is what a group being an isolation
+        // group means, and it is the case the shortcut above must decline.
+        const GREY: AuthoredColor = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("backdrop", 32.0, 32.0, GREY),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("m", 16.0, 16.0, RED),
+        })
+        .unwrap();
+        let child = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::SetBlendMode {
+            id: child,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        // Isolated, the child multiplies against nothing and simply lands
+        // on top at full red. Were the group flattened away it would
+        // multiply into the grey below and come out at about a fifth of
+        // that (grey is 0.5 sRGB, ~0.214 linear).
+        let inside = s.get(8, 8);
+        assert!((inside.r - 1.0).abs() < 1e-4, "{inside:?}");
+        assert!(inside.g.abs() < 1e-4 && inside.b.abs() < 1e-4, "{inside:?}");
+        assert!((inside.a - 1.0).abs() < 1e-4, "{inside:?}");
+        assert!(s.get(24, 24).r < 0.3, "backdrop still shows beside it");
+    }
+
+    #[test]
+    fn a_group_leaves_the_canvas_outside_its_bounds_alone() {
+        // The group's passes are clipped to where it can land. A shape
+        // painted under it, far away, must survive that untouched.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("under", 8.0, 8.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("in", 8.0, 8.0, RED),
+        })
+        .unwrap();
+        // Half-opaque group, so it takes the isolation path.
+        doc.apply(Command::SetOpacity {
+            id: group,
+            opacity: 0.5,
+        })
+        .unwrap();
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: Transform::translation(40.0, 40.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(4, 4).a, 1.0, "the shape below is untouched");
+        assert!((s.get(44, 44).a - 0.5).abs() < 1e-4, "the group is halved");
+        assert_eq!(s.get(20, 20).a, 0.0, "and nothing leaked in between");
     }
 
     #[test]
