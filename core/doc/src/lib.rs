@@ -8,8 +8,8 @@
 mod node;
 
 pub use node::{
-    Adjustment, BlendMode, Filter, Mask, MaskKind, Node, NodeKind, RasterRef, Stroke, TextSpec,
-    Transform, VectorShape,
+    Adjustment, BlendMode, Filter, Gradient, GradientStop, Mask, MaskKind, Node, NodeKind,
+    RasterRef, Stroke, TextSpec, Transform, VectorShape,
 };
 
 use chitrakar_color::ColorMode;
@@ -905,6 +905,27 @@ mod tests {
         assert!(!restored.restore_resource_bytes(&id1, vec![1u8; 3]));
         assert!(restored.restore_resource_bytes(&id1, bytes.clone()));
         assert_eq!(restored.resource(&id1).unwrap().rgba8, bytes);
+    }
+
+    #[test]
+    fn a_document_written_before_gradients_still_loads() {
+        // File compatibility is additive: a Vector node serialized without
+        // the gradient field must load, not fail the whole document.
+        let json = r#"{
+            "Vector": {
+                "shape": { "Rect": { "width": 4.0, "height": 4.0 } },
+                "fill": { "Srgb": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 } },
+                "stroke": null
+            }
+        }"#;
+        let kind: NodeKind = serde_json::from_str(json).unwrap();
+        match kind {
+            NodeKind::Vector { gradient, fill, .. } => {
+                assert!(gradient.is_none(), "absent gradient defaults to none");
+                assert!(fill.is_some(), "the rest of the node still parses");
+            }
+            other => panic!("expected a vector node, got {other:?}"),
+        }
     }
 
     #[test]

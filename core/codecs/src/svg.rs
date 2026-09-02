@@ -7,7 +7,9 @@
 //! skipped in this first pass.
 
 use chitrakar_color::AuthoredColor;
-use chitrakar_doc::{BlendMode, DocError, Document, NodeId, NodeKind, Transform, VectorShape};
+use chitrakar_doc::{
+    BlendMode, DocError, Document, Gradient, NodeId, NodeKind, Transform, VectorShape,
+};
 use std::fmt::Write;
 
 /// Serialize the document's renderable tree as an SVG string.
@@ -20,7 +22,15 @@ pub fn export_svg(doc: &Document) -> Result<String, DocError> {
         h = doc.meta.height
     );
     out.push('\n');
-    write_children(doc, doc.root(), &mut out, 1)?;
+    // Gradients are referenced by url(#id), so the body is written first and
+    // the defs it asked for are spliced in ahead of it.
+    let mut body = String::new();
+    let mut defs = String::new();
+    write_children(doc, doc.root(), &mut body, 1, &mut defs)?;
+    if !defs.is_empty() {
+        let _ = write!(out, "  <defs>\n{defs}  </defs>\n");
+    }
+    out.push_str(&body);
     out.push_str("</svg>\n");
     Ok(out)
 }
@@ -30,6 +40,7 @@ fn write_children(
     group: NodeId,
     out: &mut String,
     depth: usize,
+    defs: &mut String,
 ) -> Result<(), DocError> {
     for &child in doc.children_of(group)? {
         let node = doc.node(child)?;
@@ -41,15 +52,23 @@ fn write_children(
         match &node.kind {
             NodeKind::Group => {
                 let _ = writeln!(out, "{pad}<g{common}>");
-                write_children(doc, child, out, depth + 1)?;
+                write_children(doc, child, out, depth + 1, defs)?;
                 let _ = writeln!(out, "{pad}</g>");
             }
             NodeKind::Vector {
                 shape,
                 fill,
                 stroke,
+                gradient,
             } => {
-                let paint = paint_attrs(doc, fill.as_ref(), stroke.as_ref());
+                let paint = paint_attrs(
+                    doc,
+                    fill.as_ref(),
+                    stroke.as_ref(),
+                    gradient.as_ref(),
+                    child,
+                    defs,
+                );
                 match shape {
                     VectorShape::Rect { width, height } => {
                         let _ = writeln!(
@@ -155,8 +174,29 @@ fn paint_attrs(
     doc: &Document,
     fill: Option<&AuthoredColor>,
     stroke: Option<&chitrakar_doc::Stroke>,
+    gradient: Option<&Gradient>,
+    id: NodeId,
+    defs: &mut String,
 ) -> String {
     let mut s = String::new();
+    // A gradient paints in place of the flat fill, and exports live: our
+    // stops are already in objectBoundingBox units, which is SVG's default.
+    if let Some(g) = gradient {
+        if !g.stops().is_empty() {
+            let name = format!("chitrakar-grad-{}", id.0);
+            write_gradient_def(doc, g, &name, defs);
+            let _ = write!(s, r##" fill="url(#{name})""##);
+            if let Some(stroke) = stroke {
+                let _ = write!(
+                    s,
+                    r#" stroke="{}" stroke-width="{}""#,
+                    color_hex(doc, stroke.color),
+                    stroke.width
+                );
+            }
+            return s;
+        }
+    }
     match fill {
         Some(c) => {
             let _ = write!(s, r#" fill="{}""#, color_hex(doc, *c));
@@ -176,6 +216,42 @@ fn paint_attrs(
         );
     }
     s
+}
+
+fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut String) {
+    let (open, close) = match g {
+        Gradient::Linear { from, to, .. } => (
+            format!(
+                r#"    <linearGradient id="{name}" x1="{}" y1="{}" x2="{}" y2="{}">"#,
+                from[0], from[1], to[0], to[1]
+            ),
+            "    </linearGradient>",
+        ),
+        Gradient::Radial { center, radius, .. } => (
+            format!(
+                r#"    <radialGradient id="{name}" cx="{}" cy="{}" r="{radius}">"#,
+                center[0], center[1]
+            ),
+            "    </radialGradient>",
+        ),
+    };
+    let _ = writeln!(defs, "{open}");
+    let mut stops = g.stops().to_vec();
+    stops.sort_by(|a, b| {
+        a.offset
+            .partial_cmp(&b.offset)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for stop in stops {
+        let a = color_alpha(stop.color);
+        let _ = writeln!(
+            defs,
+            r#"      <stop offset="{}" stop-color="{}" stop-opacity="{a}"/>"#,
+            stop.offset,
+            color_hex(doc, stop.color)
+        );
+    }
+    let _ = writeln!(defs, "{close}");
 }
 
 /// Resolve an authored color to an sRGB hex, using the document's press
@@ -318,6 +394,79 @@ mod tests {
         );
         assert!(svg.contains("a &lt; b"), "text XML-escaped");
         assert!(svg.contains(r#"font-size="24""#));
+    }
+
+    #[test]
+    fn gradients_export_as_live_svg_gradients() {
+        // Our stops are already in objectBoundingBox units, SVG's default,
+        // so a gradient exports as a real <linearGradient> the shape
+        // references — not baked into a flat colour or an image.
+        let mut doc = Document::new(100, 100, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::vector(
+                "g",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 50.0,
+                    height: 50.0,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 50.0,
+                    height: 50.0,
+                },
+                fill: None,
+                stroke: None,
+                gradient: Some(chitrakar_doc::Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [1.0, 1.0],
+                    stops: vec![
+                        chitrakar_doc::GradientStop {
+                            offset: 0.0,
+                            color: RED,
+                        },
+                        chitrakar_doc::GradientStop {
+                            offset: 1.0,
+                            color: AuthoredColor::Srgb {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 1.0,
+                                a: 1.0,
+                            },
+                        },
+                    ],
+                }),
+            }),
+        })
+        .unwrap();
+
+        let svg = export_svg(&doc).unwrap();
+        let name = format!("chitrakar-grad-{}", id.0);
+        assert!(svg.contains("<defs>"), "defs block written:\n{svg}");
+        assert!(
+            svg.contains(&format!(r#"<linearGradient id="{name}""#)),
+            "gradient defined:\n{svg}"
+        );
+        assert!(
+            svg.contains(&format!(r##"fill="url(#{name})""##)),
+            "shape references it:\n{svg}"
+        );
+        assert!(
+            svg.contains(r##"stop-color="#ff0000""##) && svg.contains(r##"stop-color="#0000ff""##),
+            "both stops carried:\n{svg}"
+        );
+        assert!(
+            svg.find("<defs>") < svg.find("<rect"),
+            "defs must precede the shape that references them:\n{svg}"
+        );
     }
 
     #[test]

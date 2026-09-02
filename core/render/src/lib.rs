@@ -20,8 +20,8 @@ pub mod tiles;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, Filter, Mask, MaskKind, NodeId, NodeKind, Transform,
-    VectorShape,
+    Adjustment, BlendMode, DocError, Document, Filter, Gradient, Mask, MaskKind, NodeId, NodeKind,
+    Transform, VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -340,15 +340,22 @@ fn render_group(
                 shape,
                 fill,
                 stroke,
+                gradient,
             } => {
-                if let Some(fill) = fill {
-                    let color = scale_alpha(resolve_color(doc, *fill), node.opacity);
+                // A gradient paints in place of the flat fill.
+                let fill_paint = match gradient {
+                    Some(g) => Paint::from_gradient(doc, g, &flatten_shape(shape), node.opacity),
+                    None => {
+                        fill.map(|c| Paint::Solid(scale_alpha(resolve_color(doc, c), node.opacity)))
+                    }
+                };
+                if let Some(paint) = fill_paint {
                     paint_shape(
                         dst,
                         doc,
                         shape,
                         node.transform,
-                        color,
+                        &paint,
                         node.blend,
                         clip,
                         None,
@@ -362,7 +369,7 @@ fn render_group(
                         doc,
                         shape,
                         node.transform,
-                        color,
+                        &Paint::Solid(color),
                         node.blend,
                         clip,
                         Some(stroke.width),
@@ -625,6 +632,127 @@ fn stroke_covers(shape: &VectorShape, width: f32, x: f32, y: f32) -> bool {
     }
 }
 
+/// What a shape is painted with. Gradient stops are resolved to
+/// premultiplied linear (and pre-scaled by the node's opacity) once per
+/// paint, so the per-pixel cost is a ramp lookup and a lerp.
+///
+/// Interpolation therefore happens in linear light, like every other blend
+/// in the engine: the midpoint of a black-to-white ramp is linear 0.5, which
+/// encodes to sRGB ~188, not 128.
+enum Paint {
+    Solid(LinearRgba),
+    Gradient {
+        kind: GradientGeom,
+        /// Sorted by offset.
+        stops: Vec<(f32, LinearRgba)>,
+        /// Local-space box the normalized gradient coordinates map onto.
+        box_: (f32, f32, f32, f32),
+    },
+}
+
+enum GradientGeom {
+    Linear { from: [f32; 2], to: [f32; 2] },
+    Radial { center: [f32; 2], radius: f32 },
+}
+
+impl Paint {
+    /// Resolve an authored gradient against the shape it fills. Returns
+    /// `None` when there is nothing to paint (no stops).
+    fn from_gradient(
+        doc: &Document,
+        g: &Gradient,
+        shape: &VectorShape,
+        opacity: f32,
+    ) -> Option<Paint> {
+        let mut stops: Vec<(f32, LinearRgba)> = g
+            .stops()
+            .iter()
+            .map(|s| (s.offset, scale_alpha(resolve_color(doc, s.color), opacity)))
+            .collect();
+        if stops.is_empty() {
+            return None;
+        }
+        stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let kind = match g {
+            Gradient::Linear { from, to, .. } => GradientGeom::Linear {
+                from: *from,
+                to: *to,
+            },
+            Gradient::Radial { center, radius, .. } => GradientGeom::Radial {
+                center: *center,
+                radius: *radius,
+            },
+        };
+        Some(Paint::Gradient {
+            kind,
+            stops,
+            box_: local_bounds(shape),
+        })
+    }
+
+    /// Colour at a point in the shape's local space.
+    fn at(&self, lx: f32, ly: f32) -> LinearRgba {
+        let (kind, stops, (x0, y0, x1, y1)) = match self {
+            Paint::Solid(c) => return *c,
+            Paint::Gradient { kind, stops, box_ } => (kind, stops, *box_),
+        };
+        // Normalized box coordinates, SVG's objectBoundingBox units: a
+        // radial gradient is therefore an ellipse in a non-square shape,
+        // which is what makes it follow the shape.
+        let norm = |v: f32, lo: f32, hi: f32| {
+            if (hi - lo).abs() < 1e-6 {
+                0.0
+            } else {
+                (v - lo) / (hi - lo)
+            }
+        };
+        let (u, v) = (norm(lx, x0, x1), norm(ly, y0, y1));
+        let t = match kind {
+            GradientGeom::Linear { from, to } => {
+                let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                let len2 = dx * dx + dy * dy;
+                if len2 < 1e-12 {
+                    0.0
+                } else {
+                    ((u - from[0]) * dx + (v - from[1]) * dy) / len2
+                }
+            }
+            GradientGeom::Radial { center, radius } => {
+                if *radius < 1e-6 {
+                    1.0
+                } else {
+                    ((u - center[0]).powi(2) + (v - center[1]).powi(2)).sqrt() / radius
+                }
+            }
+        }
+        .clamp(0.0, 1.0);
+        ramp(stops, t)
+    }
+}
+
+/// Colour at `t` along a sorted ramp, clamped past either end.
+fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    if t <= first.0 {
+        return first.1;
+    }
+    if t >= last.0 {
+        return last.1;
+    }
+    for w in stops.windows(2) {
+        if t <= w[1].0 {
+            let span = w[1].0 - w[0].0;
+            let k = if span.abs() < 1e-6 {
+                0.0
+            } else {
+                (t - w[0].0) / span
+            };
+            return lerp(w[0].1, w[1].1, k);
+        }
+    }
+    last.1
+}
+
 /// Exact coverage of an axis-aligned local-space rect over one device pixel:
 /// the area the pixel square and the mapped rect share. Transforms carry
 /// scale and translation only, so the mapped rect stays axis-aligned and the
@@ -712,7 +840,7 @@ fn fill_path_scanlines(
     doc: &Document,
     points: &[[f32; 2]],
     t: Transform,
-    color: LinearRgba,
+    paint: &Paint,
     mode: BlendMode,
     bbox: ClipRect,
     mask: Option<&Mask>,
@@ -761,8 +889,9 @@ fn fill_path_scanlines(
             if c <= 0.0 {
                 continue;
             }
+            let (lx, ly) = to_local(t, px as f32 + 0.5, py as f32 + 0.5).unwrap_or((0.0, 0.0));
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
+            dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
         }
     }
 }
@@ -786,7 +915,7 @@ fn paint_shape(
     doc: &Document,
     shape: &VectorShape,
     t: Transform,
-    color: LinearRgba,
+    paint: &Paint,
     mode: BlendMode,
     clip: ClipRect,
     stroke_width: Option<f32>,
@@ -818,7 +947,7 @@ fn paint_shape(
     // Path fills go through the scanline rasterizer; strokes stay on the
     // sampler, whose distance test has no scanline form.
     if let (VectorShape::Path { points, .. }, None) = (shape, stroke_width) {
-        fill_path_scanlines(dst, doc, points, t, color, mode, bbox, mask);
+        fill_path_scanlines(dst, doc, points, t, paint, mode, bbox, mask);
         return;
     }
     for py in bbox.y0..bbox.y1 {
@@ -831,8 +960,9 @@ fn paint_shape(
             if c <= 0.0 {
                 continue;
             }
+            let (lx, ly) = to_local(t, px as f32 + 0.5, py as f32 + 0.5).unwrap_or((0.0, 0.0));
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(color, c), dst.pixels[i], mode);
+            dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
         }
     }
 }
@@ -1140,11 +1270,12 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                 shape,
                 fill,
                 stroke,
+                gradient,
             } => {
                 if let Some((lx, ly)) = to_local(node.transform, x, y) {
                     let flat = flatten_shape(shape);
                     let shape = flat.as_ref();
-                    let hit = if fill.is_some() {
+                    let hit = if fill.is_some() || gradient.is_some() {
                         shape_covers(shape, lx, ly)
                     } else if let Some(s) = stroke {
                         stroke_covers(shape, s.width, lx, ly)
@@ -1397,6 +1528,140 @@ mod tests {
         );
         assert_eq!(s.get(1, 1).a, 1.0, "well inside is solid");
         assert_eq!(s.get(30, 30).a, 0.0, "across the diagonal is empty");
+    }
+
+    fn stop(offset: f32, r: f32, g: f32, b: f32) -> chitrakar_doc::GradientStop {
+        chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        }
+    }
+
+    fn gradient_rect(doc: &mut Document, gradient: Gradient) -> NodeId {
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("g", 32.0, 32.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 32.0,
+                    height: 32.0,
+                },
+                fill: Some(RED),
+                stroke: None,
+                gradient: Some(gradient),
+            }),
+        })
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn linear_gradient_ramps_across_the_shape() {
+        // Black to white left to right, in the shape's own box, so the ramp
+        // has to rise monotonically and hit both ends.
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        gradient_rect(
+            &mut doc,
+            Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+            },
+        );
+
+        // Read linear values: the ramp interpolates in linear light like the
+        // rest of the pipeline, so sRGB-encoded numbers are not the midpoints
+        // you would expect them to be.
+        let s = render(&doc).unwrap();
+        let row: Vec<f32> = (0..32).map(|x| s.get(x, 16).r).collect();
+        assert!(row[0] < 0.05, "starts at the first stop, got {}", row[0]);
+        assert!(row[31] > 0.95, "ends at the last stop, got {}", row[31]);
+        assert!(
+            row.windows(2).all(|w| w[1] >= w[0]),
+            "ramp must be monotonic, got {row:?}"
+        );
+        assert!(
+            (row[16] - 0.5).abs() < 0.05,
+            "halfway across is halfway along the ramp, got {}",
+            row[16]
+        );
+        // Constant down a column: the ramp runs along x only.
+        assert_eq!(s.get(8, 2).to_srgb8(), s.get(8, 29).to_srgb8());
+    }
+
+    #[test]
+    fn radial_gradient_ramps_outward_from_its_centre() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        gradient_rect(
+            &mut doc,
+            Gradient::Radial {
+                center: [0.5, 0.5],
+                radius: 0.5,
+                stops: vec![stop(0.0, 1.0, 1.0, 1.0), stop(1.0, 0.0, 0.0, 0.0)],
+            },
+        );
+
+        let s = render(&doc).unwrap();
+        let centre = s.get(16, 16).r;
+        let mid = s.get(24, 16).r;
+        let edge = s.get(31, 16).r;
+        assert!(centre > 0.95, "centre takes the first stop, got {centre}");
+        assert!(edge < 0.05, "the rim takes the last stop, got {edge}");
+        assert!(
+            centre > mid && mid > edge,
+            "should fall off outward, got {centre}/{mid}/{edge}"
+        );
+        // Radially symmetric about the centre. Pixel centres sit at x + 0.5,
+        // so the mirror of pixel 24 about the shape's centre (16.0) is 7.
+        assert_eq!(s.get(24, 16).to_srgb8(), s.get(7, 16).to_srgb8());
+        assert_eq!(s.get(16, 24).to_srgb8(), s.get(16, 7).to_srgb8());
+    }
+
+    #[test]
+    fn gradient_follows_the_shape_when_it_moves() {
+        // Stops live in the shape's own box, so translating the shape
+        // carries the ramp with it rather than sliding the shape past it.
+        let mut doc = Document::new(64, 32, ColorMode::Rgb);
+        let id = gradient_rect(
+            &mut doc,
+            Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+            },
+        );
+        let before = render(&doc).unwrap().get(4, 16).to_srgb8();
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 0.0),
+        })
+        .unwrap();
+        let after = render(&doc).unwrap().get(24, 16).to_srgb8();
+        assert_eq!(before, after, "same point of the shape, same colour");
+    }
+
+    #[test]
+    fn gradient_paints_over_the_flat_fill_and_is_hit_testable() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let id = gradient_rect(
+            &mut doc,
+            Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![stop(0.0, 0.0, 1.0, 0.0), stop(1.0, 0.0, 1.0, 0.0)],
+            },
+        );
+        // The node still carries fill: RED underneath; green must win.
+        let px = render(&doc).unwrap().get(16, 16).to_srgb8();
+        assert_eq!(px, [0, 255, 0, 255], "gradient paints in place of fill");
+        assert_eq!(hit_test(&doc, 16.0, 16.0).unwrap(), Some(id));
     }
 
     #[test]
@@ -2200,6 +2465,7 @@ mod tests {
                 },
                 fill: Some(RED),
                 stroke: None,
+                gradient: None,
             }),
         })
         .unwrap();

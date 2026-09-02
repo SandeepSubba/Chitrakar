@@ -48,6 +48,44 @@ impl Transform {
     }
 }
 
+/// One stop on a colour ramp: where it sits along the gradient (0..=1) and
+/// the colour there. Stops are authored colours like any other fill, so a
+/// CMYK document's gradients resolve through its press profile too.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: AuthoredColor,
+}
+
+/// A gradient fill. Geometry is in the shape's own local bounding box
+/// normalized to 0..1 on each axis (SVG's objectBoundingBox units), so a
+/// gradient follows its shape when the shape moves or is resized without
+/// needing its own transform to be kept in step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Gradient {
+    /// Ramp along the line from `from` to `to`, clamped past either end.
+    Linear {
+        from: [f32; 2],
+        to: [f32; 2],
+        stops: Vec<GradientStop>,
+    },
+    /// Ramp outward from `center` to `radius` (in units of the box's
+    /// half-diagonal), clamped past the edge.
+    Radial {
+        center: [f32; 2],
+        radius: f32,
+        stops: Vec<GradientStop>,
+    },
+}
+
+impl Gradient {
+    pub fn stops(&self) -> &[GradientStop] {
+        match self {
+            Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VectorShape {
     Rect {
@@ -124,6 +162,10 @@ pub enum NodeKind {
         shape: VectorShape,
         fill: Option<AuthoredColor>,
         stroke: Option<Stroke>,
+        /// Paints in place of `fill` when set. Additive, so documents
+        /// written before gradients existed still load.
+        #[serde(default)]
+        gradient: Option<Gradient>,
     },
     Raster(RasterRef),
     Adjustment(Adjustment),
@@ -201,6 +243,7 @@ impl Node {
                 shape,
                 fill: None,
                 stroke: None,
+                gradient: None,
             },
         )
     }
