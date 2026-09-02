@@ -24,7 +24,8 @@ without reading anything else.*
   ellipses and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
-  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat, levels,
+  drag preview, turn with a rotation knob, flip a selection about its
+  own box; adjustment layers (exposure, brightness/contrast, hue/sat, levels,
   curves drawn on a graph in the panel) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
@@ -109,9 +110,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~156),
+- **Verify before committing:** `cargo test --workspace` (~157),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~312 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~316 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -122,9 +123,10 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: another review pass over the last stretch of commits (each
-     one so far has found real defects), then text on a path or
-     underline/strike-through, and a PDF export that carries live text.
+  3. Depth: a review pass over the PDF exporter and the last stretch of
+     commits (each pass so far has found real defects); then live text in
+     PDF (embed the face, glyph ids from the shaper, a ToUnicode map),
+     underline/strike-through, and text on a path.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

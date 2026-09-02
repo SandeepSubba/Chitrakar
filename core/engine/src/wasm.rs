@@ -172,6 +172,13 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// Mirror layers about their shared box, left for right when
+    /// `horizontal`, else top for bottom (see `Session::flip_nodes`).
+    pub fn flip_nodes(&mut self, ids: Vec<f64>, horizontal: bool) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.flip_nodes(&ids, horizontal).map_err(to_js)
+    }
+
     /// Combine shape layers into one compound path. `op` is one of
     /// "union", "intersect", "subtract" or "exclude". Returns the new
     /// layer's id.

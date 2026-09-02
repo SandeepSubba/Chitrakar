@@ -2380,6 +2380,40 @@ assert(
     onClipboard && Math.abs(onClipboard[0] - 200) <= 1 && Math.abs(onClipboard[1] - 150) <= 1,
     `Copy as image put a PNG of the selection on the system clipboard (${onClipboard})`,
   );
+
+  // 8x8. Flip: a pair mirrors about the box the two of them span, so
+  // they trade sides; vertical trades top for bottom; undo puts it back.
+  await page.click('button[aria-label="Ellipse"]');
+  await page.mouse.move(...at(400, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 380), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await menuClick("Edit", "Select all");
+  await page.waitForTimeout(150);
+  const filled = async (x, y) => (await canvasPixel(x, y))[3] === 255;
+  assert((await filled(150, 175)) && !(await filled(150, 340)), "the rect is left, the ellipse right");
+  await menuClick("Edit", "Flip horizontal");
+  await page.waitForTimeout(250);
+  assert(
+    !(await filled(150, 175)) && (await filled(150, 340)) && (await filled(450, 175)),
+    "flipped horizontally, they trade sides",
+  );
+  await menuClick("Edit", "Flip vertical");
+  await page.waitForTimeout(250);
+  assert(
+    (await filled(150, 140)) && !(await filled(150, 340)) && (await filled(450, 300)),
+    "flipped vertically, they trade rows",
+  );
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(120);
+  }
+  assert(
+    (await filled(150, 175)) && !(await filled(150, 340)) && !(await filled(450, 340)),
+    "three undos: both flips and the ellipse are gone",
+  );
 }
 
 // 8y. The clipboard survives the document it was copied from: copy a

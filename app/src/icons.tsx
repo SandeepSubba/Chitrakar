@@ -54,9 +54,26 @@ export type IconName =
   | "alignMiddleV"
   | "alignBottom"
   | "distributeH"
-  | "distributeV";
+  | "distributeV"
+  | "flipH"
+  | "flipV";
 
 const PATHS: Record<IconName, JSX.Element> = {
+  // Mirror: a shape and its reflection either side of a dashed axis.
+  flipH: (
+    <>
+      <path d="M12 3v18" strokeDasharray="2 2" />
+      <path d="M9 7l-5 5 5 5z" />
+      <path d="M15 7l5 5-5 5z" />
+    </>
+  ),
+  flipV: (
+    <>
+      <path d="M3 12h18" strokeDasharray="2 2" />
+      <path d="M7 9l5-5 5 5z" />
+      <path d="M7 15l5 5 5-5z" />
+    </>
+  ),
   // Tools
   crop: (
     <>

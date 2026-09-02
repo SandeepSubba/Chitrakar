@@ -1644,6 +1644,18 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  /** Mirror the picked layers about their shared box, one history
+   * entry: a pair flips as a pair, a lone layer flips in place. */
+  const flipSelection = (horizontal: boolean) => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      session.flip_nodes(new Float64Array(selectionSet), horizontal);
+      refresh(session);
+    } catch (err) {
+      alert(`Flip: ${err}`);
+    }
+  };
+
   /** Combine the picked shapes into one compound path. */
   const combineSelection = (op: string) => {
     if (!session || selectionSet.length < 2) return;
@@ -2694,6 +2706,12 @@ export function App() {
             </MenuItem>
             <MenuItem icon="duplicate" onClick={duplicateSelected} hint="Ctrl+D">
               Duplicate
+            </MenuItem>
+            <MenuItem icon="flipH" onClick={() => flipSelection(true)}>
+              Flip horizontal
+            </MenuItem>
+            <MenuItem icon="flipV" onClick={() => flipSelection(false)}>
+              Flip vertical
             </MenuItem>
             <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
               Delete

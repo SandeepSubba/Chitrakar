@@ -899,6 +899,74 @@ impl Session {
         self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
     }
 
+    /// Mirror layers about their shared box — left for right, or top for
+    /// bottom — as one undo step. The box is the union of the picked
+    /// layers' document-space bounds, so a pair flips as a pair and a
+    /// single layer flips in place. A layer's transform is written in its
+    /// parent's space, so the document-space mirror is carried through
+    /// the ancestors and back.
+    pub fn flip_nodes(&mut self, ids: &[NodeId], horizontal: bool) -> Result<(), EngineError> {
+        let boxes: Vec<(NodeId, [f32; 4])> = ids
+            .iter()
+            .filter_map(|id| self.bounds_of(*id).map(|b| (*id, b)))
+            .collect();
+        if boxes.is_empty() {
+            return Err(EngineError::BadCommand("nothing to flip".into()));
+        }
+        let union = boxes
+            .iter()
+            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
+                [
+                    acc[0].min(b[0]),
+                    acc[1].min(b[1]),
+                    acc[2].max(b[0] + b[2]),
+                    acc[3].max(b[1] + b[3]),
+                ]
+            });
+        let mirror = if horizontal {
+            Transform {
+                a: -1.0,
+                e: union[0] + union[2],
+                ..Default::default()
+            }
+        } else {
+            Transform {
+                d: -1.0,
+                f: union[1] + union[3],
+                ..Default::default()
+            }
+        };
+        let mut cmds = Vec::new();
+        for (id, _) in boxes {
+            // The node draws through A·t; it should draw through M·A·t,
+            // so its own transform becomes A⁻¹·M·A·t.
+            let a = chitrakar_render::ancestor_space(&self.doc, id);
+            let det = a.a * a.d - a.b * a.c;
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let inv = Transform {
+                a: a.d / det,
+                b: -a.b / det,
+                c: -a.c / det,
+                d: a.a / det,
+                e: (a.c * a.f - a.d * a.e) / det,
+                f: (a.b * a.e - a.a * a.f) / det,
+            };
+            let t = self.doc.node(id)?.transform;
+            cmds.push(Command::SetTransform {
+                id,
+                transform: inv.compose(mirror).compose(a).compose(t),
+            });
+        }
+        let label = if horizontal {
+            "Flip horizontal"
+        } else {
+            "Flip vertical"
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label.to_string()))
+    }
+
     /// Dissolve a group: its children move to its position in the parent,
     /// the empty group is removed. One undo step.
     pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
@@ -2934,6 +3002,100 @@ mod tests {
         assert_eq!(restored.document().node_count(), 2);
         assert_eq!(restored.layers()[0].name, "kept");
         assert_cache_matches_fresh(&mut restored);
+    }
+
+    #[test]
+    fn a_flip_mirrors_the_selection_about_its_own_box() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "r", 20.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let other = add_rect(&mut session, "o", 10.0, 30.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(60.0, 40.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+
+        // Alone, a layer flips in place: same box, one history entry.
+        session.flip_nodes(&[rect], true).unwrap();
+        let b = session.bounds_of(rect).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 1e-3 && (b[2] - 20.0).abs() < 1e-3,
+            "{b:?}"
+        );
+        assert_eq!(session.document().node(rect).unwrap().transform.a, -1.0);
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Flip horizontal")
+        );
+
+        // Together, they mirror about the union: the rect (10..30) lands
+        // at the far side of 10..70, the tall one at the near side.
+        session.flip_nodes(&[rect, other], true).unwrap();
+        let (r, o) = (
+            session.bounds_of(rect).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (r[0] - 50.0).abs() < 1e-3 && (r[2] - 20.0).abs() < 1e-3,
+            "rect {r:?}"
+        );
+        assert!(
+            (o[0] - 10.0).abs() < 1e-3 && (o[2] - 10.0).abs() < 1e-3,
+            "other {o:?}"
+        );
+        assert!(
+            (r[1] - 10.0).abs() < 1e-3 && (o[1] - 40.0).abs() < 1e-3,
+            "rows untouched"
+        );
+        session.flip_nodes(&[rect, other], false).unwrap();
+        let (r, o) = (
+            session.bounds_of(rect).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (r[1] - 60.0).abs() < 1e-3 && (o[1] - 10.0).abs() < 1e-3,
+            "vertical: {r:?} {o:?}"
+        );
+
+        // Three undos put every pixel back.
+        for _ in 0..3 {
+            session.undo().unwrap();
+        }
+        assert_eq!(session.render().unwrap().pixels, before.pixels);
+
+        // Inside a moved, scaled group the mirror still lands where the
+        // document sees it: the box stays the box.
+        let group = session.group_nodes(&[rect], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 2.0,
+                    d: 2.0,
+                    e: 5.0,
+                    f: 5.0,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let boxed = session.bounds_of(rect).unwrap();
+        session.flip_nodes(&[rect], false).unwrap();
+        let after = session.bounds_of(rect).unwrap();
+        assert!(
+            boxed
+                .iter()
+                .zip(after.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-3),
+            "{boxed:?} -> {after:?}"
+        );
     }
 
     fn text_in(font: &str) -> Node {
