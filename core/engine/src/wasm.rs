@@ -181,6 +181,12 @@ impl WasmSession {
             .unwrap_or_default()
     }
 
+    /// Transform from a node's parent space into document space, as
+    /// `[a, b, c, d, e, f]`.
+    pub fn parent_space_of(&self, id: f64) -> Vec<f32> {
+        self.inner.parent_space_of(NodeId(id as u64)).to_vec()
+    }
+
     /// Local-space bounds of a node as `[x0, y0, x1, y1]`; empty if none.
     pub fn local_bounds_of(&self, id: f64) -> Vec<f32> {
         self.inner

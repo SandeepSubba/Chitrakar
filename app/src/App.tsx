@@ -67,6 +67,19 @@ function mixAuthored(
   return a;
 }
 
+/** `outer` applied after `inner` — the nesting rule, matching the engine's
+ * Transform::compose. */
+function composeT(outer: Transform, inner: Transform): Transform {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b,
+    b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d,
+    d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e,
+    f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
 /** A path's handles, padded to one per anchor so callers can index freely.
  * Stored empty when nothing is curved, which is what keeps older files (and
  * plain polylines) free of the field entirely. */
@@ -470,6 +483,54 @@ export function App() {
     ];
   };
 
+  /** Invert an affine, or null when it collapses space. */
+  const inverseOf = (t: Transform) => {
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return null;
+    return (x: number, y: number): [number, number] => {
+      const [ux, uy] = [x - t.e, y - t.f];
+      return [(t.d * ux - t.c * uy) / det, (t.a * uy - t.b * ux) / det];
+    };
+  };
+
+  /** A pointer position in the space the selected layer's transform is
+   * written against — its parent's. Identity for a top-level layer; for one
+   * inside a moved group, this is what keeps a drag from fighting the
+   * group's transform. */
+  const layerPoint = (
+    e: { clientX: number; clientY: number },
+    id: NodeId | null = selected,
+  ): [number, number] => {
+    const [x, y] = docPoint(e);
+    if (!session || id === null) return [x, y];
+    const inv = inverseOf(toTransform(session.parent_space_of(id)));
+    return inv ? inv(x, y) : [x, y];
+  };
+
+  /** A displacement carried into a layer's parent space: a vector, so only
+   * the linear part of the space applies. */
+  const layerVector = (id: NodeId, dx: number, dy: number): [number, number] => {
+    if (!session) return [dx, dy];
+    const t = toTransform(session.parent_space_of(id));
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return [dx, dy];
+    return [(t.d * dx - t.c * dy) / det, (t.a * dy - t.b * dx) / det];
+  };
+
+  /** Is `id` inside the currently selected group? The layers list is
+   * depth-first, so a group's subtree is the run of rows after it with a
+   * greater depth. */
+  const inSelectedGroup = (id: NodeId) => {
+    if (selected === null || id === selected) return false;
+    const at = layers.findIndex((l) => l.id === selected);
+    if (at < 0 || layers[at].kind !== "group") return false;
+    for (let i = at + 1; i < layers.length; i++) {
+      if (layers[i].depth <= layers[at].depth) break;
+      if (layers[i].id === id) return true;
+    }
+    return false;
+  };
+
   const isPanTrigger = (e: React.PointerEvent) =>
     e.button === 1 || (e.button === 0 && spaceRef.current);
 
@@ -555,9 +616,14 @@ export function App() {
         setSelected(null);
         return;
       }
-      drag.target = hit;
-      drag.t0 = toTransform(session.transform_of(hit));
-      setSelected(hit);
+      // Dragging inside a selected group moves the group. Hit testing only
+      // ever reports leaves, so without this a group could be selected in
+      // the panel and still not be draggable — you would grab whichever
+      // child happened to be under the cursor.
+      const target = inSelectedGroup(hit) ? selected! : hit;
+      drag.target = target;
+      drag.t0 = toTransform(session.transform_of(target));
+      setSelected(target);
     }
     toolDragRef.current = drag;
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -569,8 +635,11 @@ export function App() {
     [drag.lastX, drag.lastY] = docPoint(e);
     // Move tool: live preview while dragging.
     if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
-      const dx = drag.lastX - drag.startX;
-      const dy = drag.lastY - drag.startY;
+      const [dx, dy] = layerVector(
+        drag.target,
+        drag.lastX - drag.startX,
+        drag.lastY - drag.startY,
+      );
       if (dx !== 0 || dy !== 0) {
         drag.moved = true;
         preview({
@@ -648,7 +717,7 @@ export function App() {
     // Resize happens in the layer's own space: bring the cursor there,
     // hold the opposite corner still, and scale about it. Doing it in
     // document space would stretch a rotated layer along the wrong axes.
-    const [dx, dy] = docPoint(e);
+    const [dx, dy] = layerPoint(e);
     const t = drag.t0;
     const det = t.a * t.d - t.b * t.c;
     if (Math.abs(det) < 1e-9) return;
@@ -802,7 +871,7 @@ export function App() {
     if (!drag || !session || selected === null) return;
     if (e.buttons === 0) return;
     if (!("Path" in drag.vector.shape)) return;
-    const [dx, dy] = docPoint(e);
+    const [dx, dy] = layerPoint(e);
     const { t0 } = drag;
     const path = drag.vector.shape.Path;
     const pts = path.points.map((p) => [...p] as [number, number]);
@@ -883,7 +952,7 @@ export function App() {
     if (e.buttons === 0) return;
 
     if (!("Path" in drag.vector.shape)) return;
-    const [dx, dy] = docPoint(e);
+    const [dx, dy] = layerPoint(e);
     const { t0, idx, side } = drag;
     const path = drag.vector.shape.Path;
     const anchor = path.points[idx];
@@ -930,11 +999,13 @@ export function App() {
     if (!session || selected === null || !selBounds || selBounds.length !== 4)
       return;
     e.stopPropagation();
-    const centre: [number, number] = [
+    const inv = inverseOf(toTransform(session.parent_space_of(selected)));
+    const docCentre: [number, number] = [
       selBounds[0] + selBounds[2] / 2,
       selBounds[1] + selBounds[3] / 2,
     ];
-    const [px, py] = docPoint(e);
+    const centre: [number, number] = inv ? inv(...docCentre) : docCentre;
+    const [px, py] = layerPoint(e);
     rotateDragRef.current = {
       t0: toTransform(session.transform_of(selected)),
       centre,
@@ -947,7 +1018,7 @@ export function App() {
     const drag = rotateDragRef.current;
     if (!drag || !session || selected === null) return;
     if (e.buttons === 0) return;
-    const [px, py] = docPoint(e);
+    const [px, py] = layerPoint(e);
     const [cx, cy] = drag.centre;
     let d = Math.atan2(py - cy, px - cx) - drag.start;
     // Shift snaps to 15 degrees, the usual courtesy for straightening up.
@@ -988,10 +1059,13 @@ export function App() {
   };
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  // Adjustment and filter layers act on everything below them and have no
+  // box of their own; everything else, groups included, can be moved,
+  // scaled and turned.
   const resizable =
-    selectedLayer?.kind === "vector" ||
-    selectedLayer?.kind === "raster" ||
-    selectedLayer?.kind === "text";
+    selectedLayer !== null &&
+    selectedLayer.kind !== "adjustment" &&
+    selectedLayer.kind !== "filter";
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
@@ -1002,13 +1076,16 @@ export function App() {
    * handles sit on the corners they actually move. */
   let selQuad: [number, number][] | null = null;
   let selLocal: [number, number, number, number] | null = null;
-  let selT: Transform | null = null;
   if (session && selected !== null && resizable) {
     const lb = session.local_bounds_of(selected);
     if (lb.length === 4) {
       selLocal = [lb[0], lb[1], lb[2], lb[3]];
-      selT = toTransform(session.transform_of(selected));
-      const t = selT;
+      // Draw against the document, so a layer inside a moved group is
+      // outlined where it actually is.
+      const t = composeT(
+        toTransform(session.parent_space_of(selected)),
+        toTransform(session.transform_of(selected)),
+      );
       const toScreen = (x: number, y: number): [number, number] => [
         view.x + (t.a * x + t.c * y + t.e) * view.zoom,
         view.y + (t.b * x + t.d * y + t.f) * view.zoom,

@@ -25,6 +25,8 @@ without reading anything else.*
   drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
   filter layers (gaussian blur, sharpen), masks on any layer, groups,
   reorder, opacity/blend, rename, labelled history with jump-to-state.
+  Transforms nest: a group moves, scales and turns as a unit, and
+  dissolving one folds its transform into its children.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
@@ -39,9 +41,9 @@ without reading anything else.*
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
-- **Verify before committing:** `cargo test --workspace` (~94),
+- **Verify before committing:** `cargo test --workspace` (~96),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~132 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~137 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -64,10 +66,8 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
-- **Known limits, deliberately:** a group's own transform is ignored (its
-  children carry absolute transforms), so groups cannot be moved or turned
-  as a unit; masks aren't editable on-canvas; PDF/TIFF embed the composite
-  as an image rather than live vectors.
+- **Known limits, deliberately:** masks aren't editable on-canvas; PDF/TIFF
+  embed the composite as an image rather than live vectors.
 
 ---
 

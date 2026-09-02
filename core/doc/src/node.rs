@@ -39,6 +39,21 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// `self` applied after `inner`: the inner transform runs first, then
+    /// this one. That is what nesting means, so it is how a group's
+    /// transform reaches its children — and how ungrouping folds the
+    /// group's transform into them.
+    pub fn compose(self, inner: Transform) -> Transform {
+        Transform {
+            a: self.a * inner.a + self.c * inner.b,
+            b: self.b * inner.a + self.d * inner.b,
+            c: self.a * inner.c + self.c * inner.d,
+            d: self.b * inner.c + self.d * inner.d,
+            e: self.a * inner.e + self.c * inner.f + self.e,
+            f: self.b * inner.e + self.d * inner.f + self.f,
+        }
+    }
+
     pub fn translation(x: f32, y: f32) -> Self {
         Self {
             e: x,

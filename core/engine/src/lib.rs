@@ -369,15 +369,24 @@ impl Session {
             .position(|s| *s == id)
             .unwrap();
         let children = self.doc.children_of(id)?.to_vec();
-        let mut cmds: Vec<Command> = children
-            .iter()
-            .enumerate()
-            .map(|(i, child)| Command::MoveNode {
+        // The group's transform reached its children while they were inside
+        // it; once they leave, each has to carry that part itself or the
+        // whole group would jump back to where it was before it was moved.
+        let group_t = self.doc.node(id)?.transform;
+        let mut cmds: Vec<Command> = Vec::new();
+        for (i, child) in children.iter().enumerate() {
+            if group_t != Transform::default() {
+                cmds.push(Command::SetTransform {
+                    id: *child,
+                    transform: group_t.compose(self.doc.node(*child)?.transform),
+                });
+            }
+            cmds.push(Command::MoveNode {
                 id: *child,
                 parent,
                 index: position + i,
-            })
-            .collect();
+            });
+        }
         cmds.push(Command::RemoveNode { id });
         self.apply_labeled(Command::Batch(cmds), Some(label))
     }
@@ -581,6 +590,15 @@ impl Session {
             ]),
             Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1 - x0, y1 - y0]),
         }
+    }
+
+    /// The transform carrying a node's parent space into document space —
+    /// identity for a top-level layer, the enclosing groups' transforms for
+    /// a nested one. A node's own transform is written against this, so a
+    /// drag has to convert the cursor through it.
+    pub fn parent_space_of(&self, id: NodeId) -> [f32; 6] {
+        let t = chitrakar_render::ancestor_space(&self.doc, id);
+        [t.a, t.b, t.c, t.d, t.e, t.f]
     }
 
     /// A node's bounds in its own space, `[x0, y0, x1, y1]`, for drawing a
@@ -977,6 +995,40 @@ mod tests {
         // Mixed-parent grouping is refused.
         let c = add_rect(&mut session, "c", 4.0, 4.0);
         assert!(session.group_nodes(&[a, c], "bad").is_err());
+    }
+
+    #[test]
+    fn ungrouping_a_moved_group_leaves_its_children_where_they_look() {
+        // The group's transform reaches its children while they are inside
+        // it. Dissolving the group has to fold that transform into each of
+        // them, or everything springs back to where it was before the group
+        // was moved.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let group = session.group_nodes(&[a, b], "pair").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(20.0, 12.0),
+            })
+            .unwrap();
+
+        let before = session.bounds_of(a).unwrap();
+        session.ungroup_node(group).unwrap();
+        let after = session.bounds_of(a).unwrap();
+        assert!(
+            before.iter().zip(after).all(|(x, y)| (x - y).abs() < 1e-3),
+            "a child must not move when its group dissolves: {before:?} -> {after:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // And it is still one undo step, which puts the group back.
+        session.undo().unwrap();
+        assert!(matches!(
+            session.document().node(group).map(|n| &n.kind),
+            Ok(NodeKind::Group)
+        ));
     }
 
     #[test]

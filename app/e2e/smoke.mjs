@@ -638,6 +638,36 @@ await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers
 await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
 await page.waitForTimeout(200);
 await page.locator(".panel ul li", { hasText: "Group 2" }).click();
+await page.waitForTimeout(200);
+
+// 8r2. A group moves as a unit, and dissolving it leaves its contents put.
+// A point on one of the paths, which the group carries with it.
+const onPath = [150, 60];
+assert((await canvasPixel(...onPath))[3] > 0, "path ink before moving the group");
+assert(
+  (await page.locator(".sel-outline polygon").count()) === 1,
+  "a selected group gets a selection box of its own",
+);
+await drag(150, 60, 150, 170);
+assert(
+  (await canvasPixel(...onPath))[3] === 0,
+  "the group's contents moved with it",
+);
+const movedProbe = [150, 170];
+const afterMove = await canvasPixel(...movedProbe);
+assert(afterMove[3] > 0, `and arrived at the new position (${afterMove})`);
+
+// Put it back, so the rest of the suite sees the shapes where it left
+// them. (That dissolving a moved group leaves its contents put is pinned
+// by a native test, which can assert the transforms rather than pixels.)
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+assert(
+  (await canvasPixel(...onPath))[3] > 0,
+  "and the move undoes as one step",
+);
+
+await page.locator(".panel ul li", { hasText: "Group 2" }).click();
 await page.click('button[title="Ungroup selected group"]');
 await page.waitForTimeout(200);
 assert(

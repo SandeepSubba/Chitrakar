@@ -234,19 +234,58 @@ fn transformed_bounds(t: Transform, w: f32, h: f32) -> Bounds {
 /// the union of their children. Any adjustment layer in the subtree makes
 /// the answer [`Bounds::Everything`], because it acts on all content below.
 /// Visibility is ignored on purpose — toggling it dirties the same region.
+/// The transform carrying a node's *parent's* space into document space:
+/// every ancestor's transform, outermost first. A node's own transform is
+/// written against this, which is why drags and bounds both need it.
+pub fn ancestor_space(doc: &Document, id: NodeId) -> Transform {
+    let mut chain = Vec::new();
+    let mut cur = doc.parent_of(id);
+    while let Some(p) = cur {
+        if let Ok(n) = doc.node(p) {
+            chain.push(n.transform);
+        }
+        cur = doc.parent_of(p);
+    }
+    chain
+        .iter()
+        .rev()
+        .fold(Transform::default(), |acc, t| acc.compose(*t))
+}
+
+/// Doc-space bounds of a node, ancestors included.
 pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    let local = bounds_in_parent_space(doc, id)?;
+    Ok(match local {
+        Bounds::Rect(x0, y0, x1, y1) => {
+            transformed_local_bounds(ancestor_space(doc, id), (x0, y0, x1, y1))
+        }
+        other => other,
+    })
+}
+
+/// Bounds in the space the node's transform is written against — its
+/// parent's. Groups union their children here, which is why this is the
+/// recursive form and `node_bounds` is the one that finishes the job.
+fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     let node = doc.node(id)?;
     Ok(match &node.kind {
         NodeKind::Adjustment(_) | NodeKind::Filter(_) => Bounds::Everything,
         NodeKind::Group => {
             let mut acc = Bounds::None;
             for &child in doc.children_of(id)? {
-                acc = acc.union(node_bounds(doc, child)?);
+                acc = acc.union(bounds_in_parent_space(doc, child)?);
                 if acc == Bounds::Everything {
                     break;
                 }
             }
-            acc
+            // Children's bounds are in the group's space; the group's own
+            // transform carries them into its parent's.
+            match acc {
+                Bounds::Rect(x0, y0, x1, y1) => {
+                    transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+                }
+                other => other,
+            }
         }
         NodeKind::Vector { shape, stroke, .. } => {
             let flat = flatten_shape(shape);
@@ -284,8 +323,20 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
         }
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
-            // Groups, adjustments and filters have no box of their own; fall
-            // back to whatever the document-space bounds say.
+            // A group's own box is the union of its children, which are
+            // already expressed in its space — using node_bounds here would
+            // apply the group's transform a second time.
+            None if matches!(node.kind, NodeKind::Group) => {
+                let mut acc = Bounds::None;
+                for &child in doc.children_of(id)? {
+                    acc = acc.union(bounds_in_parent_space(doc, child)?);
+                }
+                match acc {
+                    Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
+                    _ => None,
+                }
+            }
+            // Adjustments and filters act on everything below them.
             None => match node_bounds(doc, id)? {
                 Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
                 _ => None,
@@ -335,7 +386,7 @@ pub fn render_region(
         surface.pixels[row + clip.x0 as usize..row + clip.x1 as usize]
             .fill(LinearRgba::TRANSPARENT);
     }
-    render_group(doc, doc.root(), surface, clip)
+    render_group(doc, doc.root(), surface, clip, Transform::default())
 }
 
 fn render_group(
@@ -343,6 +394,7 @@ fn render_group(
     group: NodeId,
     dst: &mut Surface,
     clip: ClipRect,
+    parent: Transform,
 ) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
     for &child in doc.children_of(group)? {
@@ -350,15 +402,22 @@ fn render_group(
         if !node.visible || node.opacity <= 0.0 {
             continue;
         }
-        let mask = node.mask.as_ref();
+        // Everything below draws in the parent's space, so a node's own
+        // transform is composed onto whatever its ancestors contribute; a
+        // mask is authored in that same parent space.
+        let t = parent.compose(node.transform);
+        let mask = MaskRef {
+            mask: node.mask.as_ref(),
+            parent,
+        };
         match &node.kind {
             NodeKind::Group => {
                 // Isolate the group on its own surface so group opacity,
                 // blend, and mask apply to the composite, not per child.
                 let mut sub = Surface::new(dst.width, dst.height);
-                render_group(doc, child, &mut sub, clip)?;
-                if let Some(mask) = mask {
-                    apply_mask(doc, mask, &mut sub, clip);
+                render_group(doc, child, &mut sub, clip, t)?;
+                if let Some(m) = mask.mask {
+                    apply_mask(doc, m, &mut sub, clip, parent);
                 }
                 composite(dst, &sub, node.opacity, node.blend, clip);
             }
@@ -376,17 +435,7 @@ fn render_group(
                     }
                 };
                 if let Some(paint) = fill_paint {
-                    paint_shape(
-                        dst,
-                        doc,
-                        shape,
-                        node.transform,
-                        &paint,
-                        node.blend,
-                        clip,
-                        None,
-                        mask,
-                    );
+                    paint_shape(dst, doc, shape, t, &paint, node.blend, clip, None, mask);
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
@@ -394,7 +443,7 @@ fn render_group(
                         dst,
                         doc,
                         shape,
-                        node.transform,
+                        t,
                         &Paint::Solid(color),
                         node.blend,
                         clip,
@@ -406,16 +455,7 @@ fn render_group(
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
-                        draw_raster(
-                            dst,
-                            doc,
-                            res,
-                            node.transform,
-                            node.opacity,
-                            node.blend,
-                            clip,
-                            mask,
-                        );
+                        draw_raster(dst, doc, res, t, node.opacity, node.blend, clip, mask);
                     }
                 }
             }
@@ -435,16 +475,9 @@ fn render_group(
                 }
             }
             NodeKind::Filter(filter) => apply_filter(doc, filter, node.opacity, mask, dst, clip),
-            NodeKind::Text(spec) => draw_text(
-                dst,
-                doc,
-                spec,
-                node.transform,
-                node.opacity,
-                node.blend,
-                clip,
-                mask,
-            ),
+            NodeKind::Text(spec) => {
+                draw_text(dst, doc, spec, t, node.opacity, node.blend, clip, mask)
+            }
         }
     }
     Ok(())
@@ -942,7 +975,7 @@ fn fill_path_scanlines(
     paint: &Paint,
     mode: BlendMode,
     bbox: ClipRect,
-    mask: Option<&Mask>,
+    mask: MaskRef<'_>,
 ) {
     const N: u32 = 4;
     if points.len() < 3 || bbox.is_empty() || to_local(t, 0.0, 0.0).is_none() {
@@ -1022,7 +1055,7 @@ fn paint_shape(
     mode: BlendMode,
     clip: ClipRect,
     stroke_width: Option<f32>,
-    mask: Option<&Mask>,
+    mask: MaskRef<'_>,
 ) {
     // Smooth paths render as their flattened spline polyline.
     let flat = flatten_shape(shape);
@@ -1083,7 +1116,7 @@ fn draw_raster(
     opacity: f32,
     mode: BlendMode,
     clip: ClipRect,
-    mask: Option<&Mask>,
+    mask: MaskRef<'_>,
 ) {
     // 8-bit sRGB → linear lookup table, built per blit (256 entries, cheap).
     let mut lut = [0f32; 256];
@@ -1138,8 +1171,18 @@ fn draw_raster(
 }
 
 /// Mask coverage at a pixel center, in document space. 1.0 without a mask.
-fn coverage_at(doc: &Document, mask: Option<&Mask>, x: u32, y: u32) -> f32 {
-    let Some(mask) = mask else {
+/// A mask together with the space its transform is written in — its owner's
+/// parent space, since a mask is authored against the document as the layer
+/// sees it. Carried as one value so every painter keeps a single mask
+/// argument instead of a second, easily mismatched, transform.
+#[derive(Clone, Copy)]
+struct MaskRef<'a> {
+    mask: Option<&'a Mask>,
+    parent: Transform,
+}
+
+fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
+    let (Some(mask), parent) = (m.mask, m.parent) else {
         return 1.0;
     };
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -1149,7 +1192,10 @@ fn coverage_at(doc: &Document, mask: Option<&Mask>, x: u32, y: u32) -> f32 {
             resource_id,
             transform,
             ..
-        } => match (doc.resource(resource_id), to_local(*transform, fx, fy)) {
+        } => match (
+            doc.resource(resource_id),
+            to_local(parent.compose(*transform), fx, fy),
+        ) {
             (Some(res), Some((lx, ly)))
                 if !res.rgba8.is_empty()
                     && lx >= 0.0
@@ -1175,10 +1221,24 @@ fn coverage_at(doc: &Document, mask: Option<&Mask>, x: u32, y: u32) -> f32 {
 }
 
 /// Multiply a surface region by a mask's coverage (used for group masks).
-fn apply_mask(doc: &Document, mask: &Mask, surface: &mut Surface, clip: ClipRect) {
+fn apply_mask(
+    doc: &Document,
+    mask: &Mask,
+    surface: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+) {
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
-            let c = coverage_at(doc, Some(mask), x, y);
+            let c = coverage_at(
+                doc,
+                MaskRef {
+                    mask: Some(mask),
+                    parent,
+                },
+                x,
+                y,
+            );
             if c < 1.0 {
                 let i = (y * surface.width + x) as usize;
                 surface.pixels[i] = scale_alpha(surface.pixels[i], c);
@@ -1193,13 +1253,13 @@ fn apply_filter(
     doc: &Document,
     filter: &Filter,
     opacity: f32,
-    mask: Option<&Mask>,
+    mask: MaskRef<'_>,
     dst: &mut Surface,
     clip: ClipRect,
 ) {
     match filter {
         Filter::GaussianBlur { sigma } => {
-            let needs_mix = opacity < 1.0 || mask.is_some();
+            let needs_mix = opacity < 1.0 || mask.mask.is_some();
             let original = needs_mix.then(|| blur::snapshot(dst, clip));
             blur::gaussian_blur(dst, clip, *sigma);
             if let Some(orig) = original {
@@ -1255,7 +1315,7 @@ fn draw_text(
     opacity: f32,
     mode: BlendMode,
     clip: ClipRect,
-    mask: Option<&Mask>,
+    mask: MaskRef<'_>,
 ) {
     let raster = text::rasterize(spec);
     let color = resolve_color(doc, spec.fill);
@@ -1354,10 +1414,16 @@ fn apply_adjustment(adj: &Adjustment, px: LinearRgba) -> LinearRgba {
 /// document-space point — the click target. Groups are traversed top-down;
 /// adjustment layers are not hit-testable.
 pub fn hit_test(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
-    hit_in_group(doc, doc.root(), x, y)
+    hit_in_group(doc, doc.root(), x, y, Transform::default())
 }
 
-fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+fn hit_in_group(
+    doc: &Document,
+    group: NodeId,
+    x: f32,
+    y: f32,
+    parent: Transform,
+) -> Result<Option<NodeId>, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
         let node = doc.node(child)?;
         if !node.visible {
@@ -1365,7 +1431,7 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
         }
         match &node.kind {
             NodeKind::Group => {
-                if let Some(hit) = hit_in_group(doc, child, x, y)? {
+                if let Some(hit) = hit_in_group(doc, child, x, y, parent.compose(node.transform))? {
                     return Ok(Some(hit));
                 }
             }
@@ -1375,7 +1441,7 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                 stroke,
                 gradient,
             } => {
-                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
                     let flat = flatten_shape(shape);
                     let shape = flat.as_ref();
                     let hit = if fill.is_some() || gradient.is_some() {
@@ -1391,7 +1457,7 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                 }
             }
             NodeKind::Raster(raster) => {
-                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
                     if lx >= 0.0
                         && ly >= 0.0
                         && lx < raster.width as f32
@@ -1402,7 +1468,7 @@ fn hit_in_group(doc: &Document, group: NodeId, x: f32, y: f32) -> Result<Option<
                 }
             }
             NodeKind::Text(spec) => {
-                if let Some((lx, ly)) = to_local(node.transform, x, y) {
+                if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
                     let (w, h) = text::measure(spec);
                     if lx >= 0.0 && ly >= 0.0 && lx < w && ly < h {
                         return Ok(Some(child));
@@ -2033,6 +2099,79 @@ mod tests {
                 assert_eq!(patched.get(x, y), full.get(x, y), "pixel ({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn a_group_transform_moves_and_turns_its_children() {
+        // A group's transform applies to everything inside it, so grouping
+        // two shapes and moving the group moves both — and the children's
+        // own transforms stay untouched, which is what makes it undoable
+        // and what ungrouping relies on.
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("a", 8.0, 8.0, RED),
+        })
+        .unwrap();
+        let child = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: child,
+            transform: Transform::translation(4.0, 4.0),
+        })
+        .unwrap();
+
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(6, 6).a, 1.0, "child paints at its own position");
+        assert_eq!(s.get(30, 30).a, 0.0);
+        assert_eq!(hit_test(&doc, 6.0, 6.0).unwrap(), Some(child));
+
+        // Move the group: the child moves with it.
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: Transform::translation(24.0, 24.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(6, 6).a, 0.0, "the old position is vacated");
+        assert_eq!(s.get(30, 30).a, 1.0, "and the child moved with the group");
+        assert_eq!(
+            hit_test(&doc, 30.0, 30.0).unwrap(),
+            Some(child),
+            "hit testing composes down the tree too"
+        );
+        match node_bounds(&doc, group).unwrap() {
+            Bounds::Rect(x0, y0, _, _) => {
+                assert!(
+                    (x0 - 28.0).abs() < 0.5 && (y0 - 28.0).abs() < 0.5,
+                    "group bounds follow its transform, got {:?}",
+                    (x0, y0)
+                );
+            }
+            other => panic!("expected a rect, got {other:?}"),
+        }
+
+        // Turning the group turns its contents.
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: rotation(90.0, 24.0, 24.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(30, 30).a, 0.0, "a turned group moves its child");
+        assert_eq!(
+            s.get(24 - 6, 24 + 6).a,
+            1.0,
+            "the child swung a quarter turn about the group's origin"
+        );
     }
 
     #[test]
