@@ -24,8 +24,10 @@ without reading anything else.*
   ellipses and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
-  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
-  filter layers (gaussian blur, sharpen), masks on any layer — an
+  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat) and
+  filter layers (gaussian blur, sharpen) — over everything below, or
+  scoped to one layer, which groups the two so the group's isolation does
+  the confining — masks on any layer — an
   inscribed ellipse or rectangle, or any shape handed down to the layer
   below — dragged and resized on the canvas, groups,
   reorder, duplicate/copy/cut/paste (subtree and pixels included, across

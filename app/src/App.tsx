@@ -1427,9 +1427,32 @@ export function App() {
     },
   };
 
-  const addAdjustment = (key: string) => {
-    const preset = ADJUSTMENT_PRESETS[key];
+  /** Add an adjustment or filter. A key on its own puts it at the top,
+   * over everything; `only:` in front scopes it to the picked layer, which
+   * the engine does by grouping the two — a group isolates, and that is
+   * the whole trick. */
+  const addAdjustment = (value: string) => {
+    const only = value.startsWith("only:");
+    const preset = ADJUSTMENT_PRESETS[only ? value.slice(5) : value];
     if (!session || !preset) return;
+    if (only && selected !== null) {
+      try {
+        const group = session.adjust_node(
+          selected,
+          JSON.stringify(nodePayload(preset.name, preset.kind)),
+        );
+        // Pick the adjustment itself, so its controls are right there.
+        const rows = JSON.parse(session.layers_json()) as LayerInfo[];
+        const at = rows.findIndex((l) => l.id === group);
+        const inside = rows.slice(at + 1).find((l) => l.parent === group && l.kind !== "group");
+        setSelected(inside ? inside.id : group);
+        setMultiSel([]);
+        refresh(session);
+      } catch (err) {
+        alert(`Adjust: ${err}`);
+      }
+      return;
+    }
     run({
       AddNode: {
         parent: session.root_id,
@@ -3142,11 +3165,24 @@ export function App() {
               <option value="" disabled>
                 +FX
               </option>
-              {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
-                <option key={key} value={key}>
-                  {p.name}
-                </option>
-              ))}
+              <optgroup label="Over everything below">
+                {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
+                  <option key={key} value={key}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+              {selectedLayer &&
+                selectedLayer.kind !== "adjustment" &&
+                selectedLayer.kind !== "filter" && (
+                  <optgroup label={`Only on ${selectedLayer.name}`}>
+                    {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
+                      <option key={`only:${key}`} value={`only:${key}`}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
             </select>
             <button
               onClick={() => reorderSelected(1)}

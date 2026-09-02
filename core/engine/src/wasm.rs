@@ -183,6 +183,18 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Scope an adjustment or filter to one layer: the layer and the new
+    /// node (as AddNode's node JSON) go into a group together. Returns the
+    /// group's id.
+    pub fn adjust_node(&mut self, id: f64, node_json: &str) -> Result<f64, JsError> {
+        let node: crate::Node =
+            serde_json::from_str(node_json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner
+            .adjust_node(NodeId(id as u64), node)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Put a node and its subtree on the clipboard.
     pub fn copy_node(&self, id: f64) -> Result<(), JsError> {
         self.inner.copy_node(NodeId(id as u64)).map_err(to_js)

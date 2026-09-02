@@ -584,6 +584,54 @@ impl Session {
         Ok(new_id)
     }
 
+    /// Give one layer its own adjustment or filter: wrap the layer and the
+    /// new node in a group, where the group's isolation confines what the
+    /// node does to what the layer paints. That is the only machinery
+    /// involved — a group isolates whenever something inside it reads the
+    /// backdrop — and so the result is ordinary layers that can be opened
+    /// up, reordered and undone like any others. One history entry.
+    pub fn adjust_node(&mut self, id: NodeId, node: Node) -> Result<NodeId, EngineError> {
+        if !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_)) {
+            return Err(EngineError::BadCommand(
+                "only an adjustment or a filter can be scoped to a layer".into(),
+            ));
+        }
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot adjust the root".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .ok_or_else(|| EngineError::BadCommand("layer is not in its parent".into()))?;
+        let name = format!("{} + {}", self.doc.node(id)?.name, node.name);
+        let group_id = self.doc.peek_next_id();
+        let label = format!("Adjust {}", self.doc.node(id)?.name);
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::AddNode {
+                    parent,
+                    index: index + 1,
+                    node: Box::new(Node::group(&name)),
+                },
+                Command::MoveNode {
+                    id,
+                    parent: group_id,
+                    index: 0,
+                },
+                Command::AddNode {
+                    parent: group_id,
+                    index: 1,
+                    node: Box::new(node),
+                },
+            ]),
+            Some(label),
+        )?;
+        Ok(group_id)
+    }
+
     /// Copy a node and everything under it, placed just above the original.
     /// One undo step.
     ///
@@ -1954,6 +2002,57 @@ mod tests {
             Some(id),
             "and redo restores it"
         );
+    }
+
+    #[test]
+    fn an_adjustment_scoped_to_a_layer_leaves_the_rest_alone() {
+        // Two rects side by side; darken one. The group's isolation is
+        // what confines the adjustment, and one undo takes the whole
+        // arrangement away.
+        let mut session = Session::new(64, 32, ColorMode::Rgb);
+        let left = add_rect(&mut session, "left", 20.0, 20.0);
+        let right = add_rect(&mut session, "right", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+        let group = session
+            .adjust_node(
+                right,
+                Node::adjustment(
+                    "Exposure",
+                    chitrakar_doc::Adjustment::Exposure { stops: -3.0 },
+                ),
+            )
+            .unwrap();
+        let root = session.document().root();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[left, group],
+            "the layer moved into a group where it stood"
+        );
+        assert_eq!(session.document().children_of(group).unwrap().len(), 2);
+        let after = session.render().unwrap();
+        assert!(
+            after.get(50, 10).r < before.get(50, 10).r * 0.3,
+            "the adjusted layer darkened: {} -> {}",
+            before.get(50, 10).r,
+            after.get(50, 10).r
+        );
+        assert_eq!(after.get(10, 10), before.get(10, 10), "the other did not");
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[left, right]
+        );
+        assert_eq!(session.render().unwrap().to_srgb8(), before.to_srgb8());
+        // Only adjustments and filters can be scoped.
+        assert!(session
+            .adjust_node(right, *filled_rect("no", 1.0, 1.0))
+            .is_err());
     }
 
     #[test]

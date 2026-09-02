@@ -2078,6 +2078,57 @@ assert(
   );
 }
 
+// 8x6. An adjustment scoped to one layer: two rects, darken only one.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  for (const [x0, y0, x1, y1] of [[50, 50, 250, 250], [350, 50, 550, 250]]) {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  }
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click(); // the right-hand rect, drawn last
+  await page.waitForTimeout(200);
+  const leftBefore = await canvasPixel(150, 150);
+  const rightBefore = await canvasPixel(450, 150);
+  assert(
+    (await page.locator('select[aria-label="Add adjustment layer"] optgroup').count()) === 2,
+    "with a layer picked, +FX offers to scope to it",
+  );
+  await page.selectOption('select[aria-label="Add adjustment layer"]', "only:exposure");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li").count()) === 4 &&
+      (await page.locator(".panel ul li", { hasText: "+ Exposure" }).count()) === 1,
+    "the layer and its adjustment sit together in a group named for both",
+  );
+  await setSlider("Stops", -3);
+  await page.waitForTimeout(300);
+  const leftAfter = await canvasPixel(150, 150);
+  const rightAfter = await canvasPixel(450, 150);
+  assert(
+    rightAfter[2] < rightBefore[2] * 0.6,
+    `the adjusted rect darkened (${rightBefore} -> ${rightAfter})`,
+  );
+  assert(
+    leftAfter.join() === leftBefore.join(),
+    `and the other rect did not (${leftBefore} -> ${leftAfter})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2 &&
+      (await canvasPixel(450, 150)).join() === rightBefore.join(),
+    "two undos: the slider, then the whole arrangement",
+  );
+}
+
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {
