@@ -71,7 +71,8 @@ without reading anything else.*
   the size it is actually seen at, and carries alignment, line spacing,
   tracking and a wrap width for paragraph text.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
-  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
+  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
+  the selection — rendered at that size, not upsampled), JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
 - **Renderer performance:** the transform inverse is solved once per shape

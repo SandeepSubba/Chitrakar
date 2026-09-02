@@ -1121,6 +1121,76 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// Render a region of the document — the whole page when `region` is
+    /// None, otherwise `[x, y, w, h]` in document pixels — at `scale`
+    /// pixels to the document pixel. This is what an export at 2x or of the
+    /// selection is: the same root affine the viewport uses, aimed at a
+    /// surface the size of what is wanted, so nothing is rendered and then
+    /// cut down.
+    pub fn render_scaled(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Surface, EngineError> {
+        let scale = scale.clamp(0.05, 16.0);
+        let [x, y, w, h] = region.unwrap_or([
+            0.0,
+            0.0,
+            self.doc.meta.width as f32,
+            self.doc.meta.height as f32,
+        ]);
+        if !(w > 0.0 && h > 0.0) {
+            return Err(EngineError::BadCommand("the export region is empty".into()));
+        }
+        let (pw, ph) = (
+            (w * scale).round().max(1.0) as u32,
+            (h * scale).round().max(1.0) as u32,
+        );
+        let mut surface = Surface::new(pw, ph);
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: pw,
+            y1: ph,
+        };
+        chitrakar_render::render_region_at(
+            &self.doc,
+            &mut surface,
+            full,
+            Transform {
+                a: scale,
+                d: scale,
+                e: -x * scale,
+                f: -y * scale,
+                ..Default::default()
+            },
+        )?;
+        Ok(surface)
+    }
+
+    /// PNG of a region at a scale; see [`render_scaled`](Self::render_scaled).
+    pub fn render_png_at(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render_scaled(scale, region)?;
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// JPEG of a region at a scale; transparency flattens onto white.
+    pub fn export_jpeg_at(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+        quality: u8,
+    ) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render_scaled(scale, region)?;
+        chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Render and encode as JPEG. Transparency flattens onto white, since
     /// JPEG carries no alpha.
     pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
@@ -2053,6 +2123,54 @@ mod tests {
         assert!(session
             .adjust_node(right, *filled_rect("no", 1.0, 1.0))
             .is_err());
+    }
+
+    #[test]
+    fn exporting_at_a_scale_and_of_a_region_renders_just_that() {
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 10.0),
+            })
+            .unwrap();
+        // Twice the size: twice the pixels, and the rect's edge twice as
+        // far in — re-solved, so it is a hard edge there rather than a
+        // blurred one.
+        let two = session.render_scaled(2.0, None).unwrap();
+        assert_eq!((two.width, two.height), (200, 120));
+        assert_eq!(two.get(59, 30).a, 0.0, "just outside the rect at 2x");
+        assert_eq!(two.get(61, 30).a, 1.0, "just inside it");
+        assert_eq!(two.get(99, 30).a, 1.0);
+        assert_eq!(two.get(101, 30).a, 0.0);
+        // A region: only what is inside it, at its own size, with the
+        // document's origin no longer at the corner.
+        let part = session
+            .render_scaled(1.0, Some([25.0, 5.0, 30.0, 30.0]))
+            .unwrap();
+        assert_eq!((part.width, part.height), (30, 30));
+        assert_eq!(part.get(2, 10).a, 0.0, "the five pixels before the rect");
+        assert_eq!(part.get(10, 10).a, 1.0, "the rect, shifted by the region");
+        assert_eq!(
+            part.get(24, 10).a,
+            1.0,
+            "its far edge, five short of the region's"
+        );
+        assert_eq!(part.get(27, 10).a, 0.0);
+        // Nothing outside the page is painted even when the region hangs
+        // off it, and an empty region is refused.
+        let off = session
+            .render_scaled(1.0, Some([-10.0, -10.0, 20.0, 20.0]))
+            .unwrap();
+        assert_eq!(off.get(2, 2).a, 0.0);
+        assert!(session
+            .render_scaled(1.0, Some([0.0, 0.0, 0.0, 5.0]))
+            .is_err());
+        // The PNG carries the scaled size.
+        let png = session.render_png_at(3.0, None).unwrap();
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        assert_eq!(w, 300);
     }
 
     #[test]

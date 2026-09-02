@@ -2324,6 +2324,26 @@ export function App() {
     download(session.export_png(), "untitled.png", "image/png");
   };
 
+  /** PNG at a multiple of the document's size — the @2x/@3x a screen
+   * asset wants, re-solved rather than upsampled. */
+  const exportPngAt = (scale: number) => {
+    if (!session) return;
+    download(session.export_png_at(scale, 0, 0, 0, 0), `untitled@${scale}x.png`, "image/png");
+  };
+
+  /** PNG of just the picked layers' box, at document resolution. */
+  const exportSelectionPng = () => {
+    if (!session || selectionSet.length === 0) return;
+    const box = unionBounds(selectionSet);
+    if (!box) return;
+    const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
+    try {
+      download(session.export_png_at(1, x, y, w, h), "selection.png", "image/png");
+    } catch (err) {
+      alert(`Export: ${err}`);
+    }
+  };
+
   const exportJpeg = () => {
     if (!session) return;
     download(session.export_jpeg(92), "untitled.jpg", "image/jpeg");
@@ -2500,6 +2520,17 @@ export function App() {
             <MenuItem icon="export" onClick={exportPng}>
               Export PNG
             </MenuItem>
+            <MenuItem icon="export" onClick={() => exportPngAt(2)} hint="@2x">
+              Export PNG at 2×
+            </MenuItem>
+            <MenuItem icon="export" onClick={() => exportPngAt(3)} hint="@3x">
+              Export PNG at 3×
+            </MenuItem>
+            {selectionSet.length > 0 && (
+              <MenuItem icon="export" onClick={exportSelectionPng}>
+                Export selection as PNG
+              </MenuItem>
+            )}
             <MenuItem
               icon="export"
               onClick={exportJpeg}

@@ -346,6 +346,38 @@ impl WasmSession {
         self.inner.export_jpeg(quality).map_err(to_js)
     }
 
+    /// PNG at `scale` pixels per document pixel, of the region
+    /// `[x, y, w, h]` in document pixels — or of the whole page when `w`
+    /// or `h` is zero.
+    pub fn export_png_at(
+        &self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Result<Vec<u8>, JsError> {
+        let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
+        self.inner.render_png_at(scale, region).map_err(to_js)
+    }
+
+    /// The same for JPEG.
+    #[allow(clippy::too_many_arguments)]
+    pub fn export_jpeg_at(
+        &self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        quality: u8,
+    ) -> Result<Vec<u8>, JsError> {
+        let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
+        self.inner
+            .export_jpeg_at(scale, region, quality)
+            .map_err(to_js)
+    }
+
     /// Export a one-page PDF (CMYK-separated when a press profile is set).
     pub fn export_pdf(&self) -> Result<Vec<u8>, JsError> {
         self.inner.export_pdf().map_err(to_js)

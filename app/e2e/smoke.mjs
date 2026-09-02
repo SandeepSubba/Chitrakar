@@ -2129,6 +2129,41 @@ assert(
   );
 }
 
+// 8x7. Export at a scale, and export just the selection. The PNG's IHDR
+// says how big the picture came out.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 250), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const pngSize = async (dl) => {
+    const bytes = await readFile(await dl.path());
+    return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  };
+  const [twoX] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export PNG at 2×")).click(),
+  ]);
+  assert((await pngSize(twoX)).join("x") === "1200x800", "2x export is twice the page");
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const [sel] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export selection as PNG")).click(),
+  ]);
+  const size = await pngSize(sel);
+  assert(
+    Math.abs(size[0] - 200) <= 1 && Math.abs(size[1] - 150) <= 1,
+    `the selection export is the rect's own size (${size})`,
+  );
+}
+
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {
