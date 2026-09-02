@@ -178,6 +178,30 @@ pub enum Filter {
     Sharpen { sigma: f32, amount: f32 },
 }
 
+/// A straight line the user placed to lay work out against. Not artwork —
+/// guides never render and never export — but document state all the same,
+/// because they belong to the layout rather than to the window it is being
+/// viewed through.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum Guide {
+    /// A vertical line at this document x.
+    Vertical(f32),
+    /// A horizontal line at this document y.
+    Horizontal(f32),
+}
+
+impl Guide {
+    pub fn at(&self) -> f32 {
+        match self {
+            Guide::Vertical(v) | Guide::Horizontal(v) => *v,
+        }
+    }
+
+    pub fn is_vertical(&self) -> bool {
+        matches!(self, Guide::Vertical(_))
+    }
+}
+
 /// Where each line sits inside the block's own width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TextAlign {

@@ -606,6 +606,94 @@ body {
   pointer-events: none;
 }
 
+/* Rulers: thin strips over the top and left of the canvas, marked in
+   document units. Guides are dragged out of them. */
+.ruler {
+  position: absolute;
+  z-index: 2;
+  background: #1c1c20;
+  color: var(--muted, #9aa0aa);
+  touch-action: none;
+  cursor: crosshair;
+  overflow: hidden;
+}
+
+.ruler-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+}
+
+.ruler-left {
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 18px;
+  border-right: 1px solid rgb(255 255 255 / 0.08);
+}
+
+.ruler svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ruler line {
+  stroke: rgb(255 255 255 / 0.35);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.ruler text {
+  fill: currentColor;
+  font-size: 9px;
+}
+
+/* The little square where the two rulers meet, so neither shows through
+   the other's first tick. */
+.ruler-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 18px;
+  height: 18px;
+  z-index: 3;
+  background: #1c1c20;
+  border-right: 1px solid rgb(255 255 255 / 0.08);
+  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+}
+
+.guide-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* A guide is a hairline, but it has to be grabbable, so it is drawn thin
+   and hit through a wider invisible twin. */
+.guide-overlay .guide {
+  stroke: #2ec4b6;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.guide-overlay .guide-hit {
+  stroke: transparent;
+  stroke-width: 9;
+  pointer-events: stroke;
+  cursor: grab;
+}
+
+.guide-overlay .guide.dragging {
+  pointer-events: none;
+  stroke-dasharray: 4 3;
+}
+
 /* Position and size: four short fields on one line, so exact placement is
    typed rather than nudged. */
 .geometry {

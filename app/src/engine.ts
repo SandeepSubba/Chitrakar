@@ -181,6 +181,7 @@ export type Command =
   | { SetName: { id: NodeId; name: string } }
   | { SetMask: { id: NodeId; mask: Mask | null } }
   | { SetEffects: { id: NodeId; effects: Effect[] } }
+  | { SetGuides: { guides: ({ Vertical: number } | { Horizontal: number })[] } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
   | { Batch: Command[] };
 

@@ -256,6 +256,12 @@ impl WasmSession {
         self.inner.invalidate();
     }
 
+    /// The document's guides as JSON: an array of `{"Vertical": x}` or
+    /// `{"Horizontal": y}`.
+    pub fn guides_json(&self) -> String {
+        self.inner.guides_json()
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: f64) -> Result<String, JsError> {
         self.inner.effects_json(NodeId(id as u64)).map_err(to_js)

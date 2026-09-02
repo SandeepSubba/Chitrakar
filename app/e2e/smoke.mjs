@@ -1593,6 +1593,73 @@ assert(
   );
 }
 
+// 8x2b. Rulers and guides: drag one out of a ruler, snap to it, put it
+// back. Guides are document state, so they undo.
+{
+  await newDocument(600, 400, "rgb");
+  const host = await page.locator(".canvas-host").boundingBox();
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  assert(
+    (await page.locator(".ruler").count()) === 2,
+    "the canvas has a ruler on each edge",
+  );
+  assert((await page.locator(".guide-overlay .guide").count()) === 0, "and no guides yet");
+  // Drag a vertical guide out of the left ruler to document x = 300.
+  await page.mouse.move(host.x + 8, host.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 200), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".guide-overlay .guide").count()) === 1,
+    "dragging out of a ruler placed a guide",
+  );
+  // A layer dropped near it is pulled onto it.
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(80, 80));
+  await page.mouse.down();
+  await page.mouse.move(...at(180, 180), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const leftField = page.locator('input[aria-label="X position"]');
+  // Aim the rect's left edge three document pixels short of the guide.
+  await page.mouse.move(...at(130, 130));
+  await page.mouse.down();
+  await page.mouse.move(...at(347, 130), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const landed = Number(await leftField.inputValue());
+  assert(
+    Math.abs(landed - 300) < 1.5,
+    `the drop caught the guide rather than where it was aimed (${landed})`,
+  );
+  // Throw the guide away by dragging it back onto the ruler.
+  // A guide line has no area, so grab it by the position it reports.
+  const guideX = await page.$eval(".guide-overlay .guide-hit", (el) =>
+    Number(el.getAttribute("x1")),
+  );
+  await page.mouse.move(host.x + guideX, host.y + 250);
+  await page.mouse.down();
+  await page.mouse.move(host.x + 6, host.y + 200, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".guide-overlay .guide").count()) === 0,
+    "and dropping it back on the ruler threw it away",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".guide-overlay .guide").count()) === 1,
+    "which undoes like any other edit",
+  );
+  await page.screenshot({ path: join(OUT, "guides.png") });
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

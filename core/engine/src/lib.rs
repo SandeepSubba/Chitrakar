@@ -176,7 +176,10 @@ impl Session {
             Command::AddNode { .. }
             | Command::RestoreSubtree { .. }
             | Command::Batch(_)
-            | Command::ResizeCanvas { .. } => None,
+            | Command::ResizeCanvas { .. }
+            // Guides are not artwork: nothing renders them, so nothing
+            // needs repainting when they change.
+            | Command::SetGuides { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
@@ -267,6 +270,13 @@ impl Session {
                 name(id)
             ),
             Command::MoveNode { id, .. } => format!("Move {}", name(id)),
+            Command::SetGuides { guides } => {
+                if guides.is_empty() {
+                    "Clear guides".into()
+                } else {
+                    format!("{} guides", guides.len())
+                }
+            }
             Command::ResizeCanvas { width, height, .. } => {
                 format!("Resize canvas to {width}x{height}")
             }
@@ -1175,6 +1185,11 @@ impl Session {
         self.stale_all = true;
     }
 
+    /// The document's guides as JSON.
+    pub fn guides_json(&self) -> String {
+        serde_json::to_string(self.doc.guides()).unwrap_or_else(|_| "[]".into())
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: NodeId) -> Result<String, EngineError> {
         serde_json::to_string(&self.doc.node(id)?.effects)
@@ -1547,6 +1562,38 @@ mod tests {
             session.render_cached().unwrap();
         }
         println!("A4 through a 1400x900 viewport: {:?}", t0.elapsed() / 3);
+    }
+
+    #[test]
+    fn guides_are_document_state_that_costs_no_repaint() {
+        // Guides belong to the layout, so they undo and they save; they
+        // are not artwork, so changing them repaints nothing.
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        add_rect(&mut session, "r", 20.0, 20.0);
+        session.render_cached().unwrap();
+        let before = session.pixels_recomputed();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(32.0), Guide::Horizontal(10.0)],
+            })
+            .unwrap();
+        assert_eq!(session.document().guides().len(), 2);
+        let (_, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_none(), "placing a guide repainted something");
+        assert_eq!(session.pixels_recomputed(), before, "and cost pixels");
+
+        assert!(session.undo().unwrap());
+        assert!(session.document().guides().is_empty(), "and it undoes");
+        // They survive a save and reopen.
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(12.5)],
+            })
+            .unwrap();
+        let bytes = session.save().unwrap();
+        let reopened = Session::load(&bytes).unwrap();
+        assert_eq!(reopened.document().guides(), &[Guide::Vertical(12.5)]);
     }
 
     #[test]

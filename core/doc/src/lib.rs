@@ -8,8 +8,8 @@
 mod node;
 
 pub use node::{
-    Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Mask, MaskKind, Node, NodeKind,
-    RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
+    Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Guide, Mask, MaskKind, Node,
+    NodeKind, RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
 };
 
 use chitrakar_color::ColorMode;
@@ -68,6 +68,10 @@ pub struct Document {
     cmyk_profile_bytes: Option<Vec<u8>>,
     #[serde(skip)]
     cmyk_cms: Option<chitrakar_color::CmykCms>,
+    /// Straight lines the user placed to lay work out against. Document
+    /// state, but not artwork: nothing renders or exports them. Additive.
+    #[serde(default)]
+    guides: Vec<Guide>,
 }
 
 /// An immutable source image (8-bit sRGB RGBA). The original bytes a raster
@@ -101,6 +105,7 @@ impl Document {
             resources: HashMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
+            guides: Vec::new(),
         }
     }
 
@@ -183,6 +188,10 @@ impl Document {
     /// The group containing a node; None for the root (or an unknown id).
     pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
         self.parent_and_index(id).map(|(p, _)| p)
+    }
+
+    pub fn guides(&self) -> &[Guide] {
+        &self.guides
     }
 
     pub fn root(&self) -> NodeId {
@@ -363,6 +372,10 @@ impl Document {
                     dy: -dy,
                 })
             }
+            Command::SetGuides { guides } => {
+                let prev = std::mem::replace(&mut self.guides, guides);
+                Ok(Command::SetGuides { guides: prev })
+            }
             Command::SetEffects { id, effects } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = std::mem::replace(&mut node.effects, effects);
@@ -519,6 +532,12 @@ pub enum Command {
     SetEffects {
         id: NodeId,
         effects: Vec<Effect>,
+    },
+    /// Replace the document's guides. Whole-list, like effects: adding,
+    /// moving and clearing one are then the same command with the same
+    /// obvious inverse.
+    SetGuides {
+        guides: Vec<Guide>,
     },
     /// Change the page's size, shifting every top-level layer by
     /// `(dx, dy)` so a crop keeps the picture where it was. Its own

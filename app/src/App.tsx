@@ -337,6 +337,20 @@ interface Guides {
   y: number[];
 }
 
+/** Thickness of the rulers, in CSS pixels. */
+const RULER = 18;
+
+/** Tick spacings a ruler will choose between, in document units. The first
+ * that puts ticks at least sixty screen pixels apart wins, so the labels
+ * stay readable at any zoom. */
+const TICK_STEPS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+/** A guide the user placed, mirroring `chitrakar_doc::Guide`. */
+type DocGuide = { Vertical: number } | { Horizontal: number };
+
+const guideAt = (g: DocGuide) => ("Vertical" in g ? g.Vertical : g.Horizontal);
+const guideIsVertical = (g: DocGuide) => "Vertical" in g;
+
 /** How close, in screen pixels, an edge has to come before it snaps. A
  * fixed screen distance rather than a document one, so snapping feels the
  * same however far you are zoomed in. */
@@ -442,6 +456,16 @@ export function App() {
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
   /** Alignment guides drawn while a drag is snapped to something. */
   const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
+  /** The guides the user has placed, read back from the document. */
+  const [docGuides, setDocGuides] = useState<DocGuide[]>([]);
+  const [showGuides, setShowGuides] = useState(true);
+  /** A guide being dragged: out of a ruler (index null) or an existing one
+   * being moved. `at` is where it currently sits, in document units. */
+  const [guideDrag, setGuideDrag] = useState<{
+    vertical: boolean;
+    index: number | null;
+    at: number;
+  } | null>(null);
   /** The crop frame being dragged, in host coordinates: [x0, y0, x1, y1]. */
   const [cropRect, setCropRect] = useState<[number, number, number, number] | null>(
     null,
@@ -482,6 +506,7 @@ export function App() {
       }
     }
     setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
+    setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
     // The page's size is document state like anything else — undoing a
     // crop changes it — so it is read back here rather than only being
     // written where a crop or a new document sets it.
@@ -834,6 +859,10 @@ export function App() {
   const snapTargets = (moving: NodeId[]): [number[], number[]] => {
     const xs = snapLines(0, docSize[0]);
     const ys = snapLines(0, docSize[1]);
+    // A guide is placed to be snapped to; that is the whole point of one.
+    for (const g of docGuides) {
+      (guideIsVertical(g) ? xs : ys).push(guideAt(g));
+    }
     if (!session) return [xs, ys];
     for (const layer of layers) {
       const id = layer.id as NodeId;
@@ -901,6 +930,55 @@ export function App() {
 
   const onHostPointerUp = () => {
     panDragRef.current = null;
+  };
+
+  /** Commit the guide list, as one history entry. */
+  const setGuidesDoc = (next: DocGuide[]) => run({ SetGuides: { guides: next } });
+
+  /** Start dragging a guide: out of a ruler when `index` is null, or an
+   * existing one when it is not. The pointer is followed on the window so
+   * the drag survives crossing the canvas, the panel, or a ruler. */
+  const startGuideDrag = (
+    vertical: boolean,
+    index: number | null,
+    e: React.PointerEvent,
+  ) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const host = hostRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const positionOf = (ev: { clientX: number; clientY: number }) =>
+      vertical
+        ? (ev.clientX - rect.left - view.x) / view.zoom
+        : (ev.clientY - rect.top - view.y) / view.zoom;
+    // Dropping a guide back on a ruler is how one is thrown away, so the
+    // gesture has to know where the rulers are.
+    const overRuler = (ev: { clientX: number; clientY: number }) =>
+      vertical
+        ? ev.clientX - rect.left < RULER
+        : ev.clientY - rect.top < RULER;
+    setGuideDrag({ vertical, index, at: positionOf(e) });
+    const onMove = (ev: PointerEvent) =>
+      setGuideDrag((g) => (g ? { ...g, at: positionOf(ev) } : g));
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setGuideDrag(null);
+      const at = Math.round(positionOf(ev) * 100) / 100;
+      const limit = vertical ? docSizeRef.current[0] : docSizeRef.current[1];
+      const keep = !overRuler(ev) && at >= 0 && at <= limit;
+      const next = docGuides.filter((_, i) => i !== index);
+      if (keep) {
+        next.push(vertical ? { Vertical: at } : { Horizontal: at });
+      } else if (index === null) {
+        return; // dragged out of a ruler and dropped nowhere
+      }
+      setGuidesDoc(next);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   const onCanvasPointerDown = (e: React.PointerEvent) => {
@@ -2256,6 +2334,15 @@ export function App() {
             <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)}>
               Zoom out
             </MenuItem>
+            <MenuItem
+              icon={showGuides ? "check" : "fit"}
+              onClick={() => setShowGuides((v) => !v)}
+            >
+              {showGuides ? "Hide guides" : "Show guides"}
+            </MenuItem>
+            <MenuItem icon="trash" onClick={() => setGuidesDoc([])}>
+              Clear guides
+            </MenuItem>
           </MenuButton>
         </nav>
 
@@ -2387,6 +2474,122 @@ export function App() {
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
         >
+          {/* Rulers along the top and left edges, marked in document
+              units and following the view. Dragging out of one places a
+              guide; dropping a guide back on one throws it away. */}
+          {(() => {
+            const step =
+              TICK_STEPS.find((s) => s * view.zoom >= 60) ??
+              TICK_STEPS[TICK_STEPS.length - 1];
+            const ticks = (vertical: boolean) => {
+              const span = vertical ? viewport[1] : viewport[0];
+              const origin = vertical ? view.y : view.x;
+              const first = Math.floor(-origin / view.zoom / step) * step;
+              const last = (span - origin) / view.zoom;
+              const out: number[] = [];
+              for (let v = first; v <= last; v += step) out.push(v);
+              return out;
+            };
+            const ruler = (vertical: boolean) => (
+              <div
+                className={vertical ? "ruler ruler-left" : "ruler ruler-top"}
+                aria-label={vertical ? "Vertical ruler" : "Horizontal ruler"}
+                onPointerDown={(e) => startGuideDrag(vertical, null, e)}
+              >
+                <svg>
+                  {ticks(vertical).map((v) => {
+                    const at =
+                      (vertical ? view.y : view.x) + v * view.zoom;
+                    return vertical ? (
+                      <g key={v}>
+                        <line x1={RULER - 5} y1={at} x2={RULER} y2={at} />
+                        {/* Turned a quarter to read up the ruler. The
+                            rotation puts the glyphs to the left of their
+                            anchor, so the anchor sits clear of the edge or
+                            they fall off it. */}
+                        <text
+                          x={RULER - 6}
+                          y={at + 3}
+                          transform={`rotate(-90 ${RULER - 6} ${at + 3})`}
+                        >
+                          {v}
+                        </text>
+                      </g>
+                    ) : (
+                      <g key={v}>
+                        <line x1={at} y1={RULER - 5} x2={at} y2={RULER} />
+                        <text x={at + 3} y={RULER - 7}>
+                          {v}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            );
+            return (
+              <>
+                {ruler(false)}
+                {ruler(true)}
+                <div className="ruler-corner" />
+              </>
+            );
+          })()}
+          {/* Guides: the ones placed, plus the one being dragged. */}
+          {showGuides && (
+            <svg className="guide-overlay" aria-hidden="true">
+              {docGuides.map((g, i) => {
+                const vertical = guideIsVertical(g);
+                const at =
+                  (vertical ? view.x : view.y) + guideAt(g) * view.zoom;
+                const hidden = guideDrag?.index === i;
+                const ends = {
+                  x1: vertical ? at : 0,
+                  y1: vertical ? 0 : at,
+                  x2: vertical ? at : viewport[0],
+                  y2: vertical ? viewport[1] : at,
+                };
+                return hidden ? null : (
+                  <g key={`${vertical}${i}`}>
+                    {/* A hairline is hard to catch with a pointer, so the
+                        line that takes the grab is wider and invisible. */}
+                    <line
+                      className="guide-hit"
+                      {...ends}
+                      data-guide={vertical ? `v${guideAt(g)}` : `h${guideAt(g)}`}
+                      onPointerDown={(e) => startGuideDrag(vertical, i, e)}
+                    />
+                    <line className="guide" {...ends} />
+                  </g>
+                );
+              })}
+              {guideDrag && (
+                <line
+                  className="guide dragging"
+                  x1={
+                    guideDrag.vertical
+                      ? view.x + guideDrag.at * view.zoom
+                      : 0
+                  }
+                  y1={
+                    guideDrag.vertical
+                      ? 0
+                      : view.y + guideDrag.at * view.zoom
+                  }
+                  x2={
+                    guideDrag.vertical
+                      ? view.x + guideDrag.at * view.zoom
+                      : viewport[0]
+                  }
+                  y2={
+                    guideDrag.vertical
+                      ? viewport[1]
+                      : view.y + guideDrag.at * view.zoom
+                  }
+                />
+              )}
+            </svg>
+          )}
           {/* The page itself: white, with the shadow that lifts it off
               the desk. The canvas no longer is the page — it is a window
               onto it, covering the whole viewport — so the page's own

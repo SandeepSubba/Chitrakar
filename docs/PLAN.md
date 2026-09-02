@@ -56,6 +56,9 @@ without reading anything else.*
   multi-selection moves as one — by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels.
+  Rulers run along the canvas edges; dragging out of one places a guide
+  that layers snap to and that saves with the document, and dropping it
+  back throws it away.
   Zooming in re-renders rather than magnifies: the engine composites a
   viewport at the resolution the canvas is displayed at, so outlines,
   gradients and glyphs are re-solved instead of interpolated, and a page
