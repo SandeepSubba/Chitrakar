@@ -108,7 +108,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~145),
+- **Verify before committing:** `cargo test --workspace` (~147),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~300 browser
   assertions). Both suites self-skip CMYK-profile steps unless

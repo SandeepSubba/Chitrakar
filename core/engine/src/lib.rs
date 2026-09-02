@@ -1454,16 +1454,17 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
-    /// The faces this document's text blocks name, each once, in the
+    /// The faces this document's text blocks draw with — each one named,
+    /// and the oblique twin an italic block is set in — each once, in the
     /// order they sort. Names nothing answers to are listed too: they are
     /// what the file asks for, whether or not this process can oblige.
     pub fn fonts_used(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .doc
             .nodes()
-            .filter_map(|(_, n)| match &n.kind {
-                NodeKind::Text(spec) if !spec.font.is_empty() => Some(spec.font.clone()),
-                _ => None,
+            .flat_map(|(_, n)| match &n.kind {
+                NodeKind::Text(spec) => chitrakar_render::text::faces_used(spec),
+                _ => Vec::new(),
             })
             .collect();
         names.sort();
@@ -2959,7 +2960,10 @@ mod tests {
     #[test]
     fn the_fonts_text_is_set_in_travel_inside_the_chitra() {
         const BOLD: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
         Session::register_font("Carried Face", BOLD.to_vec()).unwrap();
+        Session::register_font("Carried Face Oblique", OBLIQUE.to_vec()).unwrap();
         let mut session = Session::new(64, 64, ColorMode::Rgb);
         let root = session.document().root();
         for (i, face) in [
@@ -2983,16 +2987,39 @@ mod tests {
             session.fonts_used(),
             ["Carried Face", "DejaVu Sans", "Nobody Has This"]
         );
+        // An italic block in the face draws with its oblique twin, so the
+        // twin is used — and carried — too.
+        let mut italic = text_in("Carried Face");
+        if let NodeKind::Text(spec) = &mut italic.kind {
+            spec.italic = true;
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 4,
+                node: Box::new(italic),
+            })
+            .unwrap();
+        assert_eq!(
+            session.fonts_used(),
+            [
+                "Carried Face",
+                "Carried Face Oblique",
+                "DejaVu Sans",
+                "Nobody Has This"
+            ]
+        );
 
         let bytes = session.save().unwrap();
         let opened = chitrakar_codecs::load_chitra_with_fonts(&bytes).unwrap();
         let names: Vec<&str> = opened.fonts.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            ["Carried Face"],
-            "only a face this process holds is carried: not the bundled one, not one it never saw"
+            ["Carried Face", "Carried Face Oblique"],
+            "only faces this process holds are carried: not the bundled one, not one it never saw"
         );
-        assert_eq!(opened.fonts[0].1, BOLD, "and it is carried whole");
+        assert_eq!(opened.fonts[0].1, BOLD, "and they are carried whole");
+        assert_eq!(opened.fonts[1].1, OBLIQUE);
         let without = chitrakar_codecs::save_chitra(session.document()).unwrap();
         assert!(
             bytes.len() > without.len() + 100_000,

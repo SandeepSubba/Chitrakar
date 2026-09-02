@@ -49,6 +49,13 @@ fn registry() -> &'static RwLock<HashMap<String, &'static Fonts>> {
 /// bytes are kept for good: a registered font is referenced from every
 /// text block that names it, so there is no moment it could be dropped.
 pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
+    // The bundled face answers to its own name and to none: a face
+    // registered under either would be listed and never drawn.
+    if name.trim().is_empty() || name == DEFAULT_FONT {
+        return Err(format!(
+            "\"{name}\" is the bundled face's name; register the file under another"
+        ));
+    }
     let fonts: &'static Fonts = Box::leak(Box::new(parse(Box::leak(bytes.into_boxed_slice()))?));
     registry()
         .write()
@@ -121,6 +128,12 @@ fn upright_for(spec: &TextSpec) -> &'static Fonts {
 /// "… Italic" — or the face itself when it already is one, so an italic
 /// set directly in an oblique face is not leaned a second time.
 fn oblique_for(spec: &TextSpec) -> Option<&'static Fonts> {
+    let name = oblique_name(spec)?;
+    registry().read().ok()?.get(&name).copied()
+}
+
+/// The registered name of the block's oblique twin, if there is one.
+fn oblique_name(spec: &TextSpec) -> Option<String> {
     let base = if spec.font.is_empty() {
         DEFAULT_FONT
     } else {
@@ -128,11 +141,30 @@ fn oblique_for(spec: &TextSpec) -> Option<&'static Fonts> {
     };
     let registry = registry().read().ok()?;
     if base.ends_with(" Oblique") || base.ends_with(" Italic") {
-        return registry.get(base).copied();
+        return registry.contains_key(base).then(|| base.to_string());
     }
     ["Oblique", "Italic"]
         .iter()
-        .find_map(|suffix| registry.get(&format!("{base} {suffix}")).copied())
+        .map(|suffix| format!("{base} {suffix}"))
+        .find(|name| registry.contains_key(name))
+}
+
+/// The registered names a block draws with: the face it names, and the
+/// oblique twin an italic block is set in when one is registered — what
+/// a file has to carry for the block to read the same elsewhere.
+pub fn faces_used(spec: &TextSpec) -> Vec<String> {
+    let mut names = Vec::new();
+    if !spec.font.is_empty() {
+        names.push(spec.font.clone());
+    }
+    if spec.italic {
+        if let Some(twin) = oblique_name(spec) {
+            if !names.contains(&twin) {
+                names.push(twin);
+            }
+        }
+    }
+    names
 }
 
 /// Whether the block leans by the rasterizer's hand rather than the font's.
@@ -798,6 +830,46 @@ mod tests {
             measure(&upright).0.ceil(),
             measure(&oblique).0.ceil(),
             "and a real oblique needs no room past the glyphs' own advances"
+        );
+    }
+
+    #[test]
+    fn the_bundled_face_keeps_its_name() {
+        let before = font_names();
+        assert!(register_font(DEFAULT_FONT, FONT_BYTES.to_vec()).is_err());
+        assert!(register_font("  ", FONT_BYTES.to_vec()).is_err());
+        assert_eq!(font_names(), before, "and the list is not doubled");
+    }
+
+    #[test]
+    fn faces_used_names_the_twin_an_italic_block_draws_with() {
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        register_font("Twin Test", MONO.to_vec()).unwrap();
+        register_font("Twin Test Italic", MONO.to_vec()).unwrap();
+        let mut block = spec("x", 12.0);
+        assert!(
+            faces_used(&block).is_empty(),
+            "the bundled face is nobody's to carry"
+        );
+        block.font = "Twin Test".into();
+        assert_eq!(faces_used(&block), ["Twin Test"]);
+        block.italic = true;
+        assert_eq!(
+            faces_used(&block),
+            ["Twin Test", "Twin Test Italic"],
+            "italic draws with the twin, so the twin is used too"
+        );
+        block.font = "Twin Test Italic".into();
+        assert_eq!(
+            faces_used(&block),
+            ["Twin Test Italic"],
+            "once, when it is the face itself"
+        );
+        block.font = "Twinless".into();
+        assert_eq!(
+            faces_used(&block),
+            ["Twinless"],
+            "a synthesized lean draws with the face alone"
         );
     }
 
