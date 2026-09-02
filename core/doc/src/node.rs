@@ -166,6 +166,15 @@ pub enum Filter {
     Sharpen { sigma: f32, amount: f32 },
 }
 
+/// Where each line sits inside the block's own width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// A live text object: the string and styling are the document state,
 /// glyphs rasterize at render time (nothing is ever baked).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -174,6 +183,42 @@ pub struct TextSpec {
     /// Font size in document pixels (ascent-to-descent scale).
     pub size: f32,
     pub fill: AuthoredColor,
+    /// Additive, all three: a document written before they existed loads
+    /// with the values it was rendered at, so it still looks like itself.
+    #[serde(default)]
+    pub align: TextAlign,
+    /// Line spacing as a multiple of the font's own line height.
+    #[serde(default = "one")]
+    pub line_height: f32,
+    /// Tracking: extra space after each glyph, in ems, the way it is
+    /// normally quoted — so it scales with the size rather than fighting it.
+    #[serde(default)]
+    pub letter_spacing: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl TextSpec {
+    /// A block with default styling; the three additive fields have to come
+    /// from somewhere when the spec is built in Rust rather than parsed.
+    pub fn new(text: impl Into<String>, size: f32, fill: AuthoredColor) -> Self {
+        Self {
+            text: text.into(),
+            size,
+            fill,
+            align: TextAlign::default(),
+            line_height: 1.0,
+            letter_spacing: 0.0,
+        }
+    }
+
+    /// The line height actually used, guarded against a zero or negative
+    /// multiple that would collapse every line onto one.
+    pub fn line_scale(&self) -> f32 {
+        self.line_height.max(0.05)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

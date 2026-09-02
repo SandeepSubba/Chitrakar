@@ -2579,11 +2579,7 @@ mod tests {
             index: 0,
             node: Box::new(Node::text(
                 "t",
-                chitrakar_doc::TextSpec {
-                    text: "Ag".into(),
-                    size,
-                    fill: RED,
-                },
+                chitrakar_doc::TextSpec::new("Ag", size, RED),
             )),
         })
         .unwrap();
@@ -3719,11 +3715,7 @@ mod tests {
             index: 0,
             node: Box::new(Node::text(
                 "label",
-                chitrakar_doc::TextSpec {
-                    text: "Hi".into(),
-                    size: 48.0,
-                    fill: RED,
-                },
+                chitrakar_doc::TextSpec::new("Hi", 48.0, RED),
             )),
         })
         .unwrap();
@@ -3768,11 +3760,9 @@ mod tests {
         // Editing the text through SetKind grows the bounds (live object).
         doc.apply(Command::SetKind {
             id,
-            kind: Box::new(NodeKind::Text(chitrakar_doc::TextSpec {
-                text: "Hi there".into(),
-                size: 48.0,
-                fill: RED,
-            })),
+            kind: Box::new(NodeKind::Text(chitrakar_doc::TextSpec::new(
+                "Hi there", 48.0, RED,
+            ))),
         })
         .unwrap();
         let Bounds::Rect(_, _, wider, _) = node_bounds(&doc, id).unwrap() else {

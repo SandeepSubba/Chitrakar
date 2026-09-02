@@ -155,16 +155,35 @@ fn write_children(
                 }
             }
             NodeKind::Text(spec) => {
+                // SVG text is baseline-anchored and single-line; our node
+                // origin is the block's top and its text can hold newlines.
+                // So the first baseline is approximated from the size, and
+                // each line becomes a tspan a line-height further down.
+                // Alignment is not carried: it needs the block's measured
+                // width, which means the font metrics the renderer has and
+                // this crate does not.
+                let step = spec.size * 1.17 * spec.line_scale();
+                let track = spec.letter_spacing * spec.size;
+                let spacing = if track.abs() > 1e-4 {
+                    format!(r#" letter-spacing="{track:.3}""#)
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text y="{:.1}" font-family="DejaVu Sans, sans-serif" font-size="{}"{common} fill="{}">{}</text>"#,
-                    // Approximate first baseline: SVG text is baseline-
-                    // anchored, our node origin is the block's top.
-                    spec.size * 0.93,
+                    r#"{pad}<text font-family="DejaVu Sans, sans-serif" font-size="{}"{spacing}{common} fill="{}">"#,
                     spec.size,
                     color_hex(doc, spec.fill),
-                    escape_xml(&spec.text)
                 );
+                for (i, line) in spec.text.split('\n').enumerate() {
+                    let _ = writeln!(
+                        out,
+                        r#"{pad}  <tspan x="0" y="{:.2}">{}</tspan>"#,
+                        spec.size * 0.93 + i as f32 * step,
+                        escape_xml(line)
+                    );
+                }
+                let _ = writeln!(out, "{pad}</text>");
             }
             NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                 let _ = writeln!(
@@ -407,11 +426,7 @@ mod tests {
             index: 2,
             node: Box::new(Node::text(
                 "t",
-                chitrakar_doc::TextSpec {
-                    text: "a < b".into(),
-                    size: 24.0,
-                    fill: RED,
-                },
+                chitrakar_doc::TextSpec::new("a < b", 24.0, RED),
             )),
         })
         .unwrap();
@@ -428,6 +443,43 @@ mod tests {
         );
         assert!(svg.contains("a &lt; b"), "text XML-escaped");
         assert!(svg.contains(r#"font-size="24""#));
+
+        // A second block, with newlines and tracking: each line is its own
+        // tspan a line-height down, and the tracking rides on the <text>.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::text("t2", {
+                let mut spec = chitrakar_doc::TextSpec::new("one\ntwo", 20.0, RED);
+                spec.line_height = 1.5;
+                spec.letter_spacing = 0.1;
+                spec
+            })),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"letter-spacing="2.000""#),
+            "tracking in ems -> px"
+        );
+        assert!(svg.contains(">one</tspan>") && svg.contains(">two</tspan>"));
+        let baselines: Vec<f32> = svg
+            .lines()
+            .filter(|l| l.contains("<tspan") && (l.contains(">one<") || l.contains(">two<")))
+            .filter_map(|l| {
+                let at = l.find(r#"y=""#)? + 3;
+                l[at..].split('"').next()?.parse().ok()
+            })
+            .collect();
+        assert_eq!(
+            baselines.len(),
+            2,
+            "two lines, two baselines: {baselines:?}"
+        );
+        assert!(
+            (baselines[1] - baselines[0] - 20.0 * 1.17 * 1.5).abs() < 0.1,
+            "the second line sits a scaled line-height down: {baselines:?}"
+        );
     }
 
     #[test]

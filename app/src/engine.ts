@@ -90,10 +90,18 @@ export type Effect = {
   };
 };
 
+export type TextAlign = "Left" | "Center" | "Right";
+
 export interface TextSpec {
   text: string;
   size: number;
   fill: AuthoredColor;
+  /** Where each line sits inside the block's own width. */
+  align: TextAlign;
+  /** Multiple of the font's natural line height. */
+  line_height: number;
+  /** Tracking, in ems, so it follows the size. */
+  letter_spacing: number;
 }
 
 export interface GradientStop {

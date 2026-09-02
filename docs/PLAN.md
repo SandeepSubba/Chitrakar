@@ -51,7 +51,8 @@ without reading anything else.*
   Zooming in re-renders rather than magnifies: the engine composites at
   the resolution the canvas is displayed at (capped by a pixel budget), so
   outlines, gradients and glyphs are re-solved instead of interpolated.
-  Text likewise rasterizes at the size it is actually seen at.
+  Text likewise rasterizes at the size it is actually seen at, and
+  carries alignment, line spacing and tracking.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
@@ -101,7 +102,9 @@ without reading anything else.*
   not exchange with other applications; undo after a delete restores the
   layer but not the selection; snapping applies to moving a layer, not yet
   to resizing one; drop shadow is the only effect so far, one per layer,
-  and export flattens it like everything else; masks are ellipses only, moved and resized
+  and export flattens it like everything else; SVG export writes each
+  text line as its own tspan but cannot carry alignment, which needs font
+  metrics the codecs crate does not have; masks are ellipses only, moved and resized
   on canvas but not reshaped; PDF/TIFF
   embed the composite as an image rather than live vectors.
 

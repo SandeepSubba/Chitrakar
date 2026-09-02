@@ -1254,6 +1254,93 @@ assert(
   "size change was one undo step",
 );
 
+// 8v2. Text styling: two lines, then alignment, spacing and tracking.
+{
+  const setText = async (value) =>
+    page.locator('textarea[aria-label="Text content"]').evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    }, value);
+  // A long line over a short one, so alignment has slack to move.
+  await setText("Hello there!\nhi");
+  await page.waitForTimeout(300);
+  const band = [740, 640, 1180, 720]; // the second line's band
+  const tall = await inkCount(...band);
+  assert(tall > 20, `the second line renders (${tall} px)`);
+  // Where the short line's ink sits horizontally, as its centre of mass.
+  const secondLineCentre = () =>
+    page.evaluate(([a, b, c, d]) => {
+      const el = document.getElementById("engine-canvas");
+      const s = Number(el.dataset.frameScale) || 1;
+      [a, b, c, d] = [a, b, c, d].map((v) => Math.round(v * s));
+      const img = el.getContext("2d").getImageData(a, b, c - a, d - b).data;
+      let sum = 0;
+      let n = 0;
+      for (let i = 0; i < img.length; i += 4) {
+        if (img[i + 3] > 0) {
+          sum += ((i / 4) % (c - a)) / s;
+          n++;
+        }
+      }
+      return n === 0 ? null : sum / n;
+    }, band);
+  const atLeft = await secondLineCentre();
+  await page.click('button[aria-label="Align text right"]');
+  await page.waitForTimeout(300);
+  const atRight = await secondLineCentre();
+  assert(
+    atRight - atLeft > 20,
+    `right alignment pushed the short line across (${atLeft} -> ${atRight})`,
+  );
+  await page.click('button[aria-label="Centre text"]');
+  await page.waitForTimeout(300);
+  const atCentre = await secondLineCentre();
+  assert(
+    atCentre > atLeft + 5 && atCentre < atRight - 5,
+    `and centring puts it between the two (${atLeft} / ${atCentre} / ${atRight})`,
+  );
+  await page.click('button[aria-label="Align text left"]');
+  await page.waitForTimeout(300);
+
+  // Line height and tracking change the block's own measured size, which
+  // is what the selection outline is drawn around.
+  const outline = async () => {
+    const q = await page.$eval(".sel-outline polygon", (el) =>
+      el.getAttribute("points").split(" ").map((p) => p.split(",").map(Number)),
+    );
+    const xs = q.map((p) => p[0]);
+    const ys = q.map((p) => p[1]);
+    return [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
+  };
+  const plain = await outline();
+  await setSlider("Line height", 2);
+  await page.waitForTimeout(250);
+  const spaced = await outline();
+  assert(
+    spaced[1] > plain[1] * 1.6 && Math.abs(spaced[0] - plain[0]) < 2,
+    `double spacing grew the block downwards only (${plain} -> ${spaced})`,
+  );
+  await setSlider("Line height", 1);
+  await page.waitForTimeout(250);
+
+  await setSlider("Letter spacing", 0.3);
+  await page.waitForTimeout(250);
+  const tracked = await outline();
+  assert(
+    tracked[0] > plain[0] * 1.2 && Math.abs(tracked[1] - plain[1]) < 2,
+    `tracking grew the block sideways only (${plain} -> ${tracked})`,
+  );
+  await setSlider("Letter spacing", 0);
+  await page.waitForTimeout(250);
+  await setText("Hello!");
+  await page.waitForTimeout(300);
+}
+
 await page.screenshot({ path: join(OUT, "editor5.png") });
 
 // 8w. Export SVG: the download carries live vector markup.

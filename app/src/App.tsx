@@ -815,6 +815,9 @@ export function App() {
                 text: "Text",
                 size: 48,
                 fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                align: "Left",
+                line_height: 1,
+                letter_spacing: 0,
               },
             },
             x,
@@ -3086,6 +3089,31 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
         </label>
         {slider("Size", t.size, 8, 200, 1, (v) => ({
           Text: { ...t, size: v },
+        }))}
+        <div className="align-bar" role="group" aria-label="Text alignment">
+          {(
+            [
+              ["Left", "alignLeft", "Align text left"],
+              ["Center", "alignCenterH", "Centre text"],
+              ["Right", "alignRight", "Align text right"],
+            ] as const
+          ).map(([mode, icon, title]) => (
+            <button
+              key={mode}
+              className={(t.align ?? "Left") === mode ? "active" : undefined}
+              title={title}
+              aria-label={title}
+              onClick={() => onEdit({ Text: { ...t, align: mode } }, false)}
+            >
+              <Icon name={icon} />
+            </button>
+          ))}
+        </div>
+        {slider("Line height", t.line_height ?? 1, 0.5, 3, 0.05, (v) => ({
+          Text: { ...t, line_height: v },
+        }))}
+        {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
+          Text: { ...t, letter_spacing: v },
         }))}
         <label className="row">
           Color

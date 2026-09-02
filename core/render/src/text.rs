@@ -53,27 +53,48 @@ impl TextRaster {
 
 /// Natural (untransformed) size of a text block in document pixels.
 pub fn measure(spec: &TextSpec) -> (f32, f32) {
-    let font = font().as_scaled(spec.size.max(0.1));
-    let line_height = font.ascent() - font.descent() + font.line_gap();
+    measure_at(spec, 1.0)
+}
+
+/// The same, for a block rasterized at `scale`. Metrics are linear in the
+/// font size, so this is the natural measure times the scale — but taken
+/// from the scaled font, so it agrees with the raster to the pixel.
+fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
+    let font = font().as_scaled(spec.size.max(0.1) * scale);
+    let step = line_step(&font, spec);
     let mut widest = 0f32;
     let mut lines = 0u32;
     for line in spec.text.split('\n') {
         lines += 1;
-        widest = widest.max(line_width(&font, line));
+        widest = widest.max(line_width(&font, line, spec, scale));
     }
-    (
-        widest.max(1.0),
-        (lines.max(1) as f32 * line_height).max(1.0),
-    )
+    (widest.max(1.0), (lines.max(1) as f32 * step).max(1.0))
 }
 
-fn line_width(font: &impl ScaleFont<&'static FontRef<'static>>, line: &str) -> f32 {
+/// Baseline-to-baseline distance: the font's own line height, scaled by
+/// whatever the block asks for.
+fn line_step(font: &impl ScaleFont<&'static FontRef<'static>>, spec: &TextSpec) -> f32 {
+    (font.ascent() - font.descent() + font.line_gap()) * spec.line_scale()
+}
+
+/// Tracking in raster pixels. Quoted in ems, so it follows the size.
+fn tracking(spec: &TextSpec, scale: f32) -> f32 {
+    spec.letter_spacing * spec.size.max(0.1) * scale
+}
+
+fn line_width(
+    font: &impl ScaleFont<&'static FontRef<'static>>,
+    line: &str,
+    spec: &TextSpec,
+    scale: f32,
+) -> f32 {
+    let track = tracking(spec, scale);
     let mut width = 0f32;
     let mut prev = None;
     for ch in line.chars() {
         let id = font.glyph_id(ch);
         if let Some(prev) = prev {
-            width += font.kern(prev, id);
+            width += font.kern(prev, id) + track;
         }
         width += font.h_advance(id);
         prev = Some(id);
@@ -95,25 +116,30 @@ pub fn rasterize(spec: &TextSpec) -> TextRaster {
 /// result by natural-size coordinates times the same scale.
 pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let scale = scale.max(0.01);
-    let (w, h) = measure(spec);
-    let (width, height) = (
-        (w * scale).ceil().max(1.0) as u32,
-        (h * scale).ceil().max(1.0) as u32,
-    );
+    let (w, h) = measure_at(spec, scale);
+    let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
     let mut coverage = vec![0f32; (width * height) as usize];
     // Every metric below comes from the scaled font, so advances, kerning
     // and line height are all in raster pixels already.
     let font = font().as_scaled(spec.size.max(0.1) * scale);
-    let line_height = font.ascent() - font.descent() + font.line_gap();
+    let step = line_step(&font, spec);
+    let track = tracking(spec, scale);
 
     for (line_no, line) in spec.text.split('\n').enumerate() {
-        let baseline = line_no as f32 * line_height + font.ascent();
-        let mut pen_x = 0f32;
+        let baseline = line_no as f32 * step + font.ascent();
+        // Alignment is within the block's own width, which is the widest
+        // line: a short line is pushed right by the slack it leaves.
+        let slack = w - line_width(&font, line, spec, scale);
+        let mut pen_x = match spec.align {
+            chitrakar_doc::TextAlign::Left => 0.0,
+            chitrakar_doc::TextAlign::Center => slack / 2.0,
+            chitrakar_doc::TextAlign::Right => slack,
+        };
         let mut prev = None;
         for ch in line.chars() {
             let id = font.glyph_id(ch);
             if let Some(prev) = prev {
-                pen_x += font.kern(prev, id);
+                pen_x += font.kern(prev, id) + track;
             }
             let glyph = id.with_scale_and_position(
                 spec.size.max(0.1) * scale,
@@ -147,16 +173,16 @@ mod tests {
     use chitrakar_color::AuthoredColor;
 
     fn spec(text: &str, size: f32) -> TextSpec {
-        TextSpec {
-            text: text.into(),
+        TextSpec::new(
+            text,
             size,
-            fill: AuthoredColor::Srgb {
+            AuthoredColor::Srgb {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
                 a: 1.0,
             },
-        }
+        )
     }
 
     #[test]
@@ -177,6 +203,68 @@ mod tests {
         assert!(total > 10.0, "the glyph left ink, got {total}");
         // Ink stays inside the measured box.
         assert!(raster.width >= 2 && raster.height >= 20);
+    }
+
+    #[test]
+    fn alignment_moves_the_short_line_not_the_long_one() {
+        // Alignment is within the block's own width, so the widest line
+        // never moves and a shorter one shifts by its slack.
+        let ink_columns = |raster: &TextRaster| {
+            // Where the second line's ink starts, in raster columns.
+            let start = raster.height / 2;
+            (0..raster.width)
+                .find(|&x| (start..raster.height).any(|y| raster.sample(x, y) > 0.1))
+                .unwrap_or(raster.width)
+        };
+        let mut left = spec("Wide line here\nx", 24.0);
+        let block = measure(&left).0;
+        let at_left = ink_columns(&rasterize(&left));
+        left.align = chitrakar_doc::TextAlign::Right;
+        let at_right = ink_columns(&rasterize(&left));
+        left.align = chitrakar_doc::TextAlign::Center;
+        let at_center = ink_columns(&rasterize(&left));
+        assert!(
+            at_left < at_center && at_center < at_right,
+            "{at_left} {at_center} {at_right}"
+        );
+        assert!(
+            (at_right as f32) > block * 0.8,
+            "right-aligned, the short line ends up against the far edge"
+        );
+        // The block is the same size whichever way it is aligned.
+        left.align = chitrakar_doc::TextAlign::Right;
+        assert_eq!(measure(&left).0, block);
+    }
+
+    #[test]
+    fn line_height_and_tracking_stretch_the_block() {
+        let plain = spec("ab\ncd", 24.0);
+        let (w0, h0) = measure(&plain);
+
+        let mut tall = plain.clone();
+        tall.line_height = 2.0;
+        let (w1, h1) = measure(&tall);
+        assert_eq!(w1, w0, "line spacing does not change the width");
+        assert!(
+            (h1 - h0 * 2.0).abs() < 1.0,
+            "double spacing doubles the height: {h0} -> {h1}"
+        );
+
+        let mut tracked = plain.clone();
+        tracked.letter_spacing = 0.25;
+        let (w2, h2) = measure(&tracked);
+        assert_eq!(h2, h0, "tracking does not change the height");
+        // Two glyphs a line, so one gap a line: a quarter em at 24px.
+        assert!(
+            (w2 - w0 - 6.0).abs() < 0.5,
+            "a quarter-em of tracking widens each line by six pixels: {w0} -> {w2}"
+        );
+        assert!(rasterize(&tracked).width >= w2.ceil() as u32 - 1);
+
+        // A nonsense line height cannot collapse the block onto one line.
+        let mut broken = plain.clone();
+        broken.line_height = 0.0;
+        assert!(measure(&broken).1 > 1.0);
     }
 
     #[test]

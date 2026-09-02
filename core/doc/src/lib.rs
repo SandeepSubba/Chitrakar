@@ -9,7 +9,7 @@ mod node;
 
 pub use node::{
     Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Mask, MaskKind, Node, NodeKind,
-    RasterRef, Stroke, TextSpec, Transform, VectorShape,
+    RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
 };
 
 use chitrakar_color::ColorMode;
