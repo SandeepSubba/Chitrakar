@@ -340,8 +340,31 @@ impl<'a> Page<'a> {
                 alone.apply(Command::SetVisible { id, visible: false })?;
             }
         }
-        let surface = chitrakar_render::render(&alone)?;
-        let (w, h) = (surface.width as usize, surface.height as usize);
+        // Pixels for print: a screen-resolution document would put
+        // screen-resolution text on the page, so the render is oversampled
+        // towards 300 dpi (up to four times).
+        let over = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0);
+        let meta = &self.doc.meta;
+        let (w, h) = (
+            (meta.width as f32 * over).ceil().max(1.0) as usize,
+            (meta.height as f32 * over).ceil().max(1.0) as usize,
+        );
+        let mut surface = chitrakar_render::Surface::new(w as u32, h as u32);
+        chitrakar_render::render_region_at(
+            &alone,
+            &mut surface,
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w as u32,
+                y1: h as u32,
+            },
+            Transform {
+                a: over,
+                d: over,
+                ..Default::default()
+            },
+        )?;
         // The ink's bounding box; nothing to place when there is none.
         let inked = |x: usize, y: usize| surface.pixels[y * w + x].a > 0.0;
         let Some(y0) = (0..h).find(|&y| (0..w).any(|x| inked(x, y))) else {
@@ -366,11 +389,14 @@ impl<'a> Page<'a> {
             .gstate(1.0, 1.0, blend)
             .map(|gs| format!("/{gs} gs\n"))
             .unwrap_or_default();
+        // Placed in document pixels, however many samples it holds.
         let _ = writeln!(
             self.content,
-            "q\n{gs}{cw} 0 0 {} {x0} {} cm\n/{name} Do\nQ",
-            -(ch as i32),
-            y1
+            "q\n{gs}{} 0 0 {} {} {} cm\n/{name} Do\nQ",
+            num(cw as f32 / over),
+            num(-(ch as f32) / over),
+            num(x0 as f32 / over),
+            num(y1 as f32 / over)
         );
         Ok(())
     }
@@ -1172,6 +1198,25 @@ mod tests {
             "text becomes the second image: {content}"
         );
         assert!(text.contains("/Width 2 /Height 1"));
+        // At 72 dpi the text is rendered four times over for print: its
+        // image holds more samples than the document pixels it covers.
+        let placed = content
+            .lines()
+            .rev()
+            .find(|l| l.ends_with(" cm") && !l.starts_with("1 0 0"))
+            .unwrap();
+        let placed_w: f32 = placed.split_whitespace().next().unwrap().parse().unwrap();
+        let widths: Vec<u32> = text
+            .split("/Width ")
+            .skip(1)
+            .filter_map(|s| s.split_whitespace().next()?.parse().ok())
+            .collect();
+        assert!(
+            widths
+                .iter()
+                .any(|&w| (w as f32 - placed_w * 4.0).abs() < 1.5),
+            "the text image is 4x its placed width {placed_w}: {widths:?}"
+        );
         // Nothing of the hidden layer.
         assert!(!content.contains("0 0 120 80 re"));
         assert!(!text.contains(

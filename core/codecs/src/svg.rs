@@ -230,16 +230,19 @@ fn write_children(
                     block.em,
                     color_hex(doc, spec.fill),
                 );
+                // No indentation inside: the block preserves its space
+                // (an indent typed into a line is meant), so the only
+                // whitespace between the tags is the newline.
                 for (i, (line, _)) in block.lines.iter().enumerate() {
                     let _ = writeln!(
                         out,
-                        r#"{pad}  <tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
+                        r#"<tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
                         x,
                         block.ascent + i as f32 * block.step,
                         escape_xml(line)
                     );
                 }
-                let _ = writeln!(out, "{pad}</text>");
+                let _ = writeln!(out, "</text>");
             }
             NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
                 let _ = writeln!(

@@ -2448,6 +2448,7 @@ export function App() {
     const box = unionBounds(selectionSet);
     if (!box) return;
     const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
+    if (!(w > 0 && h > 0)) return;
     try {
       const png = session.export_png_at(1, x, y, w, h);
       const blob = new Blob([png as BlobPart], { type: "image/png" });
@@ -4019,7 +4020,14 @@ function CurveEditor({
 }) {
   const SIZE = 160;
   const svgRef = useRef<SVGSVGElement>(null);
-  const dragging = useRef<number | null>(null);
+  /** The gesture's own copy of the points and which one it holds, so a
+   * move that lands before React has re-rendered the props still edits
+   * the right point. */
+  const dragging = useRef<{
+    index: number;
+    points: [number, number][];
+    previewing: boolean;
+  } | null>(null);
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
   const local = (e: React.PointerEvent | React.MouseEvent): [number, number] => {
     const r = svgRef.current!.getBoundingClientRect();
@@ -4049,24 +4057,30 @@ function CurveEditor({
     } else {
       index = next.findIndex((q) => q === points[index]);
     }
-    dragging.current = index;
+    dragging.current = { index, points: next, previewing: index < 0 || next.length > points.length };
     svgRef.current!.setPointerCapture(e.pointerId);
-    onEdit(next, true);
+    // A new point is previewed at once; pressing an existing one previews
+    // nothing until it moves, so a click on a point is not an edit.
+    if (dragging.current.previewing) onEdit(next, true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    const i = dragging.current;
-    if (i === null) return;
+    const drag = dragging.current;
+    if (!drag) return;
+    drag.previewing = true;
     const p = local(e);
-    const next = sorted(points);
+    const { index: i } = drag;
+    const next = [...drag.points];
     const lo = i > 0 ? next[i - 1][0] + 0.005 : 0;
     const hi = i < next.length - 1 ? next[i + 1][0] - 0.005 : 1;
     next[i] = [Math.min(hi, Math.max(lo, p[0])), p[1]];
+    drag.points = next;
     onEdit(next, true);
   };
   const onPointerUp = () => {
-    if (dragging.current === null) return;
+    const drag = dragging.current;
+    if (!drag) return;
     dragging.current = null;
-    onGestureEnd();
+    if (drag.previewing) onGestureEnd();
   };
   const onDoubleClick = (e: React.MouseEvent) => {
     const i = nearest(local(e));

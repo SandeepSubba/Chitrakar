@@ -959,6 +959,9 @@ impl Session {
                 transform: inv.compose(mirror).compose(a).compose(t),
             });
         }
+        if cmds.is_empty() {
+            return Ok(());
+        }
         let label = if horizontal {
             "Flip horizontal"
         } else {
