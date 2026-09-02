@@ -1251,3 +1251,47 @@ body {
   outline: none;
   text-align: left;
 }
+
+/* The sheet of keys and gestures: two columns of definition lists, the
+   key on the left in the font a key is written in. */
+.modal.keys {
+  /* Wider than the dialogs that only ask for a number or two: this one
+     is two columns of prose. */
+  width: min(92vw, 48rem);
+  max-height: 82vh;
+  overflow: auto;
+}
+.keys-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 0.2rem 1.6rem;
+}
+.keys-columns h3 {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.keys-columns dl {
+  margin: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+.keys-columns dl > div {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.12rem 0;
+  font-size: 0.82rem;
+}
+.keys-columns dt {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+.keys-columns dd {
+  margin: 0;
+  color: var(--muted);
+}

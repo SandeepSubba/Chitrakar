@@ -142,7 +142,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~188),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~372 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~377 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -179,7 +179,9 @@ without reading anything else.*
   3. Depth: another review pass over the last stretch of commits (each
      pass so far has found real defects), then whatever the next user
      of the editor misses first — artboards, a brush that paints pixels.
-- **Chrome:** document actions live in a File/Edit/View menu bar — Edit
+- **Chrome:** "?" (or View › Keys and gestures) opens a sheet of every
+  key and gesture, since half of what this editor can do is a gesture
+  nobody would guess at. Document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
   none of it depends on knowing the shortcut; the tool

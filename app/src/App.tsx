@@ -536,6 +536,10 @@ export function App() {
     setDocSize([w, h]);
   }, []);
   const [newDocOpen, setNewDocOpen] = useState(false);
+  /** The sheet of keys and gestures, opened with "?" or from the View
+   * menu: half of what this editor can do is a gesture nobody would
+   * guess at, and a menu cannot show a gesture. */
+  const [showKeys, setShowKeys] = useState(false);
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
@@ -941,12 +945,21 @@ export function App() {
       // Escape cancels whatever is in flight; with nothing in flight it
       // drops the selection, which is what every editor does with it.
       if (e.key === "Escape") {
+        if (showKeys) {
+          setShowKeys(false);
+          return;
+        }
         cancelGesture();
         deselect();
       }
       if (!typing && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         selectAll();
+      }
+      // "?" opens the sheet of shortcuts, and closes it again.
+      if (!typing && e.key === "?") {
+        e.preventDefault();
+        setShowKeys((open) => !open);
       }
       if (e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
         finishPath(false); // pen tool: finish as an open (stroked) path
@@ -965,7 +978,9 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo, cancelGesture, finishPath, selectAll, deselect]);
+    // `showKeys` is in here because Escape reads it: without it the
+    // listener would keep a closure from before the sheet opened.
+  }, [undo, redo, cancelGesture, finishPath, selectAll, deselect, showKeys]);
 
   // Keep the viewport measurement in step with the element it describes.
   useEffect(() => {
@@ -3363,6 +3378,9 @@ export function App() {
             <MenuItem icon="fit" onClick={fitView}>
               Fit document to window
             </MenuItem>
+            <MenuItem icon="text" onClick={() => setShowKeys(true)} hint="?">
+              Keys and gestures
+            </MenuItem>
             <MenuItem icon="zoomIn" onClick={() => zoomBy(1.25)}>
               Zoom in
             </MenuItem>
@@ -3493,6 +3511,7 @@ export function App() {
           hidden
         />
       </header>
+      {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
       {newDocOpen && (
         <NewDocDialog
           onCancel={() => setNewDocOpen(false)}
@@ -4618,6 +4637,97 @@ export function App() {
 
 function topLevelCount(layers: LayerInfo[]): number {
   return layers.filter((l) => l.depth === 0).length;
+}
+
+/** What this editor answers to, in the order someone would meet it.
+ * Gestures sit beside keys because most of these are gestures. */
+const KEY_HELP: [string, [string, string][]][] = [
+  [
+    "Tools",
+    [
+      ["V, M", "Move"],
+      ["R, E", "Rectangle, ellipse"],
+      ["P, B", "Pen, brush"],
+      ["T", "Text"],
+      ["C", "Crop"],
+      ["I", "Eyedropper — take the colour under the cursor"],
+    ],
+  ],
+  [
+    "Picking",
+    [
+      ["Drag on bare canvas", "A band picks everything it touches"],
+      ["Shift-drag a band", "Adds to what is picked"],
+      ["Ctrl-click a layer", "Adds one layer to the selection"],
+      ["Double-click text", "Type into it on the canvas"],
+      ["Escape", "Let go of the selection"],
+    ],
+  ],
+  [
+    "Moving",
+    [
+      ["Drag", "Move; the edges snap to the page and to other layers"],
+      ["Ctrl while dragging", "Ignore the snapping"],
+      ["Alt-drag", "Leave the original and carry a copy"],
+      ["Arrow keys", "Nudge a pixel; shift for ten"],
+      ["Drag a layer row", "Reorder, or drop into a group"],
+    ],
+  ],
+  [
+    "The view",
+    [
+      ["Wheel", "Zoom about the cursor"],
+      ["Space-drag, middle-drag", "Pan"],
+      ["Drag out of a ruler", "Place a guide; drop it back to remove it"],
+    ],
+  ],
+  [
+    "The document",
+    [
+      ["Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"],
+      ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
+      ["Ctrl+D", "Duplicate"],
+      ["Ctrl+A", "Select all"],
+      ["Delete", "Delete the picked layers"],
+      ["?", "This sheet"],
+    ],
+  ],
+];
+
+/** The sheet of keys and gestures. */
+function KeysDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-scrim" onPointerDown={onClose}>
+      <div
+        className="modal keys"
+        role="dialog"
+        aria-label="Keys and gestures"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Keys and gestures</h2>
+        <div className="keys-columns">
+          {KEY_HELP.map(([group, rows]) => (
+            <section key={group}>
+              <h3>{group}</h3>
+              <dl>
+                {rows.map(([key, what]) => (
+                  <div key={key}>
+                    <dt>{key}</dt>
+                    <dd>{what}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="mask-button primary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** New-document dialog: presets for the sizes people actually start from,

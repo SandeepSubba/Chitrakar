@@ -3066,6 +3066,29 @@ assert(
   await page.waitForTimeout(250);
 }
 
+// 9h. The sheet of keys and gestures: "?" opens it, Escape closes it,
+// and the View menu has it too.
+{
+  await page.keyboard.press("?");
+  await page.waitForTimeout(200);
+  const sheet = page.locator('[aria-label="Keys and gestures"]');
+  assert((await sheet.count()) === 1, "? opens the sheet");
+  const text = await sheet.innerText();
+  assert(
+    text.includes("Eyedropper") && text.includes("Alt-drag") && text.includes("band"),
+    "it says what the gestures do",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert((await sheet.count()) === 0, "and Escape closes it");
+  await menuClick("View", "Keys and gestures");
+  await page.waitForTimeout(200);
+  assert((await sheet.count()) === 1, "the View menu opens it too");
+  await page.click('[aria-label="Keys and gestures"] >> text=Close');
+  await page.waitForTimeout(200);
+  assert((await sheet.count()) === 0, "and Close closes it");
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
