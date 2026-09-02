@@ -70,8 +70,10 @@ without reading anything else.*
   marks; complex scripts once a font for them is registered), can be set
   in DejaVu Sans, Sans Bold, Serif or Sans Mono — the bundled face is in
   the wasm, the rest are fetched from `app/public/fonts` at startup and
-  registered with the engine, so adding a face is dropping a file there
-  — rasterizes at
+  registered with the engine, so adding a face is dropping a file there;
+  File › Load font… registers any TrueType/OpenType file for the page's
+  lifetime, and a Bold toggle swaps a face for its "… Bold" twin —
+  rasterizes at
   the size it is actually seen at, and carries alignment, line spacing,
   tracking and a wrap width for paragraph text.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
@@ -113,9 +115,9 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: user-supplied fonts (the registry takes any TrueType/OpenType
-     bytes; only the UI for choosing a file is missing) and a bold/italic
-     toggle that picks the matching face by name.
+  3. Depth: italic (an oblique face and a toggle, the way bold is done),
+     and fonts travelling inside a .chitra so a document set in a loaded
+     font opens the same elsewhere.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

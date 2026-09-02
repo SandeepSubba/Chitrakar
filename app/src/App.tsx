@@ -436,6 +436,7 @@ export function App() {
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
   const iccInputRef = useRef<HTMLInputElement>(null);
+  const fontInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
   /** The viewport's size in CSS pixels. The canvas covers it, and the
@@ -2503,6 +2504,35 @@ export function App() {
     }
   };
 
+  /** Register a font file under its own name, offer it in the Text panel,
+   * and set the picked text layer in it — which is what loading one is
+   * usually for. A font stays for the page's lifetime; it is not part of
+   * the document, so a .chitra opened elsewhere falls back to the bundled
+   * face until the same file is loaded there. */
+  const loadFont = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    const name = file.name.replace(/\.(ttf|otf)$/i, "");
+    file.arrayBuffer().then((buf) => {
+      try {
+        WasmSession.register_font(name, new Uint8Array(buf));
+      } catch (err) {
+        alert(`Could not load font: ${err}`);
+        return;
+      }
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) {
+        run({
+          SetKind: {
+            id: selectedLayer!.id,
+            kind: { Text: { ...selectedKind.Text, font: name } },
+          },
+        });
+      }
+    });
+  };
+
   const loadIccProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -2539,6 +2569,9 @@ export function App() {
             </MenuItem>
             <MenuItem icon="image" onClick={() => pick(placeInputRef)}>
               Place image…
+            </MenuItem>
+            <MenuItem icon="text" onClick={() => pick(fontInputRef)}>
+              Load font…
             </MenuItem>
             <MenuItem icon="save" onClick={saveFile}>
               Save
@@ -2730,6 +2763,13 @@ export function App() {
           type="file"
           accept=".icc,.icm"
           onChange={loadIccProfile}
+          hidden
+        />
+        <input
+          ref={fontInputRef}
+          type="file"
+          accept=".ttf,.otf"
+          onChange={loadFont}
           hidden
         />
       </header>
@@ -4002,8 +4042,31 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) 
         {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
           Text: { ...t, letter_spacing: v },
         }))}
-        <label>
+        <label className="row">
           Font
+          {(() => {
+            // A face and its "… Bold" twin, when the registry has both:
+            // the toggle just swaps the name, which is all bold is here.
+            const current = t.font || fonts[0];
+            const base = current.replace(/ Bold$/, "");
+            const heavy = `${base} Bold`;
+            const isBold = current.endsWith(" Bold");
+            const available = fonts.includes(heavy) && fonts.includes(base);
+            return (
+              <button
+                className={isBold ? "active" : undefined}
+                disabled={!available}
+                title={available ? "Bold" : "No bold face for this font"}
+                aria-label="Bold"
+                aria-pressed={isBold}
+                onClick={() =>
+                  onEdit({ Text: { ...t, font: isBold ? base : heavy } }, false)
+                }
+              >
+                <strong>B</strong>
+              </button>
+            );
+          })()}
           <select
             value={t.font || fonts[0]}
             onChange={(e) => onEdit({ Text: { ...t, font: e.target.value } }, false)}

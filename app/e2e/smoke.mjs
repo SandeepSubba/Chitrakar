@@ -1424,6 +1424,30 @@ assert(
     Math.abs((await outline())[0] - unfolded[0]) < 2,
     "and back to the bundled face it is its old width",
   );
+  // The bold toggle swaps a face for its "… Bold" twin.
+  await page.click('button[aria-label="Bold"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVu Sans Bold" &&
+      Math.abs((await outline())[0] - bold[0]) < 2,
+    "the bold toggle set the bold face",
+  );
+  await page.click('button[aria-label="Bold"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVu Sans",
+    "and again takes it off",
+  );
+  // A font loaded from a file joins the list and dresses the picked block.
+  await page.locator('input[accept=".ttf,.otf"]').setInputFiles("public/fonts/DejaVuSerif.ttf");
+  await page.waitForTimeout(600);
+  assert(
+    (await page.locator('select[aria-label="Font"] option', { hasText: "DejaVuSerif" }).count()) === 1 &&
+      (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVuSerif",
+    "a loaded font file is offered under its own name and applied",
+  );
+  await page.selectOption('select[aria-label="Font"]', "DejaVu Sans");
+  await page.waitForTimeout(300);
   assert(
     Math.abs(unfolded[0] - single[0]) < 2 && Math.abs(unfolded[1] - single[1]) < 2,
     "and zero lets it fit its text again",
