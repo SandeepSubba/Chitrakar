@@ -97,11 +97,11 @@ impl WasmSession {
         self.inner.present_size().1
     }
 
-    /// Ask for the composite at `scale` times document resolution so a
-    /// zoomed-in canvas stays sharp. Returns the scale actually adopted,
-    /// which is capped by a pixel budget.
-    pub fn set_view_scale(&mut self, scale: f32) -> f32 {
-        self.inner.set_view_scale(scale)
+    /// Present only what a viewport of `width x height` device pixels can
+    /// see, with the document's origin at `(x, y)` inside it and `scale`
+    /// device pixels to the document pixel.
+    pub fn set_viewport(&mut self, scale: f32, x: f32, y: f32, width: u32, height: u32) {
+        self.inner.set_viewport(scale, x, y, width, height);
     }
 
     /// Re-render what changed since the last call into the internal RGBA8

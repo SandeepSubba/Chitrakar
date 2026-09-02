@@ -268,6 +268,31 @@ mod tests {
     }
 
     #[test]
+    fn a_minified_raster_keeps_every_line_and_every_alignment() {
+        // Rasterizing below natural size is what happens whenever the
+        // canvas is zoomed out, and it must not lose the parts of the
+        // block that sit against its right and bottom edges.
+        let mut block = spec("Hello there!\nhi", 48.0);
+        for scale in [1.0f32, 0.779] {
+            for align in [
+                chitrakar_doc::TextAlign::Left,
+                chitrakar_doc::TextAlign::Right,
+            ] {
+                block.align = align;
+                let r = rasterize_at(&block, scale);
+                let ink: f32 = (r.height / 2..r.height)
+                    .flat_map(|y| (0..r.width).map(move |x| (x, y)))
+                    .map(|(x, y)| r.sample(x, y))
+                    .sum();
+                assert!(
+                    ink > 5.0,
+                    "scale {scale}, {align:?}: the second line has {ink} ink"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn empty_text_is_harmless() {
         let raster = rasterize(&spec("", 32.0));
         assert!(raster.width >= 1 && raster.height >= 1);

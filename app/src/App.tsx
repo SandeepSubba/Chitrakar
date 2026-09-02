@@ -424,11 +424,11 @@ export function App() {
   const iccInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
-  /** Device pixels the engine renders per document pixel. Follows the zoom
-   * so magnifying the canvas re-renders the artwork instead of enlarging
-   * the pixels of a document-sized frame; the engine caps it and tells us
-   * what it actually adopted. */
-  const [frameScale, setFrameScale] = useState(1);
+  /** The viewport's size in CSS pixels. The canvas covers it, and the
+   * engine composites only what fits — so a print-sized page costs a
+   * screenful of pixels to show, not nine megapixels. */
+  const [viewport, setViewport] = useState<[number, number]>([1, 1]);
+  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -665,25 +665,40 @@ export function App() {
     };
   }, [undo, redo, cancelGesture, finishPath]);
 
-  // Ask the engine to render at the zoom the canvas is actually shown at.
-  // It answers with the scale it adopted (a budget caps large documents),
-  // and only that answer resizes the canvas.
+  // Keep the viewport measurement in step with the element it describes.
   useEffect(() => {
-    if (!session) return;
-    const dpr = window.devicePixelRatio || 1;
-    setFrameScale(session.set_view_scale(view.zoom * dpr));
-  }, [session, view.zoom, docSize]);
+    const host = hostRef.current;
+    if (!host) return;
+    const measure = () =>
+      setViewport(([w, h]) =>
+        w === host.clientWidth && h === host.clientHeight
+          ? [w, h]
+          : [host.clientWidth, host.clientHeight],
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
 
-  // Repaint once the canvas has been resized — by a change of scale or of
-  // the page itself, either of which clears its backing store, and either
-  // of which leaves the engine with a whole fresh frame waiting.
+  // Tell the engine what the canvas is looking at, then repaint. The
+  // canvas is a window onto the page now, so its backing store follows the
+  // viewport rather than the document, and every pan or zoom is a fresh
+  // frame — which is cheap, because it is only ever a screenful.
   useEffect(() => {
     if (!session) return;
-    // The engine tracks what it has already presented; a resized canvas
-    // has thrown that away, so tell it before asking for the frame.
+    session.set_viewport(
+      view.zoom * dpr,
+      view.x * dpr,
+      view.y * dpr,
+      Math.round(viewport[0] * dpr),
+      Math.round(viewport[1] * dpr),
+    );
+    // Resizing the element clears its backing store, and the engine tracks
+    // what it has already presented, so it has to be told.
     session.invalidate();
     refresh(session);
-  }, [session, frameScale, docSize, refresh]);
+  }, [session, view, viewport, dpr, docSize, refresh]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
@@ -712,12 +727,14 @@ export function App() {
     return () => host.removeEventListener("wheel", onWheel);
   }, []);
 
-  /** Pointer position in document pixels. */
+  /** Pointer position in document pixels. The canvas covers the whole
+   * viewport, so the page's position within it is the view, not the
+   * element's box. */
   const docPoint = (e: { clientX: number; clientY: number }): [number, number] => {
     const rect = canvasRef.current!.getBoundingClientRect();
     return [
-      ((e.clientX - rect.left) / rect.width) * docSize[0],
-      ((e.clientY - rect.top) / rect.height) * docSize[1],
+      (e.clientX - rect.left - view.x) / view.zoom,
+      (e.clientY - rect.top - view.y) / view.zoom,
     ];
   };
 
@@ -2317,22 +2334,31 @@ export function App() {
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
         >
+          {/* The page itself: white, with the shadow that lifts it off
+              the desk. The canvas no longer is the page — it is a window
+              onto it, covering the whole viewport — so the page's own
+              extent has to be drawn. */}
+          <div
+            id="engine-page"
+            style={{
+              left: view.x,
+              top: view.y,
+              width: docSize[0] * view.zoom,
+              height: docSize[1] * view.zoom,
+            }}
+          />
           <canvas
             id="engine-canvas"
             ref={canvasRef}
-            width={Math.round(docSize[0] * frameScale)}
-            height={Math.round(docSize[1] * frameScale)}
-            /* Device pixels per document pixel, published so anything
-               reading the backing store can convert into it. */
-            data-frame-scale={frameScale}
-            style={{
-              // The backing store holds frameScale device pixels per
-              // document pixel, so the element is scaled down by that much
-              // on its way to the requested zoom. When the engine granted
-              // the full request the two cancel and one frame pixel lands
-              // on one screen pixel.
-              transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom / frameScale})`,
-            }}
+            width={Math.round(viewport[0] * dpr)}
+            height={Math.round(viewport[1] * dpr)}
+            /* Where the document's origin sits in the backing store, and
+               how many of its pixels one document pixel takes — published
+               so anything reading it can convert into it. */
+            data-origin-x={view.x * dpr}
+            data-origin-y={view.y * dpr}
+            data-frame-scale={view.zoom * dpr}
+            style={{ width: viewport[0], height: viewport[1] }}
             onPointerDown={onCanvasPointerDown}
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}

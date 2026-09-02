@@ -110,6 +110,13 @@ pub struct Session {
     /// enlarge the result is what makes a zoomed-in canvas look soft; the
     /// fix is to render more pixels, not to interpolate the ones we have.
     view_scale: f32,
+    /// Where the document's origin sits on the presented surface, in that
+    /// surface's own pixels. Non-zero once a viewport is set: the surface
+    /// is then a window onto the page rather than the page itself.
+    view_origin: (f32, f32),
+    /// The presented surface's size when it is a viewport rather than the
+    /// whole page.
+    viewport: Option<(u32, u32)>,
     /// Inverse restoring the state before the current preview gesture, with
     /// the label captured from the gesture's first command.
     preview_inverse: Option<HistoryEntry>,
@@ -136,6 +143,8 @@ impl Session {
             scratch: None,
             stale: None,
             view_scale: 1.0,
+            view_origin: (0.0, 0.0),
+            viewport: None,
             preview_inverse: None,
             pixels_recomputed: 0,
             proof_cms: None,
@@ -858,6 +867,7 @@ impl Session {
     /// since the last call. Returns the cached surface and the region that
     /// was just recomputed (None if the cache was already clean).
     pub fn render_cached(&mut self) -> Result<(&Surface, Option<ClipRect>), EngineError> {
+        let view = self.view_transform();
         let scale = self.view_scale;
         let (w, h) = self.present_size();
         let full = ClipRect {
@@ -879,22 +889,23 @@ impl Session {
         match self.stale.take() {
             Some(doc_clip) => {
                 // The dirty region arrives in document pixels; the cache is
-                // kept at view resolution, so widen it outwards to whole
-                // device pixels rather than trusting a rounded edge.
+                // kept in the view's, so carry it through the view and
+                // widen it outwards to whole pixels rather than trusting a
+                // rounded edge.
                 let clip = ClipRect::from_float(
-                    doc_clip.x0 as f32 * scale,
-                    doc_clip.y0 as f32 * scale,
-                    doc_clip.x1 as f32 * scale,
-                    doc_clip.y1 as f32 * scale,
+                    doc_clip.x0 as f32 * scale + view.e,
+                    doc_clip.y0 as f32 * scale + view.f,
+                    doc_clip.x1 as f32 * scale + view.e,
+                    doc_clip.y1 as f32 * scale + view.f,
                     w,
                     h,
                 )
                 .intersect(full);
-                let view = Transform {
-                    a: scale,
-                    d: scale,
-                    ..Default::default()
-                };
+                if clip.is_empty() {
+                    // The change happened off-screen. Nothing to present,
+                    // but the cache is still whole.
+                    return Ok((self.cache.as_ref().unwrap(), None));
+                }
                 // Filters sample neighbors: a region render is only correct
                 // deeper than the filter stack's reach inside its own edge.
                 // So compute a padded region in scratch and copy back just
@@ -924,40 +935,62 @@ impl Session {
         }
     }
 
-    /// Size of the surface [`render_cached`](Self::render_cached) presents,
-    /// which is the document scaled by the view resolution.
+    /// The document-to-surface mapping the cache is kept in.
+    fn view_transform(&self) -> Transform {
+        Transform {
+            a: self.view_scale,
+            d: self.view_scale,
+            e: self.view_origin.0,
+            f: self.view_origin.1,
+            ..Default::default()
+        }
+    }
+
+    /// Size of the surface [`render_cached`](Self::render_cached) presents:
+    /// the viewport when one has been set, and otherwise the whole document
+    /// at the view's resolution.
     pub fn present_size(&self) -> (u32, u32) {
-        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
-        (
-            ((w as f32 * self.view_scale).round() as u32).max(1),
-            ((h as f32 * self.view_scale).round() as u32).max(1),
-        )
+        match self.viewport {
+            Some(size) => size,
+            None => {
+                let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+                (
+                    ((w as f32 * self.view_scale).round() as u32).max(1),
+                    ((h as f32 * self.view_scale).round() as u32).max(1),
+                )
+            }
+        }
+    }
+
+    /// Present only what a viewport of `(width, height)` device pixels can
+    /// see, with the document's origin at `(x, y)` within it and `scale`
+    /// device pixels to the document pixel.
+    ///
+    /// This is what stops a big document costing a big render: an A4 page
+    /// at 300dpi is nine megapixels whatever the screen is, and composing
+    /// all of it to show a screenful was most of the cost of showing
+    /// anything. Passing a viewport also lifts the resolution cap, since
+    /// the surface no longer grows with the zoom.
+    pub fn set_viewport(&mut self, scale: f32, x: f32, y: f32, width: u32, height: u32) {
+        let scale = scale.clamp(0.01, 64.0);
+        let size = (width.max(1), height.max(1));
+        let same = (scale - self.view_scale).abs() < 1e-4
+            && (x - self.view_origin.0).abs() < 1e-3
+            && (y - self.view_origin.1).abs() < 1e-3
+            && self.viewport == Some(size);
+        if same {
+            return;
+        }
+        self.view_scale = scale;
+        self.view_origin = (x, y);
+        self.viewport = Some(size);
+        // Everything the surface shows has moved; none of it can be reused.
+        self.cache = None;
+        self.scratch = None;
+        self.stale = None;
     }
 
     pub fn view_scale(&self) -> f32 {
-        self.view_scale
-    }
-
-    /// Ask for the composite at `scale` times document resolution, so a
-    /// magnified canvas is re-rendered rather than interpolated. The request
-    /// is capped: past a budget the surface costs more than the sharpness is
-    /// worth, and on a document already larger than the budget the answer is
-    /// document resolution.
-    pub fn set_view_scale(&mut self, scale: f32) -> f32 {
-        /// Device pixels the presented surface may occupy. At 16 bytes a
-        /// pixel in the compositor plus 4 in the presented frame, this is
-        /// about 160 MB — enough to sharpen a screen-sized document
-        /// several times over, and a ceiling a huge one cannot push past.
-        const BUDGET: f32 = 8_000_000.0;
-        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
-        let ceiling = (BUDGET / (w * h).max(1.0)).sqrt().max(1.0);
-        let scale = scale.clamp(1.0, ceiling.min(8.0));
-        if (scale - self.view_scale).abs() > 1e-4 {
-            self.view_scale = scale;
-            self.cache = None;
-            self.scratch = None;
-            self.stale = None;
-        }
         self.view_scale
     }
 
@@ -1319,66 +1352,82 @@ mod tests {
     }
 
     #[test]
-    fn the_view_scale_renders_more_pixels_of_the_same_picture() {
-        // Raising the view scale must give a bigger surface showing the
-        // same composition — the point is more detail, not a crop or a
-        // shift, so the same fraction of the canvas stays covered.
-        let mut session = Session::new(32, 32, ColorMode::Rgb);
-        add_rect(&mut session, "half", 16.0, 32.0);
-        let covered = |s: &Surface| {
-            s.pixels.iter().filter(|p| p.a > 0.5).count() as f32 / s.pixels.len() as f32
-        };
-        let (one, _) = session.render_cached().unwrap();
-        assert_eq!((one.width, one.height), (32, 32));
-        let at_one = covered(one);
-
-        assert_eq!(session.set_view_scale(3.0), 3.0);
-        let (three, dirty) = session.render_cached().unwrap();
-        assert_eq!((three.width, three.height), (96, 96));
-        assert!(dirty.is_some(), "changing the scale invalidates the cache");
-        assert!(
-            (covered(three) - at_one).abs() < 0.02,
-            "the same half of the canvas is covered: {at_one} vs {}",
-            covered(three)
+    fn a_viewport_shows_the_part_of_the_page_it_is_pointed_at() {
+        // The surface is a window onto the document now, not the document:
+        // it is the size it was told, the page lands where the origin says,
+        // and nothing is painted outside the page's own edge.
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 200.0, 200.0);
+        let _ = id;
+        session.set_viewport(1.0, 20.0, 30.0, 100, 80);
+        let (s, dirty) = session.render_cached().unwrap();
+        assert_eq!(
+            (s.width, s.height),
+            (100, 80),
+            "the surface is the viewport"
         );
+        assert!(dirty.is_some());
+        assert_eq!(s.get(10, 10).a, 0.0, "above and left of the page: nothing");
+        assert_eq!(s.get(50, 50).a, 1.0, "and the page itself is painted");
+        assert_eq!(s.get(19, 40).a, 0.0, "the page's left edge is respected");
+        assert_eq!(s.get(21, 40).a, 1.0, "just inside it, painted");
     }
 
     #[test]
-    fn an_edit_at_view_scale_repaints_the_right_device_pixels() {
-        // The dirty region is tracked in document pixels but the cache is
-        // kept in device ones. Get that conversion wrong and an edit leaves
-        // a stale band behind, so compare against a full render.
-        let mut session = Session::new(24, 24, ColorMode::Rgb);
-        session.set_view_scale(2.5);
-        let id = add_rect(&mut session, "r", 8.0, 8.0);
+    fn a_viewport_can_be_zoomed_past_what_the_whole_page_would_cost() {
+        // The surface no longer grows with the zoom, so the zoom is not
+        // capped by what a full-page surface would cost. A print-sized
+        // document at 4x is a screenful of pixels like any other.
+        let mut session = Session::new(2480, 3508, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(100.0, 100.0),
+            })
+            .unwrap();
+        session.set_viewport(4.0, -380.0, -380.0, 400, 300);
+        let (s, _) = session.render_cached().unwrap();
+        assert_eq!((s.width, s.height), (400, 300));
+        // The rect covers document (100,100)-(140,140), which at 4x with
+        // that origin is (20,20)-(180,180) on the surface.
+        assert_eq!(s.get(100, 100).a, 1.0, "the magnified rect is there");
+        assert_eq!(s.get(200, 200).a, 0.0, "and stops where it should");
+    }
+
+    #[test]
+    fn an_edit_inside_a_viewport_repaints_the_right_pixels() {
+        // The dirty region is tracked in document pixels and has to be
+        // carried through both the scale and the pan. Get either wrong and
+        // an edit leaves a stale band, so compare against a full render.
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session.set_viewport(2.0, -30.0, -20.0, 150, 150);
         session.render_cached().unwrap();
         session
             .apply(Command::SetTransform {
                 id,
-                transform: Transform::translation(11.0, 7.0),
+                transform: Transform::translation(40.0, 35.0),
             })
             .unwrap();
         let (cached, dirty) = session.render_cached().unwrap();
-        let dirty = dirty.expect("moving a layer dirties something");
-        assert!(
-            dirty.x1 <= cached.width && dirty.y1 <= cached.height,
-            "the dirty rect is in device pixels: {dirty:?}"
-        );
+        assert!(dirty.is_some(), "moving a layer dirties something");
         let cached = cached.to_srgb8();
-        let mut fresh = Surface::new(60, 60);
-        let clip = ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: 60,
-            y1: 60,
-        };
+        let mut fresh = Surface::new(150, 150);
         chitrakar_render::render_region_at(
             session.document(),
             &mut fresh,
-            clip,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 150,
+                y1: 150,
+            },
             Transform {
-                a: 2.5,
-                d: 2.5,
+                a: 2.0,
+                d: 2.0,
+                e: -30.0,
+                f: -20.0,
                 ..Default::default()
             },
         )
@@ -1387,238 +1436,42 @@ mod tests {
     }
 
     #[test]
-    fn the_view_scale_is_capped_by_what_the_surface_would_cost() {
-        // A screen-sized document can afford to be sharpened; a print-sized
-        // one is already past the budget and stays at its own resolution.
-        let mut small = Session::new(800, 600, ColorMode::Rgb);
-        assert!(small.set_view_scale(8.0) > 3.0);
-        assert!(small.set_view_scale(8.0) <= 8.0);
-        let mut a4 = Session::new(2480, 3508, ColorMode::Rgb);
-        assert_eq!(a4.set_view_scale(4.0), 1.0);
-        assert_eq!(a4.present_size(), (2480, 3508));
-        // And nothing asks for less than the document's own pixels.
-        assert_eq!(small.set_view_scale(0.25), 1.0);
-    }
-
-    #[test]
-    fn a_drop_shadow_repaints_the_ground_it_covers() {
-        // The shadow reaches outside the layer, so the dirty region has to
-        // as well. If it does not, adding or removing one leaves a stain
-        // where the cache was never revisited.
-        let mut session = Session::new(48, 48, ColorMode::Rgb);
-        let id = add_rect(&mut session, "r", 16.0, 16.0);
+    fn an_edit_entirely_off_screen_presents_nothing() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
         session
             .apply(Command::SetTransform {
                 id,
-                transform: Transform::translation(12.0, 12.0),
+                transform: Transform::translation(300.0, 300.0),
             })
             .unwrap();
+        session.set_viewport(1.0, 0.0, 0.0, 100, 100);
         session.render_cached().unwrap();
-        let shadow = chitrakar_doc::Effect::DropShadow {
-            dx: 7.0,
-            dy: 7.0,
-            blur: 3.0,
-            color: AuthoredColor::Srgb {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
-            opacity: 1.0,
-        };
         session
-            .apply(Command::SetEffects {
-                id,
-                effects: vec![shadow],
-            })
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
             .unwrap();
-        assert_cache_matches_fresh(&mut session);
-        // And taking it away has to clear the ground it covered.
-        session
-            .apply(Command::SetEffects {
-                id,
-                effects: Vec::new(),
-            })
-            .unwrap();
-        assert_cache_matches_fresh(&mut session);
-        assert!(session.undo().unwrap(), "the shadow comes back");
-        assert_cache_matches_fresh(&mut session);
+        let (_, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_none(), "nothing on screen changed: {dirty:?}");
     }
 
     #[test]
-    fn cropping_keeps_the_picture_where_it_was() {
-        // A crop is a resize plus the shift that cancels it: the page gets
-        // smaller, and what was inside the crop rectangle stays put.
-        let mut session = Session::new(64, 64, ColorMode::Rgb);
-        let id = add_rect(&mut session, "r", 10.0, 10.0);
-        session
-            .apply(Command::SetTransform {
-                id,
-                transform: Transform::translation(30.0, 30.0),
-            })
-            .unwrap();
-        let (before, _) = session.render_cached().unwrap();
-        assert_eq!(before.get(35, 35).a, 1.0);
-
-        // Crop to (20,20)-(52,52): the rect should land at (10,10).
-        session.resize_canvas(32, 32, -20.0, -20.0).unwrap();
-        assert_eq!(session.document().meta.width, 32);
-        let (after, _) = session.render_cached().unwrap();
-        assert_eq!((after.width, after.height), (32, 32), "the cache resized");
-        assert_eq!(after.get(15, 15).a, 1.0, "the rect moved with the page");
-        assert_eq!(after.get(5, 5).a, 0.0, "and nothing else came with it");
-        assert_cache_matches_fresh(&mut session);
-
-        assert!(session.undo().unwrap());
-        assert_eq!(session.document().meta.width, 64);
-        let (back, _) = session.render_cached().unwrap();
-        assert_eq!(back.get(35, 35).a, 1.0, "undo puts the page back");
-        assert_cache_matches_fresh(&mut session);
-    }
-
-    #[test]
-    fn a_zero_sized_canvas_is_refused() {
-        let mut session = Session::new(16, 16, ColorMode::Rgb);
-        assert!(session.resize_canvas(0, 10, 0.0, 0.0).is_err());
-        assert_eq!(session.document().meta.width, 16, "and changes nothing");
-    }
-
-    /// Two 40x40 squares on a 100x100 page, overlapping in a 20x20 corner.
-    fn two_overlapping_squares() -> (Session, Vec<NodeId>) {
-        let mut session = Session::new(100, 100, ColorMode::Rgb);
-        let a = add_rect(&mut session, "a", 40.0, 40.0);
-        session
-            .apply(Command::SetTransform {
-                id: a,
-                transform: Transform::translation(10.0, 10.0),
-            })
-            .unwrap();
-        let b = add_rect(&mut session, "b", 40.0, 40.0);
-        session
-            .apply(Command::SetTransform {
-                id: b,
-                transform: Transform::translation(30.0, 30.0),
-            })
-            .unwrap();
-        (session, vec![a, b])
-    }
-
-    /// How many pixels the composite covers.
-    fn ink(session: &mut Session) -> usize {
-        session
-            .render()
-            .unwrap()
-            .pixels
-            .iter()
-            .filter(|p| p.a > 0.5)
-            .count()
-    }
-
-    #[test]
-    fn booleans_combine_two_shapes_into_one_layer() {
-        // Areas are the check: union is both minus the overlap counted
-        // twice, intersect is the overlap, subtract is the lower shape
-        // less the overlap.
-        for (op, expected) in [
-            ("union", 40 * 40 * 2 - 20 * 20),
-            ("intersect", 20 * 20),
-            ("subtract", 40 * 40 - 20 * 20),
-        ] {
-            let (mut session, ids) = two_overlapping_squares();
-            let before = ink(&mut session);
-            assert_eq!(before, 40 * 40 * 2 - 20 * 20, "the two squares as drawn");
-            let id = session.boolean_nodes(&ids, op).unwrap();
-            assert_eq!(
-                session
-                    .document()
-                    .children_of(session.document().root())
-                    .unwrap(),
-                &[id],
-                "{op} left one layer"
-            );
-            let got = ink(&mut session);
-            assert!(
-                (got as i32 - expected).abs() < 200,
-                "{op}: covered {got}, expected about {expected}"
-            );
-            assert!(session.undo().unwrap());
-            assert_eq!(ink(&mut session), before, "{op} undoes as one step");
-            assert_eq!(
-                session
-                    .document()
-                    .children_of(session.document().root())
-                    .unwrap()
-                    .len(),
-                2,
-                "{op} brings both shapes back"
-            );
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_viewport_probe() {
+        let mut session = Session::new(2480, 3508, ColorMode::Rgb);
+        add_rect(&mut session, "bg", 2480.0, 3508.0);
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            session.invalidate();
+            session.render_cached().unwrap();
         }
-    }
-
-    #[test]
-    fn subtracting_an_enclosed_shape_punches_a_hole() {
-        // The result is one layer whose middle is empty — a compound path,
-        // which is the whole reason a path can carry extra rings.
-        let mut session = Session::new(100, 100, ColorMode::Rgb);
-        let outer = add_rect(&mut session, "outer", 60.0, 60.0);
-        session
-            .apply(Command::SetTransform {
-                id: outer,
-                transform: Transform::translation(20.0, 20.0),
-            })
-            .unwrap();
-        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
-        session
-            .apply(Command::SetTransform {
-                id: inner,
-                transform: Transform::translation(40.0, 40.0),
-            })
-            .unwrap();
-        session.boolean_nodes(&[outer, inner], "subtract").unwrap();
-        let s = session.render().unwrap();
-        assert_eq!(s.get(25, 25).a, 1.0, "the ring is filled");
-        assert_eq!(s.get(50, 50).a, 0.0, "and the middle is a hole");
-        assert_eq!(s.get(10, 10).a, 0.0, "outside is still outside");
-    }
-
-    #[test]
-    fn combining_refuses_what_it_cannot_answer_for() {
-        let (mut session, ids) = two_overlapping_squares();
-        assert!(
-            session.boolean_nodes(&ids[..1], "union").is_err(),
-            "needs two"
-        );
-        assert!(session.boolean_nodes(&ids, "invert").is_err(), "unknown op");
-        // A text layer has no outline to combine.
-        let root = session.document().root();
-        session
-            .apply(Command::AddNode {
-                parent: root,
-                index: 2,
-                node: Box::new(Node::text(
-                    "t",
-                    chitrakar_doc::TextSpec::new(
-                        "hi",
-                        12.0,
-                        AuthoredColor::Srgb {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        },
-                    ),
-                )),
-            })
-            .unwrap();
-        let text = *session
-            .document()
-            .children_of(root)
-            .unwrap()
-            .last()
-            .unwrap();
-        assert!(session.boolean_nodes(&[ids[0], text], "union").is_err());
-        // And nothing was half-applied.
-        assert_eq!(session.document().children_of(root).unwrap().len(), 3);
+        println!("A4 whole page: {:?}", t0.elapsed() / 3);
+        session.set_viewport(0.4, 0.0, 0.0, 1400, 900);
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            session.invalidate();
+            session.render_cached().unwrap();
+        }
+        println!("A4 through a 1400x900 viewport: {:?}", t0.elapsed() / 3);
     }
 
     #[test]

@@ -428,10 +428,17 @@ pub fn render_region(
 }
 
 /// The same, with the document mapped through `view` on the way to the
-/// surface. A surface twice the document's size and a `view` of scale two
-/// gets the document rendered at twice the resolution — outlines re-solved
-/// at that scale, not a magnified bitmap — which is how zooming in stays
-/// sharp instead of enlarging pixels.
+/// surface.
+///
+/// This is what lets the surface stop being the page. A `view` of scale
+/// two on a surface twice the size renders the document at twice the
+/// resolution — outlines re-solved at that scale, not a magnified bitmap —
+/// and a `view` that also translates renders whatever part of the document
+/// the surface is looking at, at whatever size the surface is.
+///
+/// The clip is cleared in full but painted only where the page is: the
+/// page's own edge is what clips the artwork, and with the surface no
+/// longer being the page that has to be said rather than assumed.
 pub fn render_region_at(
     doc: &Document,
     surface: &mut Surface,
@@ -446,7 +453,26 @@ pub fn render_region_at(
         surface.pixels[row + clip.x0 as usize..row + clip.x1 as usize]
             .fill(LinearRgba::TRANSPARENT);
     }
-    render_group(doc, doc.root(), surface, clip, view)
+    // Rounded outward but no further: a pixel the page's edge partly
+    // covers is the page's to paint, and one it does not touch is not.
+    // (`Bounds::to_clip` pads by a pixel for seam safety, which here would
+    // let the artwork bleed past the page.)
+    let Bounds::Rect(x0, y0, x1, y1) =
+        transformed_bounds(view, doc.meta.width as f32, doc.meta.height as f32)
+    else {
+        return Ok(());
+    };
+    let page = ClipRect {
+        x0: x0.floor().max(0.0) as u32,
+        y0: y0.floor().max(0.0) as u32,
+        x1: (x1.ceil().max(0.0) as u32).min(surface.width),
+        y1: (y1.ceil().max(0.0) as u32).min(surface.height),
+    };
+    let inside = clip.intersect(page);
+    if inside.is_empty() {
+        return Ok(());
+    }
+    render_group(doc, doc.root(), surface, inside, view)
 }
 
 fn render_group(
@@ -2028,13 +2054,15 @@ fn draw_text(
     let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
     let raster = text::rasterize_at(spec, scale);
     let color = resolve_color(doc, spec.fill);
-    let bbox =
-        match transformed_local_bounds(t, (0.0, 0.0, raster.width as f32, raster.height as f32))
-            .to_clip(dst.width, dst.height)
-        {
-            Some(b) => b.intersect(clip),
-            None => return,
-        };
+    // The box is the block's natural size, not the raster's: those agree
+    // only while the raster is at natural scale, and a minified one would
+    // otherwise clip its own right and bottom edges away.
+    let bbox = match transformed_local_bounds(t, (0.0, 0.0, natural.0, natural.1))
+        .to_clip(dst.width, dst.height)
+    {
+        Some(b) => b.intersect(clip),
+        None => return,
+    };
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);

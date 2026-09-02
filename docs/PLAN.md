@@ -55,9 +55,10 @@ without reading anything else.*
   free of it — and the same lines catch a resize handle. A ctrl-clicked
   multi-selection moves as one — by drag or by
   arrow key (shift for a coarse step) — in a single history entry.
-  Zooming in re-renders rather than magnifies: the engine composites at
-  the resolution the canvas is displayed at (capped by a pixel budget), so
-  outlines, gradients and glyphs are re-solved instead of interpolated.
+  Zooming in re-renders rather than magnifies: the engine composites a
+  viewport at the resolution the canvas is displayed at, so outlines,
+  gradients and glyphs are re-solved instead of interpolated, and a page
+  costs a screenful of pixels to show however big it is.
   Text likewise rasterizes at the size it is actually seen at, and
   carries alignment, line spacing and tracking.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
@@ -76,11 +77,13 @@ without reading anything else.*
   full-canvas pass over it costs ~55 ms. `cargo test --release -p
   chitrakar-render -- --ignored --nocapture --test-threads=1` runs the
   timing probes; the next win there is avoiding the whole-canvas
-  allocation an isolated group still makes. Presenting at view resolution
-  multiplies those costs by the scale squared, which is why the budget in
-  `Session::set_view_scale` exists; rendering only the visible viewport
-  (a root transform with pan, on a viewport-sized surface — the renderer
-  already takes an arbitrary root affine) is what would lift it.
+  allocation an isolated group still makes. Interactive rendering goes
+  through `Session::set_viewport`, which composites only what the canvas
+  can see: an A4 page at 300dpi shown on screen is 15 ms rather than
+  169 ms, and the zoom is no longer capped by what a full-page surface
+  would cost. What that leaves open is minification quality — a placed
+  photo shown at a third of its size is point-sampled, where a mip chain
+  or a box prefilter in `draw_raster` would settle it.
 - **Verify before committing:** `cargo test --workspace` (~103),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~174 browser

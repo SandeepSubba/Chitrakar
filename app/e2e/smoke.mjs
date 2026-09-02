@@ -49,16 +49,19 @@ await page.goto("http://localhost:8123/");
 await page.waitForSelector("#engine-canvas");
 await page.waitForTimeout(500); // wasm init
 
-// Probes are written in document pixels. The canvas backing store holds
-// `data-frame-scale` device pixels for each of them (it rises with zoom so
-// magnified artwork is re-rendered rather than enlarged), so every read
-// converts through it.
+// Probes are written in document pixels. The canvas is a window onto the
+// page: `data-origin-x/y` say where the document's origin sits in its
+// backing store and `data-frame-scale` how many of its pixels one document
+// pixel takes, so every read converts through those.
 const canvasPixel = (x, y) =>
   page.evaluate(([x, y]) => {
     const c = document.getElementById("engine-canvas");
     const s = Number(c.dataset.frameScale) || 1;
-    const dx = Math.min(c.width - 1, Math.floor((x + 0.5) * s));
-    const dy = Math.min(c.height - 1, Math.floor((y + 0.5) * s));
+    const ox = Number(c.dataset.originX) || 0;
+    const oy = Number(c.dataset.originY) || 0;
+    const dx = Math.round(ox + (x + 0.5) * s);
+    const dy = Math.round(oy + (y + 0.5) * s);
+    if (dx < 0 || dy < 0 || dx >= c.width || dy >= c.height) return [0, 0, 0, 0];
     return Array.from(c.getContext("2d").getImageData(dx, dy, 1, 1).data);
   }, [x, y]);
 
@@ -147,7 +150,7 @@ assert(
 
 // 2. Draw a rect with the Rect tool.
 await page.click('button[aria-label="Rect"]');
-const box = await page.locator("#engine-canvas").boundingBox();
+const box = await page.locator("#engine-page").boundingBox();
 const sx = box.width / 1280, sy = box.height / 720;
 const drag = async (x0, y0, x1, y1) => {
   await page.mouse.move(box.x + x0 * sx, box.y + y0 * sy);
@@ -430,23 +433,27 @@ await page.waitForTimeout(150);
 assert((await page.locator(".panel ul li", { hasText: "green.png" }).count()) === 0, "undo removed placed image");
 
 // 8g. Wheel zoom shrinks/grows the on-screen canvas.
-const boxBefore = await page.locator("#engine-canvas").boundingBox();
+const boxBefore = await page.locator("#engine-page").boundingBox();
 const pixelBeforeZoom = await canvasPixel(310, 480);
 await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
 await page.mouse.wheel(0, -400);
 await page.waitForTimeout(150);
-const boxAfter = await page.locator("#engine-canvas").boundingBox();
+const boxAfter = await page.locator("#engine-page").boundingBox();
 assert(boxAfter.width > boxBefore.width * 1.05, "wheel zoom enlarged canvas");
-// And it enlarged the artwork, not its pixels: the engine renders more of
-// them, so the backing store grows with the zoom rather than being
-// stretched to fill the larger box.
+// And it enlarged the artwork, not its pixels: the engine is told to
+// render more of them per document pixel, while the canvas itself stays
+// the size of the viewport it covers.
 const zoomedStore = await page.$eval("#engine-canvas", (c) => [
   c.width,
   Number(c.dataset.frameScale),
 ]);
 assert(
-  zoomedStore[1] > 1 && zoomedStore[0] > 1280,
+  zoomedStore[1] > 1,
   `zooming in raised the render resolution (${zoomedStore})`,
+);
+assert(
+  zoomedStore[0] < 1280 * 2,
+  `and the canvas stayed a viewport rather than growing with it (${zoomedStore})`,
 );
 // The picture is still the same picture at the new resolution.
 {
@@ -463,7 +470,7 @@ await page.waitForTimeout(150);
 // State: opaque rect on top spans (300,300)-(600,500). Probe (310,480) is
 // inside the rect but outside the ellipse.
 await page.click('button[aria-label="Move"]');
-const box2 = await page.locator("#engine-canvas").boundingBox();
+const box2 = await page.locator("#engine-page").boundingBox();
 const sx2 = box2.width / 1280, sy2 = box2.height / 720;
 const toScreen = (x, y) => [box2.x + x * sx2, box2.y + y * sy2];
 px = await canvasPixel(310, 480);
@@ -726,11 +733,14 @@ assert(
 
 // 8l2. Masks: inscribed ellipse mask hides the rect's corners, invert
 // flips it, remove restores — all non-destructive.
-px = await canvasPixel(599, 499); // rect's bottom-right corner, outside ellipse
+// Probes sit a few document pixels inside an edge: the canvas renders at
+// the size it is displayed at, so a probe on a boundary lands on a pixel
+// the edge only partly covers.
+px = await canvasPixel(594, 494); // rect's bottom-right corner, outside ellipse
 assert(px[3] === 255, "rect corner visible before mask");
 await page.click("text=Add ellipse mask");
 await page.waitForTimeout(200);
-px = await canvasPixel(599, 499);
+px = await canvasPixel(594, 494);
 assert(px[3] === 0, "ellipse mask hides the rect corner");
 px = await canvasPixel(450, 400);
 assert(px[0] === 255, "rect center still visible through mask");
@@ -752,13 +762,13 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(250);
   assert(
-    (await canvasPixel(599, 499))[3] === 255,
+    (await canvasPixel(594, 494))[3] === 255,
     "moving the mask uncovered the corner it was hiding",
   );
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert(
-    (await canvasPixel(599, 499))[3] === 0,
+    (await canvasPixel(594, 494))[3] === 0,
     "and the move undoes as one step",
   );
 }
@@ -768,7 +778,7 @@ px = await canvasPixel(450, 400);
 assert(px[0] !== 255 || px[3] !== 255, "inverted mask hides the center");
 await page.click("text=Remove");
 await page.waitForTimeout(200);
-px = await canvasPixel(599, 499);
+px = await canvasPixel(594, 494);
 assert(px[3] === 255, "removing the mask restores the corner");
 
 // 8m. Blur filter layer: content bleeds past shape edges; sigma editable.
@@ -1244,7 +1254,10 @@ const inkCount = (x0, y0, x1, y1) =>
   page.evaluate(([a, b, c, d]) => {
     const el = document.getElementById("engine-canvas");
     const s = Number(el.dataset.frameScale) || 1;
-    [a, b, c, d] = [a, b, c, d].map((v) => Math.round(v * s));
+    const ox = Number(el.dataset.originX) || 0;
+    const oy = Number(el.dataset.originY) || 0;
+    [a, c] = [a, c].map((v) => Math.round(ox + v * s));
+    [b, d] = [b, d].map((v) => Math.round(oy + v * s));
     const img = el.getContext("2d").getImageData(a, b, c - a, d - b).data;
     let n = 0;
     for (let i = 3; i < img.length; i += 4) if (img[i] > 0) n++;
@@ -1305,7 +1318,7 @@ assert(
   // A long line over a short one, so alignment has slack to move.
   await setText("Hello there!\nhi");
   await page.waitForTimeout(300);
-  const band = [740, 640, 1180, 720]; // the second line's band
+  const band = [740, 640, 1280, 720]; // the second line's band
   const tall = await inkCount(...band);
   assert(tall > 20, `the second line renders (${tall} px)`);
   // Where the short line's ink sits horizontally, as its centre of mass.
@@ -1313,7 +1326,10 @@ assert(
     page.evaluate(([a, b, c, d]) => {
       const el = document.getElementById("engine-canvas");
       const s = Number(el.dataset.frameScale) || 1;
-      [a, b, c, d] = [a, b, c, d].map((v) => Math.round(v * s));
+      const ox = Number(el.dataset.originX) || 0;
+      const oy = Number(el.dataset.originY) || 0;
+      [a, c] = [a, c].map((v) => Math.round(ox + v * s));
+      [b, d] = [b, d].map((v) => Math.round(oy + v * s));
       const img = el.getContext("2d").getImageData(a, b, c - a, d - b).data;
       let sum = 0;
       let n = 0;
@@ -1414,16 +1430,15 @@ assert(
   await page.isVisible("text=RGB, 600×400"),
   "the status chip reports the document's real size",
 );
-const smallCanvas = await page.$eval("#engine-canvas", (c) => [c.width, c.height]);
+const smallPage = await page.locator("#engine-page").boundingBox();
 assert(
-  smallCanvas[0] >= 600 &&
-    Math.abs(smallCanvas[0] / smallCanvas[1] - 600 / 400) < 0.02,
-  `the canvas carries the document's shape at or above its resolution (${smallCanvas})`,
+  Math.abs(smallPage.width / smallPage.height - 600 / 400) < 0.02,
+  `the page is drawn in the document's shape (${smallPage.width}x${smallPage.height})`,
 );
 {
   // Screen/document conversion has to follow the new size, so a drag in
   // the middle of the canvas must paint in the middle of the document.
-  const b = await page.locator("#engine-canvas").boundingBox();
+  const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   await page.click('button[aria-label="Rect"]');
   await page.mouse.move(...at(100, 100));
@@ -1539,7 +1554,7 @@ assert(
 // rect's centre is reliably on it.
 {
   await newDocument(600, 400, "rgb");
-  const b = await page.locator("#engine-canvas").boundingBox();
+  const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   await page.click('button[aria-label="Rect"]');
   for (const [x0, y0, x1, y1] of [
@@ -1582,7 +1597,7 @@ assert(
 // and subtracting an enclosed one punches a hole.
 {
   await newDocument(600, 400, "rgb");
-  const b = await page.locator("#engine-canvas").boundingBox();
+  const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   const drawRect = async (x0, y0, x1, y1) => {
     await page.click('button[aria-label="Rect"]');
@@ -1641,7 +1656,7 @@ assert(
 // with the picture still where it was inside the frame.
 {
   await newDocument(600, 400, "rgb");
-  const b = await page.locator("#engine-canvas").boundingBox();
+  const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   await page.click('button[aria-label="Rect"]');
   await page.mouse.move(...at(200, 150));

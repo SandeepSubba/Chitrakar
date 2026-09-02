@@ -854,9 +854,15 @@ body {
   position: absolute;
   top: 0;
   left: 0;
-  transform-origin: 0 0;
+}
+
+/* The page under the canvas. The canvas covers the viewport and paints
+   only the artwork, so the paper it sits on is this. */
+#engine-page {
+  position: absolute;
   background: #fff;
   box-shadow: 0 4px 24px rgb(0 0 0 / 0.5);
+  pointer-events: none;
 }
 
 .panel {
