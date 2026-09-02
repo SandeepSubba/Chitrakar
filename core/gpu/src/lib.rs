@@ -643,6 +643,22 @@ mod tests {
     use chitrakar_color::{AuthoredColor, ColorMode};
     use chitrakar_doc::{Command, Node};
 
+    /// A renderer, or nothing where the machine has no adapter — except
+    /// in CI, which installs a software driver on purpose: a skip there
+    /// would quietly stop checking the thing the job exists to check.
+    fn gpu_or_skip() -> Option<GpuRenderer> {
+        match GpuRenderer::new() {
+            Some(gpu) => Some(gpu),
+            None if std::env::var("CI").is_ok() => {
+                panic!("no GPU adapter in CI: mesa-vulkan-drivers should have been installed")
+            }
+            None => {
+                eprintln!("skipped: no GPU adapter");
+                None
+            }
+        }
+    }
+
     const RED: AuthoredColor = AuthoredColor::Srgb {
         r: 1.0,
         g: 0.2,
@@ -760,8 +776,7 @@ mod tests {
 
     #[test]
     fn the_gpu_draws_the_page_the_cpu_draws() {
-        let Some(gpu) = GpuRenderer::new() else {
-            eprintln!("skipped: no GPU adapter");
+        let Some(gpu) = gpu_or_skip() else {
             return;
         };
         eprintln!("adapter: {}", gpu.adapter);
@@ -804,8 +819,7 @@ mod tests {
 
     #[test]
     fn paths_are_filled_the_way_the_cpu_fills_them() {
-        let Some(gpu) = GpuRenderer::new() else {
-            eprintln!("skipped: no GPU adapter");
+        let Some(gpu) = gpu_or_skip() else {
             return;
         };
         let mut doc = Document::new(90, 90, ColorMode::Rgb);
@@ -871,8 +885,7 @@ mod tests {
 
     #[test]
     fn opacity_and_groups_composite_as_they_do_on_the_cpu() {
-        let Some(gpu) = GpuRenderer::new() else {
-            eprintln!("skipped: no GPU adapter");
+        let Some(gpu) = gpu_or_skip() else {
             return;
         };
         let mut doc = Document::new(60, 60, ColorMode::Rgb);
