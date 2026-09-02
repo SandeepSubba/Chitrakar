@@ -867,6 +867,56 @@ assert(
   );
 }
 
+// 8q3. Arrow keys nudge whatever is picked — one layer, or a whole
+// multi-selection moving together as one edit.
+{
+  const leftOf = async (nth) => {
+    await page.locator(".panel ul li", { hasText: "Path" }).nth(nth).click();
+    await page.waitForTimeout(150);
+    const q = await page.$eval(".sel-outline polygon", (el) =>
+      el.getAttribute("points").split(" ").map((p) => Number(p.split(",")[0])),
+    );
+    return Math.min(...q);
+  };
+  const start = [await leftOf(0), await leftOf(1)];
+  await page.locator(".panel ul li", { hasText: "Path" }).first().click();
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.waitForTimeout(250);
+  const one = [await leftOf(0), await leftOf(1)];
+  assert(
+    one[0] - start[0] > 5 && Math.abs(one[1] - start[1]) < 1,
+    `shift-arrow nudged the picked layer alone (${start} -> ${one})`,
+  );
+  // Now both: one press, both move, one history entry.
+  await page.locator(".panel ul li", { hasText: "Path" }).first().click();
+  await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
+    modifiers: ["Control"],
+  });
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.waitForTimeout(250);
+  const both = [await leftOf(0), await leftOf(1)];
+  assert(
+    both[0] - one[0] > 5 && Math.abs(both[1] - one[1] - (both[0] - one[0])) < 1,
+    `one press moved the whole selection by the same step (${one} -> ${both})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const undone = [await leftOf(0), await leftOf(1)];
+  assert(
+    Math.abs(undone[0] - one[0]) < 1 && Math.abs(undone[1] - one[1]) < 1,
+    `the whole nudge undoes as one step (${undone})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const back = [await leftOf(0), await leftOf(1)];
+  assert(
+    Math.abs(back[0] - start[0]) < 1 && Math.abs(back[1] - start[1]) < 1,
+    `and so does the single-layer one (${start} -> ${back})`,
+  );
+}
+
 // 8r. Ungroup via the button.
 await page.locator(".panel ul li", { hasText: "Path" }).first().click();
 await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: ["Control"] });
@@ -1306,6 +1356,50 @@ assert(
   assert(
     (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
     "undo unwinds the shadow entirely",
+  );
+}
+
+// 8x3. Dragging one member of a multi-selection carries the rest. Rects
+// are used because the drag has to start on the layer it grabs, and a
+// rect's centre is reliably on it.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-canvas").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  for (const [x0, y0, x1, y1] of [
+    [60, 60, 180, 160],
+    [300, 60, 420, 160],
+  ]) {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  }
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(120, 110))[3] === 255, "first rect is where it was drawn");
+  assert((await canvasPixel(360, 110))[3] === 255, "and so is the second");
+  // Grab the middle of one of them and pull straight down.
+  await page.mouse.move(...at(120, 110));
+  await page.mouse.down();
+  await page.mouse.move(...at(120, 240), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(120, 240))[3] === 255, "the grabbed rect came along");
+  assert(
+    (await canvasPixel(360, 240))[3] === 255,
+    "and so did the one that was only ctrl-clicked",
+  );
+  assert((await canvasPixel(360, 110))[3] === 0, "leaving its old place empty");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(360, 110))[3] === 255 && (await canvasPixel(120, 240))[3] === 0,
+    "and the pair moves back in one undo",
   );
 }
 

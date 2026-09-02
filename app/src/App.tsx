@@ -266,6 +266,9 @@ interface ToolDrag {
   /** Move tool: the node being dragged and its full starting transform. */
   target?: NodeId;
   t0?: Transform;
+  /** Move tool: every layer travelling with the drag, each with its own
+   * starting transform, since each sits in its own parent space. */
+  moving?: { id: NodeId; t0: Transform }[];
   /** Brush: the stroke so far, in document coordinates. */
   stroke?: [number, number][];
   /** Brush: a width multiplier per recorded sample. */
@@ -719,6 +722,53 @@ export function App() {
     return climbs(id, target) || climbs(target, id);
   };
 
+  /** Turn a document-space displacement into one SetTransform per layer,
+   * each expressed in that layer's own parent space. Layers that would not
+   * actually move are left out. */
+  const translateAll = (
+    moving: { id: NodeId; t0: Transform }[],
+    mx: number,
+    my: number,
+  ): Command[] => {
+    const out: Command[] = [];
+    for (const { id, t0 } of moving) {
+      const [dx, dy] = layerVector(id, mx, my);
+      if (dx === 0 && dy === 0) continue;
+      out.push({
+        SetTransform: { id, transform: { ...t0, e: t0.e + dx, f: t0.f + dy } },
+      });
+    }
+    return out;
+  };
+
+  /** The document-space box around a set of layers, as two corners.
+   * `bounds_of` answers [x, y, w, h]; everything here works in corners. */
+  const unionBounds = (
+    ids: NodeId[],
+  ): [number, number, number, number] | null => {
+    if (!session) return null;
+    let acc: [number, number, number, number] | null = null;
+    for (const id of ids) {
+      const b = session.bounds_of(id);
+      if (b.length !== 4) continue;
+      const box: [number, number, number, number] = [
+        b[0],
+        b[1],
+        b[0] + b[2],
+        b[1] + b[3],
+      ];
+      acc = acc
+        ? [
+            Math.min(acc[0], box[0]),
+            Math.min(acc[1], box[1]),
+            Math.max(acc[2], box[2]),
+            Math.max(acc[3], box[3]),
+          ]
+        : box;
+    }
+    return acc;
+  };
+
   const isPanTrigger = (e: React.PointerEvent) =>
     e.button === 1 || (e.button === 0 && spaceRef.current);
 
@@ -814,26 +864,34 @@ export function App() {
       const target = inSelectedGroup(hit) ? selected! : hit;
       drag.target = target;
       drag.t0 = toTransform(session.transform_of(target));
+      // Grabbing any member of a multi-selection drags the whole of it;
+      // grabbing anything else starts a fresh single selection.
+      const together =
+        selectionSet.length > 1 && selectionSet.includes(target)
+          ? selectionSet
+          : [target];
+      if (together.length === 1) setMultiSel([]);
+      drag.moving = together.map((id) => ({
+        id,
+        t0: toTransform(session.transform_of(id)),
+      }));
       // Collect what this drag can snap to, once, while nothing is moving:
       // the page's own edges and middle, and the same three lines from
-      // every layer that is not the one being dragged (nor an ancestor or
-      // descendant of it, which move along with it).
-      // bounds_of answers [x, y, w, h]; keep the two corners instead.
-      const corners = (b: ArrayLike<number>) =>
-        [b[0], b[1], b[0] + b[2], b[1] + b[3]] as [number, number, number, number];
-      const box = session.bounds_of(target);
-      if (box.length === 4) {
-        drag.b0 = corners(box);
+      // every layer that is not travelling with it. What snaps is the box
+      // around everything being moved, so a group of layers aligns as the
+      // one shape it looks like.
+      const moved = unionBounds(together);
+      if (moved) {
+        drag.b0 = moved;
         const xs = snapLines(0, docSize[0]);
         const ys = snapLines(0, docSize[1]);
         for (const layer of layers) {
           const id = layer.id as NodeId;
-          if (relatedTo(id, target)) continue;
+          if (together.some((m) => relatedTo(id, m))) continue;
           const b = session.bounds_of(id);
           if (b.length !== 4) continue;
-          const [x0, y0, x1, y1] = corners(b);
-          xs.push(...snapLines(x0, x1));
-          ys.push(...snapLines(y0, y1));
+          xs.push(...snapLines(b[0], b[0] + b[2]));
+          ys.push(...snapLines(b[1], b[1] + b[3]));
         }
         drag.snapX = xs;
         drag.snapY = ys;
@@ -892,15 +950,12 @@ export function App() {
       // Only re-render when the guides actually change: this runs on every
       // pointer sample.
       setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
-      const [dx, dy] = layerVector(drag.target, mx, my);
-      if (dx !== 0 || dy !== 0) {
+      // The delta is in document space; each layer wants it in its own
+      // parent's, which differ once groups turn or scale.
+      const moves = translateAll(drag.moving ?? [], mx, my);
+      if (moves.length > 0) {
         drag.moved = true;
-        preview({
-          SetTransform: {
-            id: drag.target,
-            transform: { ...drag.t0, e: drag.t0.e + dx, f: drag.t0.f + dy },
-          },
-        });
+        preview(moves.length === 1 ? moves[0] : { Batch: moves });
       }
     }
   };
@@ -1179,6 +1234,34 @@ export function App() {
       alert(`Align: ${err}`);
     }
   };
+
+  /** Arrow keys nudge whatever is picked; shift makes it a coarse step.
+   * Declared after `selectionSet` for the same reason the layer shortcuts
+   * are declared after their actions. */
+  useEffect(() => {
+    const STEPS: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const step = STEPS[e.key];
+      if (!step || !session || isTextEntry(e.target) || selectionSet.length === 0) {
+        return;
+      }
+      e.preventDefault();
+      const k = e.shiftKey ? 10 : 1;
+      const moving = selectionSet.map((id) => ({
+        id,
+        t0: toTransform(session.transform_of(id)),
+      }));
+      const cmds = translateAll(moving, step[0] * k, step[1] * k);
+      if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const ALIGN_BUTTONS: [string, IconName, string][] = [
     ["left", "alignLeft", "Align left edges"],

@@ -46,7 +46,8 @@ without reading anything else.*
   strength, cast from the layer's silhouette so it follows every edit.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
-  free of it.
+  free of it. A ctrl-clicked multi-selection moves as one — by drag or by
+  arrow key (shift for a coarse step) — in a single history entry.
   Zooming in re-renders rather than magnifies: the engine composites at
   the resolution the canvas is displayed at (capped by a pixel budget), so
   outlines, gradients and glyphs are re-solved instead of interpolated.
