@@ -68,6 +68,16 @@ const menuItem = async (menu, item) => {
   await page.waitForTimeout(120);
   return page.locator(".menu-item", { hasText: item });
 };
+/** Create a document through the New-document dialog. */
+const newDocument = async (w, h, mode) => {
+  await menuClick("File", "New document…");
+  await page.locator('input[aria-label="Width"]').fill(String(w));
+  await page.locator('input[aria-label="Height"]').fill(String(h));
+  await page.selectOption('[aria-label="Colour mode"]', mode);
+  await page.click("text=Create");
+  await page.waitForTimeout(400);
+};
+
 const menuClick = async (menu, item) => {
   (await menuItem(menu, item)).click();
   await page.waitForTimeout(200);
@@ -92,7 +102,7 @@ await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
 assert(await page.isVisible("text=Export PNG"), "File menu holds the exports");
 assert(
-  await page.isVisible("text=New CMYK document"),
+  await page.isVisible("text=New document…"),
   "and the document actions that used to crowd the bar",
 );
 // Hovering a neighbour switches menus once one is open.
@@ -1001,8 +1011,36 @@ assert(
 );
 assert(jpegBytes.length > 2000, `JPEG carries image data (${jpegBytes.length} bytes)`);
 
+// 8x. A document is not always 1280x720: create a small one, check the
+// canvas is sized to it and that a drag lands where it was aimed.
+await newDocument(600, 400, "rgb");
+assert(
+  await page.isVisible("text=RGB, 600×400"),
+  "the status chip reports the document's real size",
+);
+const smallCanvas = await page.$eval("#engine-canvas", (c) => [c.width, c.height]);
+assert(
+  smallCanvas[0] === 600 && smallCanvas[1] === 400,
+  `the canvas is sized to the document (${smallCanvas})`,
+);
+{
+  // Screen/document conversion has to follow the new size, so a drag in
+  // the middle of the canvas must paint in the middle of the document.
+  const b = await page.locator("#engine-canvas").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const inside = await canvasPixel(300, 200);
+  assert(inside[3] === 255, `drag painted inside the small document (${inside})`);
+  assert((await canvasPixel(20, 20))[3] === 0, "and not outside the drag");
+}
+
 // 9. CMYK doc smoke: new doc, draw, still renders.
-await menuClick("File", "New CMYK document");
+await newDocument(1280, 720, "cmyk");
 await page.click('button[aria-label="Rect"]');
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
@@ -1046,7 +1084,7 @@ assert(
 );
 
 // 9d. Soft proofing on an RGB document with the same profile.
-await menuClick("File", "New RGB document");
+await newDocument(1280, 720, "rgb");
 await page.waitForTimeout(200);
 await page.setInputFiles('input[accept=".icc,.icm"]', {
   name: "swop.icc",

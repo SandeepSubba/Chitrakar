@@ -206,6 +206,97 @@ body {
   cursor: pointer;
 }
 
+/* Dialogs: dim the app, sit the panel above it, and keep the same rounded
+   surfaces the menus use so it reads as part of the same program. */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.5);
+}
+
+.modal {
+  width: 20rem;
+  padding: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgb(0 0 0 / 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.modal h2 {
+  margin: 0 0 0.2rem;
+  font-size: 0.95rem;
+}
+
+.modal .row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.modal .row input,
+.modal .row select {
+  margin-left: auto;
+  width: 7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.3rem;
+}
+
+.preset {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+}
+
+.preset:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.preset.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+}
+
+.mask-button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #10101a;
+  font-weight: 600;
+}
+
 .brush-size {
   width: 2.4rem;
   margin-top: 0.3rem;

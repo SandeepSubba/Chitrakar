@@ -27,7 +27,8 @@ without reading anything else.*
   filter layers (gaussian blur, sharpen), masks on any layer, groups,
   reorder, opacity/blend, rename, labelled history with jump-to-state.
   Transforms nest: a group moves, scales and turns as a unit, and
-  dissolving one folds its transform into its children.
+  dissolving one folds its transform into its children. Documents are any
+  size, chosen from presets or typed, in RGB or CMYK.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
@@ -44,7 +45,7 @@ without reading anything else.*
   Win/macOS/Linux installers on a `v*` tag).
 - **Verify before committing:** `cargo test --workspace` (~96),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~148 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~154 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

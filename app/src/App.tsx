@@ -216,8 +216,19 @@ const HANDLES = ["nw", "ne", "sw", "se"] as const;
 const HANDLE_CORNER = [0, 1, 3, 2];
 type Handle = (typeof HANDLES)[number];
 
+/** Default canvas for a new document; any size can be chosen, and an
+ * opened file brings its own. */
 const DOC_WIDTH = 1280;
 const DOC_HEIGHT = 720;
+
+/** Starting points offered in the new-document dialog. */
+const DOC_PRESETS: [string, number, number][] = [
+  ["HD 1280×720", 1280, 720],
+  ["Full HD 1920×1080", 1920, 1080],
+  ["Square 1080×1080", 1080, 1080],
+  ["A4 at 300dpi", 2480, 3508],
+  ["Postcard at 300dpi", 1748, 1240],
+];
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
 const MIN_SIZE = 2; // doc pixels, resize clamp
@@ -270,6 +281,23 @@ export function App() {
   const [tool, setTool] = useState<Tool>("Move");
   const [fill, setFill] = useState("#6c8cff");
   const [brushSize, setBrushSize] = useState(8);
+  /** The live document's pixel size. Every screen/document conversion goes
+   * through this rather than a constant, so an opened file of any size
+   * lands on a canvas that fits it. */
+  const [docSize, setDocSize] = useState<[number, number]>([
+    DOC_WIDTH,
+    DOC_HEIGHT,
+  ]);
+  /** The same size, for callbacks that must stay referentially stable:
+   * fitView is a dependency of newDocument, which is a dependency of the
+   * one-shot startup effect, so reading state there would rebuild the
+   * document on every render. */
+  const docSizeRef = useRef<[number, number]>([DOC_WIDTH, DOC_HEIGHT]);
+  const setDocumentSize = useCallback((w: number, h: number) => {
+    docSizeRef.current = [w, h];
+    setDocSize([w, h]);
+  }, []);
+  const [newDocOpen, setNewDocOpen] = useState(false);
   const [layers, setLayers] = useState<LayerInfo[]>([]);
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
@@ -333,12 +361,14 @@ export function App() {
     const host = hostRef.current;
     if (!host) return;
     const zoom =
-      Math.min(host.clientWidth / DOC_WIDTH, host.clientHeight / DOC_HEIGHT) *
-      0.9;
+      Math.min(
+        host.clientWidth / docSizeRef.current[0],
+        host.clientHeight / docSizeRef.current[1],
+      ) * 0.9;
     setView({
       zoom,
-      x: (host.clientWidth - DOC_WIDTH * zoom) / 2,
-      y: (host.clientHeight - DOC_HEIGHT * zoom) / 2,
+      x: (host.clientWidth - docSizeRef.current[0] * zoom) / 2,
+      y: (host.clientHeight - docSizeRef.current[1] * zoom) / 2,
     });
   }, []);
 
@@ -356,9 +386,10 @@ export function App() {
   }, []);
 
   const newDocument = useCallback(
-    (useCmyk: boolean) => {
-      const s = new WasmSession(DOC_WIDTH, DOC_HEIGHT, useCmyk);
+    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT) => {
+      const s = new WasmSession(width, height, useCmyk);
       setSession(s);
+      setDocumentSize(width, height);
       setCmyk(useCmyk);
       setSelected(null);
       setHasIcc(false);
@@ -368,7 +399,7 @@ export function App() {
       refresh(s);
       fitView();
     },
-    [refresh, fitView],
+    [refresh, fitView, setDocumentSize],
   );
 
   useEffect(() => {
@@ -533,8 +564,8 @@ export function App() {
   const docPoint = (e: { clientX: number; clientY: number }): [number, number] => {
     const rect = canvasRef.current!.getBoundingClientRect();
     return [
-      ((e.clientX - rect.left) / rect.width) * DOC_WIDTH,
-      ((e.clientY - rect.top) / rect.height) * DOC_HEIGHT,
+      ((e.clientX - rect.left) / rect.width) * docSize[0],
+      ((e.clientY - rect.top) / rect.height) * docSize[1],
     ];
   };
 
@@ -1411,6 +1442,7 @@ export function App() {
     file.arrayBuffer().then((buf) => {
       const s = WasmSession.open(new Uint8Array(buf));
       setSession(s);
+      setDocumentSize(s.width, s.height);
       setCmyk(s.cmyk);
       setSelected(null);
       setHasIcc(s.has_cmyk_profile);
@@ -1474,11 +1506,8 @@ export function App() {
             onHover={() => openMenu && setOpenMenu("file")}
             onClose={() => setOpenMenu(null)}
           >
-            <MenuItem icon="newDoc" onClick={() => newDocument(false)}>
-              New RGB document
-            </MenuItem>
-            <MenuItem icon="newDoc" onClick={() => newDocument(true)}>
-              New CMYK document
+            <MenuItem icon="newDoc" onClick={() => setNewDocOpen(true)}>
+              New document…
             </MenuItem>
             <hr />
             <MenuItem icon="open" onClick={() => pick(openInputRef)}>
@@ -1605,7 +1634,7 @@ export function App() {
               ICC ✓
             </span>
           )}
-          {cmyk ? "CMYK" : "RGB"}, {DOC_WIDTH}×{DOC_HEIGHT} ·{" "}
+          {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]} ·{" "}
           {Math.round(view.zoom * 100)}%
         </span>
 
@@ -1633,6 +1662,15 @@ export function App() {
           hidden
         />
       </header>
+      {newDocOpen && (
+        <NewDocDialog
+          onCancel={() => setNewDocOpen(false)}
+          onCreate={(w, h, useCmyk) => {
+            setNewDocOpen(false);
+            newDocument(useCmyk, w, h);
+          }}
+        />
+      )}
       <div className="workspace">
         <nav className="toolbar" aria-label="Tools">
           {TOOLS.map((t) => (
@@ -1681,8 +1719,8 @@ export function App() {
           <canvas
             id="engine-canvas"
             ref={canvasRef}
-            width={DOC_WIDTH}
-            height={DOC_HEIGHT}
+            width={docSize[0]}
+            height={docSize[1]}
             style={{
               transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`,
             }}
@@ -2139,6 +2177,98 @@ export function App() {
 
 function topLevelCount(layers: LayerInfo[]): number {
   return layers.filter((l) => l.depth === 0).length;
+}
+
+/** New-document dialog: presets for the sizes people actually start from,
+ * and the two fields underneath for everything else. Colour mode is chosen
+ * here because it decides how every fill in the document is authored, and
+ * changing it afterwards would mean reinterpreting them all. */
+function NewDocDialog({
+  onCreate,
+  onCancel,
+}: {
+  onCreate: (w: number, h: number, cmyk: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [w, setW] = useState(DOC_WIDTH);
+  const [h, setH] = useState(DOC_HEIGHT);
+  const [mode, setMode] = useState("rgb");
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") onCreate(w, h, mode === "cmyk");
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [w, h, mode, onCreate, onCancel]);
+
+  const size = (label: string, value: number, set: (v: number) => void) => (
+    <label className="row">
+      {label}
+      <input
+        type="number"
+        min={1}
+        max={8192}
+        value={value}
+        onChange={(e) =>
+          set(Math.max(1, Math.min(8192, Math.round(Number(e.target.value)))))
+        }
+        aria-label={label}
+      />
+    </label>
+  );
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="New document"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>New document</h2>
+        <div className="preset-list">
+          {DOC_PRESETS.map(([name, pw, ph]) => (
+            <button
+              key={name}
+              className={w === pw && h === ph ? "preset active" : "preset"}
+              onClick={() => {
+                setW(pw);
+                setH(ph);
+              }}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+        {size("Width", w, setW)}
+        {size("Height", h, setH)}
+        <label className="row">
+          Colour
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            aria-label="Colour mode"
+          >
+            <option value="rgb">RGB</option>
+            <option value="cmyk">CMYK</option>
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={() => onCreate(w, h, mode === "cmyk")}
+          >
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** One top-level menu: a label in the bar and the popup it owns.
