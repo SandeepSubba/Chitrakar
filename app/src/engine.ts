@@ -128,6 +128,8 @@ export interface TextSpec {
   line_height: number;
   /** Tracking, in ems, so it follows the size. */
   letter_spacing: number;
+  /** Wrap width in document pixels; zero fits the text instead. */
+  width: number;
 }
 
 export interface GradientStop {

@@ -113,13 +113,51 @@ pub fn measure(spec: &TextSpec) -> (f32, f32) {
 fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
     let font = font().as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
-    let mut widest = 0f32;
-    let mut lines = 0u32;
-    for line in spec.text.split('\n') {
-        lines += 1;
-        widest = widest.max(line_width(line, spec, scale));
+    let lines = lines_of(spec, scale);
+    let widest = lines
+        .iter()
+        .map(|l| line_width(l, spec, scale))
+        .fold(0f32, f32::max);
+    // A wrapping block is as wide as it was told to be, so its right edge
+    // holds still while the words inside it change; only a word too long
+    // to fit pushes past that.
+    let width = if spec.width > 0.0 {
+        widest.max(spec.width * scale)
+    } else {
+        widest
+    };
+    (width.max(1.0), (lines.len().max(1) as f32 * step).max(1.0))
+}
+
+/// The lines the block is set in: each paragraph (a run between newlines)
+/// wrapped to the block's width when it has one, greedily, at spaces. Words
+/// are measured shaped, so a line breaks where the glyphs really end, and
+/// the line itself is shaped whole afterwards so kerning across the words
+/// on it is the font's, not a sum of parts.
+fn lines_of(spec: &TextSpec, scale: f32) -> Vec<String> {
+    let limit = spec.width * scale;
+    let mut out = Vec::new();
+    for paragraph in spec.text.split('\n') {
+        if limit <= 0.0 {
+            out.push(paragraph.to_string());
+            continue;
+        }
+        let mut line = String::new();
+        for word in paragraph.split(' ') {
+            let candidate = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if line.is_empty() || line_width(&candidate, spec, scale) <= limit {
+                line = candidate;
+            } else {
+                out.push(std::mem::replace(&mut line, word.to_string()));
+            }
+        }
+        out.push(line);
     }
-    (widest.max(1.0), (lines.max(1) as f32 * step).max(1.0))
+    out
 }
 
 /// Baseline-to-baseline distance: the font's own line height, scaled by
@@ -159,7 +197,7 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let font = font().as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
 
-    for (line_no, line) in spec.text.split('\n').enumerate() {
+    for (line_no, line) in lines_of(spec, scale).iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
         let (glyphs, line_w) = shape_line(line, spec, scale);
         // Alignment is within the block's own width, which is the widest
@@ -345,6 +383,55 @@ mod tests {
         let mut tracked = spec("fi", 40.0);
         tracked.letter_spacing = 0.5;
         assert_eq!(shape_line("fi", &tracked, 1.0).0.len(), 1);
+    }
+
+    #[test]
+    fn a_width_wraps_words_and_holds_the_block_to_it() {
+        let loose = spec("the quick brown fox jumps over the lazy dog", 20.0);
+        let (w0, h0) = measure(&loose);
+        let mut wrapped = loose.clone();
+        wrapped.width = w0 / 3.0;
+        let (w1, h1) = measure(&wrapped);
+        assert!(
+            (w1 - w0 / 3.0).abs() < 0.01,
+            "the block is exactly as wide as it was told: {w1} vs {}",
+            w0 / 3.0
+        );
+        assert!(
+            h1 >= h0 * 3.0,
+            "and three times as tall, or more: {h0} -> {h1}"
+        );
+        assert_eq!(lines_of(&wrapped, 1.0).len() as f32 * h0, h1);
+        // Every wrapped line fits, and no word was cut in half.
+        for line in lines_of(&wrapped, 1.0) {
+            assert!(
+                line_width(&line, &wrapped, 1.0) <= w1 + 0.01,
+                "{line:?} overflows"
+            );
+            assert!(!line.starts_with(' ') && !line.ends_with(' '));
+        }
+        assert_eq!(
+            lines_of(&wrapped, 1.0).join(" "),
+            loose.text,
+            "the words are all still there, in order"
+        );
+        // A word longer than the width stands alone and overhangs.
+        let mut narrow = spec("antidisestablishmentarianism ok", 20.0);
+        narrow.width = 30.0;
+        let lines = lines_of(&narrow, 1.0);
+        assert_eq!(lines, vec!["antidisestablishmentarianism", "ok"]);
+        assert!(measure(&narrow).0 > 30.0, "the block overhangs for it");
+        // Explicit newlines still break, inside a wrapping block too.
+        let mut both = spec("a b\nc", 20.0);
+        both.width = 1000.0;
+        assert_eq!(lines_of(&both, 1.0), vec!["a b", "c"]);
+        // And ink lands on the later lines.
+        let r = rasterize(&wrapped);
+        let lower: f32 = (r.height * 2 / 3..r.height)
+            .flat_map(|y| (0..r.width).map(move |x| (x, y)))
+            .map(|(x, y)| r.sample(x, y))
+            .sum();
+        assert!(lower > 5.0, "the last third of the block has ink");
     }
 
     #[test]

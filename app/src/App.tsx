@@ -1056,6 +1056,7 @@ export function App() {
                 align: "Left",
                 line_height: 1,
                 letter_spacing: 0,
+                width: 0,
               },
             },
             x,
@@ -3887,6 +3888,10 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
         }))}
         {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
           Text: { ...t, letter_spacing: v },
+        }))}
+        {/* Zero is a block that fits its text; anything else wraps to it. */}
+        {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
+          Text: { ...t, width: v },
         }))}
         <label className="row">
           Color

@@ -230,6 +230,12 @@ pub struct TextSpec {
     /// normally quoted — so it scales with the size rather than fighting it.
     #[serde(default)]
     pub letter_spacing: f32,
+    /// Wrap width in document pixels. Zero is a block that fits its own
+    /// text; anything else wraps words to that width and is that wide, so
+    /// alignment inside it holds still while the text changes. A word
+    /// longer than the width stands on its own line and overhangs.
+    #[serde(default)]
+    pub width: f32,
 }
 
 fn one() -> f32 {
@@ -247,6 +253,7 @@ impl TextSpec {
             align: TextAlign::default(),
             line_height: 1.0,
             letter_spacing: 0.0,
+            width: 0.0,
         }
     }
 

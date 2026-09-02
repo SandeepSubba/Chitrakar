@@ -1389,6 +1389,25 @@ assert(
   );
   await setSlider("Letter spacing", 0);
   await page.waitForTimeout(250);
+
+  // A wrap width narrows the block and folds its words into more lines.
+  await setText("the quick brown fox jumps over the lazy dog");
+  await page.waitForTimeout(300);
+  const single = await outline();
+  await setSlider("Wrap width", 240);
+  await page.waitForTimeout(300);
+  const folded = await outline();
+  assert(
+    folded[0] < single[0] * 0.6 && folded[1] > single[1] * 1.8,
+    `a wrap width folded one line into several (${single} -> ${folded})`,
+  );
+  await setSlider("Wrap width", 0);
+  await page.waitForTimeout(300);
+  const unfolded = await outline();
+  assert(
+    Math.abs(unfolded[0] - single[0]) < 2 && Math.abs(unfolded[1] - single[1]) < 2,
+    "and zero lets it fit its text again",
+  );
   await setText("Hello!");
   await page.waitForTimeout(300);
 }

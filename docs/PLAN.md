@@ -66,8 +66,8 @@ without reading anything else.*
   costs a screenful of pixels to show however big it is.
   Text is shaped by the font (rustybuzz: ligatures, kerning, combining
   marks; complex scripts once a font for them is bundled), rasterizes at
-  the size it is actually seen at, and carries alignment, line spacing
-  and tracking.
+  the size it is actually seen at, and carries alignment, line spacing,
+  tracking and a wrap width for paragraph text.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
@@ -78,7 +78,8 @@ without reading anything else.*
   that nothing inside reads the backdrop through (opacity 1, Normal, no
   mask, no blended/adjustment/filter descendant) skips its isolation
   surface entirely. Together those took a full A4/300dpi render from
-  ~370 ms to ~240 ms, and one plain folder in an A4 document from ~250 ms
+  ~370 ms to ~240 ms (fat LTO in the release profile later took another tenth
+  off every figure and 6% off the wasm bundle), and one plain folder in an A4 document from ~250 ms
   of overhead to none. What remains at that size is mostly memory
   bandwidth: the surface is 16 bytes a pixel (139 MB at A4), and each
   full-canvas pass over it costs ~55 ms. `cargo test --release -p
@@ -105,8 +106,8 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: font choice and weights (shaping is done; only one face is
-     bundled), and line wrapping.
+  3. Depth: font choice and weights (shaping and wrapping are done; only
+     one face is bundled).
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
