@@ -67,7 +67,11 @@ without reading anything else.*
   gradients and glyphs are re-solved instead of interpolated, and a page
   costs a screenful of pixels to show however big it is.
   Text is shaped by the font (rustybuzz: ligatures, kerning, combining
-  marks; complex scripts once a font for them is bundled), rasterizes at
+  marks; complex scripts once a font for them is registered), can be set
+  in DejaVu Sans, Sans Bold, Serif or Sans Mono — the bundled face is in
+  the wasm, the rest are fetched from `app/public/fonts` at startup and
+  registered with the engine, so adding a face is dropping a file there
+  — rasterizes at
   the size it is actually seen at, and carries alignment, line spacing,
   tracking and a wrap width for paragraph text.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
@@ -109,8 +113,9 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: font choice and weights (shaping and wrapping are done; only
-     one face is bundled).
+  3. Depth: user-supplied fonts (the registry takes any TrueType/OpenType
+     bytes; only the UI for choosing a file is missing) and a bold/italic
+     toggle that picks the matching face by name.
 - **Chrome:** document actions live in a File/Edit/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, View
   carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

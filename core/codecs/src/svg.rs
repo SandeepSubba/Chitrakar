@@ -208,7 +208,12 @@ fn write_children(
                 };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text font-family="DejaVu Sans, sans-serif" font-size="{}"{spacing}{common} fill="{}">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{}"{spacing}{common} fill="{}">"#,
+                    if spec.font.is_empty() {
+                        "DejaVu Sans"
+                    } else {
+                        spec.font.as_str()
+                    },
                     spec.size,
                     color_hex(doc, spec.fill),
                 );

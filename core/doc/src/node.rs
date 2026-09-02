@@ -236,6 +236,11 @@ pub struct TextSpec {
     /// longer than the width stands on its own line and overhangs.
     #[serde(default)]
     pub width: f32,
+    /// Which face sets the block, by the name it was registered under.
+    /// Empty — and any name nothing answers to — is the bundled face, so
+    /// a document set in a font this machine lacks still renders.
+    #[serde(default)]
+    pub font: String,
 }
 
 fn one() -> f32 {
@@ -254,6 +259,7 @@ impl TextSpec {
             line_height: 1.0,
             letter_spacing: 0.0,
             width: 0.0,
+            font: String::new(),
         }
     }
 

@@ -9,22 +9,75 @@
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 use chitrakar_doc::TextSpec;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
 
-fn font() -> &'static FontRef<'static> {
-    static FONT: OnceLock<FontRef<'static>> = OnceLock::new();
-    FONT.get_or_init(|| FontRef::try_from_slice(FONT_BYTES).expect("bundled font must parse"))
+/// The bundled face's name, and what any name nothing answers to means.
+pub const DEFAULT_FONT: &str = "DejaVu Sans";
+
+/// One face, as both of its readers see it: ab_glyph for the outlines,
+/// rustybuzz for the shaping. Both borrow the same bytes for the life of
+/// the process — a font, once registered, is never taken away, which is
+/// what lets the readers be handed out as plain references.
+pub struct Fonts {
+    font: FontRef<'static>,
+    face: rustybuzz::Face<'static>,
 }
 
-/// The same bytes as the shaper sees them. Parsed once; shaping a line is
-/// then a lookup through the font's own tables rather than a parse.
-fn face() -> &'static rustybuzz::Face<'static> {
-    static FACE: OnceLock<rustybuzz::Face<'static>> = OnceLock::new();
-    FACE.get_or_init(|| {
-        rustybuzz::Face::from_slice(FONT_BYTES, 0).expect("bundled font must parse")
+fn parse(bytes: &'static [u8]) -> Result<Fonts, String> {
+    Ok(Fonts {
+        font: FontRef::try_from_slice(bytes).map_err(|e| e.to_string())?,
+        face: rustybuzz::Face::from_slice(bytes, 0).ok_or("not a font the shaper can read")?,
     })
+}
+
+fn bundled() -> &'static Fonts {
+    static BUNDLED: OnceLock<Fonts> = OnceLock::new();
+    BUNDLED.get_or_init(|| parse(FONT_BYTES).expect("bundled font must parse"))
+}
+
+fn registry() -> &'static RwLock<HashMap<String, &'static Fonts>> {
+    static REGISTRY: OnceLock<RwLock<HashMap<String, &'static Fonts>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Make a face available under `name` for the rest of the process. The
+/// bytes are kept for good: a registered font is referenced from every
+/// text block that names it, so there is no moment it could be dropped.
+pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
+    let fonts: &'static Fonts = Box::leak(Box::new(parse(Box::leak(bytes.into_boxed_slice()))?));
+    registry()
+        .write()
+        .map_err(|_| "font registry poisoned")?
+        .insert(name.to_string(), fonts);
+    Ok(())
+}
+
+/// Every face that can be named: the bundled one first, then the rest in
+/// the order they sort.
+pub fn font_names() -> Vec<String> {
+    let mut names: Vec<String> = registry()
+        .read()
+        .map(|r| r.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names.insert(0, DEFAULT_FONT.to_string());
+    names
+}
+
+/// The face a block is set in — the one it names, or the bundled one when
+/// it names nothing or something this process has not been given.
+fn fonts_for(spec: &TextSpec) -> &'static Fonts {
+    if spec.font.is_empty() || spec.font == DEFAULT_FONT {
+        return bundled();
+    }
+    registry()
+        .read()
+        .ok()
+        .and_then(|r| r.get(&spec.font).copied())
+        .unwrap_or_else(bundled)
 }
 
 /// One positioned glyph of a shaped line: which glyph, where its origin
@@ -42,13 +95,14 @@ struct Shaped {
 /// way a typesetter letter-spaces: between the glyphs, never inside a
 /// ligature's own shape.
 fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
-    let face = face();
+    let fonts = fonts_for(spec);
+    let face = &fonts.face;
     let px = spec.size.max(0.1) * scale;
     // `size` is ab_glyph's scale — pixels per ascent-to-descent height, not
     // per em — so the shaper's font units are converted by that same
     // height. Using the em here instead sets every advance and offset 16%
     // adrift of the outlines they position in DejaVu Sans.
-    let unit = px / font().height_unscaled();
+    let unit = px / fonts.font.height_unscaled();
     let track = tracking(spec, scale);
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(line);
@@ -130,7 +184,7 @@ struct Layout {
 }
 
 fn layout(spec: &TextSpec, scale: f32) -> Layout {
-    let font = font().as_scaled(spec.size.max(0.1) * scale);
+    let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
     let lines = lines_of(spec, scale);
     let widths: Vec<f32> = lines.iter().map(|l| line_width(l, spec, scale)).collect();
@@ -227,7 +281,7 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let mut coverage = vec![0f32; (width * height) as usize];
     // Every metric below comes from the scaled font, so advances, kerning
     // and line height are all in raster pixels already.
-    let font = font().as_scaled(spec.size.max(0.1) * scale);
+    let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
 
     for (line_no, line) in l.lines.iter().enumerate() {
@@ -426,7 +480,7 @@ mod tests {
         // for the same glyph at the same size: they have to be the same
         // number, or every line is set loose against its own ink.
         let s = spec("", 40.0);
-        let scaled = font().as_scaled(40.0);
+        let scaled = bundled().font.as_scaled(40.0);
         for ch in ['H', 'i', 'W', '.'] {
             let (glyphs, w) = shape_line(&ch.to_string(), &s, 1.0);
             assert_eq!(glyphs.len(), 1);
@@ -501,6 +555,25 @@ mod tests {
             .map(|(x, y)| r.sample(x, y))
             .sum();
         assert!(lower > 5.0, "the last third of the block has ink");
+    }
+
+    #[test]
+    fn a_registered_face_sets_the_blocks_that_name_it() {
+        // Bold is wider than regular for the same words; a name nothing
+        // answers to falls back to the bundled face rather than failing.
+        let bold = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        register_font("Test Bold", bold.to_vec()).unwrap();
+        assert!(font_names().contains(&"Test Bold".to_string()));
+        let regular = spec("Hello there", 32.0);
+        let mut heavy = regular.clone();
+        heavy.font = "Test Bold".into();
+        let (w0, _) = measure(&regular);
+        let (w1, _) = measure(&heavy);
+        assert!(w1 > w0 * 1.05, "bold is wider: {w0} -> {w1}");
+        let mut missing = regular.clone();
+        missing.font = "No Such Face".into();
+        assert_eq!(measure(&missing), measure(&regular), "unknown falls back");
+        assert!(register_font("junk", vec![1, 2, 3]).is_err());
     }
 
     #[test]

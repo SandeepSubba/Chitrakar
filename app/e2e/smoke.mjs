@@ -1404,6 +1404,26 @@ assert(
   await setSlider("Wrap width", 0);
   await page.waitForTimeout(300);
   const unfolded = await outline();
+  // Faces beyond the bundled one are fetched and registered at startup;
+  // choosing one re-sets the block, so bold comes out wider.
+  await page.waitForFunction(
+    () => document.querySelectorAll('select[aria-label="Font"] option').length >= 4,
+    null,
+    { timeout: 5000 },
+  );
+  await page.selectOption('select[aria-label="Font"]', "DejaVu Sans Bold");
+  await page.waitForTimeout(300);
+  const bold = await outline();
+  assert(
+    bold[0] > unfolded[0] * 1.04 && Math.abs(bold[1] - unfolded[1]) < 2,
+    `bold set the block wider, not taller (${unfolded} -> ${bold})`,
+  );
+  await page.selectOption('select[aria-label="Font"]', "DejaVu Sans");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await outline())[0] - unfolded[0]) < 2,
+    "and back to the bundled face it is its old width",
+  );
   assert(
     Math.abs(unfolded[0] - single[0]) < 2 && Math.abs(unfolded[1] - single[1]) < 2,
     "and zero lets it fit its text again",

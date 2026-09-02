@@ -1268,6 +1268,16 @@ impl Session {
         Ok(id)
     }
 
+    /// Make a font available to every text block that names it, for the
+    /// rest of the process. Names are the ones the Text panel offers.
+    pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), EngineError> {
+        chitrakar_render::text::register_font(name, bytes).map_err(EngineError::BadCommand)
+    }
+
+    pub fn font_names() -> Vec<String> {
+        chitrakar_render::text::font_names()
+    }
+
     /// The node the last command — an undo or redo included — touched, if
     /// it still exists, so a selection can follow it.
     pub fn last_touched_node(&self) -> Option<NodeId> {

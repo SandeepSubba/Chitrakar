@@ -130,6 +130,8 @@ export interface TextSpec {
   letter_spacing: number;
   /** Wrap width in document pixels; zero fits the text instead. */
   width: number;
+  /** The face's registered name; empty is the bundled DejaVu Sans. */
+  font: string;
 }
 
 export interface GradientStop {

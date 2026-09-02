@@ -309,6 +309,17 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Register a font (TrueType/OpenType bytes) under a name text blocks
+    /// can use. Process-wide, so once is enough per page load.
+    pub fn register_font(name: &str, bytes: &[u8]) -> Result<(), JsError> {
+        Session::register_font(name, bytes.to_vec()).map_err(to_js)
+    }
+
+    /// The names text blocks can be set in, as a JSON array.
+    pub fn font_names() -> String {
+        serde_json::to_string(&Session::font_names()).unwrap_or_else(|_| "[]".into())
+    }
+
     /// The node the last command touched, or undefined. Undo hands the
     /// layer it brought back here so the selection can follow it.
     pub fn last_touched_node(&self) -> Option<f64> {

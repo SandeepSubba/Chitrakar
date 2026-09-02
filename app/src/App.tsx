@@ -456,6 +456,32 @@ export function App() {
   const shapeCount = useRef(0);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** Faces a text block can be set in. The bundled one is always there;
+   * the rest are fetched from /fonts once per page load and registered
+   * with the engine, which keeps them for good. */
+  const [fontNames, setFontNames] = useState<string[]>(["DejaVu Sans"]);
+  const fontsLoaded = useRef(false);
+  useEffect(() => {
+    if (!session || fontsLoaded.current) return;
+    fontsLoaded.current = true;
+    const faces: [string, string][] = [
+      ["DejaVu Sans Bold", "/fonts/DejaVuSans-Bold.ttf"],
+      ["DejaVu Serif", "/fonts/DejaVuSerif.ttf"],
+      ["DejaVu Sans Mono", "/fonts/DejaVuSansMono.ttf"],
+    ];
+    Promise.all(
+      faces.map(async ([name, url]) => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return;
+          WasmSession.register_font(name, new Uint8Array(await res.arrayBuffer()));
+        } catch {
+          // A face that will not load is simply not offered.
+        }
+      }),
+    ).then(() => setFontNames(JSON.parse(WasmSession.font_names()) as string[]));
+  }, [session]);
+
   /** Alignment guides drawn while a drag is snapped to something. */
   const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
   /** The guides the user has placed, read back from the document. */
@@ -1059,6 +1085,7 @@ export function App() {
                 line_height: 1,
                 letter_spacing: 0,
                 width: 0,
+                font: "",
               },
             },
             x,
@@ -3395,6 +3422,7 @@ export function App() {
                   onEdit={setKind}
                   onGestureEnd={endGesture}
                   cmyk={cmyk}
+                  fonts={fontNames}
                 />
               )}
               <div className="effects">
@@ -3833,11 +3861,13 @@ interface KindPropsProps {
   /** Document colour mode, so new colours are authored as ink in a CMYK
    * document exactly like the shape tools do. */
   cmyk: boolean;
+  /** Faces a text block may be set in, bundled one first. */
+  fonts: string[];
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
  * every layer's settings revisitable (the non-destructive contract). */
-function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
+function KindProps({ kind, onEdit, onGestureEnd, cmyk, fonts }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -3972,6 +4002,20 @@ function KindProps({ kind, onEdit, onGestureEnd, cmyk }: KindPropsProps) {
         {slider("Letter spacing", t.letter_spacing ?? 0, -0.1, 0.5, 0.01, (v) => ({
           Text: { ...t, letter_spacing: v },
         }))}
+        <label>
+          Font
+          <select
+            value={t.font || fonts[0]}
+            onChange={(e) => onEdit({ Text: { ...t, font: e.target.value } }, false)}
+            aria-label="Font"
+          >
+            {fonts.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
         {/* Zero is a block that fits its text; anything else wraps to it. */}
         {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
           Text: { ...t, width: v },
