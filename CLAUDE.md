@@ -2,10 +2,14 @@
 
 Multiplatform non-destructive photo + vector editor. Rust engine compiled
 natively **and** to WASM; TypeScript/React UI; Tauri 2 shells for
-desktop/mobile. Read `docs/PLAN.md` for the roadmap (✅ marks show what's
-done) and `docs/spikes/` for the moxcms-CMS and wgpu-GPU decisions.
-`git log --oneline` is a faithful build diary — commit messages explain each
-subsystem.
+desktop/mobile.
+
+**Resuming work? Read `docs/PLAN.md` §0 "Where things stand" first** — it
+says what works today, how to verify, and what's next, so a fresh session
+needs nothing else. The rest of PLAN.md is the roadmap (✅ = done),
+`docs/spikes/` holds the moxcms-CMS and wgpu-GPU decisions with data, and
+`git log --oneline` is a faithful build diary. Keep §0 current when you
+finish a chunk of work.
 
 ## Architecture in one breath
 

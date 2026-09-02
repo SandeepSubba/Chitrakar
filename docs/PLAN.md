@@ -14,6 +14,42 @@ two non-negotiable principles:
 
 ---
 
+## 0. Where things stand (read this first)
+
+*Handoff block — keep it current; it exists so a fresh session can resume
+without reading anything else.*
+
+- **Branch:** `claude/multiplatform-photo-vector-editor-enghs5`.
+- **Working today:** a real editor. Draw rects/ellipses/pen paths (straight
+  or smooth), place images, add live text; move/scale with handles and live
+  drag preview; adjustment layers (exposure, brightness/contrast, hue/sat),
+  filter layers (gaussian blur, sharpen), masks on any layer, groups,
+  reorder, opacity/blend, rename, labelled history with jump-to-state.
+  Color: embedded ICC honored on import, CMYK documents with press profiles,
+  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG, SVG,
+  CMYK TIFF. Desktop app packages (deb verified locally; CI builds
+  Win/macOS/Linux installers on a `v*` tag).
+- **Verify before committing:** `cargo test --workspace` (~75),
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
+  and in `app/`: `npm run build && npm run test:e2e` (~81 browser
+  assertions). Both suites self-skip CMYK-profile steps unless
+  `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc.
+- **Next up (rough priority):**
+  1. PDF export (composite + embedded profile) — the last export gap.
+  2. wgpu/vello GPU backend, validated pixel-for-pixel against the CPU
+     reference renderer (llvmpipe makes this CI-able — see
+     docs/spikes/gpu-rendering.md).
+  3. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
+     wants a machine with Xcode/Android Studio).
+  4. Depth: bezier handles on paths, brush engine, gradient fills, text
+     shaping via rustybuzz/parley.
+- **Known limits, deliberately:** no anti-aliasing in the CPU rasterizer
+  (the GPU path brings it), transforms carry scale+translate only (no
+  rotation/shear yet), masks aren't editable on-canvas, PDF/JPEG export
+  missing.
+
+---
+
 ## 1. Tech stack
 
 | Piece | Choice | Why |
