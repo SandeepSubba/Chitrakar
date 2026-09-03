@@ -94,6 +94,14 @@ fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
 }
 
 /// An open document plus its edit history and cached composite.
+/// A stroke being drawn: the layer it is going onto, where it sits in
+/// that layer's order, and what has been drawn of it so far.
+struct Painting {
+    layer: NodeId,
+    index: usize,
+    stroke: chitrakar_doc::PaintStroke,
+}
+
 pub struct Session {
     doc: Document,
     undo: Vec<HistoryEntry>,
@@ -126,6 +134,9 @@ pub struct Session {
     /// Inverse restoring the state before the current preview gesture, with
     /// the label captured from the gesture's first command.
     preview_inverse: Option<HistoryEntry>,
+    /// The stroke a brush is in the middle of drawing: which layer it is
+    /// going onto, where in that layer's order, and the stroke so far.
+    painting: Option<Painting>,
     /// Total pixels re-rendered so far (observability for tests and tuning).
     pixels_recomputed: u64,
     /// The node the most recent command touched, when there was one. What
@@ -157,6 +168,7 @@ impl Session {
             view_origin: (0.0, 0.0),
             viewport: None,
             preview_inverse: None,
+            painting: None,
             pixels_recomputed: 0,
             last_touched: None,
             proof_cms: None,
@@ -374,6 +386,7 @@ impl Session {
     /// End the gesture, recording it as one undo step. Returns false if no
     /// preview was active.
     pub fn commit_preview(&mut self) -> bool {
+        self.painting = None;
         match self.preview_inverse.take() {
             Some(entry) => {
                 self.undo.push(entry);
@@ -387,6 +400,7 @@ impl Session {
     /// Abort the gesture, restoring the pre-gesture state. Returns false if
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
+        self.painting = None;
         match self.preview_inverse.take() {
             Some(entry) => {
                 self.apply_internal(entry.inverse)?;
@@ -706,6 +720,121 @@ impl Session {
         let label = format!("Duplicate {}", self.doc.node(id)?.name);
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(copy_id)
+    }
+
+    /// Add an empty layer to paint on at the top of the document.
+    pub fn add_paint_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(chitrakar_doc::Node::paint(name)),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Start a brush stroke on a paint layer. The point is in document
+    /// space and is written into the layer's own; the stroke goes on as
+    /// a preview, so however many times it is extended the whole of it
+    /// is one entry in history when the gesture is committed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_begin(
+        &mut self,
+        layer: NodeId,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: chitrakar_color::AuthoredColor,
+        softness: f32,
+        erase: bool,
+    ) -> Result<(), EngineError> {
+        let index = self.stroke_count(layer)?;
+        let Some((lx, ly)) = self.point_in_layer(layer, x, y)? else {
+            return Ok(());
+        };
+        let stroke = chitrakar_doc::PaintStroke {
+            points: vec![[lx, ly]],
+            radii: vec![self.radius_in_layer(layer, radius)?],
+            color,
+            softness,
+            erase,
+        };
+        self.preview(Command::AddStroke {
+            id: layer,
+            index,
+            stroke: Box::new(stroke.clone()),
+        })?;
+        self.painting = Some(Painting {
+            layer,
+            index,
+            stroke,
+        });
+        Ok(())
+    }
+
+    /// Carry the stroke being drawn on to another point. A point that
+    /// lands where the last one did is dropped: a pointer that has not
+    /// moved has nothing to add, and the stroke is redrawn every time it
+    /// grows.
+    pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), EngineError> {
+        let Some(painting) = self.painting.as_ref() else {
+            return Ok(());
+        };
+        let (layer, index) = (painting.layer, painting.index);
+        let Some((lx, ly)) = self.point_in_layer(layer, x, y)? else {
+            return Ok(());
+        };
+        let radius = self.radius_in_layer(layer, radius)?;
+        let painting = self.painting.as_mut().expect("checked above");
+        if let Some(last) = painting.stroke.points.last() {
+            if (last[0] - lx).abs() < 0.01 && (last[1] - ly).abs() < 0.01 {
+                return Ok(());
+            }
+        }
+        painting.stroke.points.push([lx, ly]);
+        painting.stroke.radii.push(radius);
+        let stroke = Box::new(painting.stroke.clone());
+        self.preview(Command::SetStroke {
+            id: layer,
+            index,
+            stroke,
+        })
+    }
+
+    /// Whether a brush stroke is being drawn.
+    pub fn is_painting(&self) -> bool {
+        self.painting.is_some()
+    }
+
+    /// How many strokes a paint layer holds, which is where the next one
+    /// goes.
+    pub fn stroke_count(&self, id: NodeId) -> Result<usize, EngineError> {
+        match &self.doc.node(id)?.kind {
+            chitrakar_doc::NodeKind::Paint { strokes } => Ok(strokes.len()),
+            _ => Err(EngineError::Doc(chitrakar_doc::DocError::NotAPaintLayer(
+                id,
+            ))),
+        }
+    }
+
+    /// A brush radius given in document units, in a layer's own — a
+    /// stroke is written in the layer's space, so a scaled layer takes a
+    /// smaller radius to paint the same width on the page.
+    fn radius_in_layer(&self, id: NodeId, radius: f32) -> Result<f32, EngineError> {
+        let t = self.doc.node(id)?.transform;
+        Ok(radius / t.a.hypot(t.b).max(t.c.hypot(t.d)).max(1e-6))
+    }
+
+    /// A document-space point in a layer's own space, which is where a
+    /// brush has to write its stroke.
+    pub fn point_in_layer(
+        &self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<(f32, f32)>, EngineError> {
+        Ok(chitrakar_render::point_in_layer(&self.doc, id, x, y)?)
     }
 
     /// Duplicate several layers as one undo step, each copy landing just
@@ -3850,6 +3979,79 @@ mod tests {
 mod save_probe {
     use super::*;
     use chitrakar_color::ColorMode;
+
+    /// However many points a brush stroke gathers as it is drawn, the
+    /// whole of it is one entry in history — and one undo takes it off.
+    #[test]
+    fn a_brush_stroke_is_one_entry_in_history() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let before = session.history_labels().0.len();
+        let blue = r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#;
+        let color: chitrakar_color::AuthoredColor = serde_json::from_str(blue).unwrap();
+        session
+            .paint_begin(layer, 10.0, 30.0, 4.0, color, 0.3, false)
+            .unwrap();
+        for x in 1..=20 {
+            session.paint_extend(10.0 + x as f32, 30.0, 4.0).unwrap();
+        }
+        assert!(session.is_painting());
+        assert!(session.commit_preview());
+        assert!(!session.is_painting());
+        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "one entry, not twenty"
+        );
+        assert!(
+            session.render().unwrap().get(20, 30).a > 0.9,
+            "and it is painted"
+        );
+
+        session.undo().unwrap();
+        assert_eq!(session.stroke_count(layer).unwrap(), 0);
+        assert_eq!(session.render().unwrap().get(20, 30).a, 0.0);
+        session.redo().unwrap();
+        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+
+        // A stroke abandoned mid-gesture leaves nothing behind.
+        session
+            .paint_begin(layer, 40.0, 40.0, 4.0, color, 0.3, false)
+            .unwrap();
+        session.paint_extend(45.0, 40.0, 4.0).unwrap();
+        assert!(session.cancel_preview().unwrap());
+        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+        assert!(!session.is_painting());
+    }
+
+    /// A stroke repaints where the stroke is, not where the whole
+    /// painting is: a dab in one corner leaves the other alone.
+    #[test]
+    fn a_dab_dirties_only_what_it_covers() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        // A long stroke across the page, then a dab in one corner.
+        session
+            .paint_begin(layer, 20.0, 20.0, 6.0, color, 0.0, false)
+            .unwrap();
+        session.paint_extend(380.0, 380.0, 6.0).unwrap();
+        session.commit_preview();
+        let _ = session.render();
+        let before = session.pixels_recomputed();
+        session
+            .paint_begin(layer, 30.0, 30.0, 5.0, color, 0.0, false)
+            .unwrap();
+        session.commit_preview();
+        let _ = session.render();
+        let touched = session.pixels_recomputed() - before;
+        assert!(
+            touched < 400 * 400 / 4,
+            "a dab repainted {touched} pixels of a 160000-pixel page"
+        );
+    }
 
     #[test]
     #[ignore = "timing probe, not an assertion"]

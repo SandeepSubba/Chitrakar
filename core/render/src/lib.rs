@@ -1153,6 +1153,19 @@ fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
     Inverse::of(t).map(|inv| inv.at(x, y))
 }
 
+/// A document-space point in a layer's own space: where on the layer
+/// the pointer is, for a tool that writes into a layer's coordinates.
+/// `None` when the layer's transform collapses space, mapping every
+/// document point nowhere.
+pub fn point_in_layer(
+    doc: &Document,
+    id: NodeId,
+    x: f32,
+    y: f32,
+) -> Result<Option<(f32, f32)>, DocError> {
+    Ok(to_local(doc.node(id)?.transform, x, y))
+}
+
 /// How much the transform can stretch a length, used to pad bounds for
 /// strokes: the larger of the two column norms, which bounds the true
 /// largest singular value closely enough for a conservative pad.
@@ -2293,6 +2306,13 @@ fn stroke_coverage(stroke: &chitrakar_doc::PaintStroke, band: f32, x: f32, y: f3
 /// Lay a paint layer's strokes onto a surface, in the order they were
 /// laid: paint goes on with source-over, an eraser takes off what is
 /// already there.
+///
+/// A stroke's coverage is gathered into a buffer of its own first, one
+/// segment at a time over that segment's own box, rather than asking
+/// every pixel of the stroke's box about every segment of it. A long
+/// stroke has hundreds of segments and a box the size of the canvas;
+/// the difference is between costing what the stroke covers and costing
+/// that times how long it is.
 fn lay_strokes(
     dst: &mut Surface,
     doc: &Document,
@@ -2306,17 +2326,60 @@ fn lay_strokes(
         let Some(box_) = stroke.bounds() else {
             continue;
         };
-        let bbox = match transformed_local_bounds(t, (box_[0], box_[1], box_[2], box_[3]))
-            .to_clip(dst.width, dst.height)
-        {
+        let bbox = match transformed_box(t, box_).to_clip(dst.width, dst.height) {
             Some(b) => b.intersect(clip),
             None => continue,
         };
+        if bbox.is_empty() {
+            continue;
+        }
+        let (w, h) = (bbox.x1 - bbox.x0, bbox.y1 - bbox.y0);
+        let mut cover = vec![0.0f32; (w * h) as usize];
+        let n = stroke.points.len();
+        let softness = stroke.softness.clamp(0.0, 1.0);
+        // One point is a single dab, which is the segment from it to
+        // itself.
+        for i in 0..n.saturating_sub(1).max(1) {
+            let j = (i + 1).min(n - 1);
+            let (a, b) = (stroke.points[i], stroke.points[j]);
+            let (ra, rb) = (stroke.radius(i), stroke.radius(j));
+            let reach = ra.max(rb);
+            if reach <= 0.0 {
+                continue;
+            }
+            let seg = [
+                a[0].min(b[0]) - reach,
+                a[1].min(b[1]) - reach,
+                a[0].max(b[0]) + reach,
+                a[1].max(b[1]) + reach,
+            ];
+            let Some(sb) = transformed_box(t, seg)
+                .to_clip(dst.width, dst.height)
+                .map(|c| c.intersect(bbox))
+            else {
+                continue;
+            };
+            for py in sb.y0..sb.y1 {
+                for px in sb.x0..sb.x1 {
+                    let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+                    let along = segment_parameter(lx, ly, a, b);
+                    let r = ra + (rb - ra) * along;
+                    if r <= 0.0 {
+                        continue;
+                    }
+                    let fade = (r * softness).max(band);
+                    let c = ((r - segment_distance(lx, ly, a, b)) / fade).clamp(0.0, 1.0);
+                    let k = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
+                    if c > cover[k] {
+                        cover[k] = c;
+                    }
+                }
+            }
+        }
         let color = resolve_color(doc, stroke.color);
         for py in bbox.y0..bbox.y1 {
             for px in bbox.x0..bbox.x1 {
-                let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
-                let c = stroke_coverage(stroke, band, lx, ly);
+                let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
                 if c <= 0.0 {
                     continue;
                 }

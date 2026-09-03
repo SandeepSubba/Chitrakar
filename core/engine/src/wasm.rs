@@ -209,6 +209,47 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Add an empty layer to paint on at the top of the document.
+    /// Returns its id.
+    pub fn add_paint_layer(&mut self, name: &str) -> Result<f64, JsError> {
+        self.inner
+            .add_paint_layer(name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Start a brush stroke on a paint layer. The point and the radius
+    /// are in document units; `color` is an authored colour as JSON, the
+    /// way a command carries one. The stroke previews as it is drawn and
+    /// becomes one entry in history at `commit_preview`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_begin(
+        &mut self,
+        layer: f64,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: &str,
+        softness: f32,
+        erase: bool,
+    ) -> Result<(), JsError> {
+        let color =
+            serde_json::from_str(color).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        self.inner
+            .paint_begin(NodeId(layer as u64), x, y, radius, color, softness, erase)
+            .map_err(to_js)
+    }
+
+    /// Carry the stroke being drawn on to another point.
+    pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), JsError> {
+        self.inner.paint_extend(x, y, radius).map_err(to_js)
+    }
+
+    /// Whether a brush stroke is being drawn.
+    pub fn is_painting(&self) -> bool {
+        self.inner.is_painting()
+    }
+
     /// Set the opacity of several layers as one undo step.
     pub fn set_opacity_of(&mut self, ids: Vec<f64>, opacity: f32) -> Result<(), JsError> {
         let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
