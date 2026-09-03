@@ -383,6 +383,79 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   );
 }
 
+// 4b2. White balance and vibrance: neutral changes nothing, warming lifts
+// the red and drops the blue, and vibrance moves a colour without moving
+// a grey. Undone afterwards, so the rest of the suite sees what it
+// expects.
+{
+  await page.selectOption('[aria-label="Add adjustment layer"]', "white-balance");
+  await page.waitForTimeout(200);
+  const neutral = await canvasPixel(500, 325);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "White balance" }).count()) === 1 &&
+      neutral.join() === after.join(),
+    "a neutral white balance changes nothing",
+  );
+  await page.locator(".panel ul li", { hasText: "White balance" }).click();
+  // The exposure layer below has pushed this pixel's blue past white —
+  // it is 255 on screen but above 1.0 in linear light — so cooling it by
+  // 40% still shows as 255. Red is the channel with room to move.
+  await setSlider("Temperature", 0.8);
+  const warm = await canvasPixel(500, 325);
+  assert(
+    warm[0] > neutral[0],
+    `warming lifts the red (${neutral} -> ${warm})`,
+  );
+  await setSlider("Temperature", -0.8);
+  const cool = await canvasPixel(500, 325);
+  assert(
+    cool[0] < neutral[0],
+    `and cooling drops it below where it started (${neutral} -> ${cool})`,
+  );
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(100);
+  }
+  assert(
+    (await page.locator(".panel ul li", { hasText: "White balance" }).count()) === 0,
+    "and three undos take the layer and its two edits back",
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "vibrance");
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(500, 325)).join() === after.join(),
+    "a neutral vibrance changes nothing",
+  );
+  await page.locator(".panel ul li", { hasText: "Vibrance" }).click();
+  // What vibrance does to a given colour is settled by the engine's own
+  // tests; what this one is for is that the slider reaches the picture.
+  // A digest rather than one pixel, since the pixel this block has been
+  // reading is over-exposed and already saturated, which is exactly the
+  // colour vibrance is supposed to leave alone.
+  const digest = () =>
+    page.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      let h = 0;
+      for (let i = 0; i < d.length; i += 997) h = (h * 31 + d[i]) | 0;
+      return h;
+    });
+  const before = await digest();
+  await setSlider("Vibrance", 1);
+  assert((await digest()) !== before, "vibrance reaches the picture");
+  for (let i = 0; i < 2; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(100);
+  }
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Vibrance" }).count()) === 0 &&
+      (await digest()) === before &&
+      (await canvasPixel(500, 325)).join() === after.join(),
+    "and two undos take that back too",
+  );
+}
+
 // 4c. Curves: the diagonal changes nothing; pressing on the graph's middle
 // and dragging up adds a point and lifts the midtones in one gesture.
 {

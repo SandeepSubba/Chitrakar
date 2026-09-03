@@ -25,7 +25,8 @@ without reading anything else.*
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview, turn with a rotation knob, flip a selection about its
-  own box; adjustment layers (exposure, brightness/contrast, hue/sat, levels,
+  own box; adjustment layers (exposure, brightness/contrast, hue/sat,
+  white balance, vibrance, levels,
   curves drawn on a graph in the panel) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
@@ -174,9 +175,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~210),
+- **Verify before committing:** `cargo test --workspace` (~212),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~393 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~400 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

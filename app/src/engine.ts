@@ -51,7 +51,9 @@ export type Adjustment =
         out_white: number;
       };
     }
-  | { Curves: { points: [number, number][] } };
+  | { Curves: { points: [number, number][] } }
+  | { WhiteBalance: { temperature: number; tint: number } }
+  | { Vibrance: { amount: number } };
 
 export interface Transform {
   a: number;

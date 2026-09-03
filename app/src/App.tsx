@@ -2044,6 +2044,14 @@ export function App() {
         },
       },
     },
+    "white-balance": {
+      name: "White balance",
+      kind: { Adjustment: { WhiteBalance: { temperature: 0, tint: 0 } } },
+    },
+    vibrance: {
+      name: "Vibrance",
+      kind: { Adjustment: { Vibrance: { amount: 0 } } },
+    },
     levels: {
       name: "Levels",
       kind: {
@@ -5546,6 +5554,24 @@ function KindProps({
             wrap({ HueSaturation: { ...p, lightness: v } }),
           )}
         </>
+      );
+    }
+    if ("WhiteBalance" in adj) {
+      const p = adj.WhiteBalance;
+      return (
+        <>
+          {slider("Temperature", p.temperature, -1, 1, 0.01, (v) =>
+            wrap({ WhiteBalance: { ...p, temperature: v } }),
+          )}
+          {slider("Tint", p.tint, -1, 1, 0.01, (v) =>
+            wrap({ WhiteBalance: { ...p, tint: v } }),
+          )}
+        </>
+      );
+    }
+    if ("Vibrance" in adj) {
+      return slider("Vibrance", adj.Vibrance.amount, -1, 1, 0.01, (v) =>
+        wrap({ Vibrance: { amount: v } }),
       );
     }
     if ("Curves" in adj) {

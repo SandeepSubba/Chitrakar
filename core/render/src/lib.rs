@@ -3102,6 +3102,37 @@ fn apply_adjustment(adj: &Adjustment, lut: Option<&[f32]>, px: LinearRgba) -> Li
             };
             (f(r), f(g), f(b))
         }
+        Adjustment::WhiteBalance { temperature, tint } => {
+            // A light's colour is a gain per channel, and that is what
+            // balancing one is: warming lifts red and drops blue, and
+            // the tint runs green against magenta. Half the slider's
+            // travel at each end, so the extremes still hold a picture.
+            let warm = temperature.clamp(-1.0, 1.0) * 0.5;
+            let mag = tint.clamp(-1.0, 1.0) * 0.5;
+            let f = |v: f32, gain: f32| (v * gain).clamp(0.0, 1.0);
+            (f(r, 1.0 + warm), f(g, 1.0 - mag), f(b, 1.0 - warm))
+        }
+        Adjustment::Vibrance { amount } => {
+            // Saturation weighted by how much the colour has already:
+            // grey takes the whole change, a colour at full chroma takes
+            // none of it. That is what keeps skin from going orange
+            // while a dull sky comes up.
+            let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            // Saturation as a fraction of the pixel's own brightness,
+            // not as an absolute spread: the composite is unbounded
+            // linear light, so a bright colour would otherwise read as
+            // fully saturated and take none of the change merely for
+            // being bright.
+            let top = r.max(g).max(b);
+            let sat = if top > 1e-6 {
+                (top - r.min(g).min(b)) / top
+            } else {
+                0.0
+            };
+            let s = 1.0 + amount * (1.0 - sat.clamp(0.0, 1.0));
+            let f = |v: f32| (lum + (v - lum) * s).clamp(0.0, 1.0);
+            (f(r), f(g), f(b))
+        }
         Adjustment::Curves { points } => {
             let table;
             let lut = match lut {
@@ -3555,6 +3586,103 @@ mod tests {
         assert_eq!(
             render(&doc).unwrap().get(30, 30).to_srgb8(),
             [255, 0, 0, 255]
+        );
+    }
+
+    /// White balance is a gain per channel: warming lifts the red and
+    /// drops the blue, and the tint runs green against magenta. Grey
+    /// says it plainest, since it has all three in equal measure.
+    #[test]
+    fn white_balance_warms_and_cools_a_grey() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let under = to_working(grey);
+        let warm = apply_adjustment(
+            &chitrakar_doc::Adjustment::WhiteBalance {
+                temperature: 0.5,
+                tint: 0.0,
+            },
+            None,
+            under,
+        );
+        assert!(warm.r > under.r && warm.b < under.b, "{warm:?}");
+        assert!((warm.g - under.g).abs() < 1e-6, "the green is left alone");
+        let cool = apply_adjustment(
+            &chitrakar_doc::Adjustment::WhiteBalance {
+                temperature: -0.5,
+                tint: 0.0,
+            },
+            None,
+            under,
+        );
+        assert!(cool.r < under.r && cool.b > under.b, "{cool:?}");
+        let magenta = apply_adjustment(
+            &chitrakar_doc::Adjustment::WhiteBalance {
+                temperature: 0.0,
+                tint: 0.6,
+            },
+            None,
+            under,
+        );
+        assert!(
+            magenta.g < under.g && (magenta.r - under.r).abs() < 1e-6,
+            "the tint takes green out and leaves the rest: {magenta:?}"
+        );
+        // Nothing at all is nothing at all.
+        let same = apply_adjustment(
+            &chitrakar_doc::Adjustment::WhiteBalance {
+                temperature: 0.0,
+                tint: 0.0,
+            },
+            None,
+            under,
+        );
+        assert!((same.r - under.r).abs() < 1e-6 && (same.b - under.b).abs() < 1e-6);
+    }
+
+    /// Vibrance lifts what is dull and leaves what is already vivid, so
+    /// a near-grey moves further than a saturated colour does.
+    #[test]
+    fn vibrance_lifts_the_dull_and_spares_the_vivid() {
+        let lift = chitrakar_doc::Adjustment::Vibrance { amount: 1.0 };
+        let moved = |c: AuthoredColor| {
+            let before = to_working(c);
+            let after = apply_adjustment(&lift, None, before);
+            let chroma = |p: LinearRgba| p.r.max(p.g).max(p.b) - p.r.min(p.g).min(p.b);
+            chroma(after) - chroma(before)
+        };
+        let dull = moved(AuthoredColor::Srgb {
+            r: 0.52,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        });
+        let vivid = moved(AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        });
+        assert!(dull > 0.0, "a dull colour comes up: {dull}");
+        assert!(
+            vivid < dull,
+            "and a vivid one moves less than it does ({vivid} against {dull})"
+        );
+        // Grey has no colour to lift, so it stays grey.
+        let grey = to_working(AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        });
+        let after = apply_adjustment(&lift, None, grey);
+        assert!(
+            (after.r - after.g).abs() < 1e-6 && (after.g - after.b).abs() < 1e-6,
+            "grey stays grey: {after:?}"
         );
     }
 

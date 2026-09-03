@@ -247,6 +247,21 @@ pub enum Adjustment {
     Curves {
         points: Vec<[f32; 2]>,
     },
+    /// White balance. `temperature` warms the picture as it rises and
+    /// cools it as it falls (-1..=1, blue against amber); `tint` runs the
+    /// other way a light source strays, green against magenta. Both act
+    /// on the linear channels, which is where a light's colour actually
+    /// lives.
+    WhiteBalance {
+        temperature: f32,
+        tint: f32,
+    },
+    /// Saturation that leaves the already-vivid alone: the further a
+    /// colour is from grey, the less of the change it takes. That is
+    /// what keeps skin from going orange while a dull sky comes up.
+    Vibrance {
+        amount: f32,
+    },
 }
 
 /// Non-destructive convolution filters; like adjustments they apply at
