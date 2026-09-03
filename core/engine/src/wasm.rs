@@ -209,6 +209,14 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// A small square picture of one layer on its own: RGBA8, `size`
+    /// across. Empty when the layer has no picture of its own.
+    pub fn thumbnail(&self, id: f64, size: u32) -> Vec<u8> {
+        self.inner
+            .thumbnail(NodeId(id as u64), size)
+            .unwrap_or_default()
+    }
+
     /// Add an empty layer to paint on at the top of the document.
     /// Returns its id.
     pub fn add_paint_layer(&mut self, name: &str) -> Result<f64, JsError> {

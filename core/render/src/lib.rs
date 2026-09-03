@@ -553,9 +553,28 @@ fn render_group(
 ) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
     for &child in doc.children_of(group)? {
+        render_layer(doc, child, dst, clip, parent)?;
+    }
+    Ok(())
+}
+
+/// Draw one layer where its parent puts it: its own picture, its effects
+/// around that, and the whole composited with its blend and opacity.
+///
+/// Pulled out of the walk so a caller with one layer in mind — a panel
+/// wanting to show what a layer holds — can draw exactly what the page
+/// would have drawn of it, effects and all.
+fn render_layer(
+    doc: &Document,
+    child: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+) -> Result<(), DocError> {
+    {
         let node = doc.node(child)?;
         if !node.visible || node.opacity <= 0.0 {
-            continue;
+            return Ok(());
         }
         // Effects are drawn from the layer's own silhouette, so a layer
         // that has any must exist as a picture before they can be. An
@@ -565,8 +584,7 @@ fn render_group(
         let effected = !node.effects.is_empty()
             && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
         if !effected {
-            render_child(doc, child, dst, clip, parent, node.blend)?;
-            continue;
+            return render_child(doc, child, dst, clip, parent, node.blend);
         }
         let scale = max_scale(parent);
         let reach = node
@@ -590,10 +608,10 @@ fn render_group(
         };
         let layer_clip = match extent.to_clip(dst.width, dst.height) {
             Some(b) => b.intersect(grown),
-            None => continue,
+            None => return Ok(()),
         };
         if layer_clip.is_empty() {
-            continue;
+            return Ok(());
         }
         let mut layer = Surface::new(dst.width, dst.height);
         // Normal into the layer's own transparent surface; the node's blend
@@ -2419,6 +2437,53 @@ fn lay_strokes(
     }
 }
 
+/// A layer on its own, drawn into a square `size` across: its own box
+/// fitted inside and centred, on nothing, at whatever scale that takes.
+/// Straight-alpha sRGB bytes, `size * size * 4` of them.
+///
+/// What comes out is what the page would have drawn of that layer,
+/// effects and all — the same walk, called with one layer rather than a
+/// group's worth. `None` when the layer has no box of its own: an
+/// adjustment or a filter is a change to what lies under it, and shows
+/// nothing on a transparent square. A layer never scales up past its own
+/// size, so a small one sits small in its square rather than going soft.
+pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>>, DocError> {
+    if size == 0 {
+        return Ok(None);
+    }
+    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+        return Ok(None);
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    if !(w > 0.0 && h > 0.0) {
+        return Ok(None);
+    }
+    let scale = (size as f32 / w.max(h)).min(1.0);
+    // The layer's own transform is applied by the walk; this only says
+    // where the box it lands in goes on the square.
+    let fit = Transform {
+        a: scale,
+        b: 0.0,
+        c: 0.0,
+        d: scale,
+        e: (size as f32 - w * scale) / 2.0 - x0 * scale,
+        f: (size as f32 - h * scale) / 2.0 - y0 * scale,
+    };
+    let mut surface = Surface::new(size, size);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: size,
+        y1: size,
+    };
+    render_layer(doc, id, &mut surface, clip, fit)?;
+    let mut rgba8 = Vec::with_capacity((size * size) as usize * 4);
+    for px in &surface.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some(rgba8))
+}
+
 /// A paint layer handed over as an image: its size, where its top-left
 /// sits in the layer's own space, and its pixels as straight-alpha sRGB
 /// bytes.
@@ -3080,6 +3145,69 @@ mod tests {
             doc.apply(Command::RemoveStroke { id, index: 9 }),
             Err(DocError::NoSuchStroke { .. })
         ));
+    }
+
+    /// A thumbnail is what the page draws of one layer, fitted into a
+    /// square of its own: the layer's ink is in it, nothing else is, and
+    /// a layer that is only a change to what is under it has none.
+    #[test]
+    fn a_thumbnail_shows_one_layer_and_only_that_layer() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("under", 200.0, 200.0, RED),
+        })
+        .unwrap();
+        let blue = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect("small", 20.0, 20.0, blue),
+        })
+        .unwrap();
+        let small = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: small,
+            transform: Transform::translation(150.0, 150.0),
+        })
+        .unwrap();
+
+        let thumb = thumbnail(&doc, small, 32).unwrap().unwrap();
+        assert_eq!(thumb.len(), 32 * 32 * 4);
+        let at = |x: usize, y: usize| {
+            let i = (y * 32 + x) * 4;
+            [thumb[i], thumb[i + 1], thumb[i + 2], thumb[i + 3]]
+        };
+        // A 20-pixel layer never scales up, so it sits centred in the
+        // square with bare corners around it.
+        assert_eq!(at(16, 16), [0, 0, 255, 255], "the layer is in the middle");
+        assert_eq!(at(1, 1)[3], 0, "the layer below it is not");
+
+        // The layer under it fills the page, so its thumbnail is solid.
+        let under = doc.children_of(root).unwrap()[0];
+        let full = thumbnail(&doc, under, 32).unwrap().unwrap();
+        assert_eq!(&full[0..4], &[255, 0, 0, 255], "corner to corner");
+
+        // An adjustment layer is a change to what is under it and has no
+        // square of its own.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::adjustment(
+                "exposure",
+                chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+            )),
+        })
+        .unwrap();
+        let adj = doc.children_of(root).unwrap()[2];
+        assert!(thumbnail(&doc, adj, 32).unwrap().is_none());
     }
 
     #[test]

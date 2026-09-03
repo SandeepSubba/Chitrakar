@@ -857,6 +857,14 @@ impl Session {
         self.painting.is_some()
     }
 
+    /// A small square picture of one layer on its own, for a panel that
+    /// shows what a layer holds rather than only what it is called.
+    /// RGBA8, `size * size * 4` bytes — empty when the layer has no
+    /// picture of its own, which an adjustment or a filter has not.
+    pub fn thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
+        Ok(chitrakar_render::thumbnail(&self.doc, id, size)?.unwrap_or_default())
+    }
+
     /// How many strokes a paint layer holds, which is where the next one
     /// goes.
     pub fn stroke_count(&self, id: NodeId) -> Result<usize, EngineError> {

@@ -805,8 +805,8 @@ assert(
   "typing a layer name did not switch tools under the cursor",
 );
 assert(
-  (await page.locator(".panel ul li .layer-kind-icon svg").count()) > 0,
-  "layer rows carry a kind glyph",
+  (await page.locator(".panel ul li .layer-kind-icon").count()) > 0,
+  "layer rows say what the layer is — a picture of it, or a glyph for its kind",
 );
 
 // 8l2. Masks: inscribed ellipse mask hides the rect's corners, invert
@@ -3157,8 +3157,76 @@ assert(
   assert((await canvasPixel(280, 260))[3] === 0, "the next takes the second stroke");
   assert((await canvasPixel(280, 200))[3] > 200, "and leaves the first");
   await page.click('button[aria-label="Erase"]');
+
+  // The ring shows how big the brush is and follows the pointer; the
+  // brackets resize it, and both rings resize with it.
+  await page.mouse.move(...at(300, 100));
+  await page.waitForTimeout(150);
+  const ring = page.locator(".brush-ring circle").first();
+  assert((await ring.count()) === 1, "the brush has a ring under the pointer");
+  const wide = Number(await ring.getAttribute("r"));
+  await page.mouse.move(...at(320, 120));
+  await page.waitForTimeout(100);
+  const moved = await page.locator(".brush-ring circle").first().getAttribute("cx");
+  await page.keyboard.press("[");
+  await page.keyboard.press("[");
+  await page.waitForTimeout(150);
+  const thin = Number(await page.locator(".brush-ring circle").first().getAttribute("r"));
+  assert(thin < wide, `"[" thinned the brush (${wide} -> ${thin})`);
+  assert(
+    Number(await page.inputValue('input[aria-label="Paint width"]')) < 40,
+    "and the width field says so",
+  );
+  await page.keyboard.press("]");
+  await page.waitForTimeout(150);
+  assert(
+    Number(await page.locator(".brush-ring circle").first().getAttribute("r")) > thin,
+    '"]" thickens it again',
+  );
+  await page.mouse.move(...at(200, 200));
+  await page.waitForTimeout(100);
+  assert(
+    (await page.locator(".brush-ring circle").first().getAttribute("cx")) !== moved,
+    "and the ring follows the pointer",
+  );
   await page.click('button[aria-label="Move"]');
   await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".brush-ring").count()) === 0,
+    "putting the brush down takes the ring away",
+  );
+
+  // The panel shows what each layer holds, not only what it is called.
+  await page.waitForTimeout(700);
+  const thumb = page.locator(".panel ul li .layer-thumb").first();
+  assert((await thumb.count()) === 1, "the paint layer has a picture of itself");
+  const src = await thumb.getAttribute("src");
+  assert(src.startsWith("data:image/png"), "and it is a picture, not a glyph");
+  // It is a picture of that layer: the stroke's colour is in it, and it
+  // is not a blank square.
+  const ink = await page.evaluate(
+    (url) =>
+      new Promise((done) => {
+        const img = new Image();
+        img.onload = () => {
+          const c = document.createElement("canvas");
+          c.width = img.width;
+          c.height = img.height;
+          const x = c.getContext("2d");
+          x.drawImage(img, 0, 0);
+          const d = x.getImageData(0, 0, c.width, c.height).data;
+          let opaque = 0;
+          for (let i = 3; i < d.length; i += 4) if (d[i] > 200) opaque++;
+          done({ opaque, total: d.length / 4 });
+        };
+        img.src = url;
+      }),
+    src,
+  );
+  assert(
+    ink.opaque > 20 && ink.opaque < ink.total,
+    `the picture holds the layer's ink and its bare parts (${ink.opaque} of ${ink.total})`,
+  );
 }
 
 // 10. Recovery: a draft of the document is kept as it changes, and a

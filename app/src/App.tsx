@@ -189,6 +189,10 @@ const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
 /** Minimum travel between recorded brush samples, and how far a simplified
  * stroke may stray from the one that was drawn — both in document units. */
 const BRUSH_STEP = 3;
+/** How many pixels a layer's picture in the panel is across. Twice the
+ * size it is shown at, so it stays crisp on a display that has the
+ * pixels for it. */
+const THUMB = 36;
 const BRUSH_TOLERANCE = 2;
 
 /** Ramer-Douglas-Peucker, returning the *indices* it keeps so per-sample
@@ -530,6 +534,15 @@ export function App() {
   const [paintSize, setPaintSize] = useState(24);
   const [paintSoftness, setPaintSoftness] = useState(0.5);
   const [erasing, setErasing] = useState(false);
+  /** Where the brush is hovering, in the canvas's own coordinates, so the
+   * ring that shows how big it is can sit under the pointer. Null when the
+   * pointer is not over the canvas, or the brush is not the tool in hand. */
+  const [brushAt, setBrushAt] = useState<[number, number] | null>(null);
+  /** A small picture of each layer, by id, for the panel. Regenerated a
+   * breath after the document settles rather than on every frame: a drag
+   * refreshes the layer list many times a second and none of those frames
+   * is worth a re-render of the whole stack. */
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
   /** The live document's pixel size. Every screen/document conversion goes
    * through this rather than a constant, so an opened file of any size
    * lands on a canvas that fits it. */
@@ -951,6 +964,19 @@ export function App() {
           setTool(shortcut);
           setPenPoints([]);
         }
+        // Brackets resize the brush, as they do everywhere else. By a
+        // ratio rather than a step, so the small sizes stay adjustable
+        // and the large ones do not take forever.
+        if (e.key === "[" || e.key === "]") {
+          e.preventDefault();
+          setPaintSize((size) => {
+            // Rounded away from where it started, so a small brush can
+            // still be made smaller rather than rounding back to itself.
+            const next =
+              e.key === "]" ? Math.ceil(size * 1.25) : Math.floor(size / 1.25);
+            return Math.max(1, Math.min(200, next));
+          });
+        }
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -1233,6 +1259,10 @@ export function App() {
   };
 
   const onHostPointerMove = (e: React.PointerEvent) => {
+    if (tool === "Paint" && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      setBrushAt([e.clientX - rect.left, e.clientY - rect.top]);
+    }
     const pan = panDragRef.current;
     if (!pan) return;
     setView((v) => ({
@@ -1245,6 +1275,43 @@ export function App() {
   const onHostPointerUp = () => {
     panDragRef.current = null;
   };
+
+  useEffect(() => {
+    if (!session) return;
+    const id = setTimeout(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = THUMB;
+      canvas.height = THUMB;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const next: Record<number, string> = {};
+      for (const l of layers) {
+        let px: Uint8Array;
+        try {
+          px = session.thumbnail(l.id, THUMB);
+        } catch {
+          continue;
+        }
+        if (px.length !== THUMB * THUMB * 4) continue;
+        ctx.clearRect(0, 0, THUMB, THUMB);
+        ctx.putImageData(
+          new ImageData(new Uint8ClampedArray(px), THUMB, THUMB),
+          0,
+          0,
+        );
+        next[l.id] = canvas.toDataURL();
+      }
+      setThumbs(next);
+    }, 350);
+    return () => clearTimeout(id);
+  }, [session, layers, saveTick]);
+
+  /** The ring follows the brush; nothing else needs it, and a stale ring
+   * left behind by a tool change or a pointer leaving the canvas would
+   * read as a brush that is still there. */
+  useEffect(() => {
+    if (tool !== "Paint") setBrushAt(null);
+  }, [tool]);
 
   /** Commit the guide list, as one history entry. */
   const setGuidesDoc = (next: DocGuide[]) =>
@@ -3690,13 +3757,14 @@ export function App() {
           )}
         </nav>
         <main
-          className="canvas-host"
+          className={`canvas-host${tool === "Paint" ? " painting" : ""}`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
           onDrop={onHostDrop}
           onPointerDown={onHostPointerDown}
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
+          onPointerLeave={() => setBrushAt(null)}
         >
           {/* Rulers along the top and left edges, marked in document
               units and following the view. Dragging out of one places a
@@ -3887,6 +3955,33 @@ export function App() {
                 width={(marquee[2] - marquee[0]) * view.zoom}
                 height={(marquee[3] - marquee[1]) * view.zoom}
               />
+            </svg>
+          )}
+          {/* How big the brush is, and how much of that is its fade: the
+              outer ring is where it stops, the inner one where its solid
+              core ends. An eraser's ring is dashed, since what it does to
+              the canvas is the opposite of what the colour says. */}
+          {tool === "Paint" && brushAt && (
+            <svg
+              className={`brush-ring${erasing ? " erasing" : ""}`}
+              aria-hidden="true"
+            >
+              <circle
+                cx={brushAt[0]}
+                cy={brushAt[1]}
+                r={Math.max(1, (paintSize / 2) * view.zoom)}
+              />
+              {paintSoftness > 0.05 && (
+                <circle
+                  className="core"
+                  cx={brushAt[0]}
+                  cy={brushAt[1]}
+                  r={Math.max(
+                    0.5,
+                    (paintSize / 2) * (1 - paintSoftness) * view.zoom,
+                  )}
+                />
+              )}
             </svg>
           )}
           {(guides.x.length > 0 || guides.y.length > 0) && (
@@ -4689,8 +4784,16 @@ export function App() {
                 >
                   <Icon name={l.locked ? "lock" : "unlock"} size={14} />
                 </button>
+                {/* What the layer holds, when it holds anything: a
+                    small picture of it on its own. An adjustment or a
+                    filter is a change to what is under it and has none,
+                    so those keep the glyph that says which they are. */}
                 <span className="layer-kind-icon" title={l.kind}>
-                  <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
+                  {thumbs[l.id] ? (
+                    <img className="layer-thumb" src={thumbs[l.id]} alt="" />
+                  ) : (
+                    <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
+                  )}
                 </span>
                 {renaming?.id === l.id ? (
                   <input
@@ -4778,6 +4881,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],
+      ["[  ]", "Thinner, thicker brush"],
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],

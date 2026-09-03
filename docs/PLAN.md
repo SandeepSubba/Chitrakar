@@ -65,7 +65,13 @@ without reading anything else.*
   one of them can come back off. Its eraser rubs out this layer's own
   paint and leaves what is under it alone; a layer is picked where it
   has paint, so the empty part of one lets through what is beneath; and
-  however many points a stroke gathered, it is one entry in history.
+  however many points a stroke gathered, it is one entry in history. A
+  ring under the pointer says how big the brush is and how much of that
+  is its fade, and `[` and `]` resize it.
+  Layer rows carry a small picture of the layer itself — what the page
+  would draw of it, effects and all, fitted into its own square — in
+  place of the glyph that says what kind it is, and regenerated a breath
+  after the document settles rather than every frame.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
   free of it — and the same lines catch a resize handle. A
@@ -148,9 +154,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~204),
+- **Verify before committing:** `cargo test --workspace` (~205),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~372 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~381 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -214,7 +220,8 @@ without reading anything else.*
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is
   reserved for state — active tool, open menu, live toggle, selected layer.
   Tools have single-letter shortcuts (V/M, R, E, P, B, N, T), suppressed while
-  typing. Layer rows carry a kind glyph and a mask marker.
+  typing. Layer rows carry a picture of the layer (a kind glyph where
+  there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
