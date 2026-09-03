@@ -107,7 +107,9 @@ without reading anything else.*
   changes how many pixels it is and leaves what is in it the size it
   was (pulling the west or north edge carries the contents with it,
   since they are written against the frame's own corner), and the W/H
-  fields set that same number. What is inside it moves by how each layer
+  fields set that same number, and the panel offers the sizes anyone
+  actually asks for — screens, posts, and paper worked out through the
+  document's own resolution. What is inside it moves by how each layer
   is pinned — left, centre, right or both sides, and the same down the
   page — so a frame taken from one screen size to another lays itself
   out rather than needing every layer dragged. Its ground is a colour in
@@ -234,7 +236,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~242),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~468 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~470 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

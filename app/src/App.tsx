@@ -5114,6 +5114,10 @@ export function App() {
                 <KindProps
                   kind={selectedKind}
                   bins={histogram}
+                  dpi={docDpi}
+                  onFrameSize={(w, h) =>
+                    selected !== null && resizeFrame(selected, w, h, 0, 0, false)
+                  }
                   onEdit={setKind}
                   onGestureEnd={endGesture}
                   cmyk={cmyk}
@@ -6194,6 +6198,12 @@ interface CurvesPanelProps {
 
 interface KindPropsProps {
   kind: NodeKind;
+  /** The document's resolution, for the paper sizes a frame can be given
+   * — those are quoted on paper, not in pixels. */
+  dpi: number;
+  /** Give a frame a size, which is not a plain kind edit: what is inside
+   * it moves by how each layer is pinned. */
+  onFrameSize: (width: number, height: number) => void;
   /** How the tones under this layer are spread, for the graphs that read
    * one. Null until the document has settled long enough to count them. */
   bins: Uint32Array | null;
@@ -6216,6 +6226,8 @@ interface KindPropsProps {
 function KindProps({
   kind,
   bins,
+  dpi,
+  onFrameSize,
   onEdit,
   onGestureEnd,
   cmyk,
@@ -6554,11 +6566,48 @@ function KindProps({
 
   if ("Artboard" in kind) {
     const f = kind.Artboard;
+    // Paper is quoted in millimetres and inches, so it becomes pixels
+    // through the document's own resolution rather than a fixed number.
+    const mm = (v: number) => Math.round((v / 25.4) * dpi);
+    const inch = (v: number) => Math.round(v * dpi);
+    const sizes: [string, number, number][] = [
+      ["Desktop 1920 × 1080", 1920, 1080],
+      ["Laptop 1440 × 900", 1440, 900],
+      ["Phone 390 × 844", 390, 844],
+      ["Tablet 834 × 1194", 834, 1194],
+      ["Square post 1080 × 1080", 1080, 1080],
+      ["Story 1080 × 1920", 1080, 1920],
+      ["A4", mm(210), mm(297)],
+      ["A5", mm(148), mm(210)],
+      ["Letter", inch(8.5), inch(11)],
+    ];
     const ground = (background: AuthoredColor | null): NodeKind => ({
       Artboard: { ...f, background },
     });
     return (
       <>
+        <label className="row">
+          Size
+          <select
+            value=""
+            onChange={(e) => {
+              const at = Number(e.target.value);
+              if (Number.isFinite(at) && sizes[at]) {
+                onFrameSize(sizes[at][1], sizes[at][2]);
+              }
+            }}
+            aria-label="Frame size preset"
+          >
+            <option value="" disabled>
+              {Math.round(f.width)} × {Math.round(f.height)}
+            </option>
+            {sizes.map(([name, w, h], i) => (
+              <option key={name} value={i}>
+                {name.includes("×") ? name : `${name} (${w} × ${h})`}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="row">
           Ground
           <input

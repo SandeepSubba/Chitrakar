@@ -189,6 +189,10 @@ pub struct Session {
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
     soft_proof: bool,
     gamut_warn: bool,
+    /// Whether any layer is a live copy of another. Kept rather than
+    /// looked up: the dirty region has to ask on every command, and the
+    /// answer is no for almost every document.
+    has_copies: bool,
 }
 
 impl Session {
@@ -215,6 +219,7 @@ impl Session {
             proof_cms: None,
             soft_proof: false,
             gamut_warn: false,
+            has_copies: false,
         }
     }
 
@@ -327,6 +332,11 @@ impl Session {
         let Some(id) = id else {
             return Bounds::None;
         };
+        // Almost every document has no copies in it, and this runs on
+        // every command — a drag asks for it a hundred times a second.
+        if !self.has_copies {
+            return Bounds::None;
+        }
         let mut order = Vec::new();
         Self::painter_order(&self.doc, self.doc.root(), &mut order);
         let mut following = vec![id];
@@ -366,6 +376,19 @@ impl Session {
 
     /// Apply a command to the document, computing the dirty region from the
     /// target's bounds before and after. Returns the inverse.
+    /// Re-read whether the document holds any live copies. Cheap, and
+    /// only worth doing when a command could have changed the answer.
+    fn note_copies(&mut self) {
+        let mut order = Vec::new();
+        Self::painter_order(&self.doc, self.doc.root(), &mut order);
+        self.has_copies = order.iter().any(|&id| {
+            matches!(
+                self.doc.node(id).map(|n| &n.kind),
+                Ok(NodeKind::Instance { .. })
+            )
+        });
+    }
+
     fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
         // Both touch more than one node, so the whole canvas is the only
         // safe dirty region — and a resize changes what "the whole canvas"
@@ -376,7 +399,18 @@ impl Session {
             .stroke_bounds(&cmd)
             .unwrap_or_else(|| self.bounds_of_target(target))
             .union(self.copies_bounds(target));
+        let structural = matches!(
+            cmd,
+            Command::AddNode { .. }
+                | Command::RemoveNode { .. }
+                | Command::SetKind { .. }
+                | Command::RestoreSubtree { .. }
+                | Command::Batch(_)
+        );
         let inverse = self.doc.apply(cmd)?;
+        if structural {
+            self.note_copies();
+        }
         let post_target = Self::command_target(&inverse);
         let post = self
             .stroke_bounds(&inverse)
@@ -2817,7 +2851,11 @@ impl Session {
                 let _ = chitrakar_render::text::register_font(&name, bytes);
             }
         }
-        Ok(Self::from_document(opened.doc))
+        let mut session = Self::from_document(opened.doc);
+        // An opened file can already hold copies; the flag is only kept
+        // in step by the commands that could change it.
+        session.note_copies();
+        Ok(session)
     }
 }
 
@@ -4700,6 +4738,36 @@ mod tests {
             "the copy grew with the original in the cached frame"
         );
         let _ = before;
+
+        // Take the copy away and the original is on its own again; put
+        // it back and it follows once more. The dirty region asks a kept
+        // flag whether there are copies at all, and this is what keeps
+        // that flag honest.
+        session.apply(Command::RemoveNode { id: copy }).unwrap();
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 10.0, 10.0).kind),
+            })
+            .unwrap();
+        let (alone, _) = session.render_cached().unwrap();
+        assert_eq!(alone.get(85, 5).a, 0.0, "nothing is copying it now");
+        // Undo brings the copy back, and with it the flag.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 30.0, 30.0).kind),
+            })
+            .unwrap();
+        let (again, _) = session.render_cached().unwrap();
+        assert_eq!(
+            again.get(85, 25).to_srgb8()[3],
+            255,
+            "and with the copy back it follows again"
+        );
     }
 
     /// A frame given a new size moves what is in it by how each layer is

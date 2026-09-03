@@ -340,9 +340,137 @@ mod tests {
             )),
         );
 
+        // A frame with something pinned inside it, a live copy of the
+        // shape, a layer confined to the one below it, and a curve with
+        // a channel of its own — everything the newest node kinds and
+        // fields carry, so a file written today still reads as itself.
+        let frame = add(
+            &mut doc,
+            Box::new(Node::artboard("frame", 40.0, 40.0, Some(blue))),
+        );
+        doc.apply(Command::SetTransform {
+            id: frame,
+            transform: chitrakar_doc::Transform::translation(70.0, 10.0),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: Box::new(Node::vector(
+                "in the frame",
+                VectorShape::Rect {
+                    width: 15.0,
+                    height: 15.0,
+                    radius: 0.0,
+                },
+            )),
+        })
+        .unwrap();
+        let inside = doc.children_of(frame).unwrap()[0];
+        doc.apply(Command::SetKind {
+            id: inside,
+            kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 15.0,
+                    height: 15.0,
+                    radius: 0.0,
+                },
+                fill: Some(red),
+                stroke: None,
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        doc.apply(Command::SetPinning {
+            id: inside,
+            pinned: chitrakar_doc::Pinning {
+                x: chitrakar_doc::Pin::End,
+                y: chitrakar_doc::Pin::Middle,
+            },
+        })
+        .unwrap();
+
+        let copy = add(&mut doc, Box::new(Node::instance("copy", shape_id)));
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: chitrakar_doc::Transform::translation(5.0, 70.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetOpacity {
+            id: copy,
+            opacity: 0.6,
+        })
+        .unwrap();
+
+        let over = add(
+            &mut doc,
+            Box::new(Node::vector(
+                "clipped to the copy",
+                VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+            )),
+        );
+        doc.apply(Command::SetKind {
+            id: over,
+            kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                shape: VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+                fill: Some(blue),
+                stroke: None,
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+
+        add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "graded",
+                chitrakar_doc::Adjustment::Curves {
+                    points: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+                    red: vec![[0.0, 0.1], [1.0, 0.9]],
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            )),
+        );
+
         let before = chitrakar_render::render(&doc).unwrap();
-        let after =
-            chitrakar_render::render(&load_chitra(&save_chitra(&doc).unwrap()).unwrap()).unwrap();
+        let back = load_chitra(&save_chitra(&doc).unwrap()).unwrap();
+        // The same pixels can come from a document that lost what it was
+        // made of, so check the shape of it too.
+        assert!(
+            matches!(
+                back.node(frame).unwrap().kind,
+                chitrakar_doc::NodeKind::Artboard {
+                    width: 40.0,
+                    height: 40.0,
+                    background: Some(_)
+                }
+            ),
+            "the frame came back a frame"
+        );
+        assert_eq!(back.children_of(frame).unwrap().len(), 1, "holding its own");
+        assert_eq!(
+            back.node(inside).unwrap().pinned,
+            chitrakar_doc::Pinning {
+                x: chitrakar_doc::Pin::End,
+                y: chitrakar_doc::Pin::Middle,
+            },
+            "and what is pinned in it is still pinned"
+        );
+        assert!(
+            matches!(
+                back.node(copy).unwrap().kind,
+                chitrakar_doc::NodeKind::Instance { of } if of == shape_id
+            ),
+            "the copy still follows what it followed"
+        );
+        assert!(back.node(over).unwrap().clipped, "and the clip survived");
+        let after = chitrakar_render::render(&back).unwrap();
         assert_eq!((before.width, before.height), (after.width, after.height));
         let mut worst = 0.0f32;
         for (p, q) in before.pixels.iter().zip(&after.pixels) {

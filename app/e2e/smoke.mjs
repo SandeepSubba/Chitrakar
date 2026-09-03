@@ -2973,6 +2973,20 @@ assert(
     "and still does not touch what is inside",
   );
 
+  // A preset gives the frame a named size, in pixels the document's
+  // resolution works out for paper.
+  await page.selectOption('select[aria-label="Frame size preset"]', {
+    label: "Desktop 1920 × 1080",
+  });
+  await page.waitForTimeout(300);
+  assert(
+    (await size()) === "1920",
+    `a preset sets the frame's size (${await size()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await size()) === "260", "and it is one undo");
+
   // No ground: the frame becomes a window onto the page.
   await page.uncheck('input[aria-label="Frame has a ground"]');
   await page.waitForTimeout(300);
