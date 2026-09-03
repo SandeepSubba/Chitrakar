@@ -1253,6 +1253,94 @@ impl Session {
         self.set_each(ids, "Opacity", |id| Command::SetOpacity { id, opacity })
     }
 
+    /// A layer's look, without its shape: what it is painted with, what
+    /// hangs off it, and how it sits on what is under it. Carried as
+    /// JSON so it outlives the document it was taken from, the way the
+    /// layer clipboard does.
+    pub fn copy_style(&self, id: NodeId) -> Result<String, EngineError> {
+        let node = self.doc.node(id)?;
+        let (fill, stroke, gradient) = match &node.kind {
+            chitrakar_doc::NodeKind::Vector {
+                fill,
+                stroke,
+                gradient,
+                ..
+            } => (*fill, stroke.clone(), gradient.clone()),
+            chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill), None, None),
+            _ => (None, None, None),
+        };
+        let style = Style {
+            fill,
+            stroke,
+            gradient,
+            effects: node.effects.clone(),
+            opacity: node.opacity,
+            blend: node.blend,
+        };
+        serde_json::to_string(&style).map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Give that look to every layer named, in one entry.
+    ///
+    /// A layer takes what it can carry: a shape takes the fill, the
+    /// stroke and the gradient, a block of text takes the fill alone,
+    /// and everything takes the effects, the opacity and the blend.
+    /// Nothing takes another layer's shape — that is not what a style
+    /// is.
+    pub fn paste_style(&mut self, json: &str, ids: &[NodeId]) -> Result<(), EngineError> {
+        let style: Style =
+            serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let mut cmds = Vec::new();
+        for &id in ids {
+            let node = self.doc.node(id)?;
+            match &node.kind {
+                chitrakar_doc::NodeKind::Vector { shape, .. } => {
+                    cmds.push(Command::SetKind {
+                        id,
+                        kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                            shape: shape.clone(),
+                            fill: style.fill,
+                            stroke: style.stroke.clone(),
+                            gradient: style.gradient.clone(),
+                        }),
+                    });
+                }
+                chitrakar_doc::NodeKind::Text(spec) => {
+                    if let Some(fill) = style.fill {
+                        let mut spec = spec.clone();
+                        spec.fill = fill;
+                        cmds.push(Command::SetKind {
+                            id,
+                            kind: Box::new(chitrakar_doc::NodeKind::Text(spec)),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            cmds.push(Command::SetEffects {
+                id,
+                effects: style.effects.clone(),
+            });
+            cmds.push(Command::SetOpacity {
+                id,
+                opacity: style.opacity,
+            });
+            cmds.push(Command::SetBlendMode {
+                id,
+                blend: style.blend,
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        let label = if ids.len() == 1 {
+            "Paste style".to_string()
+        } else {
+            format!("Paste style on {} layers", ids.len())
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
     /// Set the blend mode of several layers as one undo step.
     pub fn set_blend_of(
         &mut self,
@@ -2108,6 +2196,17 @@ enum CopyStyle {
     /// Neither renamed nor moved: a child inside a subtree being copied,
     /// which belongs exactly where it was.
     Exact,
+}
+
+/// A layer's look, without its shape — see [`Session::copy_style`].
+#[derive(Serialize, serde::Deserialize)]
+struct Style {
+    fill: Option<chitrakar_color::AuthoredColor>,
+    stroke: Option<chitrakar_doc::Stroke>,
+    gradient: Option<chitrakar_doc::Gradient>,
+    effects: Vec<chitrakar_doc::Effect>,
+    opacity: f32,
+    blend: chitrakar_doc::BlendMode,
 }
 
 /// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
@@ -4149,6 +4248,113 @@ mod save_probe {
         assert!(session.cancel_preview().unwrap());
         assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
         assert!(!session.is_painting());
+    }
+
+    /// A layer's look travels to other layers without its shape: they
+    /// keep what they are and take what they are painted with.
+    #[test]
+    fn a_style_travels_without_the_shape_it_came_from() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut source = chitrakar_doc::Node::vector(
+            "source",
+            chitrakar_doc::VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut source.kind {
+            *fill = Some(red);
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(source),
+            })
+            .unwrap();
+        let from = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetEffects {
+                id: from,
+                effects: vec![chitrakar_doc::Effect::Outline {
+                    width: 2.0,
+                    color: red,
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+        session
+            .apply(Command::SetOpacity {
+                id: from,
+                opacity: 0.5,
+            })
+            .unwrap();
+
+        // An ellipse and a block of text to give it to.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::vector(
+                    "target",
+                    chitrakar_doc::VectorShape::Ellipse { rx: 10.0, ry: 6.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(chitrakar_doc::Node::text(
+                    "words",
+                    chitrakar_doc::TextSpec::new("hi", 12.0, red),
+                )),
+            })
+            .unwrap();
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        let (ellipse, text) = (kids[1], kids[2]);
+
+        let style = session.copy_style(from).unwrap();
+        let before = session.history_labels().0.len();
+        session.paste_style(&style, &[ellipse, text]).unwrap();
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "both layers in one entry"
+        );
+
+        let node = session.document().node(ellipse).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, fill, .. } = &node.kind else {
+            panic!("the ellipse stopped being a shape");
+        };
+        assert!(
+            matches!(shape, chitrakar_doc::VectorShape::Ellipse { .. }),
+            "it kept its own shape"
+        );
+        assert_eq!(*fill, Some(red), "and took the fill");
+        assert_eq!(node.effects.len(), 1, "and the effects");
+        assert_eq!(node.opacity, 0.5, "and the opacity");
+
+        let words = session.document().node(text).unwrap();
+        let chitrakar_doc::NodeKind::Text(spec) = &words.kind else {
+            panic!("the text stopped being text");
+        };
+        assert_eq!(spec.text, "hi", "the text kept its words");
+        assert_eq!(spec.fill, red, "and took the fill");
+        assert_eq!(words.effects.len(), 1);
+
+        // One undo takes the whole paste back.
+        session.undo().unwrap();
+        assert_eq!(session.document().node(ellipse).unwrap().opacity, 1.0);
+        assert!(session.document().node(text).unwrap().effects.is_empty());
     }
 
     /// Rubbing at a layer that is not a paint layer takes a piece out of

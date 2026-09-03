@@ -35,7 +35,10 @@ without reading anything else.*
   below, or one brushed on by hand — dragged and resized on the canvas, groups,
   reorder (by the arrows, or by dragging a row above, below or into
   another), duplicate/copy/cut/paste (subtree and pixels included, across
-  documents), delete, align and distribute a multi-selection, combine
+  documents), copy and paste a layer's look on its own — what it is
+  painted with, what hangs off it and how it sits on what is under it,
+  but never its shape — onto any number of layers in one entry,
+  delete, align and distribute a multi-selection, combine
   shapes with union/subtract/intersect/exclude into a compound path that
   can carry holes, opacity/blend,
   rename, lock (a locked layer is drawn but neither picked nor moved from
@@ -175,9 +178,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~212),
+- **Verify before committing:** `cargo test --workspace` (~214),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~400 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~405 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

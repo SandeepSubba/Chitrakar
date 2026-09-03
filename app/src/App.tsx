@@ -1800,6 +1800,33 @@ export function App() {
     }
   };
 
+  /** The look of the picked layer, kept as JSON so it outlives the
+   * document it was taken from — the same way the layer clipboard does.
+   * Null until something has been copied. */
+  const styleClip = useRef<string | null>(null);
+
+  const copyStyle = () => {
+    if (!session || selected === null) return;
+    try {
+      styleClip.current = session.copy_style(selected);
+    } catch (err) {
+      alert(`Copy style: ${err}`);
+    }
+  };
+
+  const pasteStyle = () => {
+    if (!session || styleClip.current === null) return;
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    try {
+      session.paste_style(styleClip.current, new Float64Array(ids));
+    } catch (err) {
+      alert(`Paste style: ${err}`);
+      return;
+    }
+    refresh(session);
+  };
+
   const onCanvasPointerUp = () => {
     if (paintingRef.current && session) {
       paintingRef.current = null;
@@ -2336,6 +2363,21 @@ export function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicateSelected();
+      }
+      // With alt, the clipboard keys carry the layer's look rather than
+      // the layer: the pairing every editor uses for it.
+      if ((e.metaKey || e.ctrlKey) && e.altKey && !typing) {
+        const k = e.key.toLowerCase();
+        if (k === "c") {
+          e.preventDefault();
+          copyStyle();
+          return;
+        }
+        if (k === "v") {
+          e.preventDefault();
+          pasteStyle();
+          return;
+        }
       }
       if ((e.metaKey || e.ctrlKey) && !typing) {
         const k = e.key.toLowerCase();
@@ -3579,6 +3621,12 @@ export function App() {
               hint="Ctrl+D"
             >
               Duplicate
+            </MenuItem>
+            <MenuItem icon="copy" onClick={copyStyle} hint="Ctrl+Alt+C">
+              Copy style
+            </MenuItem>
+            <MenuItem icon="paste" onClick={pasteStyle} hint="Ctrl+Alt+V">
+              Paste style
             </MenuItem>
             <MenuItem icon="flipH" onClick={() => flipSelection(true)}>
               Flip horizontal
@@ -5019,6 +5067,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"],
       ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
       ["Ctrl+D", "Duplicate"],
+      ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
       ["Ctrl+A", "Select all"],
       ["Delete", "Delete the picked layers"],
       ["?", "This sheet"],

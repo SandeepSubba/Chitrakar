@@ -383,6 +383,75 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   );
 }
 
+// 4b1. A layer's look travels to another layer without its shape: copy
+// the style off one rect, give it to a second, and the second keeps
+// being itself while taking the fill and the opacity.
+{
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 1280) * b.width, b.y + (y / 720) * b.height];
+  // The colour to draw with is shared with every later block, so put it
+  // back before leaving.
+  const wasFill = await page.inputValue('input[aria-label="Fill colour"]');
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(80, 560));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 680), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.fill('input[aria-label="Fill colour"]', "#22cc55");
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(340, 560));
+  await page.mouse.down();
+  await page.mouse.move(...at(540, 680), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const green = await canvasPixel(440, 620);
+  assert(green[1] > green[0] && green[1] > green[2], `a green rect (${green})`);
+  // Drawing a shape does not pick it, and the opacity lives in the
+  // panel, so pick the new rect by its row — the topmost one.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  // Fade it, so the style carries something besides the fill.
+  await setSlider("Layer opacity", 0.5);
+  await page.waitForTimeout(200);
+
+  // Copy that look, pick the first rect, and give it the look.
+  await page.keyboard.press("Control+Alt+c");
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Move"]');
+  await page.mouse.click(...at(180, 620));
+  await page.waitForTimeout(200);
+  const wasFirst = await canvasPixel(180, 620);
+  await page.keyboard.press("Control+Alt+v");
+  await page.waitForTimeout(250);
+  const nowFirst = await canvasPixel(180, 620);
+  assert(
+    nowFirst.join() !== wasFirst.join(),
+    `the first rect took the look (${wasFirst} -> ${nowFirst})`,
+  );
+  assert(
+    nowFirst[1] > nowFirst[0] && nowFirst[1] > nowFirst[2],
+    `and it is the green one (${nowFirst})`,
+  );
+  assert(
+    (await canvasPixel(180, 540))[3] === 0,
+    "and it kept its own shape rather than taking the other's",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(180, 620)).join() === wasFirst.join(),
+    "one undo takes the whole paste back",
+  );
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(120);
+  }
+  await page.fill('input[aria-label="Fill colour"]', wasFill);
+  await page.waitForTimeout(200);
+}
+
 // 4b2. White balance and vibrance: neutral changes nothing, warming lifts
 // the red and drops the blue, and vibrance moves a colour without moving
 // a grey. Undone afterwards, so the rest of the suite sees what it

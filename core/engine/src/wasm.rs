@@ -284,6 +284,18 @@ impl WasmSession {
         self.inner.is_painting()
     }
 
+    /// A layer's look without its shape, as JSON: what it is painted
+    /// with, what hangs off it, and how it sits on what is under it.
+    pub fn copy_style(&self, id: f64) -> Result<String, JsError> {
+        self.inner.copy_style(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Give that look to every layer named, in one undo step.
+    pub fn paste_style(&mut self, json: &str, ids: Vec<f64>) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.paste_style(json, &ids).map_err(to_js)
+    }
+
     /// Set the opacity of several layers as one undo step.
     pub fn set_opacity_of(&mut self, ids: Vec<f64>, opacity: f32) -> Result<(), JsError> {
         let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();

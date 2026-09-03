@@ -193,6 +193,165 @@ mod tests {
         assert_eq!(restored.meta.width, 320);
     }
 
+    /// Everything the document model can hold, saved and opened again,
+    /// and the two rendered side by side.
+    ///
+    /// Each kind of layer, mask, adjustment and effect has its own test
+    /// somewhere; what this one is for is the gap between them — a kind
+    /// added to the model and not to the file, which no per-kind test
+    /// would notice because each of those builds its document in memory.
+    #[test]
+    fn a_document_of_everything_survives_the_round_trip() {
+        let mut doc = Document::new(120, 120, ColorMode::Rgb);
+        let root = doc.root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let blue = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.3,
+            b: 0.9,
+            a: 1.0,
+        };
+        let mut at = 0;
+        let mut add = |doc: &mut Document, node: Box<Node>| {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node,
+            })
+            .unwrap();
+            at += 1;
+            doc.children_of(root).unwrap()[at - 1]
+        };
+
+        // A shape with a gradient and a stroke.
+        let mut shape = Node::vector(
+            "shape",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 30.0,
+                radius: 5.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = &mut shape.kind
+        {
+            *fill = Some(red);
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: blue,
+                width: 3.0,
+                widths: Vec::new(),
+            });
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 1.0],
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: red,
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: blue,
+                    },
+                ],
+            });
+        }
+        let shape_id = add(&mut doc, Box::new(shape));
+        doc.apply(Command::SetEffects {
+            id: shape_id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 3.0,
+                dy: 3.0,
+                blur: 2.0,
+                color: blue,
+                opacity: 0.7,
+            }],
+        })
+        .unwrap();
+
+        // A painted layer, with a painted mask over it.
+        let paint_id = add(&mut doc, Box::new(Node::paint("brush")));
+        doc.apply(Command::AddStroke {
+            id: paint_id,
+            index: 0,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[10.0, 90.0], [60.0, 100.0], [110.0, 90.0]],
+                radii: vec![9.0, 5.0, 7.0],
+                color: blue,
+                softness: 0.4,
+                erase: false,
+            }),
+            on_mask: false,
+        })
+        .unwrap();
+        doc.apply(Command::SetMask {
+            id: paint_id,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Painted {
+                    strokes: vec![chitrakar_doc::PaintStroke {
+                        points: vec![[60.0, 95.0]],
+                        radii: vec![8.0],
+                        color: red,
+                        softness: 0.0,
+                        erase: true,
+                    }],
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+
+        // Text, and the two newest adjustments over everything.
+        add(
+            &mut doc,
+            Box::new(Node::text(
+                "words",
+                chitrakar_doc::TextSpec::new("Chitrakar", 14.0, red),
+            )),
+        );
+        add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "balance",
+                chitrakar_doc::Adjustment::WhiteBalance {
+                    temperature: 0.3,
+                    tint: -0.2,
+                },
+            )),
+        );
+        add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "vibrance",
+                chitrakar_doc::Adjustment::Vibrance { amount: 0.5 },
+            )),
+        );
+
+        let before = chitrakar_render::render(&doc).unwrap();
+        let after =
+            chitrakar_render::render(&load_chitra(&save_chitra(&doc).unwrap()).unwrap()).unwrap();
+        assert_eq!((before.width, before.height), (after.width, after.height));
+        let mut worst = 0.0f32;
+        for (p, q) in before.pixels.iter().zip(&after.pixels) {
+            for (u, v) in [(p.r, q.r), (p.g, q.g), (p.b, q.b), (p.a, q.a)] {
+                worst = worst.max((u - v).abs());
+            }
+        }
+        assert!(worst < 1e-6, "the page came back different by {worst}");
+        // And it is a page with something on it, not two blank ones.
+        let ink = before.pixels.iter().filter(|p| p.a > 0.01).count();
+        assert!(ink > 1000, "there was something to compare ({ink} pixels)");
+    }
+
     /// A painting is strokes, not pixels, so it saves as what it is and
     /// comes back still editable.
     #[test]
