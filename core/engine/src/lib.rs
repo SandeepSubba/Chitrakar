@@ -928,6 +928,221 @@ impl Session {
         Ok(chitrakar_render::mask_thumbnail(&self.doc, id, size)?.unwrap_or_default())
     }
 
+    /// Put a new anchor on a path at the point nearest a document point,
+    /// splitting the segment it lands on so the path keeps the shape it
+    /// had. Returns where the new anchor sits in the path's order.
+    ///
+    /// A curved segment is split properly rather than cut straight: the
+    /// two halves take the control points de Casteljau gives them, so
+    /// the curve through the new anchor is the curve that was there.
+    ///
+    /// `within` is how far from the outline the point may be, in the
+    /// layer's own units: an anchor goes on the outline, so a point that
+    /// is merely *inside* the shape is not asking for one.
+    pub fn insert_anchor(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<usize, EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        if points.len() < 2 {
+            return Err(EngineError::BadCommand("a path of one anchor".into()));
+        }
+        let Some((lx, ly)) = self.point_in_layer(id, false, x, y)? else {
+            return Ok(0);
+        };
+        let mut hs = padded_handles(handles, points.len());
+        let segments = if *closed {
+            points.len()
+        } else {
+            points.len() - 1
+        };
+        // The closest point on the path, found by walking each segment.
+        const STEPS: usize = 24;
+        let (mut best, mut at, mut best_t) = (f32::MAX, 0usize, 0.0f32);
+        for i in 0..segments {
+            let j = (i + 1) % points.len();
+            for k in 0..=STEPS {
+                let t = k as f32 / STEPS as f32;
+                let p = cubic_at(points[i], hs[i], points[j], hs[j], t);
+                let d = (p[0] - lx).powi(2) + (p[1] - ly).powi(2);
+                if d < best {
+                    (best, at, best_t) = (d, i, t);
+                }
+            }
+        }
+        if best.sqrt() > within.max(0.0) {
+            return Err(EngineError::BadCommand("no outline near that point".into()));
+        }
+        let j = (at + 1) % points.len();
+        let (a, b) = (points[at], points[j]);
+        let (c1, c2) = (
+            [a[0] + hs[at][2], a[1] + hs[at][3]],
+            [b[0] + hs[j][0], b[1] + hs[j][1]],
+        );
+        let t = best_t;
+        let mix = |p: [f32; 2], q: [f32; 2]| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+        let (p01, p12, p23) = (mix(a, c1), mix(c1, c2), mix(c2, b));
+        let (p012, p123) = (mix(p01, p12), mix(p12, p23));
+        let m = mix(p012, p123);
+        let off = |from: [f32; 2], to: [f32; 2]| [to[0] - from[0], to[1] - from[1]];
+
+        let mut points = points.clone();
+        hs[at] = [hs[at][0], hs[at][1], off(a, p01)[0], off(a, p01)[1]];
+        hs[j] = [off(b, p23)[0], off(b, p23)[1], hs[j][2], hs[j][3]];
+        let fresh = [
+            off(m, p012)[0],
+            off(m, p012)[1],
+            off(m, p123)[0],
+            off(m, p123)[1],
+        ];
+        points.insert(at + 1, m);
+        hs.insert(at + 1, fresh);
+        self.replace_path(
+            id,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: *closed,
+                smooth: *smooth,
+                handles: hs,
+                subpaths: subpaths.clone(),
+            },
+            "Add anchor",
+        )?;
+        Ok(at + 1)
+    }
+
+    /// Take an anchor off a path. Refuses to leave one that has nothing
+    /// left to be a path with.
+    pub fn remove_anchor(&mut self, id: NodeId, index: usize) -> Result<(), EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        let least = if *closed { 3 } else { 2 };
+        if index >= points.len() || points.len() <= least {
+            return Err(EngineError::BadCommand(
+                "a path needs the anchors it has left".into(),
+            ));
+        }
+        let mut points = points.clone();
+        let mut hs = padded_handles(handles, points.len());
+        points.remove(index);
+        hs.remove(index);
+        self.replace_path(
+            id,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: *closed,
+                smooth: *smooth,
+                handles: hs,
+                subpaths: subpaths.clone(),
+            },
+            "Remove anchor",
+        )
+    }
+
+    /// Put a rewritten path back on a layer, with its anchors normalized
+    /// to a (0,0) origin and the shift folded into the transform, which
+    /// is the invariant every other path edit keeps.
+    fn replace_path(
+        &mut self,
+        id: NodeId,
+        shape: chitrakar_doc::VectorShape,
+        label: &str,
+    ) -> Result<(), EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let (fill, stroke, gradient) = (*fill, stroke.clone(), gradient.clone());
+        let t = node.transform;
+        let chitrakar_doc::VectorShape::Path {
+            mut points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        let (mut mx, mut my) = (f32::MAX, f32::MAX);
+        for p in points.iter().chain(subpaths.iter().flatten()) {
+            mx = mx.min(p[0]);
+            my = my.min(p[1]);
+        }
+        let mut subpaths = subpaths;
+        if mx.is_finite() && my.is_finite() && (mx != 0.0 || my != 0.0) {
+            for p in points.iter_mut().chain(subpaths.iter_mut().flatten()) {
+                p[0] -= mx;
+                p[1] -= my;
+            }
+        } else {
+            (mx, my) = (0.0, 0.0);
+        }
+        let moved = chitrakar_doc::Transform {
+            e: t.e + t.a * mx + t.c * my,
+            f: t.f + t.b * mx + t.d * my,
+            ..t
+        };
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::SetKind {
+                    id,
+                    kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Path {
+                            points,
+                            closed,
+                            smooth,
+                            handles,
+                            subpaths,
+                        },
+                        fill,
+                        stroke,
+                        gradient,
+                    }),
+                },
+                Command::SetTransform {
+                    id,
+                    transform: moved,
+                },
+            ]),
+            Some(label.to_string()),
+        )
+    }
+
     /// Add an empty layer to clone onto at the top of the document.
     pub fn add_clone_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
         let parent = self.doc.root();
@@ -2244,6 +2459,25 @@ enum CopyStyle {
     /// Neither renamed nor moved: a child inside a subtree being copied,
     /// which belongs exactly where it was.
     Exact,
+}
+
+/// A path's handles, one per anchor: an anchor with none gets a pair of
+/// zeroes, which is a corner.
+fn padded_handles(handles: &[[f32; 4]], n: usize) -> Vec<[f32; 4]> {
+    let mut out = handles.to_vec();
+    out.resize(n, [0.0; 4]);
+    out
+}
+
+/// A point on the cubic between two anchors, given their handles.
+fn cubic_at(a: [f32; 2], ha: [f32; 4], b: [f32; 2], hb: [f32; 4], t: f32) -> [f32; 2] {
+    let (c1, c2) = ([a[0] + ha[2], a[1] + ha[3]], [b[0] + hb[0], b[1] + hb[1]]);
+    let u = 1.0 - t;
+    let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [
+        w0 * a[0] + w1 * c1[0] + w2 * c2[0] + w3 * b[0],
+        w0 * a[1] + w1 * c1[1] + w2 * c2[1] + w3 * b[1],
+    ]
 }
 
 /// A layer's look, without its shape — see [`Session::copy_style`].
@@ -4403,6 +4637,104 @@ mod save_probe {
         session.undo().unwrap();
         assert_eq!(session.document().node(ellipse).unwrap().opacity, 1.0);
         assert!(session.document().node(text).unwrap().effects.is_empty());
+    }
+
+    /// An anchor put onto a curve keeps the curve: the two halves take
+    /// the control points the split gives them, so the path through the
+    /// new anchor is the path that was already there.
+    #[test]
+    fn an_anchor_added_to_a_curve_leaves_the_curve_where_it_was() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        // One curved segment, bowing well away from its chord.
+        let mut curve = chitrakar_doc::Node::vector(
+            "curve",
+            chitrakar_doc::VectorShape::Path {
+                points: vec![[0.0, 0.0], [100.0, 0.0]],
+                closed: false,
+                smooth: false,
+                handles: vec![[0.0, 0.0, 0.0, 60.0], [0.0, 60.0, 0.0, 0.0]],
+                subpaths: Vec::new(),
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { stroke, fill, .. } = &mut curve.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: Vec::new(),
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(curve),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+
+        // Halfway along, which is where the curve's own middle is.
+        let at = session.insert_anchor(id, 90.0, 85.0, 8.0).unwrap();
+        assert_eq!(at, 1, "the new anchor sits between the two it split");
+        let node = session.document().node(id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            panic!("not a shape");
+        };
+        let chitrakar_doc::VectorShape::Path { points, .. } = shape else {
+            panic!("not a path");
+        };
+        assert_eq!(points.len(), 3, "there are three anchors now");
+
+        let after = session.render().unwrap();
+        // Not pixel for pixel: one segment became two, so the curve is
+        // flattened at twice the resolution and its edge lands a
+        // fraction of a pixel differently. What matters is that the
+        // curve is where it was, which the average says and a look at
+        // the middle of it confirms.
+        let mut total = 0.0f64;
+        for (p, q) in before.pixels.iter().zip(&after.pixels) {
+            total += (p.a - q.a).abs() as f64;
+        }
+        let mean = total / before.pixels.len() as f64;
+        assert!(mean < 0.002, "the curve did not move ({mean:.5})");
+        assert!(
+            after.get(90, 85).a > 0.5,
+            "it still runs through its own middle"
+        );
+        assert_eq!(
+            after.get(90, 45).a,
+            0.0,
+            "and not through where it never did"
+        );
+
+        // And one comes off again.
+        session.remove_anchor(id, 1).unwrap();
+        let node = session.document().node(id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            panic!("not a shape");
+        };
+        let chitrakar_doc::VectorShape::Path { points, .. } = shape else {
+            panic!("not a path");
+        };
+        assert_eq!(points.len(), 2, "and the anchor comes off again");
+        // A path needs what it has left.
+        assert!(session.remove_anchor(id, 0).is_err());
+        // And an anchor goes on the outline, not merely inside the shape:
+        // a point nowhere near it is not asking for one.
+        assert!(session.insert_anchor(id, 90.0, 20.0, 8.0).is_err());
     }
 
     /// A clone gesture: the source is set once and the whole stroke

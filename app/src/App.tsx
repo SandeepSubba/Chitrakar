@@ -1402,8 +1402,30 @@ export function App() {
   };
 
   /** A double-click on a picked text block opens it for typing in place. */
-  const onCanvasDoubleClick = () => {
-    if (tool === "Move" && !inlineText) beginInlineText();
+  const onCanvasDoubleClick = (e: React.MouseEvent) => {
+    if (tool !== "Move" || !session || selected === null) return;
+    // Double-clicking a picked path's outline puts an anchor on it,
+    // which is what the gesture means in every vector editor. A block of
+    // text has its own meaning for it, and takes precedence.
+    if (
+      selectedKind &&
+      typeof selectedKind === "object" &&
+      "Vector" in selectedKind &&
+      "Path" in selectedKind.Vector.shape
+    ) {
+      const [x, y] = docPoint(e);
+      try {
+        // Near the outline, in document units: an anchor goes on the
+        // path, so a double-click well inside the shape is not asking
+        // for one and falls through to what it otherwise means.
+        session.insert_anchor(selected, x, y, 10 / view.zoom);
+      } catch {
+        return;
+      }
+      refresh(session);
+      return;
+    }
+    if (!inlineText) beginInlineText();
   };
 
   /** A rubber band being dragged on empty canvas, in document
@@ -2633,6 +2655,18 @@ export function App() {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
+    // Alt takes the anchor off rather than moving it — the gesture that
+    // pairs with double-clicking the outline to put one on.
+    if (e.altKey) {
+      try {
+        session.remove_anchor(selected, idx);
+      } catch (err) {
+        alert(`Remove anchor: ${err}`);
+        return;
+      }
+      refresh(session);
+      return;
+    }
     anchorDragRef.current = {
       idx,
       vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
@@ -5157,6 +5191,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
       ["Ctrl+D", "Duplicate"],
       ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
+      ["Double-click a path", "Put an anchor on its outline"],
+      ["Alt-click an anchor", "Take it off"],
       ["Ctrl+A", "Select all"],
       ["Delete", "Delete the picked layers"],
       ["?", "This sheet"],

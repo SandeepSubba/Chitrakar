@@ -274,6 +274,27 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Put a new anchor on a path at the point nearest a document point,
+    /// splitting the segment it lands on. Returns its index.
+    pub fn insert_anchor(
+        &mut self,
+        id: f64,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<usize, JsError> {
+        self.inner
+            .insert_anchor(NodeId(id as u64), x, y, within)
+            .map_err(to_js)
+    }
+
+    /// Take an anchor off a path.
+    pub fn remove_anchor(&mut self, id: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .remove_anchor(NodeId(id as u64), index)
+            .map_err(to_js)
+    }
+
     /// Add an empty layer to clone onto at the top of the document.
     /// Returns its id.
     pub fn add_clone_layer(&mut self, name: &str) -> Result<f64, JsError> {

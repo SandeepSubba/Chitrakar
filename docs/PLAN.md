@@ -58,7 +58,10 @@ without reading anything else.*
   ends and stops on the canvas, and exported as live SVG gradients. Paths carry bezier
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
-  as real cubic segments.
+  as real cubic segments. Anchors go on and come off after the fact:
+  double-clicking a path's outline puts one where it was clicked,
+  splitting that segment so the curve stays exactly where it was, and
+  alt-clicking an anchor takes it off.
   Any layer can carry live effects — drop shadow, outline and inner
   shadow, stacked in any combination, all cast from the layer's
   silhouette so they follow every edit.
@@ -188,9 +191,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~220),
+- **Verify before committing:** `cargo test --workspace` (~221),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~415 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~419 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

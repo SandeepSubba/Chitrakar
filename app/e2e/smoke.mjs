@@ -1269,6 +1269,64 @@ await page.waitForTimeout(200);
 px = await canvasPixel(150, 180);
 assert(px[3] === 0, "anchor drag is one undo step");
 
+// 8t2. Anchors go on and come off: double-clicking the outline puts one
+// where it was clicked, alt-clicking one takes it away, and each is a
+// single undo.
+{
+  const was = await page.locator(".anchor").count();
+  // The triangle's own outline, partway along an edge.
+  const edge = await page.locator('[data-anchor="0"]').boundingBox();
+  const other = await page.locator('[data-anchor="1"]').boundingBox();
+  const apexAt = await page.locator('[data-anchor="2"]').boundingBox();
+  // Halfway along the edge and a few pixels inside it: on the outline is
+  // half outside the fill, and a click that lands outside deselects the
+  // layer before the double-click is over.
+  const centre = {
+    x: (edge.x + other.x + apexAt.x) / 3 + 5,
+    y: (edge.y + other.y + apexAt.y) / 3 + 5,
+  };
+  const half = { x: (edge.x + other.x) / 2 + 5, y: (edge.y + other.y) / 2 + 5 };
+  const mid = {
+    x: half.x + (centre.x - half.x) * 0.12,
+    y: half.y + (centre.y - half.y) * 0.12,
+  };
+  await page.mouse.dblclick(mid.x, mid.y);
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".anchor").count()) === was + 1,
+    `double-click put an anchor on the outline (${was} -> ${await page
+      .locator(".anchor")
+      .count()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".anchor").count()) === was,
+    "and one undo takes it off again",
+  );
+
+  // Put it back, then alt-click it away.
+  await page.mouse.dblclick(mid.x, mid.y);
+  await page.waitForTimeout(300);
+  const added = await page.locator(".anchor").count();
+  const spot = await page.locator('[data-anchor="1"]').boundingBox();
+  await page.keyboard.down("Alt");
+  await page.mouse.click(spot.x + 5, spot.y + 5);
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".anchor").count()) === added - 1,
+    "alt-click takes an anchor off",
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".anchor").count()) === was,
+    "and the triangle is a triangle again",
+  );
+}
+
 // 8u. Smooth toggle bows the path outside its straight chords.
 px = await canvasPixel(92, 80); // just left of the sharp left edge
 assert(px[3] === 0, "outside the straight edge before smoothing");
