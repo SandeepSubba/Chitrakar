@@ -148,12 +148,23 @@ without reading anything else.*
   surface entirely. Together those took a full A4/300dpi render from
   ~370 ms to ~240 ms (fat LTO in the release profile later took another tenth
   off every figure and 6% off the wasm bundle), and one plain folder in an A4 document from ~250 ms
-  of overhead to none. What remains at that size is mostly memory
+  of overhead to none. A group that *does* have to be isolated — opacity,
+  a blend, a mask, or something inside reading the backdrop — is now
+  isolated on a surface the size of the box it can land in rather than
+  the size of the page, so at A4 a group holding one small shape went
+  from 145 ms to 84 ms, which is what the same group costs when it needs
+  no isolation at all. What remains at that size is mostly memory
   bandwidth: the surface is 16 bytes a pixel (139 MB at A4), and each
   full-canvas pass over it costs ~55 ms. `cargo test --release -p
   chitrakar-render -- --ignored --nocapture --test-threads=1` runs the
-  timing probes; the next win there is avoiding the whole-canvas
-  allocation an isolated group still makes. Interactive rendering goes
+  timing probes; the next win there is the same trick for a layer with
+  live effects, which at A4 costs ~220 ms for one small shape with a
+  drop shadow against a ~80 ms baseline. It is harder than the group
+  was: the layer's own surface, the silhouette field and the
+  destination are all indexed in device coordinates, and the stamping
+  pass reads the field at an offset, so windowing them means either
+  giving `Surface` an origin or getting three sets of bounds right at
+  once. Interactive rendering goes
   through `Session::set_viewport`, which composites only what the canvas
   can see: an A4 page at 300dpi shown on screen is 15 ms rather than
   169 ms, and the zoom is no longer capped by what a full-page surface

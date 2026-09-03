@@ -678,7 +678,13 @@ fn render_child(
         // A painted mask is worked out over the region about to be
         // drawn before anything reads it, since reading one a pixel at a
         // time would cost the strokes' length at every pixel.
-        let plane = MaskRef::plane_for(node.mask.as_ref(), parent, clip, (dst.width, dst.height));
+        // A group is isolated on a surface of its own, in that surface's
+        // coordinates, so its mask is worked out there instead of here.
+        let plane = if matches!(node.kind, NodeKind::Group) {
+            None
+        } else {
+            MaskRef::plane_for(node.mask.as_ref(), parent, clip, (dst.width, dst.height))
+        };
         let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
             NodeKind::Group => {
@@ -715,16 +721,34 @@ fn render_child(
                 {
                     return render_group(doc, child, dst, sub_clip, t);
                 }
-                let mut sub = Surface::new(dst.width, dst.height);
-                render_group(doc, child, &mut sub, sub_clip, t)?;
-                if mask.mask.is_some() {
-                    // The mask the walk already worked out, rather than
-                    // one worked out again: a painted mask is rasterized
-                    // to read it, and doing that twice for one group is
-                    // the whole region's worth of work wasted.
-                    apply_mask(doc, mask, &mut sub, sub_clip);
+                // The surface it is isolated on covers only where the
+                // group can land rather than the whole page: at A4 a
+                // group holding one small shape was allocating and
+                // clearing the canvas for it. Everything drawn into it
+                // is shifted by that window's own corner.
+                let (ox, oy) = (sub_clip.x0, sub_clip.y0);
+                let window = Transform::translation(-(ox as f32), -(oy as f32));
+                let inner = ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: sub_clip.x1 - ox,
+                    y1: sub_clip.y1 - oy,
+                };
+                let mut sub = Surface::new(inner.x1, inner.y1);
+                render_group(doc, child, &mut sub, inner, window.compose(t))?;
+                if node.mask.is_some() {
+                    // The mask is read in the window's coordinates too.
+                    let shifted = window.compose(parent);
+                    let plane = MaskRef::plane_for(
+                        node.mask.as_ref(),
+                        shifted,
+                        inner,
+                        (sub.width, sub.height),
+                    );
+                    let m = MaskRef::new(node.mask.as_ref(), shifted).with_plane(plane.as_ref());
+                    apply_mask(doc, m, &mut sub, inner);
                 }
-                composite(dst, &sub, node.opacity, blend, sub_clip);
+                composite_from(dst, &sub, (ox, oy), node.opacity, blend, sub_clip);
             }
             NodeKind::Vector {
                 shape,
@@ -1114,10 +1138,25 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
 }
 
 fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode, clip: ClipRect) {
+    composite_from(dst, src, (0, 0), opacity, mode, clip);
+}
+
+/// Composite a window of source pixels: `src` holds the destination's
+/// region starting at `origin`, so a layer isolated on a surface the
+/// size of the box it can land in composites back where it belongs.
+fn composite_from(
+    dst: &mut Surface,
+    src: &Surface,
+    origin: (u32, u32),
+    opacity: f32,
+    mode: BlendMode,
+    clip: ClipRect,
+) {
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
+            let s = ((y - origin.1) * src.width + (x - origin.0)) as usize;
             let i = (y * dst.width + x) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(src.pixels[i], opacity), dst.pixels[i], mode);
+            dst.pixels[i] = blend_pixel(scale_alpha(src.pixels[s], opacity), dst.pixels[i], mode);
         }
     }
 }
@@ -3654,6 +3693,72 @@ mod tests {
             render(&doc).unwrap();
         }
         println!("TIMING A4 300dpi (rect + ellipse): {:?}", t0.elapsed() / 3);
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_effect_probe() {
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("r", 100.0, 100.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 6.0,
+                dy: 6.0,
+                blur: 8.0,
+                color: RED,
+                opacity: 0.6,
+            }],
+        })
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            render(&doc).unwrap();
+        }
+        eprintln!(
+            "GROUP one small layer with a shadow: {:?}",
+            t0.elapsed() / 3
+        );
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_isolated_group_probe() {
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let gid = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: gid,
+            index: 0,
+            node: filled_rect("r", 100.0, 100.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::SetOpacity {
+            id: gid,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            render(&doc).unwrap();
+        }
+        eprintln!(
+            "GROUP one isolated group, tiny child: {:?}",
+            t0.elapsed() / 3
+        );
     }
 
     #[test]
