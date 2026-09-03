@@ -129,6 +129,7 @@ const TOOLS = [
   "Pen",
   "Brush",
   "Paint",
+  "Clone",
   "Text",
   "Crop",
   "Eyedropper",
@@ -144,6 +145,7 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   p: "Pen",
   b: "Brush",
   n: "Paint",
+  s: "Clone",
   t: "Text",
   c: "Crop",
   i: "Eyedropper",
@@ -159,6 +161,7 @@ const KIND_ICONS: Record<string, IconName> = {
   filter: "filter",
   text: "text",
   paint: "paint",
+  clone: "clone",
 };
 
 const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
@@ -168,6 +171,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Pen: "P",
   Brush: "B",
   Paint: "N",
+  Clone: "S",
   Text: "T",
   Crop: "C",
   Eyedropper: "I",
@@ -180,6 +184,7 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Pen: "pen",
   Brush: "brush",
   Paint: "paint",
+  Clone: "clone",
   Text: "text",
   Crop: "crop",
   Eyedropper: "eyedropper",
@@ -553,6 +558,9 @@ export function App() {
    * ring that shows how big it is can sit under the pointer. Null when the
    * pointer is not over the canvas, or the brush is not the tool in hand. */
   const [brushAt, setBrushAt] = useState<[number, number] | null>(null);
+  /** Where the clone tool reads from, in document units. Alt-click sets
+   * it; until it is set the tool has nothing to lift and says so. */
+  const [cloneFrom, setCloneFrom] = useState<[number, number] | null>(null);
   /** A small picture of each layer, by id, for the panel. Regenerated a
    * breath after the document settles rather than on every frame: a drag
    * refreshes the layer list many times a second and none of those frames
@@ -828,6 +836,7 @@ export function App() {
       setGamutWarn(false);
       shapeCount.current = 0;
       paintCount.current = 0;
+      setCloneFrom(null);
       setDocName("untitled");
       refresh(s);
       fitView();
@@ -1280,7 +1289,7 @@ export function App() {
   };
 
   const onHostPointerMove = (e: React.PointerEvent) => {
-    if (tool === "Paint" && canvasRef.current) {
+    if ((tool === "Paint" || tool === "Clone") && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
       setBrushAt([e.clientX - rect.left, e.clientY - rect.top]);
     }
@@ -1338,7 +1347,7 @@ export function App() {
    * left behind by a tool change or a pointer leaving the canvas would
    * read as a brush that is still there. */
   useEffect(() => {
-    if (tool !== "Paint") setBrushAt(null);
+    if (tool !== "Paint" && tool !== "Clone") setBrushAt(null);
   }, [tool]);
 
   /** Commit the guide list, as one history entry. */
@@ -1438,12 +1447,17 @@ export function App() {
   /** The layer a paint stroke should land on: the picked one when it is a
    * paint layer, and a fresh one when it is not — so the first stroke of a
    * session makes its own layer and every stroke after it joins that one. */
-  const paintTarget = (s: WasmSession): NodeId | null => {
+  const paintTarget = (s: WasmSession, clone: boolean): NodeId | null => {
+    const want = clone ? "clone" : "paint";
     const picked = layers.find((l) => l.id === selected);
-    if (picked && picked.kind === "paint" && !picked.locked) return picked.id;
+    if (picked && picked.kind === want && !picked.locked) return picked.id;
     paintCount.current += 1;
     try {
-      const id = s.add_paint_layer(`Paint ${paintCount.current}`) as NodeId;
+      const id = (
+        clone
+          ? s.add_clone_layer(`Clone ${paintCount.current}`)
+          : s.add_paint_layer(`Paint ${paintCount.current}`)
+      ) as NodeId;
       setSelected(id);
       setMultiSel([]);
       return id;
@@ -1456,6 +1470,41 @@ export function App() {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
+    if (tool === "Clone") {
+      // Alt sets where the clone reads from, which is what that key does
+      // in every editor that has this tool.
+      if (e.altKey) {
+        setCloneFrom([x, y]);
+        return;
+      }
+      if (cloneFrom === null) {
+        alert("Alt-click the place to clone from first.");
+        return;
+      }
+      const layer = paintTarget(session, true);
+      if (layer === null) return;
+      try {
+        session.paint_begin(
+          layer,
+          x,
+          y,
+          paintSize / 2,
+          JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
+          paintSoftness,
+          false,
+          false,
+        );
+        session.paint_source(cloneFrom[0] - x, cloneFrom[1] - y);
+      } catch (err) {
+        alert(`Clone: ${err}`);
+        return;
+      }
+      paintingRef.current = { width: 1, at: performance.now() };
+      lastPaint.current = [x, y];
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      refresh(session);
+      return;
+    }
     if (tool === "Paint") {
       // Alt takes the colour under the brush rather than laying any: the
       // sampling every paint tool puts under that key, so the brush does
@@ -1489,7 +1538,7 @@ export function App() {
         }
         layer = picked.id;
       } else {
-        layer = paintTarget(session);
+        layer = paintTarget(session, false);
       }
       if (layer === null) return;
       // Shift starts the stroke where the last one ended and runs it
@@ -2958,7 +3007,7 @@ export function App() {
   /** Handles sit over the layer they belong to, which is exactly where a
    * brush wants to paint, so the brush takes them off the canvas while it
    * is the tool in hand. The outline stays: it still says what is picked. */
-  const grabbable = movable && tool !== "Paint";
+  const grabbable = movable && tool !== "Paint" && tool !== "Clone";
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
@@ -3833,7 +3882,7 @@ export function App() {
             aria-label="Fill colour"
             className="fill-swatch"
           />
-          {tool === "Paint" && (
+          {(tool === "Paint" || tool === "Clone") && (
             <>
               <input
                 type="number"
@@ -3859,6 +3908,7 @@ export function App() {
                 aria-label="Brush softness"
                 className="paint-softness"
               />
+              {tool === "Paint" && (
               <button
                 className={`icon-button${erasing ? " active" : ""}`}
                 onClick={() => setErasing((on) => !on)}
@@ -3868,6 +3918,7 @@ export function App() {
               >
                 <Icon name="eraser" />
               </button>
+              )}
             </>
           )}
           {tool === "Brush" && (
@@ -3886,7 +3937,9 @@ export function App() {
           )}
         </nav>
         <main
-          className={`canvas-host${tool === "Paint" ? " painting" : ""}`}
+          className={`canvas-host${
+            tool === "Paint" || tool === "Clone" ? " painting" : ""
+          }`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
           onDrop={onHostDrop}
@@ -4090,7 +4143,23 @@ export function App() {
               outer ring is where it stops, the inner one where its solid
               core ends. An eraser's ring is dashed, since what it does to
               the canvas is the opposite of what the colour says. */}
-          {tool === "Paint" && brushAt && (
+          {tool === "Clone" && cloneFrom && (
+            <svg className="brush-ring clone-source" aria-hidden="true">
+              <circle
+                cx={view.x + cloneFrom[0] * view.zoom}
+                cy={view.y + cloneFrom[1] * view.zoom}
+                r={Math.max(3, (paintSize / 2) * view.zoom)}
+              />
+              <path
+                d={`M${view.x + cloneFrom[0] * view.zoom - 7} ${
+                  view.y + cloneFrom[1] * view.zoom
+                } h14 M${view.x + cloneFrom[0] * view.zoom} ${
+                  view.y + cloneFrom[1] * view.zoom - 7
+                } v14`}
+              />
+            </svg>
+          )}
+          {(tool === "Paint" || tool === "Clone") && brushAt && (
             <svg
               className={`brush-ring${erasing ? " erasing" : ""}`}
               aria-hidden="true"
@@ -5021,6 +5090,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],
+      ["S", "Clone (paint with what is already there)"],
+      ["Alt-click (clone)", "Set the place to clone from"],
       ["[  ]", "Thinner, thicker brush"],
       ["Alt-click (brush)", "Take the colour under the brush"],
       ["Shift-click (brush)", "Paint a straight line on from the last stroke"],

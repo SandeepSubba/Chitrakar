@@ -1289,6 +1289,21 @@ body {
   opacity: 0.6;
 }
 
+/* Where the clone reads from: a ring with a cross in it, so it reads as
+   a place rather than as another brush. */
+.clone-source circle,
+.clone-source path {
+  stroke-dasharray: 4 3;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  opacity: 0.85;
+}
+
+.clone-source path {
+  stroke-dasharray: none;
+}
+
 .brush-ring.erasing circle {
   stroke-dasharray: 5 4;
 }

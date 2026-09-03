@@ -62,7 +62,8 @@ export type IconName =
   | "unlock"
   | "eyedropper"
   | "paint"
-  | "eraser";
+  | "eraser"
+  | "clone";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // A pipette: the barrel down to a tip, with the bulb at the top.
@@ -122,6 +123,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M5 19l1.2-4.2L15 6a2 2 0 0 1 2.8 2.8L9.2 17.8z" />
       <path d="M4.6 19.4l3.2-1" />
+    </>
+  ),
+  clone: (
+    <>
+      <circle cx="8" cy="8" r="4" />
+      <circle cx="16" cy="16" r="4" />
+      <path d="M10.8 10.8l2.4 2.4" />
     </>
   ),
   paint: (

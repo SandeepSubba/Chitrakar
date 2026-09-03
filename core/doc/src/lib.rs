@@ -235,8 +235,8 @@ impl Document {
         self.nodes.iter()
     }
 
-    /// The strokes of a paint layer, or of a node's painted mask, to add
-    /// to or take from.
+    /// The strokes of a layer a brush works on — one painted or one
+    /// cloned — or of a node's painted mask, to add to or take from.
     fn strokes_mut(
         &mut self,
         id: NodeId,
@@ -250,7 +250,7 @@ impl Document {
             };
         }
         match &mut node.kind {
-            NodeKind::Paint { strokes } => Ok(strokes),
+            NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => Ok(strokes),
             _ => Err(DocError::NotAPaintLayer(id)),
         }
     }

@@ -193,6 +193,7 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
         // instead, and callers that only want a size get nothing.
         NodeKind::Group
         | NodeKind::Paint { .. }
+        | NodeKind::Clone { .. }
         | NodeKind::Adjustment(_)
         | NodeKind::Filter(_) => None,
     }
@@ -294,7 +295,11 @@ fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
             return Ok(true);
         }
         match &node.kind {
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) => return Ok(true),
+            // A clone layer paints with what is under it, so a group
+            // holding one cannot be painted straight onto the page.
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => {
+                return Ok(true)
+            }
             NodeKind::Group if reads_backdrop(doc, child)? => return Ok(true),
             _ => {}
         }
@@ -398,10 +403,14 @@ fn bounds_in_parent_space_inner(
             let [x0, y0, x1, y1] = text::bounds(spec);
             transformed_local_bounds(node.transform, (x0, y0, x1, y1))
         }
-        NodeKind::Paint { strokes } => match painted_bounds(strokes) {
-            Some([x0, y0, x1, y1]) => transformed_local_bounds(node.transform, (x0, y0, x1, y1)),
-            None => Bounds::None,
-        },
+        NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+            match painted_bounds(strokes) {
+                Some([x0, y0, x1, y1]) => {
+                    transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+                }
+                None => Bounds::None,
+            }
+        }
         kind => {
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
@@ -424,7 +433,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
         }
         NodeKind::Text(spec) => Some(text::bounds(spec)),
-        NodeKind::Paint { strokes } => painted_bounds(strokes),
+        NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => painted_bounds(strokes),
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
             // A group's own box is the union of its children, which are
@@ -459,6 +468,18 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
 pub fn filter_reach(doc: &Document) -> u32 {
     doc.nodes()
         .map(|(id, node)| match &node.kind {
+            // A clone reads at an offset from where it paints, so a
+            // change at the source has to repaint the clone as well —
+            // which is the same problem a filter's radius poses, and
+            // takes the same answer.
+            NodeKind::Clone { strokes } => {
+                let scale = max_scale(ancestor_space(doc, *id).compose(node.transform));
+                let far = strokes
+                    .iter()
+                    .map(|s| s.source[0].abs().max(s.source[1].abs()))
+                    .fold(0.0f32, f32::max);
+                (far * scale).ceil() as u32 + 1
+            }
             NodeKind::Filter(Filter::GaussianBlur { sigma })
             | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
                 // A filter's radius is written in the space it sits in, so
@@ -840,6 +861,9 @@ fn render_child(
             NodeKind::Text(spec) => draw_text(dst, doc, spec, t, node.opacity, blend, clip, mask),
             NodeKind::Paint { strokes } => {
                 draw_paint(dst, doc, strokes, t, node.opacity, blend, clip, mask)
+            }
+            NodeKind::Clone { strokes } => {
+                draw_clone(dst, doc, strokes, t, node.opacity, blend, clip, mask)
             }
         }
     }
@@ -2673,6 +2697,111 @@ pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>
     Ok(Some(rgba8))
 }
 
+/// Paint a clone layer: each stroke lays down what the page already
+/// shows at its own offset, so the picture it puts there is whatever is
+/// there *now* — retouch the source and the clone follows.
+///
+/// The page is snapshotted before any of it is laid, so a stroke that
+/// runs over its own source reads what was there when the stroke began
+/// rather than what it has just painted, which is the difference
+/// between cloning a patch and smearing it.
+#[allow(clippy::too_many_arguments)]
+fn draw_clone(
+    dst: &mut Surface,
+    doc: &Document,
+    strokes: &[chitrakar_doc::PaintStroke],
+    t: Transform,
+    opacity: f32,
+    blend: BlendMode,
+    clip: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    let Some(inv) = Inverse::of(t) else {
+        return;
+    };
+    let Some(extent) = painted_bounds(strokes)
+        .map(|b| transformed_box(t, b))
+        .and_then(|b| b.to_clip(dst.width, dst.height))
+        .map(|b| b.intersect(clip))
+    else {
+        return;
+    };
+    if extent.is_empty() {
+        return;
+    }
+    let band = 1.0 / max_scale(t).max(1e-6);
+    for stroke in strokes {
+        let Some(box_) = stroke.bounds() else {
+            continue;
+        };
+        let bbox = match transformed_box(t, box_).to_clip(dst.width, dst.height) {
+            Some(b) => b.intersect(extent),
+            None => continue,
+        };
+        if bbox.is_empty() {
+            continue;
+        }
+        let w = bbox.x1 - bbox.x0;
+        let cover = stroke_cover(stroke, t, inv, band, bbox, (dst.width, dst.height));
+        // The offset is written in the layer's own space; on the page it
+        // is that offset carried through the layer's transform, without
+        // the translation — a direction, not a place.
+        let (sx, sy) = (
+            t.a * stroke.source[0] + t.c * stroke.source[1],
+            t.b * stroke.source[0] + t.d * stroke.source[1],
+        );
+        // What is under the source, taken before this stroke lays
+        // anything: a stroke that runs over its own source would
+        // otherwise read what it has just painted and smear it along.
+        // Taken per stroke, so a later one does see an earlier one.
+        let from = ClipRect::from_float(
+            bbox.x0 as f32 + sx,
+            bbox.y0 as f32 + sy,
+            bbox.x1 as f32 + sx,
+            bbox.y1 as f32 + sy,
+            dst.width,
+            dst.height,
+        );
+        if from.is_empty() {
+            continue;
+        }
+        let source = blur::snapshot(dst, from);
+        let row = (from.x1 - from.x0) as usize;
+        let read = |x: i64, y: i64| {
+            if x < from.x0 as i64
+                || y < from.y0 as i64
+                || x >= from.x1 as i64
+                || y >= from.y1 as i64
+            {
+                // Off the page there is nothing to clone.
+                return LinearRgba::TRANSPARENT;
+            }
+            source[(y - from.y0 as i64) as usize * row + (x - from.x0 as i64) as usize]
+        };
+        for py in bbox.y0..bbox.y1 {
+            for px in bbox.x0..bbox.x1 {
+                let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
+                if c <= 0.0 {
+                    continue;
+                }
+                let weight = c * opacity * coverage_at(doc, mask, px, py);
+                if weight <= 0.0 {
+                    continue;
+                }
+                let lifted = read(
+                    (px as f32 + sx).round() as i64,
+                    (py as f32 + sy).round() as i64,
+                );
+                if lifted.a <= 0.0 {
+                    continue;
+                }
+                let i = (py * dst.width + px) as usize;
+                dst.pixels[i] = blend_pixel(scale_alpha(lifted, weight), dst.pixels[i], blend);
+            }
+        }
+    }
+}
+
 /// A paint layer handed over as an image: its size, where its top-left
 /// sits in the layer's own space, and its pixels as straight-alpha sRGB
 /// bytes.
@@ -3231,7 +3360,7 @@ fn hit_in_group(
             // whole box: a brush layer is mostly empty, and an empty
             // part of it should let through what is under it. An
             // eraser's own stroke is not paint, so it picks nothing.
-            NodeKind::Paint { strokes } => {
+            NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
                 let t = parent.compose(node.transform);
                 if let Some((lx, ly)) = to_local(t, x, y) {
                     let band = 1.0 / max_scale(t).max(1e-6);
@@ -3310,6 +3439,7 @@ mod tests {
             color,
             softness: 0.0,
             erase: false,
+            source: [0.0, 0.0],
         }
     }
 
@@ -3506,6 +3636,7 @@ mod tests {
                     color: RED,
                     softness: 0.5,
                     erase: false,
+                    source: [0.0, 0.0],
                 }
             })
             .collect();
@@ -3515,6 +3646,119 @@ mod tests {
             let _ = render(&doc).unwrap();
             eprintln!("A4 painting, 40 long strokes: {:?}", t.elapsed());
         }
+    }
+
+    /// A clone layer paints with what the page already shows at its own
+    /// offset — and because it reads at render time rather than keeping
+    /// a copy, changing the source changes what the clone lays down.
+    #[test]
+    fn a_clone_lays_down_what_is_under_its_source_now() {
+        let blue = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let build = |patch: AuthoredColor| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            // A patch of colour in one corner to clone from.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("patch", 20.0, 20.0, patch),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+            // A clone layer that reads 40 pixels up and left of where it
+            // paints, so painting at (60, 60) lifts from (20, 20).
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[1];
+            let mut stroke = stroke(&[[60.0, 60.0]], 6.0, patch);
+            stroke.source = [-40.0, -40.0];
+            doc.apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(stroke),
+                on_mask: false,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        let red = build(RED);
+        assert_eq!(
+            red.get(60, 60).to_srgb8(),
+            [255, 0, 0, 255],
+            "the clone laid down what its source shows"
+        );
+        assert_eq!(red.get(60, 20).a, 0.0, "and nothing where it did not paint");
+        assert_eq!(
+            red.get(20, 20).to_srgb8(),
+            [255, 0, 0, 255],
+            "the source itself is untouched"
+        );
+
+        // Recolour the source, and the clone follows: it kept no copy.
+        let recoloured = build(blue);
+        assert_eq!(
+            recoloured.get(60, 60).to_srgb8(),
+            [0, 0, 255, 255],
+            "the clone follows its source rather than keeping a copy"
+        );
+    }
+
+    /// A stroke that runs over what it is reading takes what was there
+    /// when it began, rather than what it has just laid down.
+    #[test]
+    fn a_clone_does_not_smear_itself() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("patch", 12.0, 60.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::clone_layer("clone")),
+        })
+        .unwrap();
+        let clone = doc.children_of(root).unwrap()[1];
+        // A long stroke moving right, reading four pixels to its left:
+        // without a snapshot each step would read what the step before
+        // it painted and drag the patch the whole way across.
+        let mut smear = stroke(&[[14.0, 30.0], [50.0, 30.0]], 5.0, RED);
+        smear.source = [-4.0, 0.0];
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 0,
+            stroke: Box::new(smear),
+            on_mask: false,
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert!(
+            s.get(14, 30).a > 0.5,
+            "it lifted the patch where it started"
+        );
+        assert_eq!(
+            s.get(45, 30).a,
+            0.0,
+            "and dragged nothing along with it, having read what was there"
+        );
     }
 
     /// A painted mask starts showing the whole layer, and an eraser

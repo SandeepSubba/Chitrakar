@@ -274,6 +274,20 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Add an empty layer to clone onto at the top of the document.
+    /// Returns its id.
+    pub fn add_clone_layer(&mut self, name: &str) -> Result<f64, JsError> {
+        self.inner
+            .add_clone_layer(name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Where the stroke being drawn reads from, in document units.
+    pub fn paint_source(&mut self, dx: f32, dy: f32) -> Result<(), JsError> {
+        self.inner.paint_source(dx, dy).map_err(to_js)
+    }
+
     /// Carry the stroke being drawn on to another point.
     pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), JsError> {
         self.inner.paint_extend(x, y, radius).map_err(to_js)

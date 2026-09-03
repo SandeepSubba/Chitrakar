@@ -3433,6 +3433,48 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
 
+  // The clone brush paints with what is already on the page: alt-click
+  // says where to read from, and a stroke lifts that colour to where it
+  // is drawn — following the source rather than keeping a copy of it.
+  await page.click('button[aria-label="Clone"]');
+  await page.waitForTimeout(150);
+  const cloneRows = await page.locator(".panel ul li").count();
+  await page.keyboard.down("Alt");
+  await page.mouse.move(...at(160, 200));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".clone-source").count()) === 1,
+    "alt-click marks the place it will read from",
+  );
+  const lifted = await canvasPixel(160, 200);
+  assert(lifted[3] > 200, `there is something to lift (${lifted})`);
+  assert((await canvasPixel(160, 360))[3] === 0, "and bare page to lift it onto");
+  await page.mouse.move(...at(160, 360));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 360), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const cloned = await canvasPixel(170, 360);
+  assert(
+    cloned[3] > 150 &&
+      Math.abs(cloned[0] - lifted[0]) < 40 &&
+      Math.abs(cloned[1] - lifted[1]) < 40,
+    `the clone laid down what its source shows (${lifted} -> ${cloned})`,
+  );
+  assert(
+    (await page.locator(".panel ul li").count()) === cloneRows + 1,
+    "on a layer of its own",
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(170, 360))[3] === 0, "and it undoes away");
+  await page.click('button[aria-label="Move"]');
+  await page.waitForTimeout(150);
+
   // The panel shows what each layer holds, not only what it is called.
   await page.waitForTimeout(700);
   const thumb = page.locator(".panel ul li .layer-thumb").first();

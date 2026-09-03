@@ -304,14 +304,17 @@ fn write_children(
                     let _ = writeln!(out, "</text>");
                 }
             }
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
+            // These three are all changes to what is under them rather
+            // than pictures of their own, and SVG has no equivalent that
+            // composites the way ours does.
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => {
                 let _ = writeln!(
                     out,
                     "{pad}<!-- {} layer '{}' has no SVG equivalent; omitted -->",
-                    if matches!(node.kind, NodeKind::Adjustment(_)) {
-                        "adjustment"
-                    } else {
-                        "filter"
+                    match node.kind {
+                        NodeKind::Adjustment(_) => "adjustment",
+                        NodeKind::Filter(_) => "filter",
+                        _ => "clone",
                     },
                     escape_xml(&node.name)
                 );
@@ -568,6 +571,7 @@ mod tests {
                         color: RED,
                         softness: 0.0,
                         erase: true,
+                        source: [0.0, 0.0],
                     }],
                 },
                 invert: false,

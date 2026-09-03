@@ -289,6 +289,7 @@ mod tests {
                 color: blue,
                 softness: 0.4,
                 erase: false,
+                source: [0.0, 0.0],
             }),
             on_mask: false,
         })
@@ -303,6 +304,7 @@ mod tests {
                         color: red,
                         softness: 0.0,
                         erase: true,
+                        source: [0.0, 0.0],
                     }],
                 },
                 invert: false,
@@ -380,6 +382,7 @@ mod tests {
                 },
                 softness: 0.5,
                 erase: false,
+                source: [0.0, 0.0],
             }),
         })
         .unwrap();

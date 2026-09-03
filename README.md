@@ -14,7 +14,8 @@ the WASM boundary and presents the frames the engine renders.
 
 **Today:** shapes, pen and brush paths with bezier handles and booleans,
 a paint brush that lays pixels on a layer of live strokes (and an eraser
-for them), placed images, live text (shaped by the font, any face loaded, bold /
+for them), a clone brush that paints with what is already there and
+follows it when it changes, placed images, live text (shaped by the font, any face loaded, bold /
 italic / underline, wrapped, aligned, set along a path, typed on the
 canvas), adjustment and filter layers (exposure, brightness/contrast,
 hue/saturation, white balance, vibrance, levels, curves, blur, sharpen), masks, live effects

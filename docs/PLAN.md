@@ -74,6 +74,13 @@ without reading anything else.*
   is its fade, `[` and `]` resize it, alt-click takes the colour under it
   without putting it down, and shift-click runs a straight line on from
   where the last stroke ended.
+  The clone brush (S) paints with what is already on the page: alt-click
+  says where to read from, and every stroke carries that offset, so what
+  it lays down is whatever the page shows there *now* — retouch the
+  source and the clone follows, which is what a stamped copy of pixels
+  could not do. The page is snapshotted before a stroke is laid, so a
+  stroke crossing its own source lifts what was there when it began
+  rather than what it has just put down.
   Rubbing at a layer that is not a paint layer takes a piece out of it
   instead: the stroke goes into a painted mask, so the layer is
   untouched and the brush puts the piece back — which is how part of a
@@ -178,9 +185,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~216),
+- **Verify before committing:** `cargo test --workspace` (~219),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~405 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~411 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -243,7 +250,7 @@ without reading anything else.*
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is
   reserved for state — active tool, open menu, live toggle, selected layer.
-  Tools have single-letter shortcuts (V/M, R, E, P, B, N, T), suppressed while
+  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, T), suppressed while
   typing. Layer rows carry a picture of the layer (a kind glyph where
   there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling

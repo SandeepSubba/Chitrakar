@@ -307,7 +307,8 @@ impl Session {
             };
         }
         match &node.kind {
-            chitrakar_doc::NodeKind::Paint { strokes } => Some(strokes),
+            chitrakar_doc::NodeKind::Paint { strokes }
+            | chitrakar_doc::NodeKind::Clone { strokes } => Some(strokes),
             _ => None,
         }
     }
@@ -834,6 +835,7 @@ impl Session {
             color,
             softness,
             erase,
+            source: [0.0, 0.0],
         };
         self.preview(Command::AddStroke {
             id: layer,
@@ -923,6 +925,40 @@ impl Session {
     /// mask.
     pub fn mask_thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
         Ok(chitrakar_render::mask_thumbnail(&self.doc, id, size)?.unwrap_or_default())
+    }
+
+    /// Add an empty layer to clone onto at the top of the document.
+    pub fn add_clone_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(chitrakar_doc::Node::clone_layer(name)),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Where the stroke being drawn reads from, as an offset in the
+    /// layer's own space. A clone stroke set after it has begun still
+    /// takes it, since the whole stroke is one preview.
+    pub fn paint_source(&mut self, dx: f32, dy: f32) -> Result<(), EngineError> {
+        let Some(painting) = self.painting.as_ref() else {
+            return Ok(());
+        };
+        let (layer, index, on_mask) = (painting.layer, painting.index, painting.on_mask);
+        // The offset arrives in document units, like the point and the
+        // radius, and like them it is written in the layer's own.
+        let scale = chitrakar_render::layer_scale(&self.doc, layer, on_mask)?.max(1e-6);
+        let painting = self.painting.as_mut().expect("checked above");
+        painting.stroke.source = [dx / scale, dy / scale];
+        let stroke = Box::new(painting.stroke.clone());
+        self.preview(Command::SetStroke {
+            id: layer,
+            index,
+            stroke,
+            on_mask,
+        })
     }
 
     /// How many strokes a paint layer holds, which is where the next one
@@ -1850,6 +1886,7 @@ impl Session {
                     NodeKind::Filter(_) => "filter",
                     NodeKind::Text(_) => "text",
                     NodeKind::Paint { .. } => "paint",
+                    NodeKind::Clone { .. } => "clone",
                 },
                 visible: node.visible,
                 opacity: node.opacity,
@@ -4362,6 +4399,67 @@ mod save_probe {
         session.undo().unwrap();
         assert_eq!(session.document().node(ellipse).unwrap().opacity, 1.0);
         assert!(session.document().node(text).unwrap().effects.is_empty());
+    }
+
+    /// A clone gesture: the source is set once and the whole stroke
+    /// carries it, however many points it gathers.
+    #[test]
+    fn a_clone_stroke_carries_the_source_it_was_given() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut patch = chitrakar_doc::Node::vector(
+            "patch",
+            chitrakar_doc::VectorShape::Rect {
+                width: 24.0,
+                height: 24.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut patch.kind {
+            *fill = Some(red);
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(patch),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: chitrakar_doc::Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+
+        let layer = session.add_clone_layer("clone").unwrap();
+        let before = session.history_labels().0.len();
+        session
+            .paint_begin(layer, 80.0, 80.0, 7.0, red, 0.0, false, false)
+            .unwrap();
+        // Read from the patch, which is 60 up and to the left.
+        session.paint_source(-60.0, -60.0).unwrap();
+        session.paint_extend(84.0, 84.0, 7.0).unwrap();
+        assert!(session.commit_preview());
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "one entry for the whole stroke, source and all"
+        );
+        let drawn = session.render().unwrap();
+        assert_eq!(
+            drawn.get(80, 80).to_srgb8(),
+            [255, 0, 0, 255],
+            "it laid down what its source shows"
+        );
+        assert_eq!(drawn.get(80, 40).a, 0.0, "and nothing where it did not go");
     }
 
     /// A look taken from a layer that has nothing to paint with says

@@ -124,6 +124,13 @@ pub struct PaintStroke {
     /// Takes paint off the layer instead of laying it down.
     #[serde(default)]
     pub erase: bool,
+    /// Where a clone stroke takes its pixels from, as an offset in the
+    /// layer's own space: the point it paints at plus this is the point
+    /// it reads. Only a clone layer reads it — a brush lays its own
+    /// colour and has nowhere to read from — and it is additive, so a
+    /// stroke written before cloning existed reads as no offset at all.
+    #[serde(default)]
+    pub source: [f32; 2],
 }
 
 impl PaintStroke {
@@ -401,6 +408,14 @@ pub enum NodeKind {
     Paint {
         strokes: Vec<PaintStroke>,
     },
+    /// A layer that paints with what is already under it. Each stroke
+    /// carries the offset it reads at, so the picture it lays down is
+    /// whatever the page shows there *now* — retouch the source and the
+    /// clone follows, which is what makes this non-destructive where a
+    /// stamped copy of pixels would not be.
+    Clone {
+        strokes: Vec<PaintStroke>,
+    },
     Vector {
         shape: VectorShape,
         fill: Option<AuthoredColor>,
@@ -588,6 +603,16 @@ impl Node {
 
     pub fn filter(name: &str, filter: Filter) -> Self {
         Self::base(name, NodeKind::Filter(filter))
+    }
+
+    /// An empty layer to clone onto.
+    pub fn clone_layer(name: &str) -> Self {
+        Self::base(
+            name,
+            NodeKind::Clone {
+                strokes: Vec::new(),
+            },
+        )
     }
 
     /// An empty layer to paint on.
