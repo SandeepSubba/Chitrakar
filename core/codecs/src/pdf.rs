@@ -351,7 +351,7 @@ impl<'a> Page<'a> {
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
             // A copy is drawn by drawing the original again, so it is as
             // live as the original is.
-            NodeKind::Instance { of } => self.is_live(*of)?,
+            NodeKind::Instance { of, .. } => self.is_live(*of)?,
             // A brush layer has no live form in PDF, so it goes over as
             // the pixels it paints.
             NodeKind::Paint { .. }
@@ -618,7 +618,7 @@ impl<'a> Page<'a> {
                     }
                 }
             }
-            NodeKind::Instance { of } => {
+            NodeKind::Instance { of, .. } => {
                 // The original's own placement is undone first: a copy
                 // puts the picture where the copy is.
                 let master = self.doc.node(*of)?;

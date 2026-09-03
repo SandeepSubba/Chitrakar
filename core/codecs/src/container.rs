@@ -465,7 +465,7 @@ mod tests {
         assert!(
             matches!(
                 back.node(copy).unwrap().kind,
-                chitrakar_doc::NodeKind::Instance { of } if of == shape_id
+                chitrakar_doc::NodeKind::Instance { of, .. } if of == shape_id
             ),
             "the copy still follows what it followed"
         );

@@ -1268,6 +1268,31 @@ body {
 .lock-toggle[aria-pressed="true"] {
   opacity: 1;
 }
+/* What a copy can differ in: one row per layer of the original. */
+.overrides {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.overrides .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.overrides button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+  flex: none;
+}
+
 /* The fold on a row that holds other layers; the empty span keeps the
    rows that hold nothing lined up with the ones that do. */
 .fold {

@@ -486,6 +486,18 @@ pub enum NodeKind {
     /// only the original.
     Instance {
         of: NodeId,
+        /// Which of the original's layers this copy stands in for with
+        /// one of its own: `replaces[k]` is the position, among the
+        /// original's children, that this copy's `k`th child takes.
+        ///
+        /// That is what makes a copy differ where it has to — a label
+        /// with a different string, a panel in a different colour — while
+        /// everything else still follows the original. A child that
+        /// stands in for nothing is drawn after the original's contents,
+        /// so dropping a layer into a copy adds to it rather than
+        /// breaking it.
+        #[serde(default)]
+        replaces: Vec<usize>,
     },
     /// A frame on the page: a group with a size of its own that cuts its
     /// contents to that box, paints a ground behind them, and exports at
@@ -505,7 +517,11 @@ impl NodeKind {
     /// Whether the node is one that holds other layers — what a parent
     /// has to be for anything to go into it.
     pub fn holds_children(&self) -> bool {
-        matches!(self, NodeKind::Group | NodeKind::Artboard { .. })
+        matches!(
+            self,
+            // A copy holds the layers it stands in for.
+            NodeKind::Group | NodeKind::Artboard { .. } | NodeKind::Instance { .. }
+        )
     }
 }
 
@@ -704,7 +720,13 @@ impl Node {
 
     /// A live copy of `of` — see [`NodeKind::Instance`].
     pub fn instance(name: &str, of: NodeId) -> Self {
-        Self::base(name, NodeKind::Instance { of })
+        Self::base(
+            name,
+            NodeKind::Instance {
+                of,
+                replaces: Vec::new(),
+            },
+        )
     }
 
     pub fn artboard(

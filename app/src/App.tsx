@@ -3246,6 +3246,15 @@ export function App() {
   })();
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  /** For a picked copy: the original's layers, and whether this copy
+   * already has one of its own in place of each. */
+  const overridable: { name: string; own: boolean }[] =
+    session && selectedLayer && selectedLayer.copies !== 0
+      ? (JSON.parse(session.overridable_json(selectedLayer.id)) as {
+          name: string;
+          own: boolean;
+        }[])
+      : [];
   // Pinning is only a question inside a frame; a layer on the page has
   // no edges to be measured from.
   const inFrame =
@@ -5063,6 +5072,37 @@ export function App() {
                   >
                     Go to it
                   </button>
+                </div>
+              )}
+              {/* What a copy can differ in: the original's layers, each
+                  with a way to give this copy one of its own instead. */}
+              {selectedLayer.copies !== 0 && overridable.length > 0 && (
+                <div className="overrides" aria-label="Follows the original in">
+                  {overridable.map((row, i) => (
+                    <label key={i} className="row">
+                      <span>{row.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!session || selected === null) return;
+                          try {
+                            if (row.own) session.clear_override(selected, i);
+                            else session.override_child(selected, i);
+                            refresh(session);
+                          } catch (err) {
+                            alert(`Copy: ${err}`);
+                          }
+                        }}
+                        aria-label={
+                          row.own
+                            ? `Follow the original's ${row.name} again`
+                            : `Give this copy its own ${row.name}`
+                        }
+                      >
+                        {row.own ? "Follow again" : "Make it its own"}
+                      </button>
+                    </label>
+                  ))}
                 </div>
               )}
               {/* Inside a frame, what the layer does when that frame is

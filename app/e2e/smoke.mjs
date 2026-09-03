@@ -3129,7 +3129,79 @@ assert(
     "moving the original moved only the original",
   );
   assert((await canvasPixel(100, 300))[3] === 255, "which did move");
+
+  // A copy can differ where it has to: give it one of the original's
+  // layers as its own, change that, and everything else still follows.
+  await newDocument(600, 400, "rgb");
+  const b2 = await page.locator("#engine-page").boundingBox();
+  const at2 = (x, y) => [
+    b2.x + (x / 600) * b2.width,
+    b2.y + (y / 400) * b2.height,
+  ];
+  const box = async (x0, y0, x1, y1) => {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at2(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at2(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await box(40, 40, 100, 100);
+  await box(120, 40, 180, 100);
+  await page.click('button[aria-label="Move"]');
+  await menuClick("Edit", "Select all");
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(250);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Make a live copy"]');
+  await page.waitForTimeout(300);
+  // Move the copy clear of the original.
+  await page.mouse.move(...at2(70, 70));
+  await page.mouse.down();
+  await page.mouse.move(...at2(370, 70), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(370, 70))[3] === 255 &&
+      (await canvasPixel(450, 70))[3] === 255,
+    "the copy draws both of the original's layers",
+  );
+  const rows = await page
+    .locator('[aria-label="Follows the original in"] .row')
+    .count();
+  assert(rows === 2, `the panel offers both of them (${rows})`);
+
+  // Take the second one for the copy's own and hide it: the copy loses
+  // that layer and keeps the other, and the original keeps both.
+  await page.click('button[aria-label^="Give this copy its own"] >> nth=1');
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li").nth(1).locator("button.visibility").click();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(450, 70))[3] === 0,
+    "the copy's own layer went when it was hidden",
+  );
+  assert(
+    (await canvasPixel(370, 70))[3] === 255,
+    "and the one it still shares stayed",
+  );
+  assert(
+    (await canvasPixel(150, 70))[3] === 255,
+    "the original kept both of its own",
+  );
+  // Following again brings it back.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label^="Follow the original"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(450, 70))[3] === 255,
+    "and following the original again brings it back",
+  );
 }
+
 
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.

@@ -351,7 +351,7 @@ impl Session {
                 let Ok(node) = self.doc.node(other) else {
                     continue;
                 };
-                if matches!(node.kind, NodeKind::Instance { of } if of == cur)
+                if matches!(node.kind, NodeKind::Instance { of, .. } if of == cur)
                     && !following.contains(&other)
                 {
                     following.push(other);
@@ -1057,7 +1057,7 @@ impl Session {
         // them would work, but it is never what was meant and it makes
         // the original hard to find.
         let target = match node.kind {
-            NodeKind::Instance { of: original } => original,
+            NodeKind::Instance { of: original, .. } => original,
             _ => of,
         };
         let name = format!("{} copy", self.doc.node(target)?.name);
@@ -1079,6 +1079,124 @@ impl Session {
             node: Box::new(copy),
         })?;
         Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Give a copy a layer of its own in place of one of the original's,
+    /// so it can differ where it has to — a label with a different
+    /// string, a panel in a different colour — while everything else
+    /// still follows the original. Returns the copy's own layer, which
+    /// is then edited like any other.
+    ///
+    /// The stand-in starts as an exact copy of what it replaces, at the
+    /// same place: what is wanted is that layer, changed, and starting
+    /// from anything else would only be a guess.
+    pub fn override_child(
+        &mut self,
+        instance: NodeId,
+        index: usize,
+    ) -> Result<NodeId, EngineError> {
+        let NodeKind::Instance { of, replaces } = &self.doc.node(instance)?.kind else {
+            return Err(EngineError::BadCommand("that layer is not a copy".into()));
+        };
+        let (of, mut replaces) = (*of, replaces.clone());
+        if !chitrakar_render::takes_stand_ins(&self.doc, of) {
+            return Err(EngineError::BadCommand(
+                "only a plain group's layers can be stood in for; the original is drawn as a whole"
+                    .into(),
+            ));
+        }
+        let theirs = self.doc.children_of(of)?;
+        let Some(&original) = theirs.get(index) else {
+            return Err(EngineError::BadCommand(
+                "no such layer in the original".into(),
+            ));
+        };
+        if replaces.contains(&index) {
+            return Err(EngineError::BadCommand("already stood in for".into()));
+        }
+        let at = self.doc.children_of(instance)?.len();
+        let mut next = self.doc.peek_next_id().0;
+        let mut cmds = Vec::new();
+        let made = self.emit_copy(
+            original,
+            instance,
+            at,
+            CopyStyle::Exact,
+            &mut next,
+            &mut cmds,
+        )?;
+        replaces.push(index);
+        cmds.push(Command::SetKind {
+            id: instance,
+            kind: Box::new(NodeKind::Instance { of, replaces }),
+        });
+        let label = format!(
+            "Change {} in {}",
+            self.doc.node(original)?.name,
+            self.doc.node(instance)?.name
+        );
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(made)
+    }
+
+    /// Take a stand-in away again, so the copy follows the original there
+    /// once more.
+    pub fn clear_override(&mut self, instance: NodeId, index: usize) -> Result<(), EngineError> {
+        let NodeKind::Instance { of, replaces } = &self.doc.node(instance)?.kind else {
+            return Err(EngineError::BadCommand("that layer is not a copy".into()));
+        };
+        let (of, mut replaces) = (*of, replaces.clone());
+        let Some(k) = replaces.iter().position(|&r| r == index) else {
+            return Ok(());
+        };
+        let Some(&mine) = self.doc.children_of(instance)?.get(k) else {
+            return Ok(());
+        };
+        replaces.remove(k);
+        let label = format!(
+            "Follow the original again in {}",
+            self.doc.node(instance)?.name
+        );
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::RemoveNode { id: mine },
+                Command::SetKind {
+                    id: instance,
+                    kind: Box::new(NodeKind::Instance { of, replaces }),
+                },
+            ]),
+            Some(label),
+        )
+    }
+
+    /// The layers of the original a copy could stand in for, as
+    /// `(name, whether this copy already does)`. What the panel lists.
+    pub fn overridable(&self, instance: NodeId) -> Vec<(String, bool)> {
+        let Ok(node) = self.doc.node(instance) else {
+            return Vec::new();
+        };
+        let NodeKind::Instance { of, replaces } = &node.kind else {
+            return Vec::new();
+        };
+        if !chitrakar_render::takes_stand_ins(&self.doc, *of) {
+            return Vec::new();
+        }
+        self.doc
+            .children_of(*of)
+            .map(|kids| {
+                kids.iter()
+                    .enumerate()
+                    .map(|(i, &id)| {
+                        let name = self
+                            .doc
+                            .node(id)
+                            .map(|n| n.name.clone())
+                            .unwrap_or_default();
+                        (name, replaces.contains(&i))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The one command that gives a frame a new size and moves what is
@@ -2522,7 +2640,7 @@ impl Session {
                 ),
                 has_effects: !node.effects.is_empty(),
                 copies: match node.kind {
-                    NodeKind::Instance { of } => of.0,
+                    NodeKind::Instance { of, .. } => of.0,
                     _ => 0,
                 },
                 locked: node.locked,
@@ -4705,6 +4823,112 @@ mod tests {
         // same point reads the same.
         session.set_viewport(0.25, 0.0, 0.0, 10, 10);
         assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// A copy can stand in for one of the original's layers and follow
+    /// it everywhere else: change the original's other layer and the
+    /// copy takes it; change the stood-in one and the copy keeps its own.
+    #[test]
+    fn a_copy_can_differ_where_it_has_to() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        // A "component": a group of two rects side by side.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("button")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        for (i, x) in [0.0f32, 20.0].into_iter().enumerate() {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: filled_rect(&format!("part{i}"), 10.0, 10.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        assert_eq!(
+            session.overridable(copy),
+            vec![("part0".into(), false), ("part1".into(), false)],
+            "the panel is offered both of the original's layers"
+        );
+
+        // Stand in for the second one and move it, so the copy differs.
+        let mine = session.override_child(copy, 1).unwrap();
+        assert!(session.overridable(copy)[1].1, "and it says so");
+        session
+            .apply(Command::SetTransform {
+                id: mine,
+                transform: Transform::translation(20.0, 40.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(105, 5).a, 1.0, "the copy still follows part0");
+        assert_eq!(s.get(125, 45).a, 1.0, "and its own part1 moved down");
+        assert_eq!(s.get(125, 5).a, 0.0, "leaving where the original's is");
+        assert_eq!(
+            session.render().unwrap().get(25, 5).a,
+            1.0,
+            "the original is untouched"
+        );
+
+        // Moving the original's first layer still carries to the copy;
+        // moving the one stood in for does not.
+        session
+            .apply(Command::SetTransform {
+                id: session.document().children_of(master).unwrap()[0],
+                transform: Transform::translation(0.0, 40.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(
+            s.get(105, 45).a,
+            1.0,
+            "the copy followed the layer it shares"
+        );
+        session
+            .apply(Command::SetTransform {
+                id: session.document().children_of(master).unwrap()[1],
+                transform: Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(165, 5).a, 0.0, "and not the one it stands in for");
+        assert_eq!(s.get(125, 45).a, 1.0, "which is still its own");
+
+        // Taken away, it follows again.
+        session.clear_override(copy, 1).unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(165, 5).a, 1.0, "back to the original's placement");
+        assert!(!session.overridable(copy)[1].1);
+    }
+
+    /// Only a plain group's layers can be stood in for: one drawn as a
+    /// whole would have to be drawn twice.
+    #[test]
+    fn a_copy_of_something_drawn_whole_is_not_stood_in_for() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 20.0, 20.0);
+        let copy = session.make_instance(rect).unwrap();
+        assert!(session.overridable(copy).is_empty());
+        assert!(session.override_child(copy, 0).is_err());
     }
 
     /// Changing the original repaints the copies too: they draw what it

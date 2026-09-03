@@ -126,7 +126,14 @@ without reading anything else.*
   original moves only the original; a copy carries its own transform,
   opacity, blend and mask on top. The panel says what a copy follows and
   takes you there. A copy that could reach itself would have nothing to
-  draw, so the document refuses to make one and stays as it was. Copies
+  draw, so the document refuses to make one and stays as it was. A copy can differ where it has to: given one of the
+  original's layers as its own, it keeps that one and follows the
+  original in everything else — a label with a different string, a panel
+  in a different colour. The panel lists what the original holds, with a
+  way to take one and a way to give it back. Only a plain group's layers
+  can be stood in for; an original that is drawn as a whole for its own
+  opacity, blend, mask or effects says so rather than quietly ignoring
+  the ask. Copies
   stay live in both vector exports: the original's markup again, inside
   the copy's place.
   A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
@@ -250,9 +257,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~246),
+- **Verify before committing:** `cargo test --workspace` (~248),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~477 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~483 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -612,8 +619,9 @@ chitrakar/
 - Symbols/components ✅ first pass: `NodeKind::Instance` draws another
   layer's content in its own place, with a cycle guard in the document
   (any structural command that would let a copy reach itself is refused
-  and rolled back). Live in SVG and PDF. Overrides per copy — a
-  different string, a different fill — still to come.
+  and rolled back), and a copy can stand in for the original's direct
+  children with layers of its own. Live in SVG and PDF. Standing in for
+  a layer deeper than the original's own children is still to come.
 - Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

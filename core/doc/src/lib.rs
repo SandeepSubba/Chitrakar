@@ -293,7 +293,7 @@ impl Document {
             }
             state.insert(id, 1);
             if let Ok(node) = doc.node(id) {
-                if let NodeKind::Instance { of } = node.kind {
+                if let NodeKind::Instance { of, .. } = node.kind {
                     if walk(doc, of, state) {
                         return true;
                     }

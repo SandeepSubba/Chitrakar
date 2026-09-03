@@ -88,7 +88,7 @@ fn write_node(
                 write_children(doc, child, out, depth + 1, defs)?;
                 let _ = writeln!(out, "{pad}</g>");
             }
-            NodeKind::Instance { of } => {
+            NodeKind::Instance { of, .. } => {
                 // A copy is the original's markup again, inside the
                 // copy's own transform, with the original's own
                 // placement undone: SVG has <use>, but it would carry

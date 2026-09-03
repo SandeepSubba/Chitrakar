@@ -310,7 +310,7 @@ fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
             }
             // A copy sees what the original sees. The graph has no
             // cycles, so following it terminates.
-            NodeKind::Instance { of } => {
+            NodeKind::Instance { of, .. } => {
                 let master = doc.node(*of)?;
                 let reads = match &master.kind {
                     NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => true,
@@ -431,7 +431,7 @@ fn bounds_in_parent_space_inner(
                 None => Bounds::None,
             }
         }
-        NodeKind::Instance { of } => match local_bounds_of(doc, *of) {
+        NodeKind::Instance { of, .. } => match local_bounds_of(doc, *of) {
             Ok(Some([x0, y0, x1, y1])) => {
                 transformed_local_bounds(node.transform, (x0, y0, x1, y1))
             }
@@ -464,8 +464,28 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
         NodeKind::Text(spec) => Some(text::bounds(spec)),
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => painted_bounds(strokes),
         // A copy's own box is the original's own box: the original's
-        // placement is not part of what travels.
-        NodeKind::Instance { of } => local_bounds_of(doc, *of).unwrap_or(None),
+        // placement is not part of what travels. Where the copy stands in
+        // for some of the original's layers, it is the box of what is
+        // actually drawn — a longer label makes a wider copy.
+        NodeKind::Instance { of, .. } => {
+            let stand_ins = if takes_stand_ins(doc, *of) {
+                copy_children(doc, id)?
+            } else {
+                Vec::new()
+            };
+            if stand_ins.is_empty() {
+                local_bounds_of(doc, *of).unwrap_or(None)
+            } else {
+                let mut acc = Bounds::None;
+                for part in stand_ins {
+                    acc = acc.union(bounds_in_parent_space_inner(doc, part, false)?);
+                }
+                match acc {
+                    Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
+                    _ => None,
+                }
+            }
+        }
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
             // A group's own box is the union of its children, which are
@@ -901,7 +921,7 @@ fn render_child(
         };
         let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
-            NodeKind::Instance { of } => {
+            NodeKind::Instance { of, .. } => {
                 // A copy draws what the original draws, where the copy
                 // is: the original's own placement is undone first, so
                 // moving the original moves only the original.
@@ -915,7 +935,10 @@ fn render_child(
                 // The original's own box maps to the page through the
                 // copy's own space: undoing the original's transform and
                 // then applying it again is exactly that space.
-                let extent = match local_bounds_of(doc, *of)? {
+                // The copy's own box, not the original's: where the copy
+                // stands in for one of the original's layers with a
+                // different one, what it covers is its own.
+                let extent = match local_bounds_of(doc, child)? {
                     Some([x0, y0, x1, y1]) => transformed_local_bounds(t, (x0, y0, x1, y1)),
                     // A copy of an adjustment or a filter reaches as far
                     // as the original would.
@@ -928,10 +951,24 @@ fn render_child(
                 if sub_clip.is_empty() {
                     return Ok(());
                 }
+                // What the copy actually draws: the original, or the
+                // original with the copy's own layers standing in for
+                // some of its.
+                let stand_ins = if takes_stand_ins(doc, *of) {
+                    copy_children(doc, child)?
+                } else {
+                    Vec::new()
+                };
                 // Composited like the original would be: nothing of its
                 // own to apply, so draw it straight in.
                 if node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none() {
-                    return render_layer(doc, *of, dst, sub_clip, space);
+                    if stand_ins.is_empty() {
+                        return render_layer(doc, *of, dst, sub_clip, space);
+                    }
+                    for &part in &stand_ins {
+                        render_layer(doc, part, dst, sub_clip, t)?;
+                    }
+                    return Ok(());
                 }
                 let (ox, oy) = (sub_clip.x0, sub_clip.y0);
                 let window = Transform::translation(-(ox as f32), -(oy as f32));
@@ -942,7 +979,13 @@ fn render_child(
                     y1: sub_clip.y1 - oy,
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
-                render_layer(doc, *of, &mut sub, inner, window.compose(space))?;
+                if stand_ins.is_empty() {
+                    render_layer(doc, *of, &mut sub, inner, window.compose(space))?;
+                } else {
+                    for &part in &stand_ins {
+                        render_layer(doc, part, &mut sub, inner, window.compose(t))?;
+                    }
+                }
                 if node.mask.is_some() {
                     let shifted = window.compose(parent);
                     let plane = MaskRef::plane_for(
@@ -3444,6 +3487,53 @@ fn fit_into_square(doc: &Document, id: NodeId, size: u32) -> Result<Option<Trans
     }))
 }
 
+/// What a copy draws in place of the original's children: the original's
+/// own, except where the copy stands in for one with a layer of its own.
+///
+/// A stand-in that names a position the original no longer has, and any
+/// layer put into a copy that stands in for nothing, are drawn after the
+/// rest — so dropping a layer into a copy adds to it rather than losing
+/// it. Empty when the copy has nothing of its own, which is the answer
+/// that lets the renderer take the plainer path.
+pub fn copy_children(doc: &Document, instance: NodeId) -> Result<Vec<NodeId>, DocError> {
+    let NodeKind::Instance { of, replaces } = &doc.node(instance)?.kind else {
+        return Ok(Vec::new());
+    };
+    let mine = doc.children_of(instance)?;
+    if mine.is_empty() {
+        return Ok(Vec::new());
+    }
+    let theirs = doc.children_of(*of).unwrap_or(&[]);
+    let mut out = Vec::with_capacity(theirs.len() + mine.len());
+    for (i, &original) in theirs.iter().enumerate() {
+        match replaces.iter().position(|&r| r == i) {
+            Some(k) if k < mine.len() => out.push(mine[k]),
+            _ => out.push(original),
+        }
+    }
+    for (k, &own) in mine.iter().enumerate() {
+        if replaces.get(k).is_none_or(|&r| r >= theirs.len()) {
+            out.push(own);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the original is one a copy can stand in for parts of: a plain
+/// group, composited exactly as its children would be. A group that is
+/// isolated for its own opacity, blend, mask or effects is drawn as a
+/// whole, and swapping a layer inside it would mean drawing it twice.
+pub fn takes_stand_ins(doc: &Document, master: NodeId) -> bool {
+    let Ok(node) = doc.node(master) else {
+        return false;
+    };
+    matches!(node.kind, NodeKind::Group)
+        && node.opacity >= 1.0
+        && node.blend == BlendMode::Normal
+        && node.mask.is_none()
+        && node.effects.is_empty()
+}
+
 /// A transform's inverse as a transform, for the times a caller needs the
 /// map itself rather than the per-point [`Inverse`] — turning a frame's
 /// placement on the page back into the frame's own space, say, or keeping
@@ -4138,7 +4228,7 @@ fn hit_in_group(
                     return Ok(Some(hit));
                 }
             }
-            NodeKind::Instance { of } => {
+            NodeKind::Instance { of, .. } => {
                 // Picked over the box the original occupies, carried into
                 // the copy's own place — the same box the copy's handles
                 // are drawn round, so what is picked is what is outlined.

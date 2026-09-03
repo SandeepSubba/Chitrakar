@@ -302,6 +302,34 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Give a copy a layer of its own in place of the original's `index`
+    /// (see `Session::override_child`). Returns the copy's own layer.
+    pub fn override_child(&mut self, instance: f64, index: usize) -> Result<f64, JsError> {
+        self.inner
+            .override_child(NodeId(instance as u64), index)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Take that stand-in away, so the copy follows the original there.
+    pub fn clear_override(&mut self, instance: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .clear_override(NodeId(instance as u64), index)
+            .map_err(to_js)
+    }
+
+    /// The original's layers a copy could stand in for, as JSON: an
+    /// array of `{name, own}`, `own` saying whether it already does.
+    pub fn overridable_json(&self, instance: f64) -> String {
+        let rows: Vec<_> = self
+            .inner
+            .overridable(NodeId(instance as u64))
+            .into_iter()
+            .map(|(name, own)| serde_json::json!({ "name": name, "own": own }))
+            .collect();
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+    }
+
     /// The command that gives a frame a new size and moves what is in it
     /// by how each layer is pinned, as JSON — apply it with `preview`
     /// while a corner is being dragged and with `apply` when it is let
