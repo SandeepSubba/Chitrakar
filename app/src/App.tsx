@@ -195,6 +195,21 @@ const BRUSH_STEP = 3;
 const THUMB = 36;
 const BRUSH_TOLERANCE = 2;
 
+/** The colour the page shows at a document point, as a hex string, or
+ * null where the page shows nothing. The composite rather than the layer
+ * under the cursor: what the eye is pointing at is what it takes. */
+function colorUnder(
+  session: WasmSession,
+  x: number,
+  y: number,
+): string | null {
+  const c = session.color_at(x, y);
+  if (c.length !== 4 || c[3] === 0) return null;
+  return `#${[c[0], c[1], c[2]]
+    .map((v) => v.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 /** Ramer-Douglas-Peucker, returning the *indices* it keeps so per-sample
  * data (the widths) can be carried along with the points. A raw stroke is
  * hundreds of points at screen resolution, which renders the same and
@@ -618,6 +633,9 @@ export function App() {
   const paintCount = useRef(0);
   /** Where the last paint sample landed, for the speed the width follows. */
   const lastPaint = useRef<[number, number]>([0, 0]);
+  /** Where the last stroke ended, so shift-clicking can draw a straight
+   * line on from there — what a brush does everywhere else. */
+  const strokeEnd = useRef<[number, number] | null>(null);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
   /** A draft from an earlier visit, offered back until it is taken or
@@ -1439,6 +1457,14 @@ export function App() {
     e.stopPropagation();
     const [x, y] = docPoint(e);
     if (tool === "Paint") {
+      // Alt takes the colour under the brush rather than laying any: the
+      // sampling every paint tool puts under that key, so the brush does
+      // not have to be put down to pick a colour up.
+      if (e.altKey) {
+        const hex = colorUnder(session, x, y);
+        if (hex) setFill(hex);
+        return;
+      }
       // Rubbing at a layer that is not a paint layer takes a piece out
       // of the layer rather than painting over it: the stroke goes into
       // a mask, so the layer itself is untouched and the brush puts the
@@ -1466,19 +1492,32 @@ export function App() {
         layer = paintTarget(session);
       }
       if (layer === null) return;
+      // Shift starts the stroke where the last one ended and runs it
+      // straight to here, which is how a brush draws a line it could not
+      // have drawn by hand.
+      const from = e.shiftKey ? strokeEnd.current : null;
+      const start = from ?? [x, y];
       try {
         session.paint_begin(
           layer,
-          x,
-          y,
+          start[0],
+          start[1],
           paintSize / 2,
           JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
           paintSoftness,
           erasing,
           onMask,
         );
+        if (from) session.paint_extend(x, y, paintSize / 2);
       } catch (err) {
         alert(`Paint: ${err}`);
+        return;
+      }
+      strokeEnd.current = [x, y];
+      if (from) {
+        // The line is the whole gesture; there is nothing to drag.
+        session.commit_preview();
+        refresh(session);
         return;
       }
       paintingRef.current = { width: 1, at: performance.now() };
@@ -1551,11 +1590,8 @@ export function App() {
       // layer under the cursor, which is what the eye is pointing at —
       // and make it the colour to draw with. With a shape or a block of
       // text picked, it becomes that layer's fill as well.
-      const c = session.color_at(x, y);
-      if (c.length === 4 && c[3] > 0) {
-        const hex = `#${[c[0], c[1], c[2]]
-          .map((v) => v.toString(16).padStart(2, "0"))
-          .join("")}`;
+      const hex = colorUnder(session, x, y);
+      if (hex) {
         setFill(hex);
         const colour = cmyk ? hexToCmykColor(hex) : hexColor(hex);
         if (selectedKind && typeof selectedKind === "object") {
@@ -1767,6 +1803,7 @@ export function App() {
   const onCanvasPointerUp = () => {
     if (paintingRef.current && session) {
       paintingRef.current = null;
+      strokeEnd.current = lastPaint.current;
       session.commit_preview();
       refresh(session);
       return;
@@ -4929,6 +4966,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],
       ["[  ]", "Thinner, thicker brush"],
+      ["Alt-click (brush)", "Take the colour under the brush"],
+      ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
       [
         "Erase + drag",
         "On a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)",

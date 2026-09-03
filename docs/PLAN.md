@@ -67,7 +67,9 @@ without reading anything else.*
   has paint, so the empty part of one lets through what is beneath; and
   however many points a stroke gathered, it is one entry in history. A
   ring under the pointer says how big the brush is and how much of that
-  is its fade, and `[` and `]` resize it.
+  is its fade, `[` and `]` resize it, alt-click takes the colour under it
+  without putting it down, and shift-click runs a straight line on from
+  where the last stroke ended.
   Rubbing at a layer that is not a paint layer takes a piece out of it
   instead: the stroke goes into a painted mask, so the layer is
   untouched and the brush puts the piece back — which is how part of a
@@ -174,7 +176,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~210),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~388 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~393 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

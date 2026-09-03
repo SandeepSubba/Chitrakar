@@ -3138,6 +3138,44 @@ assert(
   );
   assert((await canvasPixel(280, 260))[3] > 200, "and it is painted too");
 
+  // Shift-click runs a straight line on from where the last stroke ended.
+  await page.mouse.move(...at(120, 320));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(280, 320))[3] === 0, "nothing along that line yet");
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(440, 320));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(300);
+  const painted = await canvasPixel(280, 320);
+  assert(painted[3] > 200, `shift-click ran a line from the last dab (${painted})`);
+
+  // Alt-click takes the colour under the brush without laying any.
+  await page.fill('input[aria-label="Fill colour"]', "#123456");
+  await page.waitForTimeout(150);
+  await page.keyboard.down("Alt");
+  await page.mouse.move(...at(280, 320));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.inputValue('input[aria-label="Fill colour"]')) !== "#123456",
+    "alt-click took the colour it was over",
+  );
+  const still = await canvasPixel(280, 320);
+  assert(
+    still[0] === painted[0] && still[1] === painted[1] && still[2] === painted[2],
+    `and laid none of its own (${still} against ${painted})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(280, 320))[3] === 0, "the line and the dab undo away");
+
   // The eraser takes paint off this layer and leaves the page bare.
   await page.click('button[aria-label="Erase"]');
   await page.waitForTimeout(100);
