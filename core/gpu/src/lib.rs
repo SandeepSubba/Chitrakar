@@ -27,10 +27,14 @@
 //! round-capped segments the CPU tests a sample against, laid down as
 //! geometry — a trapezoid per segment and a disc at every point — and
 //! unioned in the stencil, so joins, caps and a width that swells and
-//! tapers all come out of the one region. Everything else — text,
-//! masks, effects, filters, adjustments, blend modes, a group that has
-//! to be composited on its own, ink authored for a press — is declined,
-//! and the caller falls back to the CPU.
+//! tapers all come out of the one region. Text is the whole block
+//! rasterized to coverage at the size it is seen at — by the renderer
+//! that owns that decision, so the bitmap is the one the CPU would have
+//! sampled — read off a quad over the block's own box. Everything else
+//! — masks, effects, filters, adjustments, blend modes, a group that
+//! has to be composited on its own, ink authored for a press, and
+//! anything needing a texture larger than the device was asked for — is
+//! declined, and the caller falls back to the CPU.
 
 use chitrakar_color::LinearRgba;
 use chitrakar_doc::{BlendMode, Document, NodeId, NodeKind, Transform, VectorShape};
@@ -55,6 +59,13 @@ struct Vertex {
     color: [f32; 4],
     grad: [f32; 4],
 }
+
+/// The largest texture asked for, which is what `downlevel_defaults`
+/// guarantees on every adapter. A page that would need a bigger one —
+/// a page larger than this, a placed image larger than this, or a text
+/// block rasterized this finely — goes back to the CPU rather than
+/// overrunning what the device was asked for.
+const MAX_TEXTURE: u32 = 2048;
 
 /// Samples per pixel. A path's edge is as smooth as the stencil is
 /// finely sampled, and four is what every adapter offers.
@@ -125,6 +136,12 @@ enum Draw {
         union: std::ops::Range<u32>,
         cover: std::ops::Range<u32>,
     },
+    /// A text block: the quad over the block's box, and the coverage
+    /// raster it reads.
+    Text {
+        quad: std::ops::Range<u32>,
+        texture: usize,
+    },
     /// A placed image: the quad, and which of the scene's textures it
     /// samples.
     Image {
@@ -148,6 +165,7 @@ pub struct GpuRenderer {
     /// Sets the stencil rather than flipping it, so overlapping pieces
     /// of one stroke union instead of cancelling.
     union: wgpu::RenderPipeline,
+    text: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -419,12 +437,36 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("fs_cover_gradient"),
                 compilation_options: Default::default(),
-                targets: &[Some(target)],
+                targets: &[Some(target.clone())],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(stencil_state(
                 wgpu::StencilOperation::Zero,
                 wgpu::CompareFunction::NotEqual,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        let text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("text"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_cover"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_text"),
+                compilation_options: Default::default(),
+                targets: &[Some(target)],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
             )),
             multisample,
             multiview: None,
@@ -440,6 +482,7 @@ impl GpuRenderer {
             shape_gradient,
             cover_gradient,
             union,
+            text,
             layout,
             texture_layout,
             sampler,
@@ -452,14 +495,13 @@ impl GpuRenderer {
     pub fn render(&self, doc: &Document) -> Option<Surface> {
         let (width, height) = (doc.meta.width, doc.meta.height);
         let mut scene = Scene::default();
-        collect(doc, doc.root(), Transform::default(), 1.0, &mut scene)?;
+        gather(doc, &mut scene)?;
         Some(self.draw(width, height, &scene))
     }
 
     /// Whether [`render`](Self::render) would draw this document.
     pub fn can_render(doc: &Document) -> bool {
-        let mut scene = Scene::default();
-        collect(doc, doc.root(), Transform::default(), 1.0, &mut scene).is_some()
+        gather(doc, &mut Scene::default()).is_some()
     }
 
     fn draw(&self, width: u32, height: u32, scene: &Scene) -> Surface {
@@ -554,7 +596,11 @@ impl GpuRenderer {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba16Float,
+                    format: if img.channels == 1 {
+                        wgpu::TextureFormat::R16Float
+                    } else {
+                        wgpu::TextureFormat::Rgba16Float
+                    },
                     usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
@@ -568,7 +614,7 @@ impl GpuRenderer {
                     bytemuck::cast_slice(&img.texels),
                     wgpu::ImageDataLayout {
                         offset: 0,
-                        bytes_per_row: Some(img.width * 8),
+                        bytes_per_row: Some(img.width * 2 * img.channels),
                         rows_per_image: Some(img.height),
                     },
                     wgpu::Extent3d {
@@ -664,6 +710,11 @@ impl GpuRenderer {
                             pass.set_stencil_reference(0);
                             pass.set_pipeline(&self.cover);
                             pass.draw(cover.clone(), 0..1);
+                        }
+                        Draw::Text { quad, texture } => {
+                            pass.set_pipeline(&self.text);
+                            pass.set_bind_group(1, &textures[*texture], &[]);
+                            pass.draw(quad.clone(), 0..1);
                         }
                         Draw::Image { quad, texture } => {
                             pass.set_pipeline(&self.image);
@@ -784,10 +835,13 @@ struct Scene {
     ids: Vec<(String, usize)>,
 }
 
-/// A texture ready to upload: its size and its texels.
+/// A texture ready to upload: its size, how many channels each texel
+/// has — four for a colour, one for a text block's coverage — and its
+/// texels, half-precision either way.
 struct Image {
     width: u32,
     height: u32,
+    channels: u32,
     texels: Vec<u16>,
 }
 
@@ -798,6 +852,14 @@ impl Scene {
         self.vertices.extend(verts);
         start..self.vertices.len() as u32
     }
+}
+
+/// Everything the page needs drawn, or `None` when some of it cannot be.
+fn gather(doc: &Document, out: &mut Scene) -> Option<()> {
+    if doc.meta.width > MAX_TEXTURE || doc.meta.height > MAX_TEXTURE {
+        return None;
+    }
+    collect(doc, doc.root(), Transform::default(), 1.0, out)
 }
 
 /// Walk the tree in painter's order, turning what can be drawn into
@@ -854,6 +916,9 @@ fn collect(
                 if res.rgba8.is_empty() {
                     continue;
                 }
+                if res.width > MAX_TEXTURE || res.height > MAX_TEXTURE {
+                    return None;
+                }
                 // Shrinking is where the two renderers part: the CPU box-
                 // filters the texels a pixel covers, and bilinear sampling
                 // would alias. Hand the page over rather than draw it
@@ -883,9 +948,78 @@ fn collect(
                 let quad = out.push(verts);
                 out.draws.push(Draw::Image { quad, texture: at });
             }
+            NodeKind::Text(spec) => {
+                let color = premultiplied_color(spec.fill, node.opacity * opacity)?;
+                text(spec, t, color, out)?;
+            }
             _ => return None,
         }
     }
+    Some(())
+}
+
+/// Draw a text block: the whole block rasterized to coverage at the size
+/// it is seen at — by the renderer that owns that decision, so the
+/// bitmap is the one the CPU would have sampled — and read back off a
+/// quad over the block's own box.
+fn text(
+    spec: &chitrakar_doc::TextSpec,
+    t: Transform,
+    color: [f32; 4],
+    out: &mut Scene,
+) -> Option<()> {
+    let [bx0, by0, bx1, by1] = chitrakar_render::text::bounds(spec);
+    if !(bx1 > bx0 && by1 > by0) {
+        return Some(());
+    }
+    let (raster, scale) = chitrakar_render::text_raster(spec, t);
+    if raster.width == 0 || raster.height == 0 {
+        return Some(());
+    }
+    if raster.width + 2 > MAX_TEXTURE || raster.height + 2 > MAX_TEXTURE {
+        return None;
+    }
+    // A transparent row and column around the coverage, so that off the
+    // edge the sampler reads no ink rather than smearing the border —
+    // which is what the CPU's own sampler does there.
+    let (w, h) = (raster.width + 2, raster.height + 2);
+    let mut texels = vec![0u16; (w * h) as usize];
+    for y in 0..raster.height {
+        for x in 0..raster.width {
+            texels[((y + 1) * w + x + 1) as usize] = f32_to_f16(raster.sample(x, y));
+        }
+    }
+    let at = out.textures.len();
+    out.textures.push(Image {
+        width: w,
+        height: h,
+        channels: 1,
+        texels,
+    });
+    // The quad is the block's box, grown by a device pixel: the CPU
+    // walks whole pixels of that box, so the last of them can reach a
+    // little past it.
+    let (ox, oy) = raster.origin;
+    let m = 1.0 / device_scale(t);
+    let corner = |x: f32, y: f32| Vertex {
+        doc: place(t, [x, y]),
+        // The raster's own texel coordinates, which is what the shader
+        // needs to read it the way the CPU reads it.
+        local: [(x - ox) * scale, (y - oy) * scale],
+        params: [0.0; 4],
+        color,
+        grad: [0.0; 4],
+    };
+    let (x0, y0, x1, y1) = (bx0 - m, by0 - m, bx1 + m, by1 + m);
+    let quad = out.push(vec![
+        corner(x0, y0),
+        corner(x1, y0),
+        corner(x1, y1),
+        corner(x0, y0),
+        corner(x1, y1),
+        corner(x0, y1),
+    ]);
+    out.draws.push(Draw::Text { quad, texture: at });
     Some(())
 }
 
@@ -1225,6 +1359,7 @@ fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
         Image {
             width: RAMP,
             height: 1,
+            channels: 4,
             texels,
         },
         geom,
@@ -1274,6 +1409,7 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
     Image {
         width: res.width,
         height: res.height,
+        channels: 4,
         texels,
     }
 }
@@ -2039,6 +2175,129 @@ mod tests {
         );
     }
 
+    fn texted(
+        name: &str,
+        text: &str,
+        size: f32,
+        tweak: impl FnOnce(&mut chitrakar_doc::TextSpec),
+    ) -> Box<Node> {
+        let mut spec = chitrakar_doc::TextSpec::new(text, size, BLUE);
+        tweak(&mut spec);
+        Box::new(Node::text(name, spec))
+    }
+
+    /// Text is one bitmap either way: the renderer that decides how
+    /// finely to rasterize a block hands the same one to both, and the
+    /// GPU reads it the way the CPU reads it — bilinearly, fading off
+    /// the edge rather than smearing it.
+    #[test]
+    fn text_reads_the_same_raster_the_cpu_reads() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(200, 100, ColorMode::Rgb);
+        add(
+            &mut doc,
+            texted("plain", "Chitrakar", 26.0, |_| {}),
+            Transform::translation(8.0, 10.0),
+        );
+        // Leaning, underlined and struck through, and turned: the raster
+        // carries all of that, and the quad carries the transform.
+        add(
+            &mut doc,
+            texted("fancy", "vector", 20.0, |spec| {
+                spec.italic = true;
+                spec.underline = true;
+                spec.strike = true;
+            }),
+            Transform {
+                a: 1.2 * 0.97,
+                b: 1.2 * 0.24,
+                c: -1.2 * 0.24,
+                d: 1.2 * 0.97,
+                e: 14.0,
+                f: 52.0,
+            },
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        // Far tighter than the shapes, because there is nothing to
+        // approximate: both read the same bitmap, and what is left is
+        // the coverage rounded to half-precision.
+        assert!(
+            mean < 0.0005,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // There is ink, and it is where the reference has ink: over the
+        // rows the words sit on, the two agree pixel by pixel.
+        let inked = |s: &Surface| s.pixels.iter().filter(|p| p.a > 0.5).count();
+        assert!(
+            inked(&drawn) > 200,
+            "the words are drawn: {}",
+            inked(&drawn)
+        );
+        assert!(
+            (inked(&drawn) as i64 - inked(&reference) as i64).abs() < inked(&reference) as i64 / 20,
+            "{} inked pixels against the reference's {}",
+            inked(&drawn),
+            inked(&reference)
+        );
+        for y in [20, 30, 60, 70] {
+            for x in (4..196).step_by(7) {
+                let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
+                assert!((g - c).abs() < 0.15, "at ({x}, {y}): {g} vs {c}");
+            }
+        }
+        assert_eq!(drawn.get(196, 96).a, 0.0, "bare page stays bare");
+    }
+
+    /// The device is asked for the textures every adapter guarantees,
+    /// so a page that would need a bigger one is handed back rather
+    /// than overrunning that.
+    #[test]
+    fn a_page_bigger_than_the_textures_it_asked_for_goes_back() {
+        let mut doc = Document::new(MAX_TEXTURE + 1, 100, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "r",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            Transform::default(),
+        );
+        assert!(!GpuRenderer::can_render(&doc));
+
+        // And so is a placed image too big for one.
+        let mut wide = Document::new(60, 60, ColorMode::Rgb);
+        let id = wide.add_resource(
+            MAX_TEXTURE + 1,
+            1,
+            vec![255; (MAX_TEXTURE as usize + 1) * 4],
+        );
+        let root = wide.root();
+        wide.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: MAX_TEXTURE + 1,
+                    height: 1,
+                },
+            )),
+        })
+        .unwrap();
+        assert!(!GpuRenderer::can_render(&wide));
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -2054,9 +2313,9 @@ mod tests {
         );
         assert!(GpuRenderer::can_render(&doc));
 
-        // Text, a blend mode, ink authored for a press: each on its own
-        // is enough to hand the page back. A stroke is not — that one it
-        // draws.
+        // A live effect, a blend mode, ink authored for a press: each on
+        // its own is enough to hand the page back. A stroke is not —
+        // that one it draws.
         let mut with_stroke = doc.clone();
         with_stroke
             .apply(Command::SetKind {
@@ -2084,19 +2343,18 @@ mod tests {
             .unwrap();
         assert!(!GpuRenderer::can_render(&blended));
 
-        let mut with_text = doc.clone();
-        let root = with_text.root();
-        with_text
-            .apply(Command::AddNode {
-                parent: root,
-                index: 1,
-                node: Box::new(Node::text(
-                    "t",
-                    chitrakar_doc::TextSpec::new("hi", 12.0, RED),
-                )),
+        let mut with_effect = doc.clone();
+        with_effect
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::Outline {
+                    color: BLUE,
+                    width: 2.0,
+                    opacity: 1.0,
+                }],
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&with_text));
+        assert!(!GpuRenderer::can_render(&with_effect));
 
         // Ink authored for a press resolves through the document's
         // profile, so a gradient with a CMYK stop goes back too.
@@ -2131,14 +2389,11 @@ mod tests {
         assert!(!GpuRenderer::can_render(&pressed));
 
         // A hidden layer it cannot draw is no obstacle: it is not drawn.
-        let hidden = with_text.children_of(root).unwrap()[1];
-        with_text
-            .apply(Command::SetVisible {
-                id: hidden,
-                visible: false,
-            })
+        let mut hidden = with_effect.clone();
+        hidden
+            .apply(Command::SetVisible { id, visible: false })
             .unwrap();
-        assert!(GpuRenderer::can_render(&with_text));
+        assert!(GpuRenderer::can_render(&hidden));
     }
 
     /// What the two backends cost on the same page. Not an assertion:

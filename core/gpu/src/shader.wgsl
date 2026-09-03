@@ -175,6 +175,20 @@ fn fs_image(in: ImageOut) -> @location(0) vec4f {
     return textureSample(image, image_sampler, in.uv) * in.alpha;
 }
 
+// A text layer: the whole block rasterized to coverage at the size it
+// is seen at, which is what the CPU renderer samples too, so the two
+// read the same bitmap the same way. The coordinates are the raster's
+// own texels; the row and column of transparent padding around it are
+// what let the sampler fade off the edge instead of smearing it, and
+// left of or above the block's origin there is no ink at all.
+@fragment
+fn fs_text(in: CoverOut) -> @location(0) vec4f {
+    let size = vec2f(textureDimensions(image));
+    let cov = textureSampleLevel(image, image_sampler, (in.uv + vec2f(1.0, 1.0)) / size, 0.0).r;
+    let inked = in.uv.x >= 0.0 && in.uv.y >= 0.0;
+    return in.color * select(0.0, cov, inked);
+}
+
 // Where a point of the shape's normalized box sits along its gradient:
 // the projection onto the line from `from` to `to`, or the distance from
 // the centre in units of the radius, clamped past either end — the same

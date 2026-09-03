@@ -140,7 +140,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~191),
+- **Verify before committing:** `cargo test --workspace` (~193),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~377 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -170,22 +170,27 @@ without reading anything else.*
   segment, a disc at every point — and unioned in the stencil, so joins,
   caps and a width that swells and tapers all fall out of the one
   region (`chitrakar_render::stroke_skeleton` states that region once,
-  so the two renderers cannot drift). It declines
-  anything else — text, masks, effects, filters,
+  so the two renderers cannot drift). Text is the whole block rasterized
+  to coverage at the size it is seen at — by `chitrakar_render::
+  text_raster`, which the CPU path calls too, so both read the same
+  bitmap — and drawn as a quad over the block's box. It declines
+  anything else — masks, effects, filters,
   adjustments, blend modes, a group that needs isolating, ink authored
-  for a press (a gradient stop included) — and the caller falls back to
-  the CPU. Its tests render the same page both ways and compare: mean channel
+  for a press (a gradient stop included), and anything wanting a texture
+  bigger than the 2048 every adapter guarantees — and the caller falls
+  back to the CPU. Its tests render the same page both ways and compare: mean channel
   difference under 0.004 for the analytic shapes, the gradients and the
-  strokes and 0.012 for the stencilled paths, interiors, holes and bare
-  page exact, the antialiased edges tracking the CPU's. Nothing depends on it yet: the engine still
+  strokes, 0.012 for the stencilled paths and 0.0005 for text, interiors,
+  holes and bare page exact, the antialiased edges tracking the CPU's. Nothing depends on it yet: the engine still
   renders on the CPU. On llvmpipe (a CPU driver, so this measures plumbing
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
 - **Next up (rough priority):**
-  1. Extend the GPU backend to text (a glyph atlas), then wire it into
-     the engine behind a feature and let the viewport present from it
-     (see docs/spikes/gpu-rendering.md).
+  1. Wire the GPU backend into the engine behind a feature and let the
+     viewport present from it; what is left to teach it first is masks,
+     effects, adjustments and blend modes (see
+     docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

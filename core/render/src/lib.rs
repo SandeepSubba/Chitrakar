@@ -2202,8 +2202,26 @@ fn mix_snapshot(
     }
 }
 
-/// Rasterize a text block at natural size and blit its coverage through the
-/// node transform (nearest sample, like rasters).
+/// The coverage raster a text layer is drawn from, and the scale it was
+/// rasterized at.
+///
+/// The text is rasterized at the size it will be seen at under `t`, so
+/// magnifying a text layer sharpens its outlines instead of enlarging
+/// their pixels; the cap keeps a wildly zoomed layer from asking for an
+/// enormous bitmap, past which the glyphs are already far finer than the
+/// screen. A backend that draws the raster itself rather than sampling
+/// it here takes it from this function, so that what it draws is what
+/// this renderer would have drawn.
+pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextRaster, f32) {
+    let [bx0, by0, bx1, by1] = text::bounds(spec);
+    let natural = (bx1 - bx0, by1 - by0);
+    let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
+    let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
+    (text::rasterize_at(spec, scale), scale)
+}
+
+/// Rasterize a text block at the size it will be seen at and blit its
+/// coverage through the node transform.
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
     dst: &mut Surface,
@@ -2218,15 +2236,8 @@ fn draw_text(
     let Some(inv) = Inverse::of(t) else {
         return;
     };
-    // Rasterize at the size the text will be seen at, so magnifying a text
-    // layer sharpens the outlines instead of enlarging their pixels. The
-    // cap keeps a wildly zoomed layer from asking for an enormous bitmap;
-    // past it the glyphs are already far finer than the screen.
     let [bx0, by0, bx1, by1] = text::bounds(spec);
-    let natural = (bx1 - bx0, by1 - by0);
-    let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
-    let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
-    let raster = text::rasterize_at(spec, scale);
+    let (raster, scale) = text_raster(spec, t);
     let color = resolve_color(doc, spec.fill);
     // The box is the block's natural size, not the raster's: those agree
     // only while the raster is at natural scale, and a minified one would
