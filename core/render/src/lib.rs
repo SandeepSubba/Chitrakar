@@ -613,15 +613,22 @@ fn render_layer(
         if layer_clip.is_empty() {
             return Ok(());
         }
-        let mut layer = Surface::new(dst.width, dst.height);
+        // The layer's own surface covers only where it can land, not the
+        // whole page: at A4 one small shape with a shadow was allocating
+        // and clearing the canvas three times over for it. Everything
+        // drawn into it, and every field built from it, is shifted by
+        // that window's corner.
+        let origin = (layer_clip.x0, layer_clip.y0);
+        let window = Transform::translation(-(origin.0 as f32), -(origin.1 as f32));
+        let mut layer = Surface::new(layer_clip.x1 - origin.0, layer_clip.y1 - origin.1);
         // Normal into the layer's own transparent surface; the node's blend
         // belongs to the composite below, once the effects are in place.
         render_child(
             doc,
             child,
             &mut layer,
-            layer_clip,
-            parent,
+            shift_clip(layer_clip, origin),
+            window.compose(parent),
             BlendMode::Normal,
         )?;
         // Effects behind the layer, then the layer, then the ones that
@@ -631,6 +638,7 @@ fn render_layer(
             draw_effect(
                 dst,
                 &layer,
+                origin,
                 doc,
                 effect,
                 scale,
@@ -640,11 +648,19 @@ fn render_layer(
                 node.opacity,
             );
         }
-        composite(dst, &layer, 1.0, node.blend, clip.intersect(layer_clip));
+        composite_from(
+            dst,
+            &layer,
+            origin,
+            1.0,
+            node.blend,
+            clip.intersect(layer_clip),
+        );
         for effect in node.effects.iter().filter(|e| e.over()) {
             draw_effect(
                 dst,
                 &layer,
+                origin,
                 doc,
                 effect,
                 scale,
@@ -842,6 +858,7 @@ fn render_child(
 fn draw_effect(
     dst: &mut Surface,
     layer: &Surface,
+    origin: (u32, u32),
     doc: &Document,
     effect: &Effect,
     scale: f32,
@@ -869,10 +886,11 @@ fn draw_effect(
                 return;
             }
             let tint = scale_alpha(resolve_color(doc, *color), *opacity);
-            let field = silhouette(dst, layer, layer_clip, tint, false, blur * scale);
+            let field = silhouette(layer, origin, layer_clip, tint, false, blur * scale);
             stamp(
                 dst,
                 &field,
+                origin,
                 (dx * scale, dy * scale),
                 layer_clip,
                 write,
@@ -894,10 +912,11 @@ fn draw_effect(
             // kept inside it: what shows is the part of that shadow the
             // silhouette itself covers, which is the edge, from inside.
             let tint = scale_alpha(resolve_color(doc, *color), *opacity);
-            let field = silhouette(dst, layer, layer_clip, tint, true, blur * scale);
+            let field = silhouette(layer, origin, layer_clip, tint, true, blur * scale);
             stamp(
                 dst,
                 &field,
+                origin,
                 (dx * scale, dy * scale),
                 layer_clip,
                 write,
@@ -915,8 +934,17 @@ fn draw_effect(
                 return;
             }
             let tint = scale_alpha(resolve_color(doc, *color), *opacity);
-            let field = outline_band(dst, layer, layer_clip, tint, w, layer_opacity);
-            stamp(dst, &field, (0.0, 0.0), layer_clip, write, blend, None);
+            let field = outline_band(layer, origin, layer_clip, tint, w, layer_opacity);
+            stamp(
+                dst,
+                &field,
+                origin,
+                (0.0, 0.0),
+                layer_clip,
+                write,
+                blend,
+                None,
+            );
         }
     }
 }
@@ -926,23 +954,34 @@ fn draw_effect(
 /// answer — the tint is constant and the blur is linear — and it means one
 /// surface instead of two.
 fn silhouette(
-    dst: &Surface,
     layer: &Surface,
+    origin: (u32, u32),
     clip: ClipRect,
     tint: LinearRgba,
     invert: bool,
     sigma: f32,
 ) -> Surface {
-    let mut out = Surface::new(dst.width, dst.height);
+    let mut out = Surface::new(layer.width, layer.height);
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
-            let i = (y * dst.width + x) as usize;
+            let i = at_in(origin, layer.width, x, y);
             let a = layer.pixels[i].a;
             out.pixels[i] = scale_alpha(tint, if invert { 1.0 - a } else { a });
         }
     }
-    blur::gaussian_blur(&mut out, clip, sigma);
+    blur::gaussian_blur(&mut out, shift_clip(clip, origin), sigma);
     out
+}
+
+/// A device-space region in the coordinates of a surface holding the
+/// window that starts at `origin`.
+fn shift_clip(clip: ClipRect, origin: (u32, u32)) -> ClipRect {
+    ClipRect {
+        x0: clip.x0 - origin.0,
+        y0: clip.y0 - origin.1,
+        x1: clip.x1 - origin.0,
+        y1: clip.y1 - origin.1,
+    }
 }
 
 /// A band of colour reaching `width` device pixels out from the layer's
@@ -954,8 +993,8 @@ fn silhouette(
 /// which is a couple of passes over the region and rounds corners the way
 /// a pen would.
 fn outline_band(
-    dst: &Surface,
     layer: &Surface,
+    origin: (u32, u32),
     clip: ClipRect,
     tint: LinearRgba,
     width: f32,
@@ -966,7 +1005,7 @@ fn outline_band(
     let mut dist = vec![far; w * h];
     for y in 0..h {
         for x in 0..w {
-            let i = ((y as u32 + clip.y0) * dst.width + x as u32 + clip.x0) as usize;
+            let i = at_in(origin, layer.width, x as u32 + clip.x0, y as u32 + clip.y0);
             // Half covered is inside. The layer was staged with its own
             // opacity already applied, so half of *that* is where its edge
             // is: a layer at a third opacity would otherwise have no
@@ -1019,7 +1058,7 @@ fn outline_band(
             }
         }
     }
-    let mut out = Surface::new(dst.width, dst.height);
+    let mut out = Surface::new(layer.width, layer.height);
     for y in 0..h {
         for x in 0..w {
             // The chamfer counts steps between pixel centres, and the
@@ -1030,7 +1069,7 @@ fn outline_band(
             if cover <= 0.0 {
                 continue;
             }
-            let i = ((y as u32 + clip.y0) * dst.width + x as u32 + clip.x0) as usize;
+            let i = at_in(origin, layer.width, x as u32 + clip.x0, y as u32 + clip.y0);
             out.pixels[i] = scale_alpha(tint, cover);
         }
     }
@@ -1041,9 +1080,11 @@ fn outline_band(
 /// `offset` device pixels and sampled between pixels so a sub-pixel offset
 /// (or a fractional zoom) does not jump. `keep_inside`, when given, limits
 /// what lands to that surface's own alpha — how an inner shadow stays in.
+#[allow(clippy::too_many_arguments)]
 fn stamp(
     dst: &mut Surface,
     field: &Surface,
+    origin: (u32, u32),
     offset: (f32, f32),
     field_clip: ClipRect,
     write: ClipRect,
@@ -1067,14 +1108,14 @@ fn stamp(
             let at = |px: f32, py: f32| {
                 let px = px.clamp(lo_x, hi_x) as u32;
                 let py = py.clamp(lo_y, hi_y) as u32;
-                field.pixels[(py * field.width + px) as usize]
+                field.pixels[at_in(origin, field.width, px, py)]
             };
             let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
             let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
             let mut src = lerp(top, bottom, ty);
             let i = (y * dst.width + x) as usize;
             if let Some(inside) = keep_inside {
-                src = scale_alpha(src, inside.pixels[i].a);
+                src = scale_alpha(src, inside.pixels[at_in(origin, inside.width, x, y)].a);
             }
             if src.a <= 0.0 {
                 continue;
@@ -1137,8 +1178,11 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     }
 }
 
-fn composite(dst: &mut Surface, src: &Surface, opacity: f32, mode: BlendMode, clip: ClipRect) {
-    composite_from(dst, src, (0, 0), opacity, mode, clip);
+/// Where a device pixel sits in a surface holding only the window that
+/// starts at `origin`. The caller has already established that the
+/// pixel is inside that window.
+fn at_in(origin: (u32, u32), width: u32, x: u32, y: u32) -> usize {
+    ((y - origin.1) * width + (x - origin.0)) as usize
 }
 
 /// Composite a window of source pixels: `src` holds the destination's
@@ -4435,6 +4479,98 @@ mod tests {
         assert!(
             diff < ink * 0.1,
             "magnified text differs from native by {diff} over {ink} of ink"
+        );
+    }
+
+    #[test]
+    fn a_shadow_inside_an_isolated_group_lands_where_it_would_alone() {
+        // Both the group and the layer are drawn on surfaces of their own,
+        // each a window onto the page, so this layer's shadow is placed
+        // through two of them at once. Getting either corner wrong moves
+        // the shadow, and nothing else in the suite stacks them.
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 5.0,
+            blur: 1.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        let alone = {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("r", 20.0, 20.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(25.0, 25.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone()],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let g = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: g,
+            index: 0,
+            node: filled_rect("r", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(g).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(25.0, 25.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![shadow],
+        })
+        .unwrap();
+        // Opacity 1 would let the group skip its own surface, which is
+        // the case this test exists to avoid.
+        doc.apply(Command::SetOpacity {
+            id: g,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let nested = render(&doc).unwrap();
+
+        for y in 0..80 {
+            for x in 0..80 {
+                let (a, b) = (alone.get(x, y), nested.get(x, y));
+                // Half the opacity, so half the alpha — everywhere.
+                assert!(
+                    (b.a - a.a * 0.5).abs() < 0.01,
+                    "at ({x}, {y}): {b:?} against half of {a:?}"
+                );
+            }
+        }
+        assert!(
+            nested.get(38, 36).a > 0.1,
+            "and there really is a shadow to compare"
         );
     }
 

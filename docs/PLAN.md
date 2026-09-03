@@ -153,18 +153,18 @@ without reading anything else.*
   isolated on a surface the size of the box it can land in rather than
   the size of the page, so at A4 a group holding one small shape went
   from 145 ms to 84 ms, which is what the same group costs when it needs
-  no isolation at all. What remains at that size is mostly memory
+  no isolation at all; the same window makes a layer's effects cost what
+  the layer alone costs. What remains at that size is mostly memory
   bandwidth: the surface is 16 bytes a pixel (139 MB at A4), and each
   full-canvas pass over it costs ~55 ms. `cargo test --release -p
   chitrakar-render -- --ignored --nocapture --test-threads=1` runs the
-  timing probes; the next win there is the same trick for a layer with
-  live effects, which at A4 costs ~220 ms for one small shape with a
-  drop shadow against a ~80 ms baseline. It is harder than the group
-  was: the layer's own surface, the silhouette field and the
-  destination are all indexed in device coordinates, and the stamping
-  pass reads the field at an offset, so windowing them means either
-  giving `Surface` an origin or getting three sets of bounds right at
-  once. Interactive rendering goes
+  timing probes. A layer with live effects is windowed the same way —
+  its own surface and every field built from it cover only where the
+  layer can land — which took one small shape with a drop shadow at A4
+  from ~220 ms to ~86 ms, against a ~82 ms baseline. Nesting the two
+  windows is where a mistake would show, so a test puts a shadowed
+  layer inside an isolated group and compares it, pixel for pixel,
+  against the same layer drawn on its own. Interactive rendering goes
   through `Session::set_viewport`, which composites only what the canvas
   can see: an A4 page at 300dpi shown on screen is 15 ms rather than
   169 ms, and the zoom is no longer capped by what a full-page surface
@@ -172,7 +172,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~209),
+- **Verify before committing:** `cargo test --workspace` (~210),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~388 browser
   assertions). Both suites self-skip CMYK-profile steps unless
