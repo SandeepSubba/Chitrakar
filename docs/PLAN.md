@@ -134,6 +134,10 @@ without reading anything else.*
   instead: the stroke goes into a painted mask, so the layer is
   untouched and the brush puts the piece back — which is how part of a
   photo is taken out without touching the photo.
+  Groups and frames fold shut in the layer panel, so a document of
+  several artboards reads as a list of artboards rather than of
+  everything inside them. A picked frame exports on its own from the
+  File menu, beside the one that writes every frame at once.
   Layer rows carry a small picture of the layer itself — what the page
   would draw of it, effects and all, fitted into its own square — in
   place of the glyph that says what kind it is, and a picture of its
@@ -236,7 +240,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~242),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~470 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~474 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

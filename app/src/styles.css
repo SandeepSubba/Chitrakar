@@ -1268,6 +1268,24 @@ body {
 .lock-toggle[aria-pressed="true"] {
   opacity: 1;
 }
+/* The fold on a row that holds other layers; the empty span keeps the
+   rows that hold nothing lined up with the ones that do. */
+.fold {
+  display: grid;
+  place-items: center;
+  width: 0.85rem;
+  height: 1.5rem;
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+button.fold:hover {
+  color: var(--text);
+}
+
 /* What a live copy follows, with the way back to it. */
 .copy-of {
   display: flex;

@@ -605,6 +605,10 @@ export function App() {
   /** And a picture of each layer's mask, fitted the same way, so the row
    * shows what is being let through as well as what is under it. */
   const [maskThumbs, setMaskThumbs] = useState<Record<number, string>>({});
+  /** Groups and frames folded shut in the panel. A document of several
+   * artboards is a long list otherwise, and most of it is not what is
+   * being worked on. */
+  const [collapsed, setCollapsed] = useState<number[]>([]);
   /** Four runs of 256 counts — red, green, blue, luminance — of what the
    * picked adjustment layer sees, for the graphs drawn over them. */
   const [histogram, setHistogram] = useState<Uint32Array | null>(null);
@@ -3200,6 +3204,27 @@ export function App() {
     refresh(session);
   };
 
+  /** Which layers hold others: the list runs parent-first, so a layer
+   * has children exactly when the row after it is one level deeper. */
+  const hasChildren = new Set(
+    layers
+      .filter((l, i) => layers[i + 1]?.depth === l.depth + 1)
+      .map((l) => l.id),
+  );
+  /** The rows the panel shows: everything, less what is inside something
+   * folded shut. Depth-first and parent-first, so one pass does it. */
+  const panelRows = (() => {
+    const out: LayerInfo[] = [];
+    let hidingBelow: number | null = null;
+    for (const l of layers) {
+      if (hidingBelow !== null && l.depth > hidingBelow) continue;
+      hidingBelow = null;
+      out.push(l);
+      if (collapsed.includes(l.id)) hidingBelow = l.depth;
+    }
+    return out;
+  })();
+
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
   // Pinning is only a question inside a frame; a layer on the page has
   // no edges to be measured from.
@@ -3614,6 +3639,23 @@ export function App() {
     }
   };
 
+  /** The picked frame on its own, at its own size — one screen out of a
+   * page of them. */
+  const exportArtboard = () => {
+    if (!session || selected === null) return;
+    const board = layers.find((l) => l.id === selected);
+    if (!board || board.kind !== "artboard") return;
+    try {
+      download(
+        session.export_artboard_png(board.id, 1),
+        `${fileName()} - ${board.name}.png`,
+        "image/png",
+      );
+    } catch (err) {
+      alert(`Export: ${err}`);
+    }
+  };
+
   const exportJpeg = () => {
     if (!session) return;
     download(session.export_jpeg(92), `${fileName()}.jpg`, "image/jpeg");
@@ -3893,6 +3935,11 @@ export function App() {
             {selectionSet.length > 0 && (
               <MenuItem icon="export" onClick={exportSelectionPng}>
                 Export selection as PNG
+              </MenuItem>
+            )}
+            {selectedLayer?.kind === "artboard" && (
+              <MenuItem icon="frame" onClick={exportArtboard}>
+                Export this artboard
               </MenuItem>
             )}
             {layers.some((l) => l.kind === "artboard") && (
@@ -5314,7 +5361,7 @@ export function App() {
             </div>
           )}
           <ul ref={layerListRef}>
-            {layers.map((l) => (
+            {panelRows.map((l) => (
               <li
                 key={l.id}
                 data-id={l.id}
@@ -5350,6 +5397,35 @@ export function App() {
                   }
                 }}
               >
+                {/* A group or a frame folds shut, so a document of
+                    several artboards is a list of artboards rather than
+                    of everything in them. */}
+                {hasChildren.has(l.id) ? (
+                  <button
+                    className="fold"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCollapsed((prev) =>
+                        prev.includes(l.id)
+                          ? prev.filter((id) => id !== l.id)
+                          : [...prev, l.id],
+                      );
+                    }}
+                    aria-expanded={!collapsed.includes(l.id)}
+                    aria-label={
+                      collapsed.includes(l.id)
+                        ? `Open ${l.name}`
+                        : `Fold ${l.name}`
+                    }
+                  >
+                    <Icon
+                      name={collapsed.includes(l.id) ? "foldClosed" : "foldOpen"}
+                      size={11}
+                    />
+                  </button>
+                ) : (
+                  <span className="fold" />
+                )}
                 <button
                   className="visibility"
                   onClick={(e) => {

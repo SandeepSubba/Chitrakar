@@ -2828,6 +2828,38 @@ assert(
     `the rect landed where it was drawn (${painted})`,
   );
 
+  // The frame folds shut in the panel, taking what is in it with it,
+  // and a folded frame is still a frame — it exports on its own.
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "both rows are listed",
+  );
+  await page.click('button[aria-label^="Fold "]');
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "folded, the frame's contents are out of the list",
+  );
+  await page.click('button[aria-label^="Open "]');
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "and opening it brings them back",
+  );
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const [oneBoard] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export this artboard")).click(),
+  ]);
+  {
+    const bytes = await readFile(await oneBoard.path());
+    assert(
+      bytes.readUInt32BE(16) === 200 && bytes.readUInt32BE(20) === 200,
+      `the picked frame exports at its own size (${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)})`,
+    );
+  }
+
   // Dragged out past the frame's edge, the rect is cut at the edge. The
   // panel runs top-first and the frame owns the rect, so the frame is
   // the first row and the rect the second.

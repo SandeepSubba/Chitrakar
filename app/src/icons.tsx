@@ -30,6 +30,8 @@ export type IconName =
   | "clip"
   | "frame"
   | "instance"
+  | "foldOpen"
+  | "foldClosed"
   | "brush"
   | "duplicate"
   | "shadow"
@@ -280,6 +282,10 @@ const PATHS: Record<IconName, JSX.Element> = {
       <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
     </>
   ),
+  // The fold on a row that holds others: pointing down when it is open,
+  // right when it is shut.
+  foldOpen: <path d="M5 8.5l7 7 7-7" />,
+  foldClosed: <path d="M8.5 5l7 7-7 7" />,
   // A live copy: one box behind another, joined by the link between.
   instance: (
     <>
