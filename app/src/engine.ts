@@ -226,6 +226,7 @@ export interface LayerInfo {
   opacity: number;
   blend: BlendMode;
   has_mask: boolean;
+  painted_mask: boolean;
   has_effects: boolean;
   /** Cannot be picked or moved on the canvas. */
   locked: boolean;

@@ -1429,7 +1429,32 @@ export function App() {
     e.stopPropagation();
     const [x, y] = docPoint(e);
     if (tool === "Paint") {
-      const layer = paintTarget(session);
+      // Rubbing at a layer that is not a paint layer takes a piece out
+      // of the layer rather than painting over it: the stroke goes into
+      // a mask, so the layer itself is untouched and the brush puts the
+      // piece back. Once a layer has such a mask the brush keeps working
+      // on it, which is how what was rubbed out is painted back in.
+      const picked = layers.find((l) => l.id === selected);
+      const onMask =
+        !!picked &&
+        picked.kind !== "paint" &&
+        !picked.locked &&
+        (erasing || picked.painted_mask);
+      let layer: NodeId | null;
+      if (onMask) {
+        try {
+          if (!session.ensure_painted_mask(picked.id)) {
+            alert(`${picked.name} already carries a mask of another kind.`);
+            return;
+          }
+        } catch (err) {
+          alert(`Mask: ${err}`);
+          return;
+        }
+        layer = picked.id;
+      } else {
+        layer = paintTarget(session);
+      }
       if (layer === null) return;
       try {
         session.paint_begin(
@@ -1440,6 +1465,7 @@ export function App() {
           JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
           paintSoftness,
           erasing,
+          onMask,
         );
       } catch (err) {
         alert(`Paint: ${err}`);
@@ -3733,7 +3759,7 @@ export function App() {
               <button
                 className={`icon-button${erasing ? " active" : ""}`}
                 onClick={() => setErasing((on) => !on)}
-                title="Rub paint out instead of laying it down"
+                title="Rub paint out — on a paint layer its own paint, on any other layer a piece out of the layer itself"
                 aria-label="Erase"
                 aria-pressed={erasing}
               >
@@ -4882,6 +4908,10 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],
       ["[  ]", "Thinner, thicker brush"],
+      [
+        "Erase + drag",
+        "On a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)",
+      ],
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],

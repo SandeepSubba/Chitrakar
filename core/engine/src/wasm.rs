@@ -240,11 +240,29 @@ impl WasmSession {
         color: &str,
         softness: f32,
         erase: bool,
+        on_mask: bool,
     ) -> Result<(), JsError> {
         let color =
             serde_json::from_str(color).map_err(|e| JsError::new(&format!("colour: {e}")))?;
         self.inner
-            .paint_begin(NodeId(layer as u64), x, y, radius, color, softness, erase)
+            .paint_begin(
+                NodeId(layer as u64),
+                x,
+                y,
+                radius,
+                color,
+                softness,
+                erase,
+                on_mask,
+            )
+            .map_err(to_js)
+    }
+
+    /// Give a layer a mask a brush can work on, when it has not got one.
+    /// False when a mask of another kind is already there.
+    pub fn ensure_painted_mask(&mut self, id: f64) -> Result<bool, JsError> {
+        self.inner
+            .ensure_painted_mask(NodeId(id as u64))
             .map_err(to_js)
     }
 

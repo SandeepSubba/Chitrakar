@@ -439,6 +439,11 @@ pub enum MaskKind {
         height: u32,
         transform: Transform,
     },
+    /// Coverage brushed on by hand. It starts showing everything, and
+    /// each stroke either hides what it covers (an eraser) or shows it
+    /// again (a brush) — which is how a piece is taken out of a layer
+    /// without touching the layer.
+    Painted { strokes: Vec<PaintStroke> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

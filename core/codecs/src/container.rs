@@ -209,6 +209,7 @@ mod tests {
         doc.apply(Command::AddStroke {
             id,
             index: 0,
+            on_mask: false,
             stroke: Box::new(chitrakar_doc::PaintStroke {
                 points: vec![[4.0, 4.0], [20.0, 30.0]],
                 radii: vec![3.0, 6.0],

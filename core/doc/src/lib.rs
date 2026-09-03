@@ -235,9 +235,20 @@ impl Document {
         self.nodes.iter()
     }
 
-    /// The strokes of a paint layer, to add to or take from.
-    fn strokes_mut(&mut self, id: NodeId) -> Result<&mut Vec<PaintStroke>, DocError> {
+    /// The strokes of a paint layer, or of a node's painted mask, to add
+    /// to or take from.
+    fn strokes_mut(
+        &mut self,
+        id: NodeId,
+        on_mask: bool,
+    ) -> Result<&mut Vec<PaintStroke>, DocError> {
         let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+        if on_mask {
+            return match node.mask.as_mut().map(|m| &mut m.kind) {
+                Some(MaskKind::Painted { strokes }) => Ok(strokes),
+                _ => Err(DocError::NotAPaintLayer(id)),
+            };
+        }
         match &mut node.kind {
             NodeKind::Paint { strokes } => Ok(strokes),
             _ => Err(DocError::NotAPaintLayer(id)),
@@ -353,17 +364,22 @@ impl Document {
                     kind: Box::new(prev),
                 })
             }
-            Command::AddStroke { id, index, stroke } => {
-                let strokes = self.strokes_mut(id)?;
+            Command::AddStroke {
+                id,
+                index,
+                stroke,
+                on_mask,
+            } => {
+                let strokes = self.strokes_mut(id, on_mask)?;
                 if index > strokes.len() {
                     let len = strokes.len();
                     return Err(DocError::NoSuchStroke { id, index, len });
                 }
                 strokes.insert(index, *stroke);
-                Ok(Command::RemoveStroke { id, index })
+                Ok(Command::RemoveStroke { id, index, on_mask })
             }
-            Command::RemoveStroke { id, index } => {
-                let strokes = self.strokes_mut(id)?;
+            Command::RemoveStroke { id, index, on_mask } => {
+                let strokes = self.strokes_mut(id, on_mask)?;
                 if index >= strokes.len() {
                     let len = strokes.len();
                     return Err(DocError::NoSuchStroke { id, index, len });
@@ -373,10 +389,16 @@ impl Document {
                     id,
                     index,
                     stroke: Box::new(stroke),
+                    on_mask,
                 })
             }
-            Command::SetStroke { id, index, stroke } => {
-                let strokes = self.strokes_mut(id)?;
+            Command::SetStroke {
+                id,
+                index,
+                stroke,
+                on_mask,
+            } => {
+                let strokes = self.strokes_mut(id, on_mask)?;
                 if index >= strokes.len() {
                     let len = strokes.len();
                     return Err(DocError::NoSuchStroke { id, index, len });
@@ -386,6 +408,7 @@ impl Document {
                     id,
                     index,
                     stroke: Box::new(prev),
+                    on_mask,
                 })
             }
             Command::SetName { id, name } => {
@@ -597,16 +620,21 @@ pub enum Command {
         kind: Box<NodeKind>,
     },
     /// Lay a stroke onto a paint layer, at `index` in the order the
-    /// layer's strokes are painted in.
+    /// layer's strokes are painted in. With `on_mask`, it goes onto the
+    /// node's painted mask instead of the node itself.
     AddStroke {
         id: NodeId,
         index: usize,
         stroke: Box<PaintStroke>,
+        #[serde(default)]
+        on_mask: bool,
     },
     /// Take one back off.
     RemoveStroke {
         id: NodeId,
         index: usize,
+        #[serde(default)]
+        on_mask: bool,
     },
     /// Replace one in place, which is what a brush gesture does to the
     /// stroke it is still drawing.
@@ -614,6 +642,8 @@ pub enum Command {
         id: NodeId,
         index: usize,
         stroke: Box<PaintStroke>,
+        #[serde(default)]
+        on_mask: bool,
     },
     SetName {
         id: NodeId,

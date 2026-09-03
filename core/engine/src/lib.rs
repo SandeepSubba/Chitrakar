@@ -138,6 +138,9 @@ struct Painting {
     layer: NodeId,
     index: usize,
     stroke: chitrakar_doc::PaintStroke,
+    /// Whether it is going onto the node's painted mask rather than onto
+    /// the node itself.
+    on_mask: bool,
 }
 
 pub struct Session {
@@ -259,33 +262,54 @@ impl Session {
     /// node's: a stroke laid on, replaced in, or taken off a paint layer
     /// touches only where that stroke is, and a painting can be large.
     fn stroke_bounds(&self, cmd: &Command) -> Option<Bounds> {
-        let (id, box_) = match cmd {
-            Command::AddStroke { id, stroke, .. } => (*id, stroke.bounds()?),
+        let (id, box_, on_mask) = match cmd {
+            Command::AddStroke {
+                id,
+                stroke,
+                on_mask,
+                ..
+            } => (*id, stroke.bounds()?, *on_mask),
             // A brush extending a stroke changes only its tail, and
             // repainting the whole of a long one every time it grows is
             // what would make a long stroke crawl.
-            Command::SetStroke { id, index, stroke } => {
-                let chitrakar_doc::NodeKind::Paint { strokes } = &self.doc.node(*id).ok()?.kind
-                else {
-                    return None;
-                };
-                let box_ = match strokes.get(*index) {
+            Command::SetStroke {
+                id,
+                index,
+                stroke,
+                on_mask,
+            } => {
+                let box_ = match self.strokes_of(*id, *on_mask).and_then(|s| s.get(*index)) {
                     Some(other) => changed_bounds(stroke, other)?,
                     None => stroke.bounds()?,
                 };
-                (*id, box_)
+                (*id, box_, *on_mask)
             }
-            Command::RemoveStroke { id, index } => {
-                let chitrakar_doc::NodeKind::Paint { strokes } = &self.doc.node(*id).ok()?.kind
-                else {
-                    return None;
-                };
-                (*id, strokes.get(*index)?.bounds()?)
-            }
+            Command::RemoveStroke { id, index, on_mask } => (
+                *id,
+                self.strokes_of(*id, *on_mask)?.get(*index)?.bounds()?,
+                *on_mask,
+            ),
             _ => return None,
         };
-        let t = self.doc.node(id).ok()?.transform;
+        // The box is written in the space the brush wrote it in, which
+        // for a mask is the layer's parent's rather than the layer's own.
+        let t = chitrakar_render::brush_space(&self.doc, id, on_mask).ok()?;
         Some(chitrakar_render::transformed_box(t, box_))
+    }
+
+    /// The strokes of a paint layer, or of a node's painted mask.
+    fn strokes_of(&self, id: NodeId, on_mask: bool) -> Option<&[chitrakar_doc::PaintStroke]> {
+        let node = self.doc.node(id).ok()?;
+        if on_mask {
+            return match node.mask.as_ref().map(|m| &m.kind) {
+                Some(chitrakar_doc::MaskKind::Painted { strokes }) => Some(strokes),
+                _ => None,
+            };
+        }
+        match &node.kind {
+            chitrakar_doc::NodeKind::Paint { strokes } => Some(strokes),
+            _ => None,
+        }
     }
 
     fn bounds_of_target(&self, id: Option<NodeId>) -> Bounds {
@@ -798,14 +822,15 @@ impl Session {
         color: chitrakar_color::AuthoredColor,
         softness: f32,
         erase: bool,
+        on_mask: bool,
     ) -> Result<(), EngineError> {
-        let index = self.stroke_count(layer)?;
-        let Some((lx, ly)) = self.point_in_layer(layer, x, y)? else {
+        let index = self.stroke_count(layer, on_mask)?;
+        let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
             return Ok(());
         };
         let stroke = chitrakar_doc::PaintStroke {
             points: vec![[lx, ly]],
-            radii: vec![self.radius_in_layer(layer, radius)?],
+            radii: vec![self.radius_in_layer(layer, on_mask, radius)?],
             color,
             softness,
             erase,
@@ -814,11 +839,13 @@ impl Session {
             id: layer,
             index,
             stroke: Box::new(stroke.clone()),
+            on_mask,
         })?;
         self.painting = Some(Painting {
             layer,
             index,
             stroke,
+            on_mask,
         });
         Ok(())
     }
@@ -831,11 +858,11 @@ impl Session {
         let Some(painting) = self.painting.as_ref() else {
             return Ok(());
         };
-        let (layer, index) = (painting.layer, painting.index);
-        let Some((lx, ly)) = self.point_in_layer(layer, x, y)? else {
+        let (layer, index, on_mask) = (painting.layer, painting.index, painting.on_mask);
+        let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
             return Ok(());
         };
-        let radius = self.radius_in_layer(layer, radius)?;
+        let radius = self.radius_in_layer(layer, on_mask, radius)?;
         let painting = self.painting.as_mut().expect("checked above");
         if let Some(last) = painting.stroke.points.last() {
             if (last[0] - lx).abs() < 0.01 && (last[1] - ly).abs() < 0.01 {
@@ -849,12 +876,37 @@ impl Session {
             id: layer,
             index,
             stroke,
+            on_mask,
         })
     }
 
     /// Whether a brush stroke is being drawn.
     pub fn is_painting(&self) -> bool {
         self.painting.is_some()
+    }
+
+    /// Give a layer a mask a brush can work on, when it has not got one.
+    ///
+    /// `false` when there is already a mask of another kind there: that
+    /// one was drawn or placed deliberately, and replacing it is not
+    /// this function's decision to make.
+    pub fn ensure_painted_mask(&mut self, id: NodeId) -> Result<bool, EngineError> {
+        match self.doc.node(id)?.mask.as_ref().map(|m| &m.kind) {
+            Some(chitrakar_doc::MaskKind::Painted { .. }) => Ok(true),
+            Some(_) => Ok(false),
+            None => {
+                self.apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted {
+                            strokes: Vec::new(),
+                        },
+                        invert: false,
+                    })),
+                })?;
+                Ok(true)
+            }
+        }
     }
 
     /// A small square picture of one layer on its own, for a panel that
@@ -867,20 +919,19 @@ impl Session {
 
     /// How many strokes a paint layer holds, which is where the next one
     /// goes.
-    pub fn stroke_count(&self, id: NodeId) -> Result<usize, EngineError> {
-        match &self.doc.node(id)?.kind {
-            chitrakar_doc::NodeKind::Paint { strokes } => Ok(strokes.len()),
-            _ => Err(EngineError::Doc(chitrakar_doc::DocError::NotAPaintLayer(
+    pub fn stroke_count(&self, id: NodeId, on_mask: bool) -> Result<usize, EngineError> {
+        self.strokes_of(id, on_mask)
+            .map(|s| s.len())
+            .ok_or(EngineError::Doc(chitrakar_doc::DocError::NotAPaintLayer(
                 id,
-            ))),
-        }
+            )))
     }
 
     /// A brush radius given in document units, in a layer's own — a
     /// stroke is written in the layer's space, so a scaled layer takes a
     /// smaller radius to paint the same width on the page.
-    fn radius_in_layer(&self, id: NodeId, radius: f32) -> Result<f32, EngineError> {
-        Ok(radius / chitrakar_render::layer_scale(&self.doc, id)?.max(1e-6))
+    fn radius_in_layer(&self, id: NodeId, on_mask: bool, radius: f32) -> Result<f32, EngineError> {
+        Ok(radius / chitrakar_render::layer_scale(&self.doc, id, on_mask)?.max(1e-6))
     }
 
     /// A document-space point in a layer's own space, which is where a
@@ -888,10 +939,13 @@ impl Session {
     pub fn point_in_layer(
         &self,
         id: NodeId,
+        on_mask: bool,
         x: f32,
         y: f32,
     ) -> Result<Option<(f32, f32)>, EngineError> {
-        Ok(chitrakar_render::point_in_layer(&self.doc, id, x, y)?)
+        Ok(chitrakar_render::point_in_layer(
+            &self.doc, id, on_mask, x, y,
+        )?)
     }
 
     /// Duplicate several layers as one undo step, each copy landing just
@@ -1698,6 +1752,10 @@ impl Session {
                 opacity: node.opacity,
                 blend: node.blend,
                 has_mask: node.mask.is_some(),
+                painted_mask: matches!(
+                    node.mask.as_ref().map(|m| &m.kind),
+                    Some(chitrakar_doc::MaskKind::Painted { .. })
+                ),
                 has_effects: !node.effects.is_empty(),
                 locked: node.locked,
                 depth,
@@ -2056,6 +2114,9 @@ pub struct LayerInfo {
     pub opacity: f32,
     pub blend: chitrakar_doc::BlendMode,
     pub has_mask: bool,
+    /// Whether that mask is one a brush can work on, which decides
+    /// whether the brush paints the layer or the mask over it.
+    pub painted_mask: bool,
     pub has_effects: bool,
     pub locked: bool,
     pub depth: u32,
@@ -4047,7 +4108,7 @@ mod save_probe {
         let blue = r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#;
         let color: chitrakar_color::AuthoredColor = serde_json::from_str(blue).unwrap();
         session
-            .paint_begin(layer, 10.0, 30.0, 4.0, color, 0.3, false)
+            .paint_begin(layer, 10.0, 30.0, 4.0, color, 0.3, false, false)
             .unwrap();
         for x in 1..=20 {
             session.paint_extend(10.0 + x as f32, 30.0, 4.0).unwrap();
@@ -4055,7 +4116,7 @@ mod save_probe {
         assert!(session.is_painting());
         assert!(session.commit_preview());
         assert!(!session.is_painting());
-        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
         assert_eq!(
             session.history_labels().0.len(),
             before + 1,
@@ -4067,19 +4128,116 @@ mod save_probe {
         );
 
         session.undo().unwrap();
-        assert_eq!(session.stroke_count(layer).unwrap(), 0);
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 0);
         assert_eq!(session.render().unwrap().get(20, 30).a, 0.0);
         session.redo().unwrap();
-        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
 
         // A stroke abandoned mid-gesture leaves nothing behind.
         session
-            .paint_begin(layer, 40.0, 40.0, 4.0, color, 0.3, false)
+            .paint_begin(layer, 40.0, 40.0, 4.0, color, 0.3, false, false)
             .unwrap();
         session.paint_extend(45.0, 40.0, 4.0).unwrap();
         assert!(session.cancel_preview().unwrap());
-        assert_eq!(session.stroke_count(layer).unwrap(), 1);
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
         assert!(!session.is_painting());
+    }
+
+    /// Rubbing at a layer that is not a paint layer takes a piece out of
+    /// it through a mask, so the layer itself is untouched — and the
+    /// brush puts the piece back.
+    #[test]
+    fn the_brush_takes_a_piece_out_of_a_layer_it_cannot_paint_on() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut rect = chitrakar_doc::Node::vector(
+            "photo",
+            chitrakar_doc::VectorShape::Rect {
+                width: 60.0,
+                height: 60.0,
+                radius: 0.0,
+            },
+        );
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut rect.kind {
+            *fill = Some(red);
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(rect),
+            })
+            .unwrap();
+        let photo = session.document().children_of(root).unwrap()[0];
+        // Moved, because a mask is written in the space the layer sits
+        // in rather than the layer's own: a brush that confused the two
+        // would rub at the wrong place, and only a moved layer says so.
+        session
+            .apply(Command::SetTransform {
+                id: photo,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+
+        assert!(session.ensure_painted_mask(photo).unwrap());
+        assert!(
+            session.ensure_painted_mask(photo).unwrap(),
+            "asking twice leaves the one that is already there"
+        );
+        session
+            .paint_begin(photo, 70.0, 70.0, 8.0, red, 0.0, true, true)
+            .unwrap();
+        session.commit_preview();
+        assert_eq!(
+            session.render().unwrap().get(70, 70).a,
+            0.0,
+            "the layer shows a hole where the pointer was"
+        );
+        assert!(
+            session.render().unwrap().get(45, 45).a > 0.9,
+            "and is whole elsewhere"
+        );
+
+        // The brush, not erasing, paints the mask back.
+        session
+            .paint_begin(photo, 70.0, 70.0, 4.0, red, 0.0, false, true)
+            .unwrap();
+        session.commit_preview();
+        assert!(
+            session.render().unwrap().get(70, 70).a > 0.9,
+            "and the brush puts the piece back"
+        );
+
+        // A mask that was drawn or placed deliberately is not replaced.
+        let mut other = Session::new(120, 120, ColorMode::Rgb);
+        let root = other.document().root();
+        other
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("g")),
+            })
+            .unwrap();
+        let g = other.document().children_of(root).unwrap()[0];
+        other
+            .apply(Command::SetMask {
+                id: g,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Ellipse { rx: 10.0, ry: 10.0 },
+                        transform: chitrakar_doc::Transform::default(),
+                    },
+                    invert: false,
+                })),
+            })
+            .unwrap();
+        assert!(!other.ensure_painted_mask(g).unwrap());
     }
 
     /// A paint layer inside a moved group takes the brush where the
@@ -4113,7 +4271,7 @@ mod save_probe {
         let color: chitrakar_color::AuthoredColor =
             serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
         session
-            .paint_begin(layer, 60.0, 60.0, 6.0, color, 0.0, false)
+            .paint_begin(layer, 60.0, 60.0, 6.0, color, 0.0, false, false)
             .unwrap();
         session.commit_preview();
         let s = session.render().unwrap();
@@ -4130,7 +4288,7 @@ mod save_probe {
         let color: chitrakar_color::AuthoredColor =
             serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
         session
-            .paint_begin(layer, 20.0, 200.0, 6.0, color, 0.0, false)
+            .paint_begin(layer, 20.0, 200.0, 6.0, color, 0.0, false, false)
             .unwrap();
         // Draw most of the way across the page, then measure one more
         // step of the same stroke.
@@ -4163,14 +4321,14 @@ mod save_probe {
             serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
         // A long stroke across the page, then a dab in one corner.
         session
-            .paint_begin(layer, 20.0, 20.0, 6.0, color, 0.0, false)
+            .paint_begin(layer, 20.0, 20.0, 6.0, color, 0.0, false, false)
             .unwrap();
         session.paint_extend(380.0, 380.0, 6.0).unwrap();
         session.commit_preview();
         let _ = session.render();
         let before = session.pixels_recomputed();
         session
-            .paint_begin(layer, 30.0, 30.0, 5.0, color, 0.0, false)
+            .paint_begin(layer, 30.0, 30.0, 5.0, color, 0.0, false, false)
             .unwrap();
         session.commit_preview();
         let _ = session.render();

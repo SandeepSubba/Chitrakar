@@ -675,7 +675,11 @@ fn render_child(
         // transform is composed onto whatever its ancestors contribute; a
         // mask is authored in that same parent space.
         let t = parent.compose(node.transform);
-        let mask = MaskRef::new(node.mask.as_ref(), parent);
+        // A painted mask is worked out over the region about to be
+        // drawn before anything reads it, since reading one a pixel at a
+        // time would cost the strokes' length at every pixel.
+        let plane = MaskRef::plane_for(node.mask.as_ref(), parent, clip, (dst.width, dst.height));
+        let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
             NodeKind::Group => {
                 // Isolate the group on its own surface so group opacity,
@@ -1171,42 +1175,45 @@ fn to_local(t: Transform, x: f32, y: f32) -> Option<(f32, f32)> {
     Inverse::of(t).map(|inv| inv.at(x, y))
 }
 
-/// A document-space point in a layer's own space: where on the layer
-/// the pointer is, for a tool that writes into a layer's coordinates.
-/// `None` when the layer's transform collapses space, mapping every
-/// document point nowhere.
+/// The space a brush writes into.
+///
+/// Painting a layer, that is the layer's own space. Painting its mask,
+/// it is the space the mask is authored in — the layer's parent's —
+/// because a mask describes the document as the layer sees it rather
+/// than as the layer is drawn, and so does not turn or scale with it.
+pub fn brush_space(doc: &Document, id: NodeId, on_mask: bool) -> Result<Transform, DocError> {
+    Ok(if on_mask {
+        ancestor_space(doc, id)
+    } else {
+        world_transform(doc, id)?
+    })
+}
+
+/// A document-space point in the space a brush writes into: where on
+/// the layer, or on its mask, the pointer is. `None` when that space is
+/// collapsed, mapping every document point nowhere.
 pub fn point_in_layer(
     doc: &Document,
     id: NodeId,
+    on_mask: bool,
     x: f32,
     y: f32,
 ) -> Result<Option<(f32, f32)>, DocError> {
-    Ok(to_local(world_transform(doc, id)?, x, y))
+    Ok(to_local(brush_space(doc, id, on_mask)?, x, y))
 }
 
 /// A layer's own transform with every group it sits inside composed
-/// onto it: where the layer's space sits on the page. The root's own
-/// transform is not part of it, since rendering starts its walk from
-/// the identity there.
+/// onto it: where the layer's space sits on the page. The same chain
+/// [`node_bounds`] measures a layer against, so a tool that writes into
+/// a layer's space and the box drawn around that layer agree.
 pub fn world_transform(doc: &Document, id: NodeId) -> Result<Transform, DocError> {
-    let root = doc.root();
-    let mut t = doc.node(id)?.transform;
-    let mut at = id;
-    while let Some(parent) = doc.parent_of(at) {
-        if parent == root {
-            break;
-        }
-        t = doc.node(parent)?.transform.compose(t);
-        at = parent;
-    }
-    Ok(t)
+    Ok(ancestor_space(doc, id).compose(doc.node(id)?.transform))
 }
 
-/// How much a layer's own space is stretched on the page, groups
-/// included — what a length written in that space is worth in document
-/// pixels.
-pub fn layer_scale(doc: &Document, id: NodeId) -> Result<f32, DocError> {
-    Ok(max_scale(world_transform(doc, id)?))
+/// How much the space a brush writes into is stretched on the page —
+/// what a length written in it is worth in document pixels.
+pub fn layer_scale(doc: &Document, id: NodeId, on_mask: bool) -> Result<f32, DocError> {
+    Ok(max_scale(brush_space(doc, id, on_mask)?))
 }
 
 /// How much the transform can stretch a length, used to pad bounds for
@@ -2154,6 +2161,9 @@ struct MaskRef<'a> {
     /// every masked layer; neither varies across the region.
     t: Transform,
     inv: Option<Inverse>,
+    /// A painted mask's coverage, worked out over the region being drawn
+    /// before any of it is read.
+    plane: Option<&'a MaskPlane>,
 }
 
 impl<'a> MaskRef<'a> {
@@ -2164,12 +2174,37 @@ impl<'a> MaskRef<'a> {
             Some(MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. }) => {
                 parent.compose(*transform)
             }
-            None => parent,
+            // A painted mask's strokes are written in the space the mask
+            // is authored in, so there is nothing more to compose.
+            Some(MaskKind::Painted { .. }) | None => parent,
         };
         MaskRef {
             mask,
             t,
             inv: Inverse::of(t),
+            plane: None,
+        }
+    }
+
+    /// The coverage a painted mask was rasterized into, which is what
+    /// reading one comes down to.
+    fn with_plane(self, plane: Option<&'a MaskPlane>) -> MaskRef<'a> {
+        MaskRef { plane, ..self }
+    }
+
+    /// The plane a painted mask needs before it can be read, over the
+    /// region about to be drawn.
+    fn plane_for(
+        mask: Option<&Mask>,
+        parent: Transform,
+        clip: ClipRect,
+        surface: (u32, u32),
+    ) -> Option<MaskPlane> {
+        match mask.map(|m| &m.kind) {
+            Some(MaskKind::Painted { strokes }) => {
+                Some(paint_plane(strokes, parent, clip, surface))
+            }
+            _ => None,
         }
     }
 }
@@ -2184,6 +2219,10 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
             Some(inv) => pixel_coverage(shape, None, &[], m.t, inv, x, y),
             None => 0.0,
         },
+        // Read off the plane it was worked out into; without one there
+        // is nothing to read, and a mask that shows everything is the
+        // harmless answer.
+        MaskKind::Painted { .. } => m.plane.map_or(1.0, |p| p.at(x, y)),
         MaskKind::Raster { resource_id, .. } => {
             match (doc.resource(resource_id), m.inv.map(|inv| inv.at(fx, fy))) {
                 (Some(res), Some((lx, ly)))
@@ -2219,7 +2258,8 @@ fn apply_mask(
     clip: ClipRect,
     parent: Transform,
 ) {
-    let m = MaskRef::new(Some(mask), parent);
+    let plane = MaskRef::plane_for(Some(mask), parent, clip, (surface.width, surface.height));
+    let m = MaskRef::new(Some(mask), parent).with_plane(plane.as_ref());
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
             let c = coverage_at(doc, m, x, y);
@@ -2346,6 +2386,135 @@ fn stroke_coverage(stroke: &chitrakar_doc::PaintStroke, band: f32, x: f32, y: f3
     most
 }
 
+/// Coverage worked out ahead of a mask being read, for a mask that
+/// cannot be answered a pixel at a time: a painted one is a stack of
+/// strokes, and asking every stroke about every pixel would cost the
+/// strokes' length all over again at each of them.
+struct MaskPlane {
+    clip: ClipRect,
+    cover: Vec<f32>,
+}
+
+impl MaskPlane {
+    fn at(&self, x: u32, y: u32) -> f32 {
+        if x < self.clip.x0 || y < self.clip.y0 || x >= self.clip.x1 || y >= self.clip.y1 {
+            // Nothing was worked out there, and a mask that shows
+            // everything is the harmless answer.
+            return 1.0;
+        }
+        let w = self.clip.x1 - self.clip.x0;
+        self.cover[((y - self.clip.y0) * w + (x - self.clip.x0)) as usize]
+    }
+}
+
+/// A painted mask's coverage over `clip`. It starts showing everything;
+/// each stroke hides what it covers or shows it again, in the order the
+/// strokes were laid.
+fn paint_plane(
+    strokes: &[chitrakar_doc::PaintStroke],
+    t: Transform,
+    clip: ClipRect,
+    surface: (u32, u32),
+) -> MaskPlane {
+    let w = clip.x1.saturating_sub(clip.x0);
+    let h = clip.y1.saturating_sub(clip.y0);
+    let mut cover = vec![1.0f32; (w * h) as usize];
+    if let Some(inv) = Inverse::of(t) {
+        let band = 1.0 / max_scale(t).max(1e-6);
+        for stroke in strokes {
+            let Some(box_) = stroke.bounds() else {
+                continue;
+            };
+            let bbox = match transformed_box(t, box_).to_clip(surface.0, surface.1) {
+                Some(b) => b.intersect(clip),
+                None => continue,
+            };
+            if bbox.is_empty() {
+                continue;
+            }
+            let bw = bbox.x1 - bbox.x0;
+            let laid = stroke_cover(stroke, t, inv, band, bbox, surface);
+            for py in bbox.y0..bbox.y1 {
+                for px in bbox.x0..bbox.x1 {
+                    let c = laid[((py - bbox.y0) * bw + (px - bbox.x0)) as usize];
+                    if c <= 0.0 {
+                        continue;
+                    }
+                    let k = ((py - clip.y0) * w + (px - clip.x0)) as usize;
+                    cover[k] = if stroke.erase {
+                        cover[k] * (1.0 - c)
+                    } else {
+                        cover[k] + c * (1.0 - cover[k])
+                    };
+                }
+            }
+        }
+    }
+    MaskPlane { clip, cover }
+}
+
+/// A stroke's coverage over `bbox`, one value a pixel.
+///
+/// Gathered one segment at a time over that segment's own box rather
+/// than asking every pixel of the stroke's box about every segment of
+/// it: a long stroke has hundreds of segments and a box the size of the
+/// canvas, so the difference is between costing what the stroke covers
+/// and costing that times how long it is. The pieces combine by taking
+/// the most any of them lays rather than adding them, so a stroke that
+/// doubles back is not darker where it crossed.
+fn stroke_cover(
+    stroke: &chitrakar_doc::PaintStroke,
+    t: Transform,
+    inv: Inverse,
+    band: f32,
+    bbox: ClipRect,
+    surface: (u32, u32),
+) -> Vec<f32> {
+    let w = bbox.x1 - bbox.x0;
+    let mut cover = vec![0.0f32; (w * (bbox.y1 - bbox.y0)) as usize];
+    let n = stroke.points.len();
+    let softness = stroke.softness.clamp(0.0, 1.0);
+    // One point is a single dab, which is the segment from it to itself.
+    for i in 0..n.saturating_sub(1).max(1) {
+        let j = (i + 1).min(n - 1);
+        let (a, b) = (stroke.points[i], stroke.points[j]);
+        let (ra, rb) = (stroke.radius(i), stroke.radius(j));
+        let reach = ra.max(rb);
+        if reach <= 0.0 {
+            continue;
+        }
+        let seg = [
+            a[0].min(b[0]) - reach,
+            a[1].min(b[1]) - reach,
+            a[0].max(b[0]) + reach,
+            a[1].max(b[1]) + reach,
+        ];
+        let Some(sb) = transformed_box(t, seg)
+            .to_clip(surface.0, surface.1)
+            .map(|c| c.intersect(bbox))
+        else {
+            continue;
+        };
+        for py in sb.y0..sb.y1 {
+            for px in sb.x0..sb.x1 {
+                let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+                let along = segment_parameter(lx, ly, a, b);
+                let r = ra + (rb - ra) * along;
+                if r <= 0.0 {
+                    continue;
+                }
+                let fade = (r * softness).max(band);
+                let c = ((r - segment_distance(lx, ly, a, b)) / fade).clamp(0.0, 1.0);
+                let k = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
+                if c > cover[k] {
+                    cover[k] = c;
+                }
+            }
+        }
+    }
+    cover
+}
+
 /// Lay a paint layer's strokes onto a surface, in the order they were
 /// laid: paint goes on with source-over, an eraser takes off what is
 /// already there.
@@ -2376,49 +2545,8 @@ fn lay_strokes(
         if bbox.is_empty() {
             continue;
         }
-        let (w, h) = (bbox.x1 - bbox.x0, bbox.y1 - bbox.y0);
-        let mut cover = vec![0.0f32; (w * h) as usize];
-        let n = stroke.points.len();
-        let softness = stroke.softness.clamp(0.0, 1.0);
-        // One point is a single dab, which is the segment from it to
-        // itself.
-        for i in 0..n.saturating_sub(1).max(1) {
-            let j = (i + 1).min(n - 1);
-            let (a, b) = (stroke.points[i], stroke.points[j]);
-            let (ra, rb) = (stroke.radius(i), stroke.radius(j));
-            let reach = ra.max(rb);
-            if reach <= 0.0 {
-                continue;
-            }
-            let seg = [
-                a[0].min(b[0]) - reach,
-                a[1].min(b[1]) - reach,
-                a[0].max(b[0]) + reach,
-                a[1].max(b[1]) + reach,
-            ];
-            let Some(sb) = transformed_box(t, seg)
-                .to_clip(dst.width, dst.height)
-                .map(|c| c.intersect(bbox))
-            else {
-                continue;
-            };
-            for py in sb.y0..sb.y1 {
-                for px in sb.x0..sb.x1 {
-                    let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
-                    let along = segment_parameter(lx, ly, a, b);
-                    let r = ra + (rb - ra) * along;
-                    if r <= 0.0 {
-                        continue;
-                    }
-                    let fade = (r * softness).max(band);
-                    let c = ((r - segment_distance(lx, ly, a, b)) / fade).clamp(0.0, 1.0);
-                    let k = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
-                    if c > cover[k] {
-                        cover[k] = c;
-                    }
-                }
-            }
-        }
+        let w = bbox.x1 - bbox.x0;
+        let cover = stroke_cover(stroke, t, inv, band, bbox, (dst.width, dst.height));
         let color = resolve_color(doc, stroke.color);
         for py in bbox.y0..bbox.y1 {
             for px in bbox.x0..bbox.x1 {
@@ -2965,6 +3093,7 @@ mod tests {
                 id,
                 index: i,
                 stroke: Box::new(stroke),
+                on_mask: false,
             })
             .unwrap();
         }
@@ -3129,7 +3258,13 @@ mod tests {
                 stroke(&[[6.0, 30.0], [34.0, 30.0]], 4.0, RED),
             ],
         );
-        let inverse = doc.apply(Command::RemoveStroke { id, index: 0 }).unwrap();
+        let inverse = doc
+            .apply(Command::RemoveStroke {
+                id,
+                index: 0,
+                on_mask: false,
+            })
+            .unwrap();
         let s = render(&doc).unwrap();
         assert_eq!(s.get(20, 10).a, 0.0, "the first is gone");
         assert!(s.get(20, 30).a > 0.9, "the second is not");
@@ -3138,13 +3273,121 @@ mod tests {
         // Nothing else is a paint layer.
         let root = doc.root();
         assert!(matches!(
-            doc.apply(Command::RemoveStroke { id: root, index: 0 }),
+            doc.apply(Command::RemoveStroke {
+                id: root,
+                index: 0,
+                on_mask: false
+            }),
             Err(DocError::NotAPaintLayer(_))
         ));
         assert!(matches!(
-            doc.apply(Command::RemoveStroke { id, index: 9 }),
+            doc.apply(Command::RemoveStroke {
+                id,
+                index: 9,
+                on_mask: false
+            }),
             Err(DocError::NoSuchStroke { .. })
         ));
+    }
+
+    /// Not an assertion: what a painting of long strokes costs to draw
+    /// whole, which is what an export pays.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn painting_timing_probe() {
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        let strokes: Vec<chitrakar_doc::PaintStroke> = (0..40)
+            .map(|i| {
+                let y = 40.0 + i as f32 * 80.0;
+                chitrakar_doc::PaintStroke {
+                    points: (0..40)
+                        .map(|k| [60.0 + k as f32 * 60.0, y + (k % 7) as f32 * 4.0])
+                        .collect(),
+                    radii: vec![14.0],
+                    color: RED,
+                    softness: 0.5,
+                    erase: false,
+                }
+            })
+            .collect();
+        painted(&mut doc, strokes);
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = render(&doc).unwrap();
+            eprintln!("A4 painting, 40 long strokes: {:?}", t.elapsed());
+        }
+    }
+
+    /// A painted mask starts showing the whole layer, and an eraser
+    /// stroke takes a piece out of it — without touching the layer, so
+    /// undoing the stroke brings the piece back.
+    #[test]
+    fn a_painted_mask_takes_a_piece_out_of_a_layer() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("photo", 60.0, 60.0, RED),
+        })
+        .unwrap();
+        let photo = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id: photo,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Painted {
+                    strokes: Vec::new(),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        // An empty painted mask hides nothing.
+        assert_eq!(
+            render(&doc).unwrap().get(30, 30).to_srgb8(),
+            [255, 0, 0, 255]
+        );
+
+        let mut rub = stroke(&[[30.0, 30.0]], 8.0, RED);
+        rub.erase = true;
+        let inverse = doc
+            .apply(Command::AddStroke {
+                id: photo,
+                index: 0,
+                stroke: Box::new(rub),
+                on_mask: true,
+            })
+            .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(30, 30).a, 0.0, "the eraser took a piece out");
+        assert_eq!(s.get(5, 5).to_srgb8(), [255, 0, 0, 255], "the rest stayed");
+
+        // Painting over the hole shows the layer again there.
+        doc.apply(Command::AddStroke {
+            id: photo,
+            index: 1,
+            stroke: Box::new(stroke(&[[30.0, 30.0]], 4.0, RED)),
+            on_mask: true,
+        })
+        .unwrap();
+        assert!(
+            render(&doc).unwrap().get(30, 30).a > 0.9,
+            "and a brush over it puts the layer back"
+        );
+
+        // The layer itself was never touched: undoing the strokes is all
+        // it takes to have it whole again.
+        doc.apply(Command::RemoveStroke {
+            id: photo,
+            index: 1,
+            on_mask: true,
+        })
+        .unwrap();
+        doc.apply(inverse).unwrap();
+        assert_eq!(
+            render(&doc).unwrap().get(30, 30).to_srgb8(),
+            [255, 0, 0, 255]
+        );
     }
 
     /// A thumbnail is what the page draws of one layer, fitted into a

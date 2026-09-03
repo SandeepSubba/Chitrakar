@@ -30,8 +30,8 @@ without reading anything else.*
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
-  inscribed ellipse or rectangle, or any shape handed down to the layer
-  below — dragged and resized on the canvas, groups,
+  inscribed ellipse or rectangle, any shape handed down to the layer
+  below, or one brushed on by hand — dragged and resized on the canvas, groups,
   reorder (by the arrows, or by dragging a row above, below or into
   another), duplicate/copy/cut/paste (subtree and pixels included, across
   documents), delete, align and distribute a multi-selection, combine
@@ -68,6 +68,10 @@ without reading anything else.*
   however many points a stroke gathered, it is one entry in history. A
   ring under the pointer says how big the brush is and how much of that
   is its fade, and `[` and `]` resize it.
+  Rubbing at a layer that is not a paint layer takes a piece out of it
+  instead: the stroke goes into a painted mask, so the layer is
+  untouched and the brush puts the piece back — which is how part of a
+  photo is taken out without touching the photo.
   Layer rows carry a small picture of the layer itself — what the page
   would draw of it, effects and all, fitted into its own square — in
   place of the glyph that says what kind it is, and regenerated a breath
@@ -154,9 +158,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~205),
+- **Verify before committing:** `cargo test --workspace` (~207),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~381 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~386 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

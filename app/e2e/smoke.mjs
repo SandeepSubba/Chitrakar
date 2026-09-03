@@ -3196,6 +3196,53 @@ assert(
     "putting the brush down takes the ring away",
   );
 
+  // Rubbing at a layer that is not a paint layer takes a piece out of it
+  // through a mask, and the brush puts the piece back.
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(60, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(540, 380), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(300, 340))[3] === 255, "a solid rect to rub at");
+  // The brush works on the picked layer, so pick the rect.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const beforeRub = await page.locator(".panel ul li").count();
+  await page.click('button[aria-label="Paint"]');
+  await page.click('button[aria-label="Erase"]');
+  await page.waitForTimeout(150);
+  await page.mouse.move(...at(300, 340));
+  await page.mouse.down();
+  await page.mouse.move(...at(305, 342), { steps: 2 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(300, 340))[3] < 60,
+    "the rub took a piece out of the rect",
+  );
+  assert((await canvasPixel(100, 340))[3] === 255, "and left the rest of it");
+  assert(
+    (await page.locator(".panel ul li").count()) === beforeRub,
+    "through a mask on the rect, not a new paint layer",
+  );
+  await page.click('button[aria-label="Erase"]');
+  await page.waitForTimeout(150);
+  await page.mouse.move(...at(300, 340));
+  await page.mouse.down();
+  await page.mouse.move(...at(303, 341), { steps: 2 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(300, 340))[3] > 200,
+    "and the brush puts the piece back",
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
   // The panel shows what each layer holds, not only what it is called.
   await page.waitForTimeout(700);
   const thumb = page.locator(".panel ul li .layer-thumb").first();
