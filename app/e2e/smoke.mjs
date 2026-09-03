@@ -2905,6 +2905,63 @@ assert(
     `one undo puts the frame back (${await size()})`,
   );
 
+  // Pinned to the right, a layer keeps its distance from that edge when
+  // the frame grows; pinned to both sides it takes up the difference.
+  await page.locator(".panel ul li").nth(1).click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('select[aria-label="Pinned across"]').count()) === 1,
+    "a layer inside a frame is asked what it holds on to",
+  );
+  // Dragged-out geometry lands on fractions of a pixel, so these read
+  // within a pixel rather than exactly.
+  const near = (a, b) => Math.abs(Number(a) - b) < 1.5;
+  const rectX = () =>
+    page.locator('input[aria-label="X position"]').inputValue();
+  const rectW = () => page.locator('input[aria-label="W size"]').inputValue();
+  assert(near(await rectX(), 120), `the rect starts at 120 (${await rectX()})`);
+  await page.selectOption('select[aria-label="Pinned across"]', "End");
+  await page.waitForTimeout(200);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const fw = page.locator('input[aria-label="W size"]');
+  await fw.fill("300");
+  await fw.press("Enter");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li").nth(1).click();
+  await page.waitForTimeout(200);
+  assert(
+    near(await rectX(), 220),
+    `pinned right, it moved with the edge (${await rectX()})`,
+  );
+  assert(near(await rectW(), 60), `and kept its size (${await rectW()})`);
+  await page.selectOption('select[aria-label="Pinned across"]', "Stretch");
+  await page.waitForTimeout(200);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const fw2 = page.locator('input[aria-label="W size"]');
+  await fw2.fill("400");
+  await fw2.press("Enter");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li").nth(1).click();
+  await page.waitForTimeout(200);
+  assert(
+    near(await rectW(), 160),
+    `pinned to both sides, it took up the difference (${await rectW()})`,
+  );
+  // Back to where the rest of the block expects the frame.
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert(
+    near(await size(), 200),
+    `four undos put the frame and its pins back (${await size()})`,
+  );
+
   // Typed, the width is the frame's own size too.
   const w = page.locator('input[aria-label="W size"]');
   await w.fill("260");

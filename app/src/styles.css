@@ -1264,6 +1264,21 @@ body {
 .lock-toggle[aria-pressed="true"] {
   opacity: 1;
 }
+/* Where a layer inside a frame holds on: one picker per axis, side by
+   side like the geometry fields above them. */
+.pinning {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.pinning label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 /* The tones the graph is drawn over: filled shapes, faint enough that
    the curve and its points stay the thing being read. */
 .histogram path {

@@ -341,7 +341,7 @@ fn node_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bounds
 /// Bounds in the space the node's transform is written against — its
 /// parent's. Groups union their children here, which is why this is the
 /// recursive form and `node_bounds` is the one that finishes the job.
-fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+pub fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     bounds_in_parent_space_inner(doc, id, true)
 }
 

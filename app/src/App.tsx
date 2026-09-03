@@ -12,6 +12,7 @@ import {
   Mask,
   NodeId,
   NodeKind,
+  Pin,
   Transform,
   VectorShape,
   WasmSession,
@@ -151,6 +152,23 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   t: "Text",
   c: "Crop",
   i: "Eyedropper",
+};
+
+/** What a layer can be pinned to inside a frame, named for the axis so
+ * the words say what they mean rather than "start" and "end". */
+const PINS: Record<"x" | "y", [Pin, string][]> = {
+  x: [
+    ["Start", "Left"],
+    ["Middle", "Centre"],
+    ["End", "Right"],
+    ["Stretch", "Both sides"],
+  ],
+  y: [
+    ["Start", "Top"],
+    ["Middle", "Centre"],
+    ["End", "Bottom"],
+    ["Stretch", "Top and bottom"],
+  ],
 };
 
 /** A glyph per layer kind, so the stack is scannable without reading the
@@ -2163,39 +2181,18 @@ export function App() {
     const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
     if (drag.frame) {
       // The frame becomes the dragged rectangle instead of being scaled
-      // into it. Its own box always starts at (0, 0), so pulling the west
-      // or north edge moves the frame's origin — and its contents, which
-      // are written against that origin, come with it, keeping the
-      // offsets they were given.
-      const w = span(lx, fx);
-      const h = span(ly, fy);
-      const [nx, ny] = [Math.min(lx, fx), Math.min(ly, fy)];
-      preview({
-        Batch: [
-          {
-            SetKind: {
-              id: drag.id,
-              kind: {
-                Artboard: {
-                  width: w,
-                  height: h,
-                  background: drag.frame.background,
-                },
-              },
-            },
-          },
-          {
-            SetTransform: {
-              id: drag.id,
-              transform: {
-                ...t,
-                e: t.a * nx + t.c * ny + t.e,
-                f: t.b * nx + t.d * ny + t.f,
-              },
-            },
-          },
-        ],
-      });
+      // into it, and the engine moves what is inside by how each layer is
+      // pinned. Its own box always starts at (0, 0), so pulling the west
+      // or north edge moves the frame's origin, which the engine takes up
+      // in the frame's transform.
+      resizeFrame(
+        drag.id,
+        span(lx, fx),
+        span(ly, fy),
+        Math.min(lx, fx),
+        Math.min(ly, fy),
+        true,
+      );
       return;
     }
     const sx = span(lx, fx) / span(west ? x0 : x1, fx);
@@ -2216,6 +2213,30 @@ export function App() {
         },
       },
     });
+  };
+
+  /** Give a frame a new size (and, from a west or north edge, a new
+   * origin), moving what is in it by how each layer is pinned. The
+   * engine works out the whole thing as one command, so a drag previews
+   * it every move and records one entry when it lets go. */
+  const resizeFrame = (
+    id: NodeId,
+    width: number,
+    height: number,
+    dx: number,
+    dy: number,
+    gesture: boolean,
+  ) => {
+    if (!session) return;
+    try {
+      const cmd = JSON.parse(
+        session.artboard_resize(id, width, height, dx, dy),
+      ) as Command;
+      if (gesture) preview(cmd);
+      else run(cmd);
+    } catch (err) {
+      alert(`Frame: ${err}`);
+    }
   };
 
   const onHandlePointerUp = () => {
@@ -3164,6 +3185,13 @@ export function App() {
   };
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  // Pinning is only a question inside a frame; a layer on the page has
+  // no edges to be measured from.
+  const inFrame =
+    selectedLayer !== null &&
+    layers.some(
+      (l) => l.id === selectedLayer.parent && l.kind === "artboard",
+    );
   // Something has to be under a layer for it to be clipped to it, so the
   // bottom-most layer of a parent cannot be.
   const clippable = layers.some(
@@ -3342,18 +3370,14 @@ export function App() {
         ? (JSON.parse(session.kind_json(selected)) as NodeKind)
         : null;
     if (kind && typeof kind === "object" && "Artboard" in kind) {
-      run({
-        SetKind: {
-          id: selected,
-          kind: {
-            Artboard: {
-              ...kind.Artboard,
-              width: field === "w" ? value : kind.Artboard.width,
-              height: field === "h" ? value : kind.Artboard.height,
-            },
-          },
-        },
-      });
+      resizeFrame(
+        selected,
+        field === "w" ? value : kind.Artboard.width,
+        field === "h" ? value : kind.Artboard.height,
+        0,
+        0,
+        false,
+      );
       return;
     }
     const ratio = value / from;
@@ -4925,6 +4949,45 @@ export function App() {
           )}
           {selectedLayer && (
             <div className="layer-props">
+              {/* Inside a frame, what the layer does when that frame is
+                  given a new size — the reason a frame can be resized at
+                  all rather than only ever drawn at the size it was made
+                  with. */}
+              {inFrame && (
+                <div className="pinning" aria-label="Pinned to">
+                  {(
+                    [
+                      ["x", "Across"],
+                      ["y", "Down"],
+                    ] as const
+                  ).map(([axis, label]) => (
+                    <label key={axis}>
+                      {label}
+                      <select
+                        value={selectedLayer.pinned[axis]}
+                        onChange={(e) =>
+                          run({
+                            SetPinning: {
+                              id: selectedLayer.id,
+                              pinned: {
+                                ...selectedLayer.pinned,
+                                [axis]: e.target.value as Pin,
+                              },
+                            },
+                          })
+                        }
+                        aria-label={`Pinned ${label.toLowerCase()}`}
+                      >
+                        {PINS[axis].map(([value, name]) => (
+                          <option key={value} value={value}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
               {selBox && (
                 <div className="geometry" aria-label="Position and size">
                   {(

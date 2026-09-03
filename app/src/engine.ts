@@ -182,6 +182,13 @@ export type Gradient =
     }
   | { Radial: { center: [number, number]; radius: number; stops: GradientStop[] } };
 
+/** What a layer does when the frame around it is given a new size. */
+export type Pin = "Start" | "End" | "Middle" | "Stretch";
+export interface Pinning {
+  x: Pin;
+  y: Pin;
+}
+
 export type NodeKind =
   | "Group"
   | {
@@ -222,6 +229,7 @@ export type Command =
   | { SetVisible: { id: NodeId; visible: boolean } }
   | { SetLocked: { id: NodeId; locked: boolean } }
   | { SetClipped: { id: NodeId; clipped: boolean } }
+  | { SetPinning: { id: NodeId; pinned: Pinning } }
   | { SetBlendMode: { id: NodeId; blend: BlendMode } }
   | { SetTransform: { id: NodeId; transform: Transform } }
   | { SetKind: { id: NodeId; kind: NodeKind } }
@@ -256,6 +264,8 @@ export interface LayerInfo {
   locked: boolean;
   /** Shows only where the layer below it does, and goes when it goes. */
   clipped: boolean;
+  /** What it does when the frame around it is resized. */
+  pinned: Pinning;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

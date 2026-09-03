@@ -246,6 +246,7 @@ impl Session {
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
             | Command::SetClipped { id, .. }
+            | Command::SetPinning { id, .. }
             | Command::SetBlendMode { id, .. }
             | Command::SetEffects { id, .. }
             | Command::SetTransform { id, .. }
@@ -389,6 +390,7 @@ impl Session {
             Command::SetClipped { id, clipped } => {
                 format!("{} {}", if *clipped { "Clip" } else { "Unclip" }, name(id))
             }
+            Command::SetPinning { id, .. } => format!("Pin {}", name(id)),
             Command::SetBlendMode { id, .. } => format!("Blend of {}", name(id)),
             Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
             Command::SetKind { id, .. } => format!("Edit {}", name(id)),
@@ -969,6 +971,87 @@ impl Session {
             ]),
             Some(label),
         )
+    }
+
+    /// The one command that gives a frame a new size and moves what is
+    /// in it by how each layer is pinned — as JSON, so a corner drag can
+    /// preview it every move and let go of it as a single entry.
+    ///
+    /// `dx`/`dy` shift the frame's own origin, in the frame's coordinates
+    /// before the resize: pulling the west or north edge moves the corner
+    /// everything inside is measured from, and the frame's transform has
+    /// to take that up so the rest of the page does not move.
+    ///
+    /// The layers inside are not told about that shift at all — their own
+    /// coordinates are unchanged by it, and a layer pinned to the start
+    /// edge should follow that edge, which is exactly what happens when
+    /// nothing is done. What the other pins need is the change in size.
+    pub fn artboard_resize(
+        &self,
+        id: NodeId,
+        width: f32,
+        height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<String, EngineError> {
+        let node = self.doc.node(id)?;
+        let NodeKind::Artboard {
+            width: w0,
+            height: h0,
+            background,
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand("that layer is not a frame".into()));
+        };
+        if !(width > 0.0 && height > 0.0) {
+            return Err(EngineError::BadCommand("a frame needs a size".into()));
+        }
+        let (dw, dh) = (width - w0, height - h0);
+        let mut cmds = vec![
+            Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Artboard {
+                    width,
+                    height,
+                    background: *background,
+                }),
+            },
+            Command::SetTransform {
+                id,
+                transform: node.transform.compose(Transform::translation(dx, dy)),
+            },
+        ];
+        for &child in self.doc.children_of(id)? {
+            let kid = self.doc.node(child)?;
+            let Bounds::Rect(x0, y0, x1, y1) =
+                chitrakar_render::bounds_in_parent_space(&self.doc, child)?
+            else {
+                // An adjustment or a filter fills whatever it is in and
+                // has no box to pin by; it needs no moving either.
+                continue;
+            };
+            let (sx, tx) = Self::axis(kid.pinned.x, x0, x1, dw);
+            let (sy, ty) = Self::axis(kid.pinned.y, y0, y1, dh);
+            if sx == 1.0 && sy == 1.0 && tx == 0.0 && ty == 0.0 {
+                continue;
+            }
+            // The move is written in the frame's space, so it goes on the
+            // outside of the layer's own transform.
+            let outer = Transform {
+                a: sx,
+                b: 0.0,
+                c: 0.0,
+                d: sy,
+                e: tx + x0 * (1.0 - sx),
+                f: ty + y0 * (1.0 - sy),
+            };
+            cmds.push(Command::SetTransform {
+                id: child,
+                transform: outer.compose(kid.transform),
+            });
+        }
+        serde_json::to_string(&Command::Batch(cmds))
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
     /// A frame's contents as a PNG, at the size the frame shows on the
@@ -2250,6 +2333,26 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// What one axis of a resize does to a layer, as a scale and a shift in
+    /// the frame's own coordinates: `from`..`to` is the layer's span on that
+    /// axis and `change` is how much longer the frame just became.
+    fn axis(pin: chitrakar_doc::Pin, from: f32, to: f32, change: f32) -> (f32, f32) {
+        use chitrakar_doc::Pin;
+        let span = to - from;
+        match pin {
+            // Its distance from the start edge is its own coordinate, which
+            // nothing here touches.
+            Pin::Start => (1.0, 0.0),
+            Pin::End => (1.0, change),
+            Pin::Middle => (1.0, change / 2.0),
+            // Both distances kept, so the layer takes up the difference. A
+            // layer with no width on this axis has nothing to stretch and is
+            // left where a start-pinned one would be.
+            Pin::Stretch if span > 1e-6 => ((span + change).max(1e-3) / span, 0.0),
+            Pin::Stretch => (1.0, 0.0),
+        }
+    }
+
     /// Every layer in the order the page is painted in — a parent before
     /// what it holds, and each layer before the ones drawn over it. What
     /// "everything below this layer" means.
@@ -2311,6 +2414,7 @@ impl Session {
                 has_effects: !node.effects.is_empty(),
                 locked: node.locked,
                 clipped: node.clipped && index > 0,
+                pinned: node.pinned,
                 depth,
                 parent: group.0,
                 index,
@@ -2705,6 +2809,8 @@ pub struct LayerInfo {
     /// Confined to the layer below it. The bottom layer of a parent has
     /// nothing under it, so the flag reads false there however it is set.
     pub clipped: bool,
+    /// What it does when the frame around it is given a new size.
+    pub pinned: chitrakar_doc::Pinning,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,
@@ -4480,6 +4586,102 @@ mod tests {
         // same point reads the same.
         session.set_viewport(0.25, 0.0, 0.0, 10, 10);
         assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// A frame given a new size moves what is in it by how each layer is
+    /// pinned: the start edge is followed, the end edge is kept away
+    /// from, the middle is held, and a stretched layer takes up the
+    /// difference.
+    #[test]
+    fn what_a_frame_holds_moves_by_how_it_is_pinned() {
+        use chitrakar_doc::{Pin, Pinning};
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let board = session
+            .add_artboard("Artboard 1", 50.0, 50.0, 200.0, 100.0, None)
+            .unwrap();
+        // Four layers across the frame, one per answer.
+        let put = |session: &mut Session, name: &str, x: f32, w: f32, pin: Pin| {
+            let index = session.child_count(board);
+            session
+                .apply(Command::AddNode {
+                    parent: board,
+                    index,
+                    node: filled_rect(name, w, 20.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(board).unwrap()[index];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 10.0),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetPinning {
+                    id,
+                    pinned: Pinning {
+                        x: pin,
+                        y: Pin::Start,
+                    },
+                })
+                .unwrap();
+            id
+        };
+        let start = put(&mut session, "start", 10.0, 20.0, Pin::Start);
+        let end = put(&mut session, "end", 170.0, 20.0, Pin::End);
+        let middle = put(&mut session, "middle", 90.0, 20.0, Pin::Middle);
+        let wide = put(&mut session, "wide", 10.0, 180.0, Pin::Stretch);
+
+        // The frame goes from 200 wide to 300, its origin staying put.
+        let cmd = session
+            .artboard_resize(board, 300.0, 100.0, 0.0, 0.0)
+            .unwrap();
+        session.apply_json(&cmd).unwrap();
+
+        let box_ = |session: &Session, id| session.bounds_of(id).unwrap();
+        assert_eq!(
+            box_(&session, start)[0],
+            60.0,
+            "the start-pinned layer did not move"
+        );
+        assert_eq!(
+            box_(&session, end)[0],
+            // The frame sits at 50 on the page, so a local 270 reads 320.
+            320.0,
+            "the end-pinned one kept 10 from the right"
+        );
+        assert_eq!(
+            box_(&session, middle)[0],
+            190.0,
+            "the middle-pinned one kept the middle"
+        );
+        assert_eq!(
+            box_(&session, wide)[0],
+            60.0,
+            "the stretched one still starts where it did"
+        );
+        assert_eq!(
+            box_(&session, wide)[2],
+            280.0,
+            "and took up the whole difference"
+        );
+        assert_eq!(
+            box_(&session, start)[2],
+            20.0,
+            "an unstretched layer is the size it was"
+        );
+
+        // Undo puts the whole resize back in one step.
+        session.undo().unwrap();
+        assert_eq!(
+            (box_(&session, end)[0], box_(&session, wide)[2]),
+            (170.0 + 50.0, 180.0)
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Pin wide"),
+            "one undo took the whole resize, so it was one entry"
+        );
     }
 
     /// A histogram describes the picture on the page, not the hole

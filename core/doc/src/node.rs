@@ -513,6 +513,31 @@ pub enum MaskKind {
     Painted { strokes: Vec<PaintStroke> },
 }
 
+/// How a layer answers when the frame around it changes size — the same
+/// question on each axis, and the reason a frame can be given a new size
+/// at all rather than only ever being drawn at the one it was made with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Pin {
+    /// Keeps its distance from the left (or top) edge, which is what a
+    /// layer does when nothing is said — and what every layer written
+    /// before pinning existed did.
+    #[default]
+    Start,
+    /// Keeps its distance from the right (or bottom) edge.
+    End,
+    /// Keeps its distance from the middle.
+    Middle,
+    /// Keeps both distances, so it grows and shrinks with the frame.
+    Stretch,
+}
+
+/// A layer's answer on each axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Pinning {
+    pub x: Pin,
+    pub y: Pin,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub name: String,
@@ -538,6 +563,11 @@ pub struct Node {
     /// nothing to clip to, so the flag is ignored there. Additive.
     #[serde(default)]
     pub clipped: bool,
+    /// What the layer does when the frame holding it is given a new
+    /// size. Read only inside a frame; additive, and its default is what
+    /// every layer did before it existed.
+    #[serde(default)]
+    pub pinned: Pinning,
 }
 
 /// A live effect attached to a layer. Effects are rendered from the layer's
@@ -623,6 +653,7 @@ impl Node {
             effects: Vec::new(),
             locked: false,
             clipped: false,
+            pinned: Pinning::default(),
         }
     }
 

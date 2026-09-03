@@ -107,8 +107,12 @@ without reading anything else.*
   changes how many pixels it is and leaves what is in it the size it
   was (pulling the west or north edge carries the contents with it,
   since they are written against the frame's own corner), and the W/H
-  fields set that same number. Its ground is a colour in the panel, or
-  none at all, which makes the frame a window onto the page.
+  fields set that same number. What is inside it moves by how each layer
+  is pinned — left, centre, right or both sides, and the same down the
+  page — so a frame taken from one screen size to another lays itself
+  out rather than needing every layer dragged. Its ground is a colour in
+  the panel, or none at all, which makes the frame a window onto the
+  page.
   A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
   in the layer bar — so it shows only where that one does and goes when
   it goes: a texture cut to a shape, a photo poured into lettering, or,
@@ -218,9 +222,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~236),
+- **Verify before committing:** `cargo test --workspace` (~237),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~453 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~459 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -575,8 +579,8 @@ chitrakar/
   it, and exports one PNG per frame at the frame's own size; live in SVG
   (a clipPath) and PDF (a rectangle clip). Resized by its handles or its
   W/H fields rather than scaled, with a ground that can be any colour or
-  none. Frames as export presets, and constraints on what is inside
-  them, still to come.
+  none, and what is inside pinned to its edges, its middle or both.
+  Frames as export presets still to come.
 - Live effects (drop shadow, outline), styles, symbols/components.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

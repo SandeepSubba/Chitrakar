@@ -9,7 +9,8 @@ mod node;
 
 pub use node::{
     Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Guide, Mask, MaskKind, Node,
-    NodeKind, PaintStroke, RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
+    NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, TextAlign, TextSpec, Transform,
+    VectorShape,
 };
 
 use chitrakar_color::ColorMode;
@@ -345,6 +346,12 @@ impl Document {
                 node.clipped = clipped;
                 Ok(Command::SetClipped { id, clipped: prev })
             }
+            Command::SetPinning { id, pinned } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = node.pinned;
+                node.pinned = pinned;
+                Ok(Command::SetPinning { id, pinned: prev })
+            }
             Command::SetBlendMode { id, blend } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = node.blend;
@@ -617,6 +624,11 @@ pub enum Command {
     SetClipped {
         id: NodeId,
         clipped: bool,
+    },
+    /// Say what a layer does when the frame around it is resized.
+    SetPinning {
+        id: NodeId,
+        pinned: Pinning,
     },
     SetBlendMode {
         id: NodeId,

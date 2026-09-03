@@ -293,6 +293,24 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// The command that gives a frame a new size and moves what is in it
+    /// by how each layer is pinned, as JSON — apply it with `preview`
+    /// while a corner is being dragged and with `apply` when it is let
+    /// go, so the whole drag is one entry. `dx`/`dy` shift the frame's
+    /// own origin, in its coordinates before the resize.
+    pub fn artboard_resize(
+        &self,
+        id: f64,
+        width: f32,
+        height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<String, JsError> {
+        self.inner
+            .artboard_resize(NodeId(id as u64), width, height, dx, dy)
+            .map_err(to_js)
+    }
+
     /// A frame's contents as a PNG, at the size it shows on the page
     /// times `scale`.
     pub fn export_artboard_png(&self, id: f64, scale: f32) -> Result<Vec<u8>, JsError> {
