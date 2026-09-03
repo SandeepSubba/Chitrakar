@@ -293,6 +293,15 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Put a live copy of a layer beside it (see
+    /// `Session::make_instance`). Returns the copy's id.
+    pub fn make_instance(&mut self, of: f64) -> Result<f64, JsError> {
+        self.inner
+            .make_instance(NodeId(of as u64))
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// The command that gives a frame a new size and moves what is in it
     /// by how each layer is pinned, as JSON — apply it with `preview`
     /// while a corner is being dragged and with `apply` when it is let

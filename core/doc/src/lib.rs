@@ -46,6 +46,8 @@ pub enum DocError {
     MoveIntoOwnSubtree(NodeId),
     #[error("a document cannot be {0}x{1}")]
     BadCanvasSize(u32, u32),
+    #[error("that would make a copy of itself")]
+    InstanceCycle,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +260,60 @@ impl Document {
 
     /// Apply a command, returning its inverse (for undo).
     pub fn apply(&mut self, cmd: Command) -> Result<Command, DocError> {
+        // An instance draws whatever it is a copy of, so a copy that
+        // could reach itself would have nothing to draw. Only the
+        // commands that can change what reaches what are worth the walk.
+        let structural = matches!(
+            cmd,
+            Command::AddNode { .. }
+                | Command::MoveNode { .. }
+                | Command::SetKind { .. }
+                | Command::RestoreSubtree { .. }
+                | Command::Batch(_)
+        );
+        let inverse = self.apply_inner(cmd)?;
+        if structural && self.instance_cycle() {
+            // Put it back rather than leave the document in a state
+            // nothing could draw.
+            let _ = self.apply_inner(inverse);
+            return Err(DocError::InstanceCycle);
+        }
+        Ok(inverse)
+    }
+
+    /// Whether any layer can reach itself through what it holds and what
+    /// it is a copy of.
+    fn instance_cycle(&self) -> bool {
+        fn walk(doc: &Document, id: NodeId, state: &mut HashMap<NodeId, u8>) -> bool {
+            match state.get(&id) {
+                // Already on the way down: this is the cycle.
+                Some(1) => return true,
+                Some(_) => return false,
+                None => {}
+            }
+            state.insert(id, 1);
+            if let Ok(node) = doc.node(id) {
+                if let NodeKind::Instance { of } = node.kind {
+                    if walk(doc, of, state) {
+                        return true;
+                    }
+                }
+            }
+            if let Ok(children) = doc.children_of(id) {
+                for &child in children {
+                    if walk(doc, child, state) {
+                        return true;
+                    }
+                }
+            }
+            state.insert(id, 2);
+            false
+        }
+        let mut state = HashMap::new();
+        walk(self, self.root, &mut state)
+    }
+
+    fn apply_inner(&mut self, cmd: Command) -> Result<Command, DocError> {
         match cmd {
             Command::AddNode {
                 parent,
@@ -770,6 +826,63 @@ mod tests {
                 radius: 0.0,
             },
         ))
+    }
+
+    /// A copy that could reach itself would have nothing to draw, so the
+    /// document refuses to make one and stays exactly as it was.
+    #[test]
+    fn a_copy_cannot_be_made_to_hold_itself() {
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: rect("r1"),
+        })
+        .unwrap();
+        // A copy of the group, on the page: fine.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", group)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        let before = doc.node_count();
+
+        // The same copy moved inside what it copies: refused, and
+        // nothing about the document changed.
+        assert_eq!(
+            doc.apply(Command::MoveNode {
+                id: copy,
+                parent: group,
+                index: 1,
+            })
+            .err(),
+            Some(DocError::InstanceCycle)
+        );
+        assert_eq!(doc.parent_of(copy), Some(root));
+        assert_eq!(doc.children_of(group).unwrap().len(), 1);
+        assert_eq!(doc.node_count(), before);
+
+        // A copy of itself is refused the same way.
+        assert_eq!(
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: 1,
+                node: Box::new(Node::instance("self", group)),
+            })
+            .err(),
+            Some(DocError::InstanceCycle)
+        );
+        assert_eq!(doc.node_count(), before);
     }
 
     /// Confining a layer to the one below it is a plain switch with a

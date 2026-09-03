@@ -44,9 +44,25 @@ fn write_children(
     defs: &mut String,
 ) -> Result<(), DocError> {
     for &child in doc.children_of(group)? {
+        write_node(doc, child, out, depth, defs)?;
+    }
+    Ok(())
+}
+
+/// One layer's markup, at `depth` levels of indentation. Pulled out of
+/// the walk so a copy of a layer can ask for the layer's own markup
+/// again, inside the copy's place.
+fn write_node(
+    doc: &Document,
+    child: NodeId,
+    out: &mut String,
+    depth: usize,
+    defs: &mut String,
+) -> Result<(), DocError> {
+    {
         let node = doc.node(child)?;
         if !node.visible || node.opacity <= 0.0 {
-            continue;
+            return Ok(());
         }
         let pad = "  ".repeat(depth);
         let common = common_attrs(node);
@@ -70,6 +86,37 @@ fn write_children(
             NodeKind::Group => {
                 let _ = writeln!(out, "{pad}<g{common}>");
                 write_children(doc, child, out, depth + 1, defs)?;
+                let _ = writeln!(out, "{pad}</g>");
+            }
+            NodeKind::Instance { of } => {
+                // A copy is the original's markup again, inside the
+                // copy's own transform, with the original's own
+                // placement undone: SVG has <use>, but it would carry
+                // that placement with it.
+                let Some(back) = doc
+                    .node(*of)
+                    .ok()
+                    .and_then(|m| chitrakar_render::invert(m.transform))
+                else {
+                    return Ok(());
+                };
+                // Adding zero turns the negative zeros an inverse
+                // produces back into plain ones: the same number, but
+                // "-0" in the markup reads as a mistake.
+                let z = |v: f32| v + 0.0;
+                let undo = format!(
+                    r#" transform="matrix({} {} {} {} {} {})""#,
+                    z(back.a),
+                    z(back.b),
+                    z(back.c),
+                    z(back.d),
+                    z(back.e),
+                    z(back.f)
+                );
+                let _ = writeln!(out, "{pad}<g{common}>");
+                let _ = writeln!(out, "{pad}  <g{undo}>");
+                write_node(doc, *of, out, depth + 2, defs)?;
+                let _ = writeln!(out, "{pad}  </g>");
                 let _ = writeln!(out, "{pad}</g>");
             }
             NodeKind::Artboard {
@@ -601,6 +648,43 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// A copy travels as the original's markup again, inside the copy's
+    /// own place, with the original's own placement undone.
+    #[test]
+    fn a_copy_travels_as_the_original_drawn_again() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        let master = filled(&mut doc, "master", 40.0, 30.0);
+        doc.apply(Command::SetTransform {
+            id: master,
+            transform: Transform::translation(10.0, 10.0),
+        })
+        .unwrap();
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", master)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(100.0, 60.0),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        // Two rects of the same size: the original and the copy of it.
+        assert_eq!(
+            svg.matches(r#"<rect width="40" height="30""#).count(),
+            2,
+            "the copy is the original drawn again: {svg}"
+        );
+        assert!(
+            svg.contains("matrix(1 0 0 1 -10 -10)"),
+            "with the original's own placement undone: {svg}"
+        );
     }
 
     /// A frame travels as a group cut to a rectangle, with its ground

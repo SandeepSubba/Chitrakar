@@ -349,6 +349,9 @@ impl<'a> Page<'a> {
                 gradient, stroke, ..
             } => gradient.is_none() && stroke.as_ref().is_none_or(|s| s.widths.is_empty()),
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
+            // A copy is drawn by drawing the original again, so it is as
+            // live as the original is.
+            NodeKind::Instance { of } => self.is_live(*of)?,
             // A brush layer has no live form in PDF, so it goes over as
             // the pixels it paints.
             NodeKind::Paint { .. }
@@ -599,6 +602,24 @@ impl<'a> Page<'a> {
                     if c.visible && c.opacity > 0.0 {
                         self.draw_node(child)?;
                     }
+                }
+            }
+            NodeKind::Instance { of } => {
+                // The original's own placement is undone first: a copy
+                // puts the picture where the copy is.
+                let master = self.doc.node(*of)?;
+                if let Some(back) = chitrakar_render::invert(master.transform) {
+                    let _ = writeln!(
+                        self.content,
+                        "{} {} {} {} {} {} cm",
+                        num(back.a),
+                        num(back.b),
+                        num(back.c),
+                        num(back.d),
+                        num(back.e),
+                        num(back.f)
+                    );
+                    self.draw_node(*of)?;
                 }
             }
             NodeKind::Artboard {

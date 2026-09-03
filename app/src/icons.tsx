@@ -29,6 +29,7 @@ export type IconName =
   | "ungroup"
   | "clip"
   | "frame"
+  | "instance"
   | "brush"
   | "duplicate"
   | "shadow"
@@ -277,6 +278,14 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
       <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
+    </>
+  ),
+  // A live copy: one box behind another, joined by the link between.
+  instance: (
+    <>
+      <rect x="3.5" y="3.5" width="10" height="10" rx="1.5" />
+      <rect x="10.5" y="10.5" width="10" height="10" rx="1.5" />
+      <path d="M9 9l6 6" />
     </>
   ),
   // An artboard: a page with crop marks, the way a frame is drawn.

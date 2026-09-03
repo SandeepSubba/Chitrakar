@@ -194,7 +194,9 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
         // A frame's box is its own, whatever it holds: it cuts its
         // contents to that size, so nothing inside can enlarge it.
         NodeKind::Artboard { width, height, .. } => Some((*width, *height)),
-        NodeKind::Group
+        // A copy has no size of its own: it is whatever it is a copy of.
+        NodeKind::Instance { .. }
+        | NodeKind::Group
         | NodeKind::Paint { .. }
         | NodeKind::Clone { .. }
         | NodeKind::Adjustment(_)
@@ -306,6 +308,19 @@ fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
             NodeKind::Group | NodeKind::Artboard { .. } if reads_backdrop(doc, child)? => {
                 return Ok(true)
             }
+            // A copy sees what the original sees. The graph has no
+            // cycles, so following it terminates.
+            NodeKind::Instance { of } => {
+                let master = doc.node(*of)?;
+                let reads = match &master.kind {
+                    NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => true,
+                    NodeKind::Group | NodeKind::Artboard { .. } => reads_backdrop(doc, *of)?,
+                    _ => false,
+                };
+                if reads || master.blend != BlendMode::Normal {
+                    return Ok(true);
+                }
+            }
             _ => {}
         }
     }
@@ -416,6 +431,15 @@ fn bounds_in_parent_space_inner(
                 None => Bounds::None,
             }
         }
+        NodeKind::Instance { of } => match local_bounds_of(doc, *of) {
+            Ok(Some([x0, y0, x1, y1])) => {
+                transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+            }
+            // The original is gone, or is a change to what is under it
+            // rather than a picture with a box.
+            Ok(None) => Bounds::None,
+            Err(_) => Bounds::None,
+        },
         kind => {
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
@@ -439,6 +463,9 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
         }
         NodeKind::Text(spec) => Some(text::bounds(spec)),
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => painted_bounds(strokes),
+        // A copy's own box is the original's own box: the original's
+        // placement is not part of what travels.
+        NodeKind::Instance { of } => local_bounds_of(doc, *of).unwrap_or(None),
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
             // A group's own box is the union of its children, which are
@@ -874,6 +901,61 @@ fn render_child(
         };
         let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
+            NodeKind::Instance { of } => {
+                // A copy draws what the original draws, where the copy
+                // is: the original's own placement is undone first, so
+                // moving the original moves only the original.
+                let Ok(master) = doc.node(*of) else {
+                    return Ok(());
+                };
+                let Some(back) = invert(master.transform) else {
+                    return Ok(());
+                };
+                let space = t.compose(back);
+                // The original's own box maps to the page through the
+                // copy's own space: undoing the original's transform and
+                // then applying it again is exactly that space.
+                let extent = match local_bounds_of(doc, *of)? {
+                    Some([x0, y0, x1, y1]) => transformed_local_bounds(t, (x0, y0, x1, y1)),
+                    // A copy of an adjustment or a filter reaches as far
+                    // as the original would.
+                    None => Bounds::Everything,
+                };
+                let sub_clip = match extent.to_clip(dst.width, dst.height) {
+                    Some(b) => b.intersect(clip),
+                    None => return Ok(()),
+                };
+                if sub_clip.is_empty() {
+                    return Ok(());
+                }
+                // Composited like the original would be: nothing of its
+                // own to apply, so draw it straight in.
+                if node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none() {
+                    return render_layer(doc, *of, dst, sub_clip, space);
+                }
+                let (ox, oy) = (sub_clip.x0, sub_clip.y0);
+                let window = Transform::translation(-(ox as f32), -(oy as f32));
+                let inner = ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: sub_clip.x1 - ox,
+                    y1: sub_clip.y1 - oy,
+                };
+                let mut sub = Surface::new(inner.x1, inner.y1);
+                render_layer(doc, *of, &mut sub, inner, window.compose(space))?;
+                if node.mask.is_some() {
+                    let shifted = window.compose(parent);
+                    let plane = MaskRef::plane_for(
+                        node.mask.as_ref(),
+                        shifted,
+                        inner,
+                        (sub.width, sub.height),
+                    );
+                    let m = MaskRef::new(node.mask.as_ref(), shifted).with_plane(plane.as_ref());
+                    apply_mask(doc, m, &mut sub, inner);
+                }
+                composite_from(dst, &sub, (ox, oy), node.opacity, blend, sub_clip);
+            }
             NodeKind::Artboard {
                 width,
                 height,
@@ -3842,6 +3924,19 @@ fn hit_in_group(
                     return Ok(Some(hit));
                 }
             }
+            NodeKind::Instance { of } => {
+                // Picked over the box the original occupies, carried into
+                // the copy's own place — the same box the copy's handles
+                // are drawn round, so what is picked is what is outlined.
+                let Ok(Some(box_)) = local_bounds_of(doc, *of) else {
+                    continue;
+                };
+                if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
+                    if lx >= box_[0] && ly >= box_[1] && lx < box_[2] && ly < box_[3] {
+                        return Ok(Some(child));
+                    }
+                }
+            }
             NodeKind::Artboard {
                 width,
                 height,
@@ -4014,6 +4109,101 @@ mod tests {
         b: 1.0,
         a: 1.0,
     };
+
+    /// A copy draws what the original draws, where the copy is; changing
+    /// the original changes the copy, and moving the original moves only
+    /// the original.
+    #[test]
+    fn a_copy_follows_the_original_it_was_made_from() {
+        let mut doc = Document::new(80, 40, ColorMode::Rgb);
+        let master = add(&mut doc, filled_rect("master", 10.0, 10.0, RED));
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", master)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(40.0, 0.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(5, 5).to_srgb8(), [255, 0, 0, 255], "the original");
+        assert_eq!(s.get(45, 5).to_srgb8(), [255, 0, 0, 255], "and its copy");
+        assert_eq!(s.get(20, 5).a, 0.0, "and nothing in between");
+
+        // Change the original and the copy changes with it.
+        doc.apply(Command::SetKind {
+            id: master,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                fill: Some(BLUE),
+                stroke: None,
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(45, 5).to_srgb8(),
+            [0, 0, 255, 255],
+            "the copy took it"
+        );
+        assert_eq!(s.get(55, 15).to_srgb8(), [0, 0, 255, 255], "size and all");
+
+        // Moving the original leaves the copy where it was put.
+        doc.apply(Command::SetTransform {
+            id: master,
+            transform: Transform::translation(0.0, 20.0),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(5, 5).a, 0.0, "the original moved");
+        assert_eq!(
+            s.get(45, 5).to_srgb8(),
+            [0, 0, 255, 255],
+            "the copy did not"
+        );
+    }
+
+    /// A copy has its own opacity on top of what it is a copy of.
+    #[test]
+    fn a_copy_carries_its_own_opacity() {
+        let mut doc = Document::new(40, 20, ColorMode::Rgb);
+        let master = add(&mut doc, filled_rect("master", 10.0, 10.0, RED));
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", master)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(20.0, 0.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetOpacity {
+            id: copy,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(5, 5).a, 1.0, "the original is solid");
+        assert!(
+            (s.get(25, 5).a - 0.5).abs() < 0.01,
+            "and the copy is half there ({})",
+            s.get(25, 5).a
+        );
+    }
 
     /// A curve on one channel moves that channel and leaves the others,
     /// and the master curve runs before it rather than instead of it.

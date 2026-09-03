@@ -2986,6 +2986,80 @@ assert(
   );
 }
 
+// 8x6e. A live copy: it draws whatever the layer it follows holds, where
+// the copy is, so changing the original changes the copy — and moving the
+// original moves only the original.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(60, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(160, 160), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  // Drawing does not pick; the copy button acts on what is picked.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const original = await canvasPixel(100, 100);
+  assert(original[3] === 255, `something to copy (${original})`);
+
+  await page.click('button[aria-label="Make a live copy"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "the copy is a layer of its own",
+  );
+  assert(
+    (await page.locator(".copy-of").count()) === 1,
+    "and the panel says what it follows",
+  );
+  // It starts on top of the original; drag it clear.
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 100), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const moved = await canvasPixel(400, 100);
+  assert(
+    moved.join() === original.join(),
+    `the copy draws what the original does (${original} -> ${moved})`,
+  );
+  assert(
+    (await canvasPixel(100, 100)).join() === original.join(),
+    "and the original is still where it was",
+  );
+
+  // Change the original's colour: the copy changes with it.
+  await page.locator(".panel ul li").nth(1).click();
+  await page.waitForTimeout(200);
+  await setColor("Fill color", "#00ff00");
+  await page.waitForTimeout(350);
+  const green = await canvasPixel(100, 100);
+  assert(
+    green[1] > green[0] && green[1] > green[2],
+    `the original went green (${green})`,
+  );
+  assert(
+    (await canvasPixel(400, 100)).join() === green.join(),
+    `and the copy went with it (${await canvasPixel(400, 100)})`,
+  );
+
+  // Moving the original leaves the copy where it was put.
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(100, 300), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(400, 100)).join() === green.join(),
+    "moving the original moved only the original",
+  );
+  assert((await canvasPixel(100, 300))[3] === 255, "which did move");
+}
+
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.
 {

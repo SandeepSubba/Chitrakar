@@ -2,6 +2,7 @@
 //! parameters — nothing here ever stores baked pixels except the immutable
 //! source resource a [`RasterRef`] points at.
 
+use crate::NodeId;
 use chitrakar_color::AuthoredColor;
 use serde::{Deserialize, Serialize};
 
@@ -446,6 +447,17 @@ pub enum NodeKind {
     Adjustment(Adjustment),
     Filter(Filter),
     Text(TextSpec),
+    /// A live copy of another layer: it draws whatever that layer holds,
+    /// wherever this one is put, so changing the original changes every
+    /// copy of it. Its own transform, opacity, blend and mask are its
+    /// own; only what it is a picture *of* is shared.
+    ///
+    /// The original's own transform is not part of what travels — an
+    /// instance places the picture itself — so moving the original moves
+    /// only the original.
+    Instance {
+        of: NodeId,
+    },
     /// A frame on the page: a group with a size of its own that cuts its
     /// contents to that box, paints a ground behind them, and exports at
     /// exactly that many pixels however it is placed or scaled. What lets
@@ -659,6 +671,11 @@ impl Node {
 
     pub fn group(name: &str) -> Self {
         Self::base(name, NodeKind::Group)
+    }
+
+    /// A live copy of `of` — see [`NodeKind::Instance`].
+    pub fn instance(name: &str, of: NodeId) -> Self {
+        Self::base(name, NodeKind::Instance { of })
     }
 
     pub fn artboard(

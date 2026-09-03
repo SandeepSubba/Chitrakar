@@ -113,6 +113,16 @@ without reading anything else.*
   out rather than needing every layer dragged. Its ground is a colour in
   the panel, or none at all, which makes the frame a window onto the
   page.
+  Any layer can be given live copies of itself — a copy draws whatever
+  that layer holds, wherever the copy is put, so changing the original
+  changes every copy of it at once, which is what a component is. The
+  original's own placement is not part of what travels, so moving the
+  original moves only the original; a copy carries its own transform,
+  opacity, blend and mask on top. The panel says what a copy follows and
+  takes you there. A copy that could reach itself would have nothing to
+  draw, so the document refuses to make one and stays as it was. Copies
+  stay live in both vector exports: the original's markup again, inside
+  the copy's place.
   A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
   in the layer bar — so it shows only where that one does and goes when
   it goes: a texture cut to a shape, a photo poured into lettering, or,
@@ -222,9 +232,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~237),
+- **Verify before committing:** `cargo test --workspace` (~242),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~459 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~468 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -581,7 +591,12 @@ chitrakar/
   W/H fields rather than scaled, with a ground that can be any colour or
   none, and what is inside pinned to its edges, its middle or both.
   Frames as export presets still to come.
-- Live effects (drop shadow, outline), styles, symbols/components.
+- Symbols/components ✅ first pass: `NodeKind::Instance` draws another
+  layer's content in its own place, with a cycle guard in the document
+  (any structural command that would let a copy reach itself is refused
+  and rolled back). Live in SVG and PDF. Overrides per copy — a
+  different string, a different fill — still to come.
+- Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).
 

@@ -180,6 +180,7 @@ const HOLDS_CHILDREN = new Set(["group", "artboard"]);
 const KIND_ICONS: Record<string, IconName> = {
   group: "group-layer",
   artboard: "frame",
+  instance: "instance",
   vector: "rect",
   raster: "image",
   adjustment: "adjust",
@@ -2784,6 +2785,21 @@ export function App() {
     run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
+  /** A live copy of the picked layer, beside it: it draws whatever that
+   * layer holds, wherever the copy is put, so changing the original
+   * changes every copy of it. */
+  const instanceSelected = () => {
+    if (!session || selected === null) return;
+    try {
+      const id = session.make_instance(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Copy: ${err}`);
+    }
+  };
+
   const ungroupSelection = () => {
     if (!session || selected === null) return;
     try {
@@ -4899,6 +4915,14 @@ export function App() {
               <Icon name="clip" size={16} />
             </button>
             <button
+              onClick={instanceSelected}
+              disabled={selected === null}
+              title="Make a live copy: it follows this layer"
+              aria-label="Make a live copy"
+            >
+              <Icon name="instance" size={16} />
+            </button>
+            <button
               onClick={duplicateSelected}
               disabled={selected === null}
               title="Duplicate layer (Ctrl+D)"
@@ -4949,6 +4973,31 @@ export function App() {
           )}
           {selectedLayer && (
             <div className="layer-props">
+              {/* A live copy says what it follows, and takes you there:
+                  what the copy draws is not in the copy, so the panel has
+                  to point at where it is. */}
+              {selectedLayer.copies !== 0 && (
+                <div className="row copy-of">
+                  <span>
+                    Follows{" "}
+                    {layers.find((l) => l.id === selectedLayer.copies)?.name ??
+                      "a layer that is gone"}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      !layers.some((l) => l.id === selectedLayer.copies)
+                    }
+                    onClick={() => {
+                      setSelected(selectedLayer.copies);
+                      setMultiSel([]);
+                    }}
+                    aria-label="Go to the original"
+                  >
+                    Go to it
+                  </button>
+                </div>
+              )}
               {/* Inside a frame, what the layer does when that frame is
                   given a new size — the reason a frame can be resized at
                   all rather than only ever drawn at the size it was made

@@ -203,6 +203,7 @@ export type NodeKind =
   | { Adjustment: Adjustment }
   | { Filter: Filter }
   | { Text: TextSpec }
+  | { Instance: { of: NodeId } }
   | {
       /** A frame: a group with a size of its own that cuts its contents
        * to that box and grounds it. */
@@ -253,7 +254,8 @@ export interface LayerInfo {
     | "text"
     | "paint"
     | "clone"
-    | "artboard";
+    | "artboard"
+    | "instance";
   visible: boolean;
   opacity: number;
   blend: BlendMode;
@@ -266,6 +268,8 @@ export interface LayerInfo {
   clipped: boolean;
   /** What it does when the frame around it is resized. */
   pinned: Pinning;
+  /** The layer this one is a live copy of, or 0 when it is not a copy. */
+  copies: NodeId;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

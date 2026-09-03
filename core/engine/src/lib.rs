@@ -320,6 +320,40 @@ impl Session {
             .unwrap_or(Bounds::None)
     }
 
+    /// Where every live copy of a layer is — directly, or through
+    /// another copy. A change to the layer changes all of them, wherever
+    /// they were put, so the region to repaint has to take them in.
+    fn copies_bounds(&self, id: Option<NodeId>) -> Bounds {
+        let Some(id) = id else {
+            return Bounds::None;
+        };
+        let mut order = Vec::new();
+        Self::painter_order(&self.doc, self.doc.root(), &mut order);
+        let mut following = vec![id];
+        let mut bounds = Bounds::None;
+        // A copy of a copy follows the same original, so keep going until
+        // nothing new is found. The graph has no cycles, so it ends.
+        let mut at = 0;
+        while at < following.len() {
+            let cur = following[at];
+            at += 1;
+            for &other in &order {
+                let Ok(node) = self.doc.node(other) else {
+                    continue;
+                };
+                if matches!(node.kind, NodeKind::Instance { of } if of == cur)
+                    && !following.contains(&other)
+                {
+                    following.push(other);
+                    if let Ok(b) = chitrakar_render::node_bounds(&self.doc, other) {
+                        bounds = bounds.union(b);
+                    }
+                }
+            }
+        }
+        bounds
+    }
+
     fn mark_dirty(&mut self, bounds: Bounds) {
         let Some(clip) = bounds.to_clip(self.doc.meta.width, self.doc.meta.height) else {
             return;
@@ -340,12 +374,14 @@ impl Session {
         let target = Self::command_target(&cmd);
         let pre = self
             .stroke_bounds(&cmd)
-            .unwrap_or_else(|| self.bounds_of_target(target));
+            .unwrap_or_else(|| self.bounds_of_target(target))
+            .union(self.copies_bounds(target));
         let inverse = self.doc.apply(cmd)?;
         let post_target = Self::command_target(&inverse);
         let post = self
             .stroke_bounds(&inverse)
-            .unwrap_or_else(|| self.bounds_of_target(post_target));
+            .unwrap_or_else(|| self.bounds_of_target(post_target))
+            .union(self.copies_bounds(post_target));
         self.last_touched = post_target.or(target);
         if batch {
             self.mark_dirty(Bounds::Everything);
@@ -971,6 +1007,44 @@ impl Session {
             ]),
             Some(label),
         )
+    }
+
+    /// Put a live copy of a layer beside it: a layer that draws whatever
+    /// that one holds, wherever the copy is put, so changing the original
+    /// changes every copy of it. Returns the copy's id.
+    ///
+    /// The copy goes in the original's own parent, directly above it, and
+    /// starts exactly on top of the original — the placement is the first
+    /// thing anyone changes about a copy, and starting it anywhere else
+    /// would only be a guess.
+    pub fn make_instance(&mut self, of: NodeId) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(of)?;
+        // A copy of a copy is a copy of the same original: a chain of
+        // them would work, but it is never what was meant and it makes
+        // the original hard to find.
+        let target = match node.kind {
+            NodeKind::Instance { of: original } => original,
+            _ => of,
+        };
+        let name = format!("{} copy", self.doc.node(target)?.name);
+        let parent = self.doc.parent_of(of).unwrap_or_else(|| self.doc.root());
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|&c| c == of)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let mut copy = chitrakar_doc::Node::instance(&name, target);
+        // Written in the copy's parent space, which is where the
+        // original's own transform is written too.
+        copy.transform = self.doc.node(target)?.transform;
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(copy),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
     }
 
     /// The one command that gives a frame a new size and moves what is
@@ -2402,6 +2476,7 @@ impl Session {
                     NodeKind::Text(_) => "text",
                     NodeKind::Paint { .. } => "paint",
                     NodeKind::Clone { .. } => "clone",
+                    NodeKind::Instance { .. } => "instance",
                 },
                 visible: node.visible,
                 opacity: node.opacity,
@@ -2412,6 +2487,10 @@ impl Session {
                     Some(chitrakar_doc::MaskKind::Painted { .. })
                 ),
                 has_effects: !node.effects.is_empty(),
+                copies: match node.kind {
+                    NodeKind::Instance { of } => of.0,
+                    _ => 0,
+                },
                 locked: node.locked,
                 clipped: node.clipped && index > 0,
                 pinned: node.pinned,
@@ -2805,6 +2884,8 @@ pub struct LayerInfo {
     /// whether the brush paints the layer or the mask over it.
     pub painted_mask: bool,
     pub has_effects: bool,
+    /// The layer this one is a live copy of, or 0 when it is not a copy.
+    pub copies: u64,
     pub locked: bool,
     /// Confined to the layer below it. The bottom layer of a parent has
     /// nothing under it, so the flag reads false there however it is set.
@@ -4586,6 +4667,39 @@ mod tests {
         // same point reads the same.
         session.set_viewport(0.25, 0.0, 0.0, 10, 10);
         assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// Changing the original repaints the copies too: they draw what it
+    /// draws, and they are somewhere else on the page.
+    #[test]
+    fn changing_the_original_repaints_its_copies() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let master = add_rect(&mut session, "master", 20.0, 20.0);
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(80.0, 0.0),
+            })
+            .unwrap();
+        // Draw once so the cache holds the page as it is.
+        session.render_cached().unwrap();
+        let before = session.render().unwrap().get(85, 5).to_srgb8();
+
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 40.0, 40.0).kind),
+            })
+            .unwrap();
+        let (cached, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_some(), "something was repainted");
+        assert_eq!(
+            cached.get(85, 25).to_srgb8()[3],
+            255,
+            "the copy grew with the original in the cached frame"
+        );
+        let _ = before;
     }
 
     /// A frame given a new size moves what is in it by how each layer is
