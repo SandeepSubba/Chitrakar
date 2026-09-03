@@ -2795,6 +2795,84 @@ assert(
   );
 }
 
+// 8x6d. A frame is resized, not scaled: dragging its corner changes how
+// many pixels it is, and what is in it stays the size it was. Its ground
+// can be turned off, which makes it a window onto the page.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const drag = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await page.click('button[aria-label="Frame"]');
+  await drag(100, 100, 300, 300);
+  await page.click('button[aria-label="Rect"]');
+  await drag(120, 120, 180, 180);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(250);
+  const size = () => page.locator('input[aria-label="W size"]').inputValue();
+  assert((await size()) === "200", `the frame is 200 wide (${await size()})`);
+  const inner = await canvasPixel(150, 150);
+
+  // Pull the south-east corner out. The frame gets bigger; the rect in
+  // it does not.
+  const se = await page.locator(".handle.se").boundingBox();
+  await page.mouse.move(se.x + se.width / 2, se.y + se.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 380), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const grown = Number(await size());
+  assert(grown > 380, `the frame grew to ${grown}`);
+  assert(
+    (await canvasPixel(150, 150)).join() === inner.join(),
+    "and the rect in it is where and what it was",
+  );
+  assert(
+    (await canvasPixel(190, 150)).slice(0, 3).join() === "255,255,255",
+    "still its own size — past its edge is the frame's ground again",
+  );
+  assert(
+    (await canvasPixel(400, 350)).slice(0, 3).join() === "255,255,255",
+    "the ground reaches the frame's new edge",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await size()) === "200",
+    `one undo puts the frame back (${await size()})`,
+  );
+
+  // Typed, the width is the frame's own size too.
+  const w = page.locator('input[aria-label="W size"]');
+  await w.fill("260");
+  await w.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await size()) === "260", `typed size takes (${await size()})`);
+  assert(
+    (await canvasPixel(150, 150)).join() === inner.join(),
+    "and still does not touch what is inside",
+  );
+
+  // No ground: the frame becomes a window onto the page.
+  await page.uncheck('input[aria-label="Frame has a ground"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(250, 250))[3] === 0,
+    "with no ground the frame shows the page through it",
+  );
+  assert(
+    (await canvasPixel(150, 150))[3] === 255,
+    "and what is in it is still drawn",
+  );
+}
+
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.
 {

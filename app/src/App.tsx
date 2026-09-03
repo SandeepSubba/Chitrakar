@@ -531,6 +531,11 @@ interface HandleDrag {
   id: NodeId;
   t0: Transform;
   b0: [number, number, number, number];
+  /** A frame resizes rather than scales: its own size follows the corner
+   * and its contents keep the offsets they have from its top-left, the
+   * way a frame behaves everywhere. Its ground travels here so the size
+   * can be rewritten without reading the kind on every move. */
+  frame?: { background: AuthoredColor | null };
   /** Lines the dragged corner can catch on, as for a move. */
   snapX?: number[];
   snapY?: number[];
@@ -2098,6 +2103,10 @@ export function App() {
     if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
     const [snapX, snapY] = snapTargets([selected]);
+    const kind: NodeKind | null =
+      selectedLayer?.kind === "artboard"
+        ? (JSON.parse(session.kind_json(selected)) as NodeKind)
+        : null;
     handleDragRef.current = {
       corner,
       id: selected,
@@ -2105,6 +2114,10 @@ export function App() {
       b0: selLocal,
       snapX,
       snapY,
+      frame:
+        kind && typeof kind === "object" && "Artboard" in kind
+          ? { background: kind.Artboard.background }
+          : undefined,
     };
     (e.target as Element).setPointerCapture(e.pointerId);
   };
@@ -2145,6 +2158,43 @@ export function App() {
     // The corner that stays put, in local units.
     const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
     const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
+    if (drag.frame) {
+      // The frame becomes the dragged rectangle instead of being scaled
+      // into it. Its own box always starts at (0, 0), so pulling the west
+      // or north edge moves the frame's origin — and its contents, which
+      // are written against that origin, come with it, keeping the
+      // offsets they were given.
+      const w = span(lx, fx);
+      const h = span(ly, fy);
+      const [nx, ny] = [Math.min(lx, fx), Math.min(ly, fy)];
+      preview({
+        Batch: [
+          {
+            SetKind: {
+              id: drag.id,
+              kind: {
+                Artboard: {
+                  width: w,
+                  height: h,
+                  background: drag.frame.background,
+                },
+              },
+            },
+          },
+          {
+            SetTransform: {
+              id: drag.id,
+              transform: {
+                ...t,
+                e: t.a * nx + t.c * ny + t.e,
+                f: t.b * nx + t.d * ny + t.f,
+              },
+            },
+          },
+        ],
+      });
+      return;
+    }
     const sx = span(lx, fx) / span(west ? x0 : x1, fx);
     const sy = span(ly, fy) / span(north ? y0 : y1, fy);
 
@@ -3250,6 +3300,28 @@ export function App() {
     }
     const from = field === "w" ? w : h;
     if (from <= 0 || value <= 0 || !selLocal) return;
+    // A frame is given the size rather than scaled into it: what its
+    // width means is how many pixels it exports, so typing one has to
+    // change that number and leave its contents the size they are.
+    const kind: NodeKind | null =
+      selectedLayer?.kind === "artboard"
+        ? (JSON.parse(session.kind_json(selected)) as NodeKind)
+        : null;
+    if (kind && typeof kind === "object" && "Artboard" in kind) {
+      run({
+        SetKind: {
+          id: selected,
+          kind: {
+            Artboard: {
+              ...kind.Artboard,
+              width: field === "w" ? value : kind.Artboard.width,
+              height: field === "h" ? value : kind.Artboard.height,
+            },
+          },
+        },
+      });
+      return;
+    }
     const ratio = value / from;
     const [sx, sy] = field === "w" ? [ratio, 1] : [1, ratio];
     const [fx, fy] = [selLocal[0], selLocal[1]];
@@ -6113,6 +6185,55 @@ function KindProps({
             onBlur={onGestureEnd}
             aria-label="Text color"
           />
+        </label>
+      </>
+    );
+  }
+
+  if ("Artboard" in kind) {
+    const f = kind.Artboard;
+    const ground = (background: AuthoredColor | null): NodeKind => ({
+      Artboard: { ...f, background },
+    });
+    return (
+      <>
+        <label className="row">
+          Ground
+          <input
+            type="color"
+            value={colorToHex(f.background ?? hexColor("#ffffff"))}
+            onChange={(e) =>
+              onEdit(
+                ground(cmyk ? hexToCmykColor(e.target.value) : hexColor(e.target.value)),
+                true,
+              )
+            }
+            onBlur={onGestureEnd}
+            aria-label="Frame ground"
+            disabled={f.background === null}
+          />
+        </label>
+        <label className="row">
+          {/* A frame with no ground is a window onto the page: what is
+              under it shows through, and a click passes through with it. */}
+          <input
+            type="checkbox"
+            checked={f.background !== null}
+            onChange={(e) =>
+              onEdit(
+                ground(
+                  e.target.checked
+                    ? cmyk
+                      ? hexToCmykColor("#ffffff")
+                      : hexColor("#ffffff")
+                    : null,
+                ),
+                false,
+              )
+            }
+            aria-label="Frame has a ground"
+          />
+          Paint a ground
         </label>
       </>
     );

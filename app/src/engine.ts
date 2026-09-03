@@ -185,7 +185,16 @@ export type NodeKind =
     }
   | { Adjustment: Adjustment }
   | { Filter: Filter }
-  | { Text: TextSpec };
+  | { Text: TextSpec }
+  | {
+      /** A frame: a group with a size of its own that cuts its contents
+       * to that box and grounds it. */
+      Artboard: {
+        width: number;
+        height: number;
+        background: AuthoredColor | null;
+      };
+    };
 
 export interface NodePayload {
   name: string;

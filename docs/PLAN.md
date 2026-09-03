@@ -97,8 +97,12 @@ without reading anything else.*
   artboard writes one PNG per frame, at the frame's own size, named
   after it, with nothing of the page around it. Frames carry into SVG as
   a clipped group and into PDF as a rectangle clip, so both stay live
-  vectors. Scaling a frame scales its contents and its export with it;
-  typing a frame its own pixel size is still to come.
+  vectors. A frame is resized rather than scaled: dragging a corner
+  changes how many pixels it is and leaves what is in it the size it
+  was (pulling the west or north edge carries the contents with it,
+  since they are written against the frame's own corner), and the W/H
+  fields set that same number. Its ground is a colour in the panel, or
+  none at all, which makes the frame a window onto the page.
   A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
   in the layer bar — so it shows only where that one does and goes when
   it goes: a texture cut to a shape, a photo poured into lettering, or,
@@ -210,7 +214,7 @@ without reading anything else.*
   instead of crawling.
 - **Verify before committing:** `cargo test --workspace` (~234),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~437 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~447 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -561,8 +565,10 @@ chitrakar/
 - Artboards ✅ first pass: `NodeKind::Artboard` is a group with a size of
   its own that grounds and cuts its contents, takes what is drawn inside
   it, and exports one PNG per frame at the frame's own size; live in SVG
-  (a clipPath) and PDF (a rectangle clip). Typing a frame its own pixel
-  size, and frames as export presets, still to come.
+  (a clipPath) and PDF (a rectangle clip). Resized by its handles or its
+  W/H fields rather than scaled, with a ground that can be any colour or
+  none. Frames as export presets, and constraints on what is inside
+  them, still to come.
 - Live effects (drop shadow, outline), styles, symbols/components.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).
