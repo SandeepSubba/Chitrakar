@@ -51,7 +51,17 @@ export type Adjustment =
         out_white: number;
       };
     }
-  | { Curves: { points: [number, number][] } }
+  | {
+      /** A master curve every channel goes through, and a curve of its
+       * own for each channel, run after it. An empty channel list is the
+       * identity. */
+      Curves: {
+        points: [number, number][];
+        red: [number, number][];
+        green: [number, number][];
+        blue: [number, number][];
+      };
+    }
   | { WhiteBalance: { temperature: number; tint: number } }
   | { Vibrance: { amount: number } };
 

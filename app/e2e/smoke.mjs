@@ -556,6 +556,44 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
       (await page.locator('[aria-label="Tone curve"] circle').count()) === 2,
     "one undo takes the whole press-and-drag back",
   );
+  // Per-channel: the picker switches the graph to one channel, and a
+  // curve drawn there moves that channel alone.
+  // Red, not blue: this pixel's blue is already at the top of the range,
+  // so a curve could not show there — the same over-exposure that the
+  // white balance block has to step around.
+  const before = await canvasPixel(500, 325);
+  await page.click('button[aria-label="Red channel"]');
+  await page.waitForTimeout(150);
+  const chan = await page.locator('[aria-label="Red curve"]').boundingBox();
+  const [bx, by] = [chan.x + chan.width / 2, chan.y + chan.height / 2];
+  await page.mouse.move(bx, by);
+  await page.mouse.down();
+  await page.mouse.move(bx, by - chan.height * 0.3, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const graded = await canvasPixel(500, 325);
+  assert(
+    graded[0] > before[0] + 15,
+    `a curve on red lifts red (${before} -> ${graded})`,
+  );
+  assert(
+    graded[1] === before[1] && graded[2] === before[2],
+    `and leaves green and blue where they were (${before} -> ${graded})`,
+  );
+  // The master graph still shows its own curve, with blue's behind it.
+  await page.click('button[aria-label="RGB channel"]');
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator('[aria-label="Tone curve"] .ghost').count()) === 1,
+    "the channel that has a curve is drawn behind the one in hand",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(500, 325)).join() === before.join(),
+    "and one undo takes the channel curve back",
+  );
+
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(150);
   assert(

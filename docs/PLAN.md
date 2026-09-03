@@ -27,7 +27,9 @@ without reading anything else.*
   drag preview, turn with a rotation knob, flip a selection about its
   own box; adjustment layers (exposure, brightness/contrast, hue/sat,
   white balance, vibrance, levels,
-  curves drawn on a graph in the panel) and
+  curves drawn on a graph in the panel — a master curve and one per
+  channel run after it, which is what a colour grade is made of, with
+  the channels not in hand drawn faintly behind the one that is) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
@@ -212,9 +214,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~234),
+- **Verify before committing:** `cargo test --workspace` (~235),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~447 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~451 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -478,7 +480,9 @@ chitrakar/
   re-editable via the properties panel with live slider preview, one undo
   step per gesture. Levels ✅ (input range, gamma, output range, in linear
   light) and Curves ✅ (monotone cubic through points in the display
-  encoding, tabulated once per pass; press-to-add-and-drag graph editor).
+  encoding, tabulated once per pass; press-to-add-and-drag graph editor;
+  a master curve plus one per channel run after it — colour grading —
+  with a channel picker and the untouched channels drawn behind).
 - Vector styling ✅ first pass: fill and inner stroke (color + width),
   editable on existing objects; stroke-only shapes hit-test on the band.
   Gradients pending. Layer rename ✅ (SetName command, inline edit).

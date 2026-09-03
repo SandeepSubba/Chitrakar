@@ -1072,10 +1072,7 @@ fn render_child(
                 // An adjustment layer transforms everything composited below
                 // it, weighted by its opacity and mask coverage. A curve is
                 // tabulated once here rather than solved per pixel.
-                let lut = match adj {
-                    Adjustment::Curves { points } => Some(curve_lut(points)),
-                    _ => None,
-                };
+                let luts = curve_luts(adj);
                 for y in clip.y0..clip.y1 {
                     for x in clip.x0..clip.x1 {
                         let weight = node.opacity * coverage_at(doc, mask, x, y);
@@ -1083,7 +1080,7 @@ fn render_child(
                             continue;
                         }
                         let i = (y * dst.width + x) as usize;
-                        let adjusted = apply_adjustment(adj, lut.as_deref(), dst.pixels[i]);
+                        let adjusted = apply_adjustment(adj, luts.as_ref(), dst.pixels[i]);
                         dst.pixels[i] = lerp(dst.pixels[i], adjusted, weight);
                     }
                 }
@@ -3564,6 +3561,39 @@ fn draw_text(
 /// it is drawn through and a rising set of points gives a rising curve;
 /// flat beyond the first and last points. Fewer than two distinct points
 /// is the identity.
+/// The tables a curves adjustment reads: the master curve every channel
+/// goes through, and a curve of its own for each channel that has one.
+/// Tabulated once per pass rather than solved per pixel.
+#[derive(Default)]
+pub struct CurveLuts {
+    pub master: Vec<f32>,
+    pub red: Option<Vec<f32>>,
+    pub green: Option<Vec<f32>>,
+    pub blue: Option<Vec<f32>>,
+}
+
+/// Tabulate a curves adjustment's tables, or nothing when the adjustment
+/// is not one. A channel with fewer than two points is left out: its
+/// curve would be the identity, and skipping it saves the lookup.
+pub fn curve_luts(adj: &Adjustment) -> Option<CurveLuts> {
+    let Adjustment::Curves {
+        points,
+        red,
+        green,
+        blue,
+    } = adj
+    else {
+        return None;
+    };
+    let channel = |pts: &Vec<[f32; 2]>| (pts.len() >= 2).then(|| curve_lut(pts));
+    Some(CurveLuts {
+        master: curve_lut(points),
+        red: channel(red),
+        green: channel(green),
+        blue: channel(blue),
+    })
+}
+
 pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
     let mut pts: Vec<[f32; 2]> = points
         .iter()
@@ -3647,7 +3677,7 @@ fn curve_at(lut: &[f32], x: f32) -> f32 {
 /// `lut` is the tabulated curve when `adj` is one — built by the caller
 /// once per pass; built here when the caller has not, so the function
 /// stays total.
-fn apply_adjustment(adj: &Adjustment, lut: Option<&[f32]>, px: LinearRgba) -> LinearRgba {
+fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) -> LinearRgba {
     if px.a <= 0.0 {
         return px;
     }
@@ -3748,24 +3778,34 @@ fn apply_adjustment(adj: &Adjustment, lut: Option<&[f32]>, px: LinearRgba) -> Li
             let f = |v: f32| (lum + (v - lum) * s).clamp(0.0, 1.0);
             (f(r), f(g), f(b))
         }
-        Adjustment::Curves { points } => {
+        Adjustment::Curves { .. } => {
             let table;
-            let lut = match lut {
-                Some(lut) => lut,
+            let luts = match luts {
+                Some(luts) => luts,
                 None => {
-                    table = curve_lut(points);
+                    table = curve_luts(adj).unwrap_or_default();
                     &table
                 }
             };
-            // The curve is drawn over the display encoding; the pixel is
-            // linear, so it crosses over and back.
-            let f = |v: f32| {
-                chitrakar_color::srgb_to_linear(curve_at(
-                    lut,
+            // The curves are drawn over the display encoding; the pixel
+            // is linear, so it crosses over and back. The master runs
+            // first and each channel's own curve after it, which is the
+            // order the graph is read in.
+            let f = |v: f32, own: Option<&Vec<f32>>| {
+                let s = curve_at(
+                    &luts.master,
                     chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)),
-                ))
+                );
+                chitrakar_color::srgb_to_linear(match own {
+                    Some(lut) => curve_at(lut, s),
+                    None => s,
+                })
             };
-            (f(r), f(g), f(b))
+            (
+                f(r, luts.red.as_ref()),
+                f(g, luts.green.as_ref()),
+                f(b, luts.blue.as_ref()),
+            )
         }
     };
     LinearRgba {
@@ -3974,6 +4014,98 @@ mod tests {
         b: 1.0,
         a: 1.0,
     };
+
+    /// A curve on one channel moves that channel and leaves the others,
+    /// and the master curve runs before it rather than instead of it.
+    #[test]
+    fn a_curve_on_one_channel_moves_only_that_channel() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let mut doc = Document::new(2, 2, ColorMode::Rgb);
+        add(&mut doc, filled_rect("r", 2.0, 2.0, grey));
+        let lift = vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]];
+        let set = |doc: &mut Document, id, adj| {
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Adjustment(adj)),
+            })
+            .unwrap();
+        };
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "curve",
+                Adjustment::Curves {
+                    points: vec![[0.0, 0.0], [1.0, 1.0]],
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[1];
+        let shown = |doc: &Document| render(doc).unwrap().get(0, 0).to_srgb8();
+
+        set(
+            &mut doc,
+            id,
+            Adjustment::Curves {
+                points: vec![[0.0, 0.0], [1.0, 1.0]],
+                red: lift.clone(),
+                green: Vec::new(),
+                blue: Vec::new(),
+            },
+        );
+        let out = shown(&doc);
+        assert!(
+            (out[0] as i32 - 191).abs() <= 1,
+            "red is lifted to three quarters ({out:?})"
+        );
+        assert_eq!(
+            (out[1], out[2]),
+            (128, 128),
+            "green and blue are where they were ({out:?})"
+        );
+
+        // The master runs first: with both lifted, red goes past where
+        // either alone would put it.
+        set(
+            &mut doc,
+            id,
+            Adjustment::Curves {
+                points: lift.clone(),
+                red: lift.clone(),
+                green: Vec::new(),
+                blue: Vec::new(),
+            },
+        );
+        let both = shown(&doc);
+        assert!(
+            both[0] > 191 && (both[1] as i32 - 191).abs() <= 1,
+            "the channel curve reads what the master handed it ({both:?})"
+        );
+
+        // A channel with nothing on it is the identity, so a file
+        // written before per-channel curves existed looks the same.
+        set(
+            &mut doc,
+            id,
+            Adjustment::Curves {
+                points: lift,
+                red: Vec::new(),
+                green: Vec::new(),
+                blue: Vec::new(),
+            },
+        );
+        assert_eq!(shown(&doc), [191, 191, 191, 255]);
+    }
 
     fn artboard(doc: &mut Document, w: f32, h: f32, at: (f32, f32)) -> NodeId {
         let root = doc.root();
@@ -7832,6 +7964,9 @@ mod tests {
                 "curve",
                 Adjustment::Curves {
                     points: points.to_vec(),
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
                 },
             ))
         };
@@ -7854,6 +7989,9 @@ mod tests {
             id,
             kind: Box::new(NodeKind::Adjustment(Adjustment::Curves {
                 points: vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]],
+                red: Vec::new(),
+                green: Vec::new(),
+                blue: Vec::new(),
             })),
         })
         .unwrap();
@@ -7867,6 +8005,9 @@ mod tests {
             id,
             kind: Box::new(NodeKind::Adjustment(Adjustment::Curves {
                 points: vec![[0.0, 1.0], [1.0, 0.0]],
+                red: Vec::new(),
+                green: Vec::new(),
+                blue: Vec::new(),
             })),
         })
         .unwrap();

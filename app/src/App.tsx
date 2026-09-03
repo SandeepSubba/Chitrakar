@@ -2271,6 +2271,9 @@ export function App() {
               [0, 0],
               [1, 1],
             ],
+            red: [],
+            green: [],
+            blue: [],
           },
         },
       },
@@ -5705,10 +5708,20 @@ function CurveEditor({
   points,
   onEdit,
   onGestureEnd,
+  label = "Tone curve",
+  colour,
+  ghosts = [],
 }: {
   points: [number, number][];
   onEdit: (points: [number, number][], gesture: boolean) => void;
   onGestureEnd: () => void;
+  label?: string;
+  /** What the curve being edited is drawn in; the panel's own ink when
+   * left out. */
+  colour?: string;
+  /** The other channels' curves, drawn faintly behind, so a grade can be
+   * read as a whole while one channel of it is worked on. */
+  ghosts?: { key: string; points: [number, number][]; colour: string }[];
 }) {
   const SIZE = 160;
   const svgRef = useRef<SVGSVGElement>(null);
@@ -5807,7 +5820,7 @@ function CurveEditor({
         className="curve-editor"
         viewBox={`0 0 ${SIZE} ${SIZE}`}
         role="img"
-        aria-label="Tone curve"
+        aria-label={label}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -5821,9 +5834,31 @@ function CurveEditor({
           </g>
         ))}
         <line className="grid" x1={0} y1={SIZE} x2={SIZE} y2={0} />
-        <path className="line" d={line} />
+        {ghosts.map((g) => (
+          <path
+            key={g.key}
+            className="line ghost"
+            // Inline, not an attribute: the stylesheet's own stroke would
+            // win over a presentation attribute.
+            style={{ stroke: g.colour }}
+            d={curveSamples(g.points)
+              .map(
+                ([x, y], i) =>
+                  `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`,
+              )
+              .join(" ")}
+          />
+        ))}
+        <path className="line" style={{ stroke: colour }} d={line} />
         {points.map(([x, y], i) => (
-          <circle key={i} className="pt" cx={px(x)} cy={py(y)} r={4} />
+          <circle
+            key={i}
+            className="pt"
+            style={{ fill: colour }}
+            cx={px(x)}
+            cy={py(y)}
+            r={4}
+          />
         ))}
       </svg>
       <button
@@ -5843,6 +5878,108 @@ function CurveEditor({
       </button>
     </div>
   );
+}
+
+/** The channels a curves adjustment can be drawn on, and the ink each is
+ * drawn in — the master first, since that is the one most grades start
+ * from. */
+const CURVE_CHANNELS = [
+  ["rgb", "RGB", "var(--text)", "Tone curve", "RGB"],
+  ["red", "R", "#e5484d", "Red curve", "Red"],
+  ["green", "G", "#30a46c", "Green curve", "Green"],
+  ["blue", "B", "#3e63dd", "Blue curve", "Blue"],
+] as const;
+type CurveChannel = (typeof CURVE_CHANNELS)[number][0];
+
+/** The whole curves adjustment: a picker for which channel is being
+ * drawn on, and the graph for it. The master curve runs first and each
+ * channel's own after it, so the other channels are drawn faintly behind
+ * the one in hand and the grade reads as a whole. */
+function CurvesPanel({
+  curves,
+  onEdit,
+  onGestureEnd,
+}: {
+  curves: {
+    points: [number, number][];
+    red: [number, number][];
+    green: [number, number][];
+    blue: [number, number][];
+  };
+  onEdit: (curves: CurvesPanelProps["curves"], gesture: boolean) => void;
+  onGestureEnd: () => void;
+}) {
+  const [channel, setChannel] = useState<CurveChannel>("rgb");
+  const DIAGONAL: [number, number][] = [
+    [0, 0],
+    [1, 1],
+  ];
+  const of = (c: CurveChannel) =>
+    c === "rgb" ? curves.points : curves[c].length >= 2 ? curves[c] : DIAGONAL;
+  const touched = (c: CurveChannel) =>
+    c === "rgb"
+      ? curves.points.length > 2 ||
+        curves.points.some(([x, y]) => Math.abs(x - y) > 1e-6)
+      : curves[c].length >= 2;
+  const ink = (c: CurveChannel) =>
+    CURVE_CHANNELS.find(([k]) => k === c)![2];
+  return (
+    <>
+      <div
+        className="curve-channels"
+        role="group"
+        aria-label="Curve channel"
+      >
+        {CURVE_CHANNELS.map(([key, label, colour, , name]) => (
+          <button
+            key={key}
+            type="button"
+            className={key === channel ? "active" : ""}
+            style={{ color: colour }}
+            aria-pressed={key === channel}
+            aria-label={`${name} channel`}
+            onClick={() => setChannel(key)}
+          >
+            {label}
+            {touched(key) ? "•" : ""}
+          </button>
+        ))}
+      </div>
+      <CurveEditor
+        key={channel}
+        points={of(channel)}
+        colour={ink(channel)}
+        label={CURVE_CHANNELS.find(([k]) => k === channel)![3]}
+        ghosts={CURVE_CHANNELS.filter(([k]) => k !== channel && touched(k)).map(
+          ([k]) => ({ key: k, points: of(k), colour: ink(k) }),
+        )}
+        onEdit={(points, gesture) => {
+          // Back on the diagonal, a channel is written out as nothing at
+          // all — which is what the engine reads as the identity, and
+          // what keeps a file free of curves nobody drew.
+          const bare =
+            points.length === 2 &&
+            points.every(([x, y]) => Math.abs(x - y) < 1e-6);
+          onEdit(
+            channel === "rgb"
+              ? { ...curves, points }
+              : { ...curves, [channel]: bare ? [] : points },
+            gesture,
+          );
+        }}
+        onGestureEnd={onGestureEnd}
+      />
+    </>
+  );
+}
+
+interface CurvesPanelProps {
+  curves: {
+    points: [number, number][];
+    red: [number, number][];
+    green: [number, number][];
+    blue: [number, number][];
+  };
 }
 
 interface KindPropsProps {
@@ -5956,11 +6093,9 @@ function KindProps({
     }
     if ("Curves" in adj) {
       return (
-        <CurveEditor
-          points={adj.Curves.points}
-          onEdit={(points, gesture) =>
-            onEdit(wrap({ Curves: { points } }), gesture)
-          }
+        <CurvesPanel
+          curves={adj.Curves}
+          onEdit={(curves, gesture) => onEdit(wrap({ Curves: curves }), gesture)}
           onGestureEnd={onGestureEnd}
         />
       );

@@ -259,6 +259,17 @@ pub enum Adjustment {
     /// two points on the diagonal (or fewer) is the identity.
     Curves {
         points: Vec<[f32; 2]>,
+        /// A curve of its own for each channel, run after the master one
+        /// — what colour grading is done with: lift the blue in the
+        /// shadows, pull the red out of the highlights. Empty is the
+        /// identity, which is why a document written before they existed
+        /// still looks like itself.
+        #[serde(default)]
+        red: Vec<[f32; 2]>,
+        #[serde(default)]
+        green: Vec<[f32; 2]>,
+        #[serde(default)]
+        blue: Vec<[f32; 2]>,
     },
     /// White balance. `temperature` warms the picture as it rises and
     /// cools it as it falls (-1..=1, blue against amber); `tint` runs the
