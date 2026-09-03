@@ -1586,11 +1586,53 @@ fn soft_light(s: f32, d: f32) -> f32 {
     }
 }
 
+/// How finely the display transfer curve is tabulated for blending.
+///
+/// Crossing that curve means a `powf`, and a blend crosses it nine times
+/// a pixel — six going in and three coming back — which was four fifths
+/// of what a blended page cost. A table with a straight line between
+/// entries is well inside a part in a hundred thousand at this many
+/// steps, which is far finer than the eight bits the answer is ever
+/// shown at, and the tests hold it to that.
+const CURVE_STEPS: usize = 4096;
+
+/// The display transfer curve, tabulated both ways.
+struct Transfer {
+    /// Linear light to what a device shows.
+    to_shown: Box<[f32]>,
+    /// And back.
+    to_linear: Box<[f32]>,
+}
+
+fn transfer() -> &'static Transfer {
+    static TABLES: std::sync::OnceLock<Transfer> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let at = |i: usize| i as f32 / CURVE_STEPS as f32;
+        Transfer {
+            to_shown: (0..=CURVE_STEPS)
+                .map(|i| chitrakar_color::linear_to_srgb(at(i)))
+                .collect(),
+            to_linear: (0..=CURVE_STEPS)
+                .map(|i| chitrakar_color::srgb_to_linear(at(i)))
+                .collect(),
+        }
+    })
+}
+
+fn on_curve(table: &[f32], v: f32) -> f32 {
+    let x = v.clamp(0.0, 1.0) * CURVE_STEPS as f32;
+    let i = x as usize;
+    let f = x - i as f32;
+    let a = table[i];
+    let b = table[(i + 1).min(CURVE_STEPS)];
+    a + (b - a) * f
+}
+
 /// The channels a blend function sees: unpremultiplied and in the
 /// display encoding, which is the space the spec is written in.
-fn shown(v: f32, a: f32) -> f32 {
+fn shown(table: &[f32], v: f32, a: f32) -> f32 {
     if a > 0.0 {
-        chitrakar_color::linear_to_srgb((v / a).clamp(0.0, 1.0))
+        on_curve(table, (v / a).clamp(0.0, 1.0))
     } else {
         0.0
     }
@@ -1598,9 +1640,12 @@ fn shown(v: f32, a: f32) -> f32 {
 
 fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> LinearRgba {
     let (sa, da) = (src.a, dst.a);
+    // Once per pixel rather than once per crossing: consulting the lock
+    // the tables live behind costs more than reading from them.
+    let t = transfer();
+    let (to, from) = (&t.to_shown, &t.to_linear);
     let mix = |s: f32, d: f32| {
-        let blended =
-            chitrakar_color::srgb_to_linear(f(shown(s, sa), shown(d, da)).clamp(0.0, 1.0));
+        let blended = on_curve(from, f(shown(to, s, sa), shown(to, d, da)).clamp(0.0, 1.0));
         // W3C compositing: result = (1-da)*s + (1-sa)*d + sa*da*B
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
@@ -1620,11 +1665,21 @@ fn non_separable(
     f: impl Fn([f32; 3], [f32; 3]) -> [f32; 3],
 ) -> LinearRgba {
     let (sa, da) = (src.a, dst.a);
-    let s = [shown(src.r, sa), shown(src.g, sa), shown(src.b, sa)];
-    let d = [shown(dst.r, da), shown(dst.g, da), shown(dst.b, da)];
+    let t = transfer();
+    let (to, from) = (&t.to_shown, &t.to_linear);
+    let s = [
+        shown(to, src.r, sa),
+        shown(to, src.g, sa),
+        shown(to, src.b, sa),
+    ];
+    let d = [
+        shown(to, dst.r, da),
+        shown(to, dst.g, da),
+        shown(to, dst.b, da),
+    ];
     let b = f(s, d);
     let mix = |i: usize, s: f32, d: f32| {
-        let blended = chitrakar_color::srgb_to_linear(b[i].clamp(0.0, 1.0));
+        let blended = on_curve(from, b[i].clamp(0.0, 1.0));
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
     LinearRgba {
@@ -4268,6 +4323,76 @@ mod tests {
         b: 1.0,
         a: 1.0,
     };
+
+    /// What a full-page blended layer costs. Blending reads the values a
+    /// device shows, so each channel crosses the transfer curve twice —
+    /// this is the price of that, measured rather than guessed at.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn blend_timing_probe() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let page = |mode| {
+            let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+            add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey));
+            let top = add(&mut doc, filled_rect("over", 2480.0, 3508.0, grey));
+            doc.apply(Command::SetBlendMode {
+                id: top,
+                blend: mode,
+            })
+            .unwrap();
+            doc
+        };
+        for mode in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Overlay,
+            BlendMode::Color,
+        ] {
+            let doc = page(mode);
+            let t = std::time::Instant::now();
+            let _ = render(&doc).unwrap();
+            println!("A4 at 300dpi, {mode:?} over a full page: {:?}", t.elapsed());
+        }
+    }
+
+    /// The tabulated transfer curve stands in for the real one on every
+    /// channel of every blended pixel, so it has to agree with it far
+    /// more finely than eight bits can tell.
+    #[test]
+    fn the_tabulated_curve_agrees_with_the_real_one() {
+        let t = transfer();
+        let mut worst_out = 0.0f32;
+        let mut worst_back = 0.0f32;
+        for i in 0..=20_000 {
+            let v = i as f32 / 20_000.0;
+            worst_out = worst_out
+                .max((on_curve(&t.to_shown, v) - chitrakar_color::linear_to_srgb(v)).abs());
+            worst_back = worst_back
+                .max((on_curve(&t.to_linear, v) - chitrakar_color::srgb_to_linear(v)).abs());
+        }
+        assert!(
+            worst_out < 1e-4 && worst_back < 1e-4,
+            "off by {worst_out} going out and {worst_back} coming back"
+        );
+        // The ends land on the entries themselves rather than between
+        // two of them, so they are whatever the real curve is — which is
+        // a hair under one at the top, in both.
+        for v in [0.0, 1.0] {
+            assert_eq!(on_curve(&t.to_shown, v), chitrakar_color::linear_to_srgb(v));
+            assert_eq!(
+                on_curve(&t.to_linear, v),
+                chitrakar_color::srgb_to_linear(v)
+            );
+        }
+        // Past the ends it holds rather than running off.
+        assert_eq!(on_curve(&t.to_shown, 2.0), on_curve(&t.to_shown, 1.0));
+        assert_eq!(on_curve(&t.to_shown, -1.0), on_curve(&t.to_shown, 0.0));
+    }
 
     /// A blend reads the values a device shows, not the linear light
     /// behind them — which is what the W3C spec says, what SVG's

@@ -238,11 +238,19 @@ without reading anything else.*
   through `Session::set_viewport`, which composites only what the canvas
   can see: an A4 page at 300dpi shown on screen is 15 ms rather than
   169 ms, and the zoom is no longer capped by what a full-page surface
-  would cost. A placed photo shown smaller than
+  would cost. Blending reads the values a
+  device shows, which means crossing the transfer curve nine times a
+  pixel; tabulating that curve (4096 steps, straight lines between, and
+  a test holding it to a part in ten thousand of the real one) took a
+  blended A4 page at 300 dpi from 1.87 s to 1.26 s, against 0.47 s for
+  the same page composited plainly. A blend does more work than
+  source-over and always will; the interactive path renders a screenful
+  rather than a page, so what is felt is a fraction of that.
+  A placed photo shown smaller than
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~245),
+- **Verify before committing:** `cargo test --workspace` (~246),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~477 browser
   assertions). Both suites self-skip CMYK-profile steps unless
