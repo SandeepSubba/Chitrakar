@@ -13,7 +13,8 @@ shells + TypeScript/React UI. The UI never touches pixels: it sends commands ove
 the WASM boundary and presents the frames the engine renders.
 
 **Today:** shapes, pen and brush paths with bezier handles and booleans,
-placed images, live text (shaped by the font, any face loaded, bold /
+a paint brush that lays pixels on a layer of live strokes (and an eraser
+for them), placed images, live text (shaped by the font, any face loaded, bold /
 italic / underline, wrapped, aligned, set along a path, typed on the
 canvas), adjustment and filter layers (exposure, brightness/contrast,
 hue/saturation, levels, curves, blur, sharpen), masks, live effects

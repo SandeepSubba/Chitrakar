@@ -139,8 +139,14 @@ impl PaintStroke {
     /// The box the stroke covers in the layer's own space, or nothing
     /// when it covers none.
     pub fn bounds(&self) -> Option<[f32; 4]> {
+        self.bounds_from(0)
+    }
+
+    /// The box the stroke covers from point `from` onward — what a
+    /// stroke still being drawn adds each time it grows.
+    pub fn bounds_from(&self, from: usize) -> Option<[f32; 4]> {
         let mut box_: Option<[f32; 4]> = None;
-        for (i, p) in self.points.iter().enumerate() {
+        for (i, p) in self.points.iter().enumerate().skip(from) {
             let r = self.radius(i).max(0.0);
             let b = [p[0] - r, p[1] - r, p[0] + r, p[1] + r];
             box_ = Some(match box_ {

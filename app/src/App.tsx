@@ -128,6 +128,7 @@ const TOOLS = [
   "Ellipse",
   "Pen",
   "Brush",
+  "Paint",
   "Text",
   "Crop",
   "Eyedropper",
@@ -142,6 +143,7 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   e: "Ellipse",
   p: "Pen",
   b: "Brush",
+  n: "Paint",
   t: "Text",
   c: "Crop",
   i: "Eyedropper",
@@ -156,6 +158,7 @@ const KIND_ICONS: Record<string, IconName> = {
   adjustment: "adjust",
   filter: "filter",
   text: "text",
+  paint: "paint",
 };
 
 const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
@@ -164,6 +167,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Ellipse: "E",
   Pen: "P",
   Brush: "B",
+  Paint: "N",
   Text: "T",
   Crop: "C",
   Eyedropper: "I",
@@ -175,6 +179,7 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Ellipse: "ellipse",
   Pen: "pen",
   Brush: "brush",
+  Paint: "paint",
   Text: "text",
   Crop: "crop",
   Eyedropper: "eyedropper",
@@ -519,6 +524,12 @@ export function App() {
   const [tool, setTool] = useState<Tool>("Move");
   const [fill, setFill] = useState("#6c8cff");
   const [brushSize, setBrushSize] = useState(8);
+  /** The paint brush: how wide it is in document pixels, how much of that
+   * width its edge fades over, and whether it is rubbing paint out
+   * instead of laying it down. */
+  const [paintSize, setPaintSize] = useState(24);
+  const [paintSoftness, setPaintSoftness] = useState(0.5);
+  const [erasing, setErasing] = useState(false);
   /** The live document's pixel size. Every screen/document conversion goes
    * through this rather than a constant, so an opened file of any size
    * lands on a canvas that fits it. */
@@ -588,6 +599,9 @@ export function App() {
   const panDragRef = useRef<PanDrag | null>(null);
   const spaceRef = useRef(false);
   const shapeCount = useRef(0);
+  const paintCount = useRef(0);
+  /** Where the last paint sample landed, for the speed the width follows. */
+  const lastPaint = useRef<[number, number]>([0, 0]);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
   /** A draft from an earlier visit, offered back until it is taken or
@@ -779,6 +793,7 @@ export function App() {
       setProofing(false);
       setGamutWarn(false);
       shapeCount.current = 0;
+      paintCount.current = 0;
       setDocName("untitled");
       refresh(s);
       fitView();
@@ -1320,10 +1335,55 @@ export function App() {
       .map((l) => l.id);
   };
 
+  /** A brush stroke in flight: the engine holds the stroke itself, this
+   * only remembers that one is being drawn and how thick the last sample
+   * was, so the width eases rather than jumping sample to sample. */
+  const paintingRef = useRef<{ width: number; at: number } | null>(null);
+
+  /** The layer a paint stroke should land on: the picked one when it is a
+   * paint layer, and a fresh one when it is not — so the first stroke of a
+   * session makes its own layer and every stroke after it joins that one. */
+  const paintTarget = (s: WasmSession): NodeId | null => {
+    const picked = layers.find((l) => l.id === selected);
+    if (picked && picked.kind === "paint" && !picked.locked) return picked.id;
+    paintCount.current += 1;
+    try {
+      const id = s.add_paint_layer(`Paint ${paintCount.current}`) as NodeId;
+      setSelected(id);
+      setMultiSel([]);
+      return id;
+    } catch {
+      return null;
+    }
+  };
+
   const onCanvasPointerDown = (e: React.PointerEvent) => {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
+    if (tool === "Paint") {
+      const layer = paintTarget(session);
+      if (layer === null) return;
+      try {
+        session.paint_begin(
+          layer,
+          x,
+          y,
+          paintSize / 2,
+          JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
+          paintSoftness,
+          erasing,
+        );
+      } catch (err) {
+        alert(`Paint: ${err}`);
+        return;
+      }
+      paintingRef.current = { width: 1, at: performance.now() };
+      lastPaint.current = [x, y];
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      refresh(session);
+      return;
+    }
     if (tool === "Text") {
       shapeCount.current += 1;
       run({
@@ -1500,6 +1560,28 @@ export function App() {
       setMarquee(band.band);
       return;
     }
+    const painting = paintingRef.current;
+    if (painting && session) {
+      const [px, py] = docPoint(e);
+      const now = performance.now();
+      // The same reading the vector brush takes: a pen's real pressure,
+      // and a mouse's speed standing in for it.
+      const step = Math.hypot(px - lastPaint.current[0], py - lastPaint.current[1]);
+      const want =
+        e.pointerType === "pen" && e.pressure > 0
+          ? 0.25 + e.pressure * 0.75
+          : speedWidth(step / Math.max(1, now - painting.at));
+      painting.width += (want - painting.width) * 0.35;
+      painting.at = now;
+      lastPaint.current = [px, py];
+      try {
+        session.paint_extend(px, py, (paintSize / 2) * painting.width);
+      } catch {
+        /* the layer went away under the stroke; the gesture ends below */
+      }
+      refresh(session);
+      return;
+    }
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
@@ -1580,6 +1662,12 @@ export function App() {
   };
 
   const onCanvasPointerUp = () => {
+    if (paintingRef.current && session) {
+      paintingRef.current = null;
+      session.commit_preview();
+      refresh(session);
+      return;
+    }
     const band = marqueeRef.current;
     if (band) {
       marqueeRef.current = null;
@@ -2677,6 +2765,10 @@ export function App() {
   /** A locked layer keeps its outline — it is still the picked layer —
    * but offers nothing to grab: it is not to be moved from the canvas. */
   const movable = resizable && !selectedLayer.locked;
+  /** Handles sit over the layer they belong to, which is exactly where a
+   * brush wants to paint, so the brush takes them off the canvas while it
+   * is the tool in hand. The outline stays: it still says what is picked. */
+  const grabbable = movable && tool !== "Paint";
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
@@ -3545,6 +3637,43 @@ export function App() {
             aria-label="Fill colour"
             className="fill-swatch"
           />
+          {tool === "Paint" && (
+            <>
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={paintSize}
+                onChange={(e) =>
+                  setPaintSize(
+                    Math.max(1, Math.min(200, Number(e.target.value))),
+                  )
+                }
+                title="Brush width"
+                aria-label="Paint width"
+                className="brush-size"
+              />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={Math.round(paintSoftness * 100)}
+                onChange={(e) => setPaintSoftness(Number(e.target.value) / 100)}
+                title="How soft the brush's edge is"
+                aria-label="Brush softness"
+                className="paint-softness"
+              />
+              <button
+                className={`icon-button${erasing ? " active" : ""}`}
+                onClick={() => setErasing((on) => !on)}
+                title="Rub paint out instead of laying it down"
+                aria-label="Erase"
+                aria-pressed={erasing}
+              >
+                <Icon name="eraser" />
+              </button>
+            </>
+          )}
           {tool === "Brush" && (
             <input
               type="number"
@@ -3931,7 +4060,7 @@ export function App() {
               {/* The knob sits off the top edge along the box's own normal,
                   so it stays above the layer however the layer is turned.
                   A locked layer has none: nothing about it turns. */}
-              {movable &&
+              {grabbable &&
                 (() => {
                   const [tl, tr, , bl] = selQuad;
                   const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
@@ -4093,7 +4222,7 @@ export function App() {
                   </>
                 );
               })()}
-              {movable &&
+              {grabbable &&
                 HANDLES.map((c, i) => (
                   <div
                     key={c}
@@ -4648,6 +4777,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["V, M", "Move"],
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
+      ["N", "Paint (a brush that lays pixels)"],
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],

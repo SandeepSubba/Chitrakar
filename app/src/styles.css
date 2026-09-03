@@ -337,6 +337,14 @@ body {
   text-align: center;
 }
 
+/* The paint brush's edge, from hard to all fade. Narrow, because it
+   shares the tool rail with the size and the eraser. */
+.paint-softness {
+  width: 3rem;
+  margin-top: 0.35rem;
+  accent-color: var(--accent);
+}
+
 .panel-head {
   display: flex;
   align-items: center;

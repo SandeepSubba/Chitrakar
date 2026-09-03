@@ -60,7 +60,9 @@ export type IconName =
   | "units"
   | "lock"
   | "unlock"
-  | "eyedropper";
+  | "eyedropper"
+  | "paint"
+  | "eraser";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // A pipette: the barrel down to a tip, with the bulb at the top.
@@ -120,6 +122,18 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <path d="M5 19l1.2-4.2L15 6a2 2 0 0 1 2.8 2.8L9.2 17.8z" />
       <path d="M4.6 19.4l3.2-1" />
+    </>
+  ),
+  paint: (
+    <>
+      <path d="M3.5 19.5c1.8-5.4 4.8-9.4 8.8-11.9" />
+      <circle cx="16.5" cy="6.5" r="3" />
+    </>
+  ),
+  eraser: (
+    <>
+      <path d="M8.5 20H20" />
+      <path d="M4.6 16.4l7.8-7.8a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8L13.6 20H7.4z" />
     </>
   ),
   brush: (

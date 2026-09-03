@@ -214,7 +214,14 @@ export type Command =
 export interface LayerInfo {
   id: NodeId;
   name: string;
-  kind: "group" | "vector" | "raster" | "adjustment" | "filter" | "text";
+  kind:
+    | "group"
+    | "vector"
+    | "raster"
+    | "adjustment"
+    | "filter"
+    | "text"
+    | "paint";
   visible: boolean;
   opacity: number;
   blend: BlendMode;

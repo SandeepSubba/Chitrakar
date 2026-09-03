@@ -3089,6 +3089,78 @@ assert(
   assert((await sheet.count()) === 0, "and Close closes it");
 }
 
+// 9i. The paint brush: a stroke lays pixels on a layer of its own, the
+// eraser takes them back off, and the whole stroke is one undo.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Paint"]');
+  await page.waitForTimeout(150);
+  await page.fill('input[aria-label="Paint width"]', "40");
+  await page.waitForTimeout(100);
+  await page.mouse.move(...at(120, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 200), { steps: 10 });
+  await page.mouse.move(...at(440, 200), { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li .layer-name").allTextContents()).some((n) =>
+      n.trim().startsWith("Paint"),
+    ),
+    "the stroke made a paint layer",
+  );
+  const onIt = await canvasPixel(280, 200);
+  assert(onIt[3] > 200, `it painted along the line (${onIt})`);
+  assert((await canvasPixel(280, 320))[3] === 0, "and nowhere else");
+  // Its edge fades rather than stopping dead: down the column through
+  // the stroke, some pixel is neither bare page nor full paint.
+  const column = [];
+  for (let y = 168; y <= 232; y += 2) column.push((await canvasPixel(280, y))[3]);
+  assert(
+    column.some((a) => a > 10 && a < 245),
+    `the brush's edge is soft (${column.join(",")})`,
+  );
+
+  // A second stroke joins the same layer rather than making another.
+  const rows = await page.locator(".panel ul li").count();
+  await page.mouse.move(...at(120, 260));
+  await page.mouse.down();
+  await page.mouse.move(...at(440, 260), { steps: 12 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === rows,
+    "a second stroke joins the layer the first one made",
+  );
+  assert((await canvasPixel(280, 260))[3] > 200, "and it is painted too");
+
+  // The eraser takes paint off this layer and leaves the page bare.
+  await page.click('button[aria-label="Erase"]');
+  await page.waitForTimeout(100);
+  await page.mouse.move(...at(280, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 205), { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const rubbed = await canvasPixel(280, 200);
+  assert(rubbed[3] < 60, `the eraser took the paint off (${rubbed})`);
+  assert((await canvasPixel(160, 200))[3] > 200, "and left the rest of the stroke");
+
+  // However many points it gathered, a stroke is one undo.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(280, 200))[3] > 200, "one undo puts the erased paint back");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await canvasPixel(280, 260))[3] === 0, "the next takes the second stroke");
+  assert((await canvasPixel(280, 200))[3] > 200, "and leaves the first");
+  await page.click('button[aria-label="Erase"]');
+  await page.click('button[aria-label="Move"]');
+  await page.waitForTimeout(150);
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

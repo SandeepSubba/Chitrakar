@@ -1163,7 +1163,32 @@ pub fn point_in_layer(
     x: f32,
     y: f32,
 ) -> Result<Option<(f32, f32)>, DocError> {
-    Ok(to_local(doc.node(id)?.transform, x, y))
+    Ok(to_local(world_transform(doc, id)?, x, y))
+}
+
+/// A layer's own transform with every group it sits inside composed
+/// onto it: where the layer's space sits on the page. The root's own
+/// transform is not part of it, since rendering starts its walk from
+/// the identity there.
+pub fn world_transform(doc: &Document, id: NodeId) -> Result<Transform, DocError> {
+    let root = doc.root();
+    let mut t = doc.node(id)?.transform;
+    let mut at = id;
+    while let Some(parent) = doc.parent_of(at) {
+        if parent == root {
+            break;
+        }
+        t = doc.node(parent)?.transform.compose(t);
+        at = parent;
+    }
+    Ok(t)
+}
+
+/// How much a layer's own space is stretched on the page, groups
+/// included — what a length written in that space is worth in document
+/// pixels.
+pub fn layer_scale(doc: &Document, id: NodeId) -> Result<f32, DocError> {
+    Ok(max_scale(world_transform(doc, id)?))
 }
 
 /// How much the transform can stretch a length, used to pad bounds for

@@ -94,6 +94,44 @@ fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
 }
 
 /// An open document plus its edit history and cached composite.
+/// The box that differs between two versions of one stroke.
+///
+/// The case worth catching is the one a brush makes every few
+/// milliseconds: the same stroke with more points on the end of it.
+/// Then only the last segment is new, and the box that changed starts
+/// at the point the shorter version ended on. Anything else — a
+/// different colour, a rewritten middle — is both boxes together.
+fn changed_bounds(
+    a: &chitrakar_doc::PaintStroke,
+    b: &chitrakar_doc::PaintStroke,
+) -> Option<[f32; 4]> {
+    let (long, short) = if a.points.len() >= b.points.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let n = short.points.len();
+    let appended = n > 0
+        && long.color == short.color
+        && long.softness == short.softness
+        && long.erase == short.erase
+        && long.points[..n] == short.points[..]
+        && long.radii.len() >= short.radii.len()
+        && long.radii[..short.radii.len()] == short.radii[..];
+    if appended {
+        return long.bounds_from(n - 1);
+    }
+    match (a.bounds(), b.bounds()) {
+        (Some(p), Some(q)) => Some([
+            p[0].min(q[0]),
+            p[1].min(q[1]),
+            p[2].max(q[2]),
+            p[3].max(q[3]),
+        ]),
+        (some, None) | (None, some) => some,
+    }
+}
+
 /// A stroke being drawn: the layer it is going onto, where it sits in
 /// that layer's order, and what has been drawn of it so far.
 struct Painting {
@@ -222,8 +260,20 @@ impl Session {
     /// touches only where that stroke is, and a painting can be large.
     fn stroke_bounds(&self, cmd: &Command) -> Option<Bounds> {
         let (id, box_) = match cmd {
-            Command::AddStroke { id, stroke, .. } | Command::SetStroke { id, stroke, .. } => {
-                (*id, stroke.bounds()?)
+            Command::AddStroke { id, stroke, .. } => (*id, stroke.bounds()?),
+            // A brush extending a stroke changes only its tail, and
+            // repainting the whole of a long one every time it grows is
+            // what would make a long stroke crawl.
+            Command::SetStroke { id, index, stroke } => {
+                let chitrakar_doc::NodeKind::Paint { strokes } = &self.doc.node(*id).ok()?.kind
+                else {
+                    return None;
+                };
+                let box_ = match strokes.get(*index) {
+                    Some(other) => changed_bounds(stroke, other)?,
+                    None => stroke.bounds()?,
+                };
+                (*id, box_)
             }
             Command::RemoveStroke { id, index } => {
                 let chitrakar_doc::NodeKind::Paint { strokes } = &self.doc.node(*id).ok()?.kind
@@ -822,8 +872,7 @@ impl Session {
     /// stroke is written in the layer's space, so a scaled layer takes a
     /// smaller radius to paint the same width on the page.
     fn radius_in_layer(&self, id: NodeId, radius: f32) -> Result<f32, EngineError> {
-        let t = self.doc.node(id)?.transform;
-        Ok(radius / t.a.hypot(t.b).max(t.c.hypot(t.d)).max(1e-6))
+        Ok(radius / chitrakar_render::layer_scale(&self.doc, id)?.max(1e-6))
     }
 
     /// A document-space point in a layer's own space, which is where a
@@ -4023,6 +4072,77 @@ mod save_probe {
         assert!(session.cancel_preview().unwrap());
         assert_eq!(session.stroke_count(layer).unwrap(), 1);
         assert!(!session.is_painting());
+    }
+
+    /// A paint layer inside a moved group takes the brush where the
+    /// pointer is, not where the layer would be without the group.
+    #[test]
+    fn a_brush_follows_the_group_its_layer_is_in() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("g")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::paint("brush")),
+            })
+            .unwrap();
+        let layer = session.document().children_of(group).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        session
+            .paint_begin(layer, 60.0, 60.0, 6.0, color, 0.0, false)
+            .unwrap();
+        session.commit_preview();
+        let s = session.render().unwrap();
+        assert!(s.get(60, 60).a > 0.9, "the dab landed under the pointer");
+        assert_eq!(s.get(20, 20).a, 0.0, "not where the group moved it from");
+    }
+
+    /// A stroke still being drawn repaints only what it just added, so a
+    /// long stroke does not get slower the longer it gets.
+    #[test]
+    fn extending_a_stroke_repaints_only_its_tail() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        session
+            .paint_begin(layer, 20.0, 200.0, 6.0, color, 0.0, false)
+            .unwrap();
+        // Draw most of the way across the page, then measure one more
+        // step of the same stroke.
+        for x in (30..340).step_by(10) {
+            session.paint_extend(x as f32, 200.0, 6.0).unwrap();
+        }
+        let _ = session.render();
+        let before = session.pixels_recomputed();
+        session.paint_extend(350.0, 200.0, 6.0).unwrap();
+        let _ = session.render();
+        let touched = session.pixels_recomputed() - before;
+        assert!(
+            touched < 2000,
+            "one more step of a page-wide stroke repainted {touched} pixels"
+        );
+        session.commit_preview();
+        assert!(
+            session.render().unwrap().get(200, 200).a > 0.9,
+            "and the whole stroke is still painted"
+        );
     }
 
     /// A stroke repaints where the stroke is, not where the whole
