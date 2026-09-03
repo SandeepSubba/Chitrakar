@@ -662,6 +662,31 @@ assert(
   overlapAfter[1] < overlapBefore[1],
   `multiply darkened overlap (g ${overlapBefore[1]} -> ${overlapAfter[1]})`,
 );
+// The rest of the W3C modes are in the picker too, grouped the way an
+// editor groups them. Difference of a colour with what it sits on is the
+// one with an answer that can be checked without knowing either.
+assert(
+  (await page.locator('select[aria-label="Blend mode"] option').count()) === 16,
+  "every blend mode the spec names is offered",
+);
+await page.selectOption('select[aria-label="Blend mode"]', "Screen");
+await page.waitForTimeout(150);
+const screened = await canvasPixel(500, 400);
+assert(
+  screened[1] > overlapBefore[1],
+  `screen lightened it the other way (g ${overlapBefore[1]} -> ${screened[1]})`,
+);
+// Both shapes were drawn with the same fill, so difference is the mode
+// with an answer that says so: a colour against itself is nothing.
+await page.selectOption('select[aria-label="Blend mode"]', "Difference");
+await page.waitForTimeout(150);
+const same = await canvasPixel(500, 400);
+assert(
+  same[0] < 10 && same[1] < 10 && same[2] < 10 && same[3] === 255,
+  `a colour differenced with itself is black (${same})`,
+);
+await page.selectOption('select[aria-label="Blend mode"]', "Multiply");
+await page.waitForTimeout(150);
 
 // 8c. Opacity slider via keyboard: lower ellipse opacity, alpha-blend shifts.
 const slider = page.locator('input[aria-label="Layer opacity"]');

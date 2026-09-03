@@ -451,6 +451,29 @@ fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
     format!(r#" mask="url(#{name})""#)
 }
 
+/// The CSS name for a blend mode: the spec's, hyphenated where it has
+/// two words.
+fn css_blend(mode: BlendMode) -> &'static str {
+    match mode {
+        BlendMode::Normal => "normal",
+        BlendMode::Multiply => "multiply",
+        BlendMode::Screen => "screen",
+        BlendMode::Overlay => "overlay",
+        BlendMode::Darken => "darken",
+        BlendMode::Lighten => "lighten",
+        BlendMode::ColorDodge => "color-dodge",
+        BlendMode::ColorBurn => "color-burn",
+        BlendMode::HardLight => "hard-light",
+        BlendMode::SoftLight => "soft-light",
+        BlendMode::Difference => "difference",
+        BlendMode::Exclusion => "exclusion",
+        BlendMode::Hue => "hue",
+        BlendMode::Saturation => "saturation",
+        BlendMode::Color => "color",
+        BlendMode::Luminosity => "luminosity",
+    }
+}
+
 fn common_attrs(node: &chitrakar_doc::Node) -> String {
     let mut s = String::new();
     let t = node.transform;
@@ -466,8 +489,11 @@ fn common_attrs(node: &chitrakar_doc::Node) -> String {
     }
     match node.blend {
         BlendMode::Normal => {}
-        BlendMode::Multiply => s.push_str(r#" style="mix-blend-mode:multiply""#),
-        BlendMode::Screen => s.push_str(r#" style="mix-blend-mode:screen""#),
+        // The spec's own names, which are what CSS calls them too, so a
+        // blend travels as itself.
+        other => {
+            let _ = write!(s, r#" style="mix-blend-mode:{}""#, css_blend(other));
+        }
     }
     s
 }
@@ -648,6 +674,37 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// A blend travels under the name the spec gives it, which is what
+    /// CSS calls it too — so what a browser shows is what the engine drew.
+    #[test]
+    fn blends_travel_under_their_own_names() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let id = filled(&mut doc, "over", 20.0, 20.0);
+        for (mode, css) in [
+            (BlendMode::Overlay, "overlay"),
+            (BlendMode::ColorDodge, "color-dodge"),
+            (BlendMode::SoftLight, "soft-light"),
+            (BlendMode::Luminosity, "luminosity"),
+        ] {
+            doc.apply(Command::SetBlendMode { id, blend: mode })
+                .unwrap();
+            let svg = export_svg(&doc).unwrap();
+            assert!(
+                svg.contains(&format!("mix-blend-mode:{css}")),
+                "{mode:?} travels as {css}: {svg}"
+            );
+        }
+        doc.apply(Command::SetBlendMode {
+            id,
+            blend: BlendMode::Normal,
+        })
+        .unwrap();
+        assert!(
+            !export_svg(&doc).unwrap().contains("mix-blend-mode"),
+            "and the plain one says nothing"
+        );
     }
 
     /// A copy travels as the original's markup again, inside the copy's

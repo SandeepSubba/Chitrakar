@@ -6,12 +6,41 @@ use crate::NodeId;
 use chitrakar_color::AuthoredColor;
 use serde::{Deserialize, Serialize};
 
+/// How a layer's colour meets what is under it. The names and the
+/// arithmetic are the W3C compositing spec's, which is what SVG's
+/// `mix-blend-mode` and PDF's `/BM` say too — so a page blends the same
+/// way in the engine and in what it exports.
+///
+/// Additive: the three that existed keep their names, and a document
+/// written before the rest still reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BlendMode {
     #[default]
     Normal,
     Multiply,
     Screen,
+    /// Multiply where the backdrop is dark and screen where it is light:
+    /// contrast, judged by what is underneath.
+    Overlay,
+    Darken,
+    Lighten,
+    /// Brightens the backdrop towards the layer's colour.
+    ColorDodge,
+    /// Darkens it towards the layer's colour.
+    ColorBurn,
+    /// Overlay with the two swapped: contrast judged by the layer.
+    HardLight,
+    /// A gentler hard light, as if the layer were a diffused lamp.
+    SoftLight,
+    Difference,
+    /// A softer difference, with no black at the middle.
+    Exclusion,
+    /// The four that take one part of a colour and leave the rest: the
+    /// layer's hue on the backdrop's brightness, and so on.
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
 }
 
 /// 2D affine transform (row-major 2×3: `[a c e; b d f]` maps column vector

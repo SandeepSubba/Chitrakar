@@ -218,7 +218,27 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Eyedropper: "eyedropper",
 };
 type Tool = (typeof TOOLS)[number];
-const BLEND_MODES: BlendMode[] = ["Normal", "Multiply", "Screen"];
+/** The blend modes, grouped the way every editor groups them: the plain
+ * one, the ones that darken, the ones that lighten, the ones that work on
+ * contrast, the ones that compare, and the four that take one part of a
+ * colour and leave the rest. */
+const BLEND_GROUPS: [string, BlendMode[]][] = [
+  ["", ["Normal"]],
+  ["Darken", ["Darken", "Multiply", "ColorBurn"]],
+  ["Lighten", ["Lighten", "Screen", "ColorDodge"]],
+  ["Contrast", ["Overlay", "SoftLight", "HardLight"]],
+  ["Compare", ["Difference", "Exclusion"]],
+  ["Colour", ["Hue", "Saturation", "Color", "Luminosity"]],
+];
+/** What each is called in the picker: the spec's CamelCase read as
+ * words. */
+const BLEND_NAMES: Partial<Record<BlendMode, string>> = {
+  ColorDodge: "Colour dodge",
+  ColorBurn: "Colour burn",
+  HardLight: "Hard light",
+  SoftLight: "Soft light",
+  Color: "Colour",
+};
 /** Minimum travel between recorded brush samples, and how far a simplified
  * stroke may stray from the one that was drawn — both in document units. */
 const BRUSH_STEP = 3;
@@ -5150,11 +5170,23 @@ export function App() {
                   }
                   aria-label="Blend mode"
                 >
-                  {BLEND_MODES.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
+                  {BLEND_GROUPS.map(([label, modes]) =>
+                    label === "" ? (
+                      modes.map((m) => (
+                        <option key={m} value={m}>
+                          {BLEND_NAMES[m] ?? m}
+                        </option>
+                      ))
+                    ) : (
+                      <optgroup key={label} label={label}>
+                        {modes.map((m) => (
+                          <option key={m} value={m}>
+                            {BLEND_NAMES[m] ?? m}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ),
+                  )}
                 </select>
               </label>
               {selectedKind && (

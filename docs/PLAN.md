@@ -40,7 +40,11 @@ without reading anything else.*
   inscribed ellipse or rectangle, any shape handed down to the layer
   below, or one brushed on by hand — dragged and resized on the canvas, groups,
   reorder (by the arrows, or by dragging a row above, below or into
-  another), duplicate/copy/cut/paste (subtree and pixels included, across
+  another), the sixteen blend modes the W3C compositing spec names —
+  grouped in the picker the way editors group them, and read over the
+  values a device shows rather than over linear light, which is what
+  makes a page look the same in the engine as in the SVG and PDF it
+  exports, duplicate/copy/cut/paste (subtree and pixels included, across
   documents), copy and paste a layer's look on its own — what it is
   painted with, what hangs off it and how it sits on what is under it,
   but never its shape — onto any number of layers in one entry,
@@ -238,9 +242,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~242),
+- **Verify before committing:** `cargo test --workspace` (~245),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~474 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~477 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

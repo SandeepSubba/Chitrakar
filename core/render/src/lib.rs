@@ -1509,20 +1509,98 @@ fn lerp(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
     }
 }
 
+/// Composite `src` over `dst` with a blend mode.
+///
+/// The compositing arithmetic is done in the premultiplied linear pixels
+/// the whole renderer works in, which is where source-over belongs. The
+/// *blend function* is not: the W3C spec defines it over the values a
+/// device shows, and so do SVG's `mix-blend-mode` and PDF's `/BM`. Doing
+/// it in linear light would put Overlay's pivot at what reads as a light
+/// grey and would make the engine disagree with its own exports, so each
+/// channel crosses into the display encoding for the blend and back.
 fn blend_pixel(src: LinearRgba, dst: LinearRgba, mode: BlendMode) -> LinearRgba {
     match mode {
         BlendMode::Normal => src.over(dst),
-        // Premultiplied separable blend: B(src,dst) mixed by coverage.
         BlendMode::Multiply => separable(src, dst, |s, d| s * d),
-        BlendMode::Screen => separable(src, dst, |s, d| s + d - s * d),
+        BlendMode::Screen => separable(src, dst, screen),
+        BlendMode::Overlay => separable(src, dst, |s, d| hard_light(d, s)),
+        BlendMode::Darken => separable(src, dst, f32::min),
+        BlendMode::Lighten => separable(src, dst, f32::max),
+        BlendMode::ColorDodge => separable(src, dst, |s, d| {
+            if d <= 0.0 {
+                0.0
+            } else if s >= 1.0 {
+                1.0
+            } else {
+                (d / (1.0 - s)).min(1.0)
+            }
+        }),
+        BlendMode::ColorBurn => separable(src, dst, |s, d| {
+            if d >= 1.0 {
+                1.0
+            } else if s <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - d) / s).min(1.0)
+            }
+        }),
+        BlendMode::HardLight => separable(src, dst, hard_light),
+        BlendMode::SoftLight => separable(src, dst, soft_light),
+        BlendMode::Difference => separable(src, dst, |s, d| (s - d).abs()),
+        BlendMode::Exclusion => separable(src, dst, |s, d| s + d - 2.0 * s * d),
+        // The four that take one part of a colour and leave the rest have
+        // to see all three channels at once.
+        BlendMode::Hue => non_separable(src, dst, |s, b| set_lum(set_sat(s, sat(b)), lum(b))),
+        BlendMode::Saturation => {
+            non_separable(src, dst, |s, b| set_lum(set_sat(b, sat(s)), lum(b)))
+        }
+        BlendMode::Color => non_separable(src, dst, |s, b| set_lum(s, lum(b))),
+        BlendMode::Luminosity => non_separable(src, dst, |s, b| set_lum(b, lum(s))),
+    }
+}
+
+fn screen(s: f32, d: f32) -> f32 {
+    s + d - s * d
+}
+
+fn hard_light(s: f32, d: f32) -> f32 {
+    if s <= 0.5 {
+        d * 2.0 * s
+    } else {
+        screen(2.0 * s - 1.0, d)
+    }
+}
+
+/// W3C soft light: a gentler hard light, with the backdrop steering how
+/// far the layer can push it.
+fn soft_light(s: f32, d: f32) -> f32 {
+    let dd = if d <= 0.25 {
+        ((16.0 * d - 12.0) * d + 4.0) * d
+    } else {
+        d.sqrt()
+    };
+    if s <= 0.5 {
+        d - (1.0 - 2.0 * s) * d * (1.0 - d)
+    } else {
+        d + (2.0 * s - 1.0) * (dd - d)
+    }
+}
+
+/// The channels a blend function sees: unpremultiplied and in the
+/// display encoding, which is the space the spec is written in.
+fn shown(v: f32, a: f32) -> f32 {
+    if a > 0.0 {
+        chitrakar_color::linear_to_srgb((v / a).clamp(0.0, 1.0))
+    } else {
+        0.0
     }
 }
 
 fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> LinearRgba {
-    let un = |v: f32, a: f32| if a > 0.0 { v / a } else { 0.0 };
+    let (sa, da) = (src.a, dst.a);
     let mix = |s: f32, d: f32| {
-        let (sa, da) = (src.a, dst.a);
-        let blended = f(un(s, sa), un(d, da));
+        let blended =
+            chitrakar_color::srgb_to_linear(f(shown(s, sa), shown(d, da)).clamp(0.0, 1.0));
         // W3C compositing: result = (1-da)*s + (1-sa)*d + sa*da*B
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
@@ -1530,8 +1608,89 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
         r: mix(src.r, dst.r),
         g: mix(src.g, dst.g),
         b: mix(src.b, dst.b),
-        a: src.a + dst.a * (1.0 - src.a),
+        a: sa + da * (1.0 - sa),
     }
+}
+
+/// The same compositing, for a blend that reads all three channels at
+/// once rather than one at a time.
+fn non_separable(
+    src: LinearRgba,
+    dst: LinearRgba,
+    f: impl Fn([f32; 3], [f32; 3]) -> [f32; 3],
+) -> LinearRgba {
+    let (sa, da) = (src.a, dst.a);
+    let s = [shown(src.r, sa), shown(src.g, sa), shown(src.b, sa)];
+    let d = [shown(dst.r, da), shown(dst.g, da), shown(dst.b, da)];
+    let b = f(s, d);
+    let mix = |i: usize, s: f32, d: f32| {
+        let blended = chitrakar_color::srgb_to_linear(b[i].clamp(0.0, 1.0));
+        (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
+    };
+    LinearRgba {
+        r: mix(0, src.r, dst.r),
+        g: mix(1, src.g, dst.g),
+        b: mix(2, src.b, dst.b),
+        a: sa + da * (1.0 - sa),
+    }
+}
+
+/// W3C's luminosity for the non-separable blends — its own weights, not
+/// the renderer's luminance, because the spec says so and matching it is
+/// what makes the engine agree with SVG and PDF.
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut out = c;
+    if n < 0.0 && l - n > 1e-6 {
+        for v in &mut out {
+            *v = l + (*v - l) * l / (l - n);
+        }
+    }
+    if x > 1.0 && x - l > 1e-6 {
+        for v in &mut out {
+            *v = l + (*v - l) * (1.0 - l) / (x - l);
+        }
+    }
+    out
+}
+
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d])
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// Stretch a colour's channels to a given saturation, keeping which
+/// channel is which — the middle one lands where it sat between the two
+/// others.
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let (mut lo, mut mid, mut hi) = (0usize, 1usize, 2usize);
+    // Sort the indices by value, three comparisons.
+    if c[lo] > c[mid] {
+        std::mem::swap(&mut lo, &mut mid);
+    }
+    if c[mid] > c[hi] {
+        std::mem::swap(&mut mid, &mut hi);
+    }
+    if c[lo] > c[mid] {
+        std::mem::swap(&mut lo, &mut mid);
+    }
+    let mut out = [0.0f32; 3];
+    if c[hi] > c[lo] {
+        out[mid] = (c[mid] - c[lo]) * s / (c[hi] - c[lo]);
+        out[hi] = s;
+    }
+    out[lo] = 0.0;
+    out
 }
 
 /// Where a device pixel sits in a surface holding only the window that
@@ -4109,6 +4268,106 @@ mod tests {
         b: 1.0,
         a: 1.0,
     };
+
+    /// A blend reads the values a device shows, not the linear light
+    /// behind them — which is what the W3C spec says, what SVG's
+    /// mix-blend-mode and PDF's /BM do, and so what keeps a page looking
+    /// the same in the engine and in what it exports.
+    ///
+    /// Overlay is the sharpest way to see it: it pivots on the middle,
+    /// and the middle of what is shown is a mid grey. Blended in linear
+    /// light the same pixels come out far darker.
+    #[test]
+    fn a_blend_reads_the_values_the_page_shows() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let over = |mode| {
+            let mut doc = Document::new(4, 4, ColorMode::Rgb);
+            add(&mut doc, filled_rect("under", 4.0, 4.0, grey));
+            let top = add(&mut doc, filled_rect("over", 4.0, 4.0, grey));
+            doc.apply(Command::SetBlendMode {
+                id: top,
+                blend: mode,
+            })
+            .unwrap();
+            render(&doc).unwrap().get(1, 1).to_srgb8()
+        };
+        let mid = over(BlendMode::Overlay)[0] as i32;
+        assert!(
+            (mid - 128).abs() <= 1,
+            "a mid grey overlaid on itself is left where it is ({mid})"
+        );
+        // Multiply: half of what is shown, times half again.
+        let dark = over(BlendMode::Multiply)[0] as i32;
+        assert!((dark - 64).abs() <= 1, "half a half is a quarter ({dark})");
+        let light = over(BlendMode::Screen)[0] as i32;
+        assert!(
+            (light - 191).abs() <= 1,
+            "and screen is the other way ({light})"
+        );
+        assert_eq!(over(BlendMode::Darken)[0], over(BlendMode::Lighten)[0]);
+        assert_eq!(
+            over(BlendMode::Difference)[0],
+            0,
+            "a colour against itself is nothing"
+        );
+    }
+
+    /// The four that take one part of a colour: Color puts the layer's
+    /// hue and saturation on the backdrop's brightness, Luminosity the
+    /// other way round.
+    #[test]
+    fn the_blends_that_take_one_part_of_a_colour() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let paint = |mode| {
+            let mut doc = Document::new(4, 4, ColorMode::Rgb);
+            add(&mut doc, filled_rect("under", 4.0, 4.0, grey));
+            let top = add(&mut doc, filled_rect("over", 4.0, 4.0, RED));
+            doc.apply(Command::SetBlendMode {
+                id: top,
+                blend: mode,
+            })
+            .unwrap();
+            render(&doc).unwrap().get(1, 1).to_srgb8()
+        };
+        let coloured = paint(BlendMode::Color);
+        assert!(
+            coloured[0] > coloured[1] && coloured[1] == coloured[2],
+            "red's hue on grey is a red ({coloured:?})"
+        );
+        // Pure red is dark for its hue, so taking the grey's brightness
+        // lifts the other two channels rather than dropping the red —
+        // the spec clips back into range about the luminosity it was
+        // given, which is what puts red at the top.
+        assert!(
+            coloured[1] > 40,
+            "carrying the grey's brightness, not red's ({coloured:?})"
+        );
+        // Luminosity is the other way: red's brightness, grey's colour —
+        // which is a grey, since grey has no colour to keep.
+        let lit = paint(BlendMode::Luminosity);
+        assert!(
+            lit[0] == lit[1] && lit[1] == lit[2],
+            "the backdrop's grey has no hue to take ({lit:?})"
+        );
+        assert!(
+            (lit[0] as i32) < 128,
+            "and red is darker than a mid grey ({lit:?})"
+        );
+        // Saturation of a flat red over grey leaves grey grey too: there
+        // is no hue under it to make vivid.
+        let sat = paint(BlendMode::Saturation);
+        assert!(sat[0] == sat[1] && sat[1] == sat[2], "{sat:?}");
+    }
 
     /// A copy draws what the original draws, where the copy is; changing
     /// the original changes the copy, and moving the original moves only
@@ -6731,8 +6990,9 @@ mod tests {
         let s = render(&doc).unwrap();
         // Isolated, the child multiplies against nothing and simply lands
         // on top at full red. Were the group flattened away it would
-        // multiply into the grey below and come out at about a fifth of
-        // that (grey is 0.5 sRGB, ~0.214 linear).
+        // multiply into the grey below and come out at half of what is
+        // shown — a blend reads the values a device shows, so red times
+        // a half-grey backdrop is a half-grey red.
         let inside = s.get(8, 8);
         assert!((inside.r - 1.0).abs() < 1e-4, "{inside:?}");
         assert!(inside.g.abs() < 1e-4 && inside.b.abs() < 1e-4, "{inside:?}");

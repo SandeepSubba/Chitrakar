@@ -9,7 +9,25 @@
 import init, { WasmSession } from "./wasm-pkg/chitrakar_engine";
 
 export type NodeId = number;
-export type BlendMode = "Normal" | "Multiply" | "Screen";
+/** The W3C compositing modes, which is what SVG's mix-blend-mode and
+ * PDF's /BM name too. */
+export type BlendMode =
+  | "Normal"
+  | "Multiply"
+  | "Screen"
+  | "Overlay"
+  | "Darken"
+  | "Lighten"
+  | "ColorDodge"
+  | "ColorBurn"
+  | "HardLight"
+  | "SoftLight"
+  | "Difference"
+  | "Exclusion"
+  | "Hue"
+  | "Saturation"
+  | "Color"
+  | "Luminosity";
 
 export type AuthoredColor =
   | { Srgb: { r: number; g: number; b: number; a: number } }

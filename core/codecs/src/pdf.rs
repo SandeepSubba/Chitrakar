@@ -513,6 +513,20 @@ impl<'a> Page<'a> {
             BlendMode::Normal => "Normal",
             BlendMode::Multiply => "Multiply",
             BlendMode::Screen => "Screen",
+            // PDF names them exactly as the spec does, in CamelCase.
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Darken => "Darken",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::ColorDodge => "ColorDodge",
+            BlendMode::ColorBurn => "ColorBurn",
+            BlendMode::HardLight => "HardLight",
+            BlendMode::SoftLight => "SoftLight",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::Hue => "Hue",
+            BlendMode::Saturation => "Saturation",
+            BlendMode::Color => "Color",
+            BlendMode::Luminosity => "Luminosity",
         };
         let obj = self.push(
             format!(
