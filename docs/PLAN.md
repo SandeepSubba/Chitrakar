@@ -158,7 +158,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~207),
+- **Verify before committing:** `cargo test --workspace` (~208),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~386 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -460,8 +460,13 @@ chitrakar/
   out-of-gamut pixels mark neutral grey. Monitor profiles and rendering-
   intent selection pending.
 - Export: PNG ✅ (sRGB composite), SVG ✅ (live vector markup — shapes,
-  paths, groups with opacity/blend, embedded rasters, text; CMYK colors
-  resolve through the press profile; adjustments/filters/masks noted as
+  paths, groups with opacity/blend, embedded rasters, text; a mask
+  travels as a picture of what it lets through — white with the coverage
+  in its alpha, which reads the same whether a consumer takes a mask by
+  luminance or by alpha — on a wrapper carrying no transform, since SVG
+  reads a userSpaceOnUse mask in the space in force where it is
+  referenced; CMYK colors
+  resolve through the press profile; adjustments and filters noted as
   omitted), CMYK TIFF ✅ (composite separated into ink through the press
   profile, composited over paper white, 4-channel TIFF with that profile
   embedded; refuses rather than guessing when no profile is loaded).

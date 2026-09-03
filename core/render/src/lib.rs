@@ -2622,6 +2622,55 @@ pub struct PaintedPixels {
     pub rgba8: Vec<u8>,
 }
 
+/// A layer's mask as an image: what it lets through over the layer's
+/// own box, one pixel per document unit.
+///
+/// White throughout with the coverage in the alpha channel, which reads
+/// the same whether the format takes a mask by its luminance or by its
+/// alpha — white has luminance 1, so one is the other. For an exporter
+/// whose format has no mask like ours and has to hand one over as a
+/// picture. `None` when the layer has no mask, or no box to draw it in.
+pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    let node = doc.node(id)?;
+    let Some(mask) = node.mask.as_ref() else {
+        return Ok(None);
+    };
+    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+        return Ok(None);
+    };
+    let (w, h) = (
+        (x1 - x0).ceil().max(1.0) as u32,
+        (y1 - y0).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    // A mask is authored in the space the layer sits in, so the image's
+    // top-left corner is where that box starts.
+    let space = Transform::translation(-x0, -y0);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    let plane = MaskRef::plane_for(Some(mask), space, clip, (w, h));
+    let m = MaskRef::new(Some(mask), space).with_plane(plane.as_ref());
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let a = (coverage_at(doc, m, x, y).clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba8.extend_from_slice(&[255, 255, 255, a]);
+        }
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
 /// A paint layer rendered on its own at one pixel per document unit,
 /// for an exporter whose format has no brush in it and has to hand the
 /// layer over as an image. `None` when the layer has no paint on it.

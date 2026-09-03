@@ -3,8 +3,9 @@
 //!
 //! Faithful subset, honestly scoped: groups carry opacity and blend
 //! (`mix-blend-mode`); adjustment and filter layers have no SVG equivalent
-//! that matches our compositing and are skipped with a comment; masks are
-//! skipped in this first pass.
+//! that matches our compositing and are skipped with a comment; a mask
+//! travels as a picture of what it lets through, since SVG has no mask
+//! shaped like ours — the artwork under it stays live.
 
 use chitrakar_color::AuthoredColor;
 use chitrakar_doc::{
@@ -49,6 +50,14 @@ fn write_children(
         }
         let pad = "  ".repeat(depth);
         let common = common_attrs(node);
+        // A mask is authored in the space the layer sits in, so it goes
+        // on a wrapper that carries no transform of its own: SVG reads a
+        // userSpaceOnUse mask in the space in force where it is
+        // referenced, and the layer's own transform belongs inside that.
+        let masked = mask_attrs(doc, child, defs);
+        if !masked.is_empty() {
+            let _ = writeln!(out, "{pad}<g{masked}>");
+        }
         match &node.kind {
             NodeKind::Group => {
                 let _ = writeln!(out, "{pad}<g{common}>");
@@ -308,8 +317,33 @@ fn write_children(
                 );
             }
         }
+        if !masked.is_empty() {
+            let _ = writeln!(out, "{pad}</g>");
+        }
     }
     Ok(())
+}
+
+/// A `mask="url(#…)"` attribute, with the mask itself written into the
+/// defs as a picture of what it lets through: white with the coverage in
+/// its alpha, which reads the same whether the mask is taken by its
+/// luminance or by its alpha. Empty when the layer has no mask.
+fn mask_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
+    let Ok(Some(m)) = chitrakar_render::mask_pixels(doc, id) else {
+        return String::new();
+    };
+    let Ok(png) = crate::encode_png(m.width, m.height, &m.rgba8) else {
+        return String::new();
+    };
+    let (w, h) = (m.width, m.height);
+    let [x, y] = m.origin;
+    let name = format!("mask{}", id.0);
+    let _ = writeln!(
+        defs,
+        r#"<mask id="{name}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><image x="{x}" y="{y}" width="{w}" height="{h}" href="data:image/png;base64,{}"/></mask>"#,
+        base64(&png)
+    );
+    format!(r#" mask="url(#{name})""#)
 }
 
 fn common_attrs(node: &chitrakar_doc::Node) -> String {
@@ -487,6 +521,80 @@ mod tests {
         b: 0.0,
         a: 1.0,
     };
+
+    /// A mask travels as a picture of what it lets through, on a wrapper
+    /// that carries no transform: SVG reads a userSpaceOnUse mask in the
+    /// space in force where it is referenced, and the layer's own
+    /// transform belongs inside that.
+    #[test]
+    fn a_mask_travels_as_what_it_lets_through() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        let root = doc.root();
+        let mut rect = Node::vector(
+            "photo",
+            VectorShape::Rect {
+                width: 80.0,
+                height: 60.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut rect.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(rect),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(40.0, 40.0),
+        })
+        .unwrap();
+
+        // With no mask there is nothing extra to say.
+        let plain = export_svg(&doc).unwrap();
+        assert!(!plain.contains("<mask"), "no mask, no mask element");
+
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Painted {
+                    strokes: vec![chitrakar_doc::PaintStroke {
+                        points: vec![[80.0, 70.0]],
+                        radii: vec![10.0],
+                        color: RED,
+                        softness: 0.0,
+                        erase: true,
+                    }],
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(svg.contains(r#"<mask id="mask"#), "the mask is in the defs");
+        assert!(
+            svg.contains(r#"maskUnits="userSpaceOnUse""#),
+            "measured in the space the layer sits in"
+        );
+        assert!(
+            svg.contains(r#"mask="url(#mask"#),
+            "and the layer references it"
+        );
+        // The wrapper carrying the mask has no transform of its own; the
+        // rect inside it keeps the one it had.
+        let at = svg.find(r#"mask="url(#mask"#).unwrap();
+        let line_start = svg[..at].rfind('<').unwrap();
+        assert!(
+            !svg[line_start..at].contains("transform="),
+            "the wrapper carries no transform: {}",
+            &svg[line_start..at]
+        );
+        assert!(svg.contains("<rect"), "and the artwork is still live");
+    }
 
     #[test]
     fn svg_exports_shapes_rasters_and_text() {
