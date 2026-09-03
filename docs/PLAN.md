@@ -262,7 +262,15 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~249),
+- **Opening a file that is not right:** a `.chitra` that is truncated,
+  bent, or not a zip at all is refused rather than survived — a test cuts
+  a good file short at every tenth of its length and flips a byte every
+  seventh through its first kilobyte. A page is held to what the engine
+  could actually draw (a hundred million pixels, thirty thousand a side,
+  at sixteen bytes a pixel): a file claiming more is refused on the way
+  in, where it can be said, and `Session::new` gives back the largest
+  page there is rather than one nothing could render.
+- **Verify before committing:** `cargo test --workspace` (~252),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~488 browser
   assertions). Both suites self-skip CMYK-profile steps unless

@@ -50,6 +50,23 @@ pub enum DocError {
     InstanceCycle,
 }
 
+/// How large a page may be. The renderer's surface is sixteen bytes a
+/// pixel, so the ceiling is what can actually be drawn rather than a
+/// round number: a hundred million pixels is already a gigabyte and a
+/// half of surface, and past that the wasm heap has nowhere to put it.
+/// The per-side limit only keeps a page from being a thread.
+pub const MAX_CANVAS_PIXELS: u64 = 100_000_000;
+pub const MAX_CANVAS_SIDE: u32 = 30_000;
+
+/// Whether a page of this size is one the engine could draw.
+pub fn canvas_fits(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_CANVAS_SIDE
+        && height <= MAX_CANVAS_SIDE
+        && width as u64 * height as u64 <= MAX_CANVAS_PIXELS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMeta {
     pub width: u32,
@@ -518,7 +535,7 @@ impl Document {
                 dx,
                 dy,
             } => {
-                if width == 0 || height == 0 {
+                if !canvas_fits(width, height) {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
                 let prev = (self.meta.width, self.meta.height);

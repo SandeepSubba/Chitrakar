@@ -196,8 +196,18 @@ pub struct Session {
 }
 
 impl Session {
+    /// A new document of that size. The size is held to what the engine
+    /// can actually draw — a page is sixteen bytes a pixel — so a caller
+    /// that asks for more gets the largest page there is rather than one
+    /// that cannot be rendered.
     pub fn new(width: u32, height: u32, color_mode: ColorMode) -> Self {
-        Self::from_document(Document::new(width, height, color_mode))
+        let side = chitrakar_doc::MAX_CANVAS_SIDE;
+        let (mut w, mut h) = (width.clamp(1, side), height.clamp(1, side));
+        while !chitrakar_doc::canvas_fits(w, h) {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+        Self::from_document(Document::new(w, h, color_mode))
     }
 
     fn from_document(doc: Document) -> Self {
@@ -5103,6 +5113,28 @@ mod tests {
             Some("Pin wide"),
             "one undo took the whole resize, so it was one entry"
         );
+    }
+
+    /// A page the engine could not draw is never made: asked for one, it
+    /// gives back the largest there is instead, and a crop cannot grow
+    /// past it either.
+    #[test]
+    fn a_page_is_never_larger_than_can_be_drawn() {
+        let huge = Session::new(100_000, 100_000, ColorMode::Rgb);
+        let (w, h) = (huge.document().meta.width, huge.document().meta.height);
+        assert!(
+            chitrakar_doc::canvas_fits(w, h),
+            "asked for 100000 square, got {w}x{h}"
+        );
+        assert!(w > 1000 && h > 1000, "and it is still a page: {w}x{h}");
+        assert_eq!(Session::new(0, 0, ColorMode::Rgb).document().meta.width, 1);
+
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        assert!(
+            session.resize_canvas(40_000, 40_000, 0.0, 0.0).is_err(),
+            "and it cannot be grown into one either"
+        );
+        assert_eq!(session.document().meta.width, 60, "left as it was");
     }
 
     /// A histogram describes the picture on the page, not the hole

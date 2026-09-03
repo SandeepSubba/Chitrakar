@@ -23,6 +23,8 @@ pub enum ContainerError {
     Manifest(#[from] serde_json::Error),
     #[error("unsupported format version {found} (this build reads up to {supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
+    #[error("that file says its page is {width}x{height}, which is more than can be drawn")]
+    BadCanvas { width: u32, height: u32 },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,6 +129,15 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         });
     }
     let mut doc = manifest.document;
+    // A page that opens has to be one the engine could draw: the surface
+    // is sixteen bytes a pixel, so a file claiming an enormous one would
+    // ask for memory nobody has rather than fail honestly here.
+    if !chitrakar_doc::canvas_fits(doc.meta.width, doc.meta.height) {
+        return Err(ContainerError::BadCanvas {
+            width: doc.meta.width,
+            height: doc.meta.height,
+        });
+    }
     let entries: Vec<String> = zip.file_names().map(String::from).collect();
     for name in entries {
         let Some(id) = name
@@ -200,6 +211,64 @@ mod tests {
     /// somewhere; what this one is for is the gap between them — a kind
     /// added to the model and not to the file, which no per-kind test
     /// would notice because each of those builds its document in memory.
+    /// A file that is damaged, truncated, or simply not one of ours must
+    /// be refused rather than bring the editor down with it: a save cut
+    /// short by a full disk is exactly the file someone will try to open.
+    #[test]
+    fn a_damaged_file_is_refused_not_survived() {
+        assert!(load_chitra(b"").is_err(), "nothing at all");
+        assert!(load_chitra(b"not a zip, just words").is_err(), "not a zip");
+        let mut doc = Document::new(64, 48, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::vector(
+                "r",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+            )),
+        })
+        .unwrap();
+        let good = save_chitra(&doc).unwrap();
+        // Cut short at every tenth of its length.
+        for cut in 1..10 {
+            let at = good.len() * cut / 10;
+            let _ = load_chitra(&good[..at]);
+        }
+        // A byte flipped anywhere in the first kilobyte.
+        for i in (0..good.len().min(1024)).step_by(7) {
+            let mut bent = good.clone();
+            bent[i] ^= 0xff;
+            let _ = load_chitra(&bent);
+        }
+        // And the whole of it still opens.
+        assert_eq!(load_chitra(&good).unwrap().meta.width, 64);
+    }
+
+    /// A page that opens is one the engine could draw. A file claiming an
+    /// enormous one is refused here, where it can be said, rather than
+    /// asking for memory nobody has on the first render.
+    #[test]
+    fn a_page_too_big_to_draw_is_refused_on_the_way_in() {
+        for (w, h) in [(100_000u32, 100_000u32), (40_000, 10), (20_000, 20_000)] {
+            let doc = Document::new(w, h, ColorMode::Rgb);
+            let saved = save_chitra(&doc).unwrap();
+            assert!(
+                matches!(load_chitra(&saved), Err(ContainerError::BadCanvas { .. })),
+                "{w}x{h} should have been refused"
+            );
+        }
+        // And a page anyone would actually work on still opens.
+        for (w, h) in [(1u32, 1u32), (2480, 3508), (9000, 9000)] {
+            let saved = save_chitra(&Document::new(w, h, ColorMode::Rgb)).unwrap();
+            assert_eq!(load_chitra(&saved).unwrap().meta.height, h, "{w}x{h}");
+        }
+    }
+
     /// The palette is document state like the guides are: it saves with
     /// the file and comes back, and setting it is its own inverse.
     #[test]
