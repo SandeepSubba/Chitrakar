@@ -224,7 +224,9 @@ export interface LayerInfo {
     | "adjustment"
     | "filter"
     | "text"
-    | "paint";
+    | "paint"
+    | "clone"
+    | "artboard";
   visible: boolean;
   opacity: number;
   blend: BlendMode;

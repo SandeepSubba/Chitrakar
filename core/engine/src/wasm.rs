@@ -234,6 +234,64 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Put a frame on the page at (x, y), `width`×`height` in document
+    /// units, with `background` an authored colour as JSON (or empty for
+    /// a frame with no ground of its own). Returns its id.
+    pub fn add_artboard(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background: &str,
+    ) -> Result<f64, JsError> {
+        let color = if background.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_str(background).map_err(|e| JsError::new(&e.to_string()))?)
+        };
+        self.inner
+            .add_artboard(name, x, y, width, height, color)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// The frame under a document point, or -1 where there is none.
+    pub fn frame_at(&self, x: f32, y: f32) -> f64 {
+        self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)
+    }
+
+    /// A document point in the coordinates layers inside `id` use.
+    /// Empty when that space has collapsed.
+    pub fn point_inside(&self, id: f64, x: f32, y: f32) -> Vec<f32> {
+        self.inner
+            .point_inside(NodeId(id as u64), x, y)
+            .map(|p| p.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// How many layers a group or frame holds.
+    pub fn child_count(&self, id: f64) -> usize {
+        self.inner.child_count(NodeId(id as u64))
+    }
+
+    /// Move a layer to a new parent and slot, keeping it where it is on
+    /// the page (see `Session::reparent`).
+    pub fn reparent(&mut self, id: f64, parent: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .reparent(NodeId(id as u64), NodeId(parent as u64), index)
+            .map_err(to_js)
+    }
+
+    /// A frame's contents as a PNG, at the size it shows on the page
+    /// times `scale`.
+    pub fn export_artboard_png(&self, id: f64, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .artboard_png(NodeId(id as u64), scale)
+            .map_err(to_js)
+    }
+
     /// Start a brush stroke on a paint layer. The point and the radius
     /// are in document units; `color` is an authored colour as JSON, the
     /// way a command carries one. The stroke previews as it is drawn and

@@ -124,6 +124,7 @@ function seedHandles(
 
 const TOOLS = [
   "Move",
+  "Frame",
   "Rect",
   "Ellipse",
   "Pen",
@@ -140,6 +141,7 @@ const TOOLS = [
 const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   v: "Move",
   m: "Move",
+  f: "Frame",
   r: "Rect",
   e: "Ellipse",
   p: "Pen",
@@ -153,8 +155,13 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
 
 /** A glyph per layer kind, so the stack is scannable without reading the
  * type label at the end of every row. */
+/** The layer kinds that hold other layers — what a row can be dropped
+ * into, and what the panel walks down through. */
+const HOLDS_CHILDREN = new Set(["group", "artboard"]);
+
 const KIND_ICONS: Record<string, IconName> = {
   group: "group-layer",
+  artboard: "frame",
   vector: "rect",
   raster: "image",
   adjustment: "adjust",
@@ -166,6 +173,7 @@ const KIND_ICONS: Record<string, IconName> = {
 
 const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Move: "V",
+  Frame: "F",
   Rect: "R",
   Ellipse: "E",
   Pen: "P",
@@ -179,6 +187,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
 
 const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Move: "move",
+  Frame: "frame",
   Rect: "rect",
   Ellipse: "ellipse",
   Pen: "pen",
@@ -641,6 +650,7 @@ export function App() {
   const panDragRef = useRef<PanDrag | null>(null);
   const spaceRef = useRef(false);
   const shapeCount = useRef(0);
+  const frameCount = useRef(0);
   const paintCount = useRef(0);
   /** Where the last paint sample landed, for the speed the width follows. */
   const lastPaint = useRef<[number, number]>([0, 0]);
@@ -1178,7 +1188,7 @@ export function App() {
   const inSelectedGroup = (id: NodeId) => {
     if (selected === null || id === selected) return false;
     const at = layers.findIndex((l) => l.id === selected);
-    if (at < 0 || layers[at].kind !== "group") return false;
+    if (at < 0 || !HOLDS_CHILDREN.has(layers[at].kind)) return false;
     for (let i = at + 1; i < layers.length; i++) {
       if (layers[i].depth <= layers[at].depth) break;
       if (layers[i].id === id) return true;
@@ -2020,15 +2030,50 @@ export function App() {
       setTool("Move");
       return;
     }
+    if (drag.tool === "Frame") {
+      // A frame is put on the page whole: its size is what was dragged,
+      // and it goes under everything already there so it does not cover
+      // loose layers. White ground, which is what a page is.
+      frameCount.current += 1;
+      try {
+        const id = session.add_artboard(
+          `Artboard ${frameCount.current}`,
+          Math.round(x0),
+          Math.round(y0),
+          Math.round(w),
+          Math.round(h),
+          JSON.stringify(hexColor("#ffffff")),
+        );
+        setSelected(id);
+        setMultiSel([]);
+        refresh(session);
+        setTool("Move");
+      } catch (err) {
+        alert(`Frame: ${err}`);
+      }
+      return;
+    }
     shapeCount.current += 1;
+    // Drawn inside a frame, it goes into that frame — in the frame's own
+    // coordinates, so it lands under the cursor rather than at the
+    // frame's offset. Both corners are carried across, so a frame that
+    // has been scaled gets a shape the size it was dragged.
+    const board = session.frame_at(x0, y0);
+    const inside = board >= 0 ? session.point_inside(board, x0, y0) : [];
+    const far = board >= 0 ? session.point_inside(board, x0 + w, y0 + h) : [];
+    const local = inside.length === 2 && far.length === 2;
+    const [ox, oy] = local ? [inside[0], inside[1]] : [x0, y0];
+    const [lw, lh] = local
+      ? [Math.abs(far[0] - inside[0]), Math.abs(far[1] - inside[1])]
+      : [w, h];
     const shape =
       drag.tool === "Rect"
-        ? { Rect: { width: w, height: h, radius: 0 } }
-        : { Ellipse: { rx: w / 2, ry: h / 2 } };
+        ? { Rect: { width: lw, height: lh, radius: 0 } }
+        : { Ellipse: { rx: lw / 2, ry: lh / 2 } };
     run({
       AddNode: {
-        parent: session.root_id,
-        index: topLevelCount(layers),
+        parent: local ? board : session.root_id,
+        index: local ? session.child_count(board) : topLevelCount(layers),
         node: nodePayload(
           `${drag.tool} ${shapeCount.current}`,
           {
@@ -2041,8 +2086,8 @@ export function App() {
               gradient: null,
             },
           },
-          x0,
-          y0,
+          ox,
+          oy,
         ),
       },
     });
@@ -2285,10 +2330,10 @@ export function App() {
         if (ev.clientY < r.top || ev.clientY >= r.bottom) continue;
         over = Number(row.dataset.id);
         const t = (ev.clientY - r.top) / r.height;
-        // The middle of a group's row drops into it; the edges of any
-        // row drop beside it.
+        // The middle of a group's (or a frame's) row drops into it; the
+        // edges of any row drop beside it.
         where =
-          row.dataset.kind === "group" && t > 0.3 && t < 0.7
+          HOLDS_CHILDREN.has(row.dataset.kind ?? "") && t > 0.3 && t < 0.7
             ? "into"
             : t < 0.5
               ? "above"
@@ -2347,7 +2392,16 @@ export function App() {
       cur = layers.find((l) => l.id === cur)?.parent;
     }
     if (parent === me.parent && index === me.index) return;
-    run({ MoveNode: { id, parent, index } });
+    try {
+      // Through the engine rather than a plain MoveNode: changing
+      // parents changes the space the layer's transform is written in,
+      // and the engine undoes that so the layer does not jump when it is
+      // dropped into a group or a frame that sits away from the origin.
+      session.reparent(id, parent, index);
+      refresh(session);
+    } catch (err) {
+      alert(`Move: ${err}`);
+    }
   };
 
   /** Typing into a text block on the canvas: which block, and the text as
@@ -3394,6 +3448,26 @@ export function App() {
     }
   };
 
+  /** Every frame on the page, each as its own PNG at its own size —
+   * what having frames is for. Named after the frame, so a page of them
+   * comes out as a set of named pictures. */
+  const exportArtboards = () => {
+    if (!session) return;
+    const boards = layers.filter((l) => l.kind === "artboard");
+    if (boards.length === 0) return;
+    try {
+      for (const board of boards) {
+        download(
+          session.export_artboard_png(board.id, 1),
+          `${fileName()} - ${board.name}.png`,
+          "image/png",
+        );
+      }
+    } catch (err) {
+      alert(`Export: ${err}`);
+    }
+  };
+
   const exportJpeg = () => {
     if (!session) return;
     download(session.export_jpeg(92), `${fileName()}.jpg`, "image/jpeg");
@@ -3673,6 +3747,15 @@ export function App() {
             {selectionSet.length > 0 && (
               <MenuItem icon="export" onClick={exportSelectionPng}>
                 Export selection as PNG
+              </MenuItem>
+            )}
+            {layers.some((l) => l.kind === "artboard") && (
+              <MenuItem
+                icon="frame"
+                onClick={exportArtboards}
+                hint="one each"
+              >
+                Export every artboard
               </MenuItem>
             )}
             <MenuItem icon="export" onClick={exportJpeg} hint="flattened">
@@ -5184,6 +5267,7 @@ const KEY_HELP: [string, [string, string][]][] = [
     "Tools",
     [
       ["V, M", "Move"],
+      ["F", "Frame (an artboard: a page within the page)"],
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],

@@ -327,7 +327,10 @@ impl<'a> Page<'a> {
             return Ok(false);
         }
         Ok(match &node.kind {
-            NodeKind::Group => {
+            // A frame is a group with a rectangle clipped round it, and
+            // PDF clips to a rectangle natively, so it stays live on the
+            // same terms a group does.
+            NodeKind::Group | NodeKind::Artboard { .. } => {
                 // Less than full opacity, or a blend, applies to the
                 // group's composite; its children drawn one by one would
                 // each apply it against each other.
@@ -591,6 +594,28 @@ impl<'a> Page<'a> {
             NodeKind::Group => {
                 // Full opacity and the default blend by construction (see
                 // is_live): nothing to set, just the children in order.
+                for &child in self.doc.children_of(id)? {
+                    let c = self.doc.node(child)?;
+                    if c.visible && c.opacity > 0.0 {
+                        self.draw_node(child)?;
+                    }
+                }
+            }
+            NodeKind::Artboard {
+                width,
+                height,
+                background,
+            } => {
+                // The ground first, then the frame's rectangle as the
+                // clip everything inside is drawn against. Both are
+                // already inside this node's own q/Q, so the clip lifts
+                // with it.
+                let rect = format!("0 0 {} {} re\n", num(*width), num(*height));
+                if let Some(color) = background {
+                    let _ = writeln!(self.content, "{}", self.color_op(*color, false)?);
+                    let _ = writeln!(self.content, "{rect}f");
+                }
+                let _ = writeln!(self.content, "{rect}W n");
                 for &child in self.doc.children_of(id)? {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 {

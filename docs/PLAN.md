@@ -87,6 +87,18 @@ without reading anything else.*
   as a disc. The page is snapshotted before a stroke is laid, so a
   stroke crossing its own source lifts what was there when it began
   rather than what it has just put down.
+  Artboards (F) are pages within the page: a frame dragged out anywhere
+  on the canvas, with a ground of its own, that cuts whatever goes into
+  it to its box. A shape drawn inside one goes into it, in its own
+  coordinates; a layer dragged onto its row in the panel goes in without
+  moving on the page (changing parents no longer shifts a layer — the
+  new parent's space is taken back out of its transform, which fixes
+  dropping into an off-origin group too); and File › Export every
+  artboard writes one PNG per frame, at the frame's own size, named
+  after it, with nothing of the page around it. Frames carry into SVG as
+  a clipped group and into PDF as a rectangle clip, so both stay live
+  vectors. Scaling a frame scales its contents and its export with it;
+  typing a frame its own pixel size is still to come.
   A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
   in the layer bar — so it shows only where that one does and goes when
   it goes: a texture cut to a shape, a photo poured into lettering, or,
@@ -196,9 +208,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~227),
+- **Verify before committing:** `cargo test --workspace` (~234),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~429 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~437 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -546,6 +558,11 @@ chitrakar/
   one removable. Clone and heal ✅ as non-destructive ops: a clone layer
   holds strokes that read the page at their own offset, so what they lay
   down follows the source when it changes.
+- Artboards ✅ first pass: `NodeKind::Artboard` is a group with a size of
+  its own that grounds and cuts its contents, takes what is drawn inside
+  it, and exports one PNG per frame at the frame's own size; live in SVG
+  (a clipPath) and PDF (a rectangle clip). Typing a frame its own pixel
+  size, and frames as export presets, still to come.
 - Live effects (drop shadow, outline), styles, symbols/components.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

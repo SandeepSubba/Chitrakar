@@ -72,6 +72,30 @@ fn write_children(
                 write_children(doc, child, out, depth + 1, defs)?;
                 let _ = writeln!(out, "{pad}</g>");
             }
+            NodeKind::Artboard {
+                width,
+                height,
+                background,
+            } => {
+                // A frame is a group cut to a rectangle, which SVG says
+                // with a clipPath in the frame's own space — so it goes
+                // on the same element that carries the frame's transform.
+                let name = format!("frame{}", child.0);
+                let _ = writeln!(
+                    defs,
+                    r#"<clipPath id="{name}"><rect width="{width}" height="{height}"/></clipPath>"#
+                );
+                let _ = writeln!(out, r#"{pad}<g{common} clip-path="url(#{name})">"#);
+                if let Some(color) = background {
+                    let ground = paint_attrs(doc, Some(color), None, None, child, defs);
+                    let _ = writeln!(
+                        out,
+                        r#"{pad}  <rect width="{width}" height="{height}"{ground}/>"#
+                    );
+                }
+                write_children(doc, child, out, depth + 1, defs)?;
+                let _ = writeln!(out, "{pad}</g>");
+            }
             NodeKind::Vector {
                 shape,
                 fill,
@@ -577,6 +601,35 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// A frame travels as a group cut to a rectangle, with its ground
+    /// inside the cut.
+    #[test]
+    fn a_frame_travels_as_a_clipped_group() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        let root = doc.root();
+        let mut board = Node::artboard("Artboard 1", 60.0, 40.0, Some(RED));
+        board.transform = Transform::translation(20.0, 30.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(board),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"<clipPath id="frame"#),
+            "the frame's rectangle is in the defs: {svg}"
+        );
+        assert!(
+            svg.contains(r#"clip-path="url(#frame"#),
+            "and the group is cut by it"
+        );
+        assert!(
+            svg.contains(r#"<rect width="60" height="40""#),
+            "with its ground painted inside"
+        );
     }
 
     /// SVG has no clipping to another layer's alpha, so a clipped layer

@@ -263,7 +263,7 @@ impl Document {
                 index,
                 node,
             } => {
-                if !matches!(self.node(parent)?.kind, NodeKind::Group) {
+                if !self.node(parent)?.kind.holds_children() {
                     return Err(DocError::NotAGroup(parent));
                 }
                 let siblings = &self.children[&parent];
@@ -276,7 +276,7 @@ impl Document {
                 }
                 let id = NodeId(self.next_id);
                 self.next_id += 1;
-                if matches!(node.kind, NodeKind::Group) {
+                if node.kind.holds_children() {
                     self.children.insert(id, Vec::new());
                 }
                 self.nodes.insert(id, *node);
@@ -481,7 +481,7 @@ impl Document {
                 if id == self.root {
                     return Err(DocError::CannotRemoveRoot);
                 }
-                if !matches!(self.node(parent)?.kind, NodeKind::Group) {
+                if !self.node(parent)?.kind.holds_children() {
                     return Err(DocError::NotAGroup(parent));
                 }
                 if self.is_descendant(id, parent) {

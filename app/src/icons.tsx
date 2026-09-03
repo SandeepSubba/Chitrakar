@@ -28,6 +28,7 @@ export type IconName =
   | "group"
   | "ungroup"
   | "clip"
+  | "frame"
   | "brush"
   | "duplicate"
   | "shadow"
@@ -276,6 +277,12 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
       <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
+    </>
+  ),
+  // An artboard: a page with crop marks, the way a frame is drawn.
+  frame: (
+    <>
+      <path d="M7.5 2.5v19M16.5 2.5v19M2.5 7.5h19M2.5 16.5h19" />
     </>
   ),
   // Clipped to the layer below: the upper box hooked down onto the lower.

@@ -813,6 +813,103 @@ impl Session {
         Ok(self.doc.children_of(parent)?[index])
     }
 
+    /// Put a frame on the page: a box of its own size, at (x, y), that
+    /// cuts whatever goes into it to that box and exports at exactly that
+    /// many pixels. Frames go at the top level, under everything already
+    /// there, so a frame added to a page of loose layers does not cover
+    /// them.
+    pub fn add_artboard(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background: Option<chitrakar_color::AuthoredColor>,
+    ) -> Result<NodeId, EngineError> {
+        if !(width > 0.0 && height > 0.0) {
+            return Err(EngineError::BadCommand("a frame needs a size".into()));
+        }
+        let parent = self.doc.root();
+        let mut node = chitrakar_doc::Node::artboard(name, width, height, background);
+        node.transform = Transform::translation(x, y);
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// The frame under a document point, if any — what a shape drawn
+    /// there should go into.
+    pub fn frame_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        chitrakar_render::frame_at(&self.doc, x, y).ok().flatten()
+    }
+
+    /// A document point in the coordinates a layer inside `id` is written
+    /// in. `None` when that space has collapsed.
+    pub fn point_inside(&self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
+        let space = chitrakar_render::own_space(&self.doc, id).ok()?;
+        let back = chitrakar_render::invert(space)?;
+        Some([
+            back.a * x + back.c * y + back.e,
+            back.b * x + back.d * y + back.f,
+        ])
+    }
+
+    /// How many layers a group or frame holds.
+    pub fn child_count(&self, id: NodeId) -> usize {
+        self.doc.children_of(id).map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Move a layer to a new parent and slot, keeping it exactly where it
+    /// is on the page: the new parent's space is undone from the layer's
+    /// own transform, so dropping a layer into a frame that sits at
+    /// (400, 200) does not throw it 400 pixels left. One entry in
+    /// history. A move within the same parent is a plain reorder and
+    /// leaves the transform alone.
+    pub fn reparent(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    ) -> Result<(), EngineError> {
+        let label = format!("Move {}", self.doc.node(id)?.name);
+        let move_it = Command::MoveNode { id, parent, index };
+        if self.doc.parent_of(id) == Some(parent) {
+            return self.apply_labeled(move_it, Some(label));
+        }
+        let was = chitrakar_render::ancestor_space(&self.doc, id);
+        let now = chitrakar_render::own_space(&self.doc, parent)?;
+        let Some(back) = chitrakar_render::invert(now) else {
+            return self.apply_labeled(move_it, Some(label));
+        };
+        let keep = back.compose(was).compose(self.doc.node(id)?.transform);
+        self.apply_labeled(
+            Command::Batch(vec![
+                move_it,
+                Command::SetTransform {
+                    id,
+                    transform: keep,
+                },
+            ]),
+            Some(label),
+        )
+    }
+
+    /// A frame's contents as a PNG, at the size the frame shows on the
+    /// page times `scale`. Errors when the node is not a frame.
+    pub fn artboard_png(&self, id: NodeId, scale: f32) -> Result<Vec<u8>, EngineError> {
+        let scale = scale.clamp(0.05, 16.0);
+        let Some(surface) = chitrakar_render::artboard_pixels(&self.doc, id, scale)? else {
+            return Err(EngineError::BadCommand("that layer is not a frame".into()));
+        };
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Start a brush stroke on a paint layer. The point is in document
     /// space and is written into the layer's own; the stroke goes on as
     /// a preview, so however many times it is extended the whole of it
@@ -2103,6 +2200,7 @@ impl Session {
                 name: node.name.clone(),
                 kind: match &node.kind {
                     NodeKind::Group => "group",
+                    NodeKind::Artboard { .. } => "artboard",
                     NodeKind::Vector { .. } => "vector",
                     NodeKind::Raster(_) => "raster",
                     NodeKind::Adjustment(_) => "adjustment",
@@ -2127,7 +2225,7 @@ impl Session {
                 index,
                 sibling_count: children.len(),
             });
-            if matches!(node.kind, NodeKind::Group) {
+            if node.kind.holds_children() {
                 self.collect_layers(id, depth + 1, out);
             }
         }
@@ -4291,6 +4389,68 @@ mod tests {
         // same point reads the same.
         session.set_viewport(0.25, 0.0, 0.0, 10, 10);
         assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// Dropping a layer into a frame that sits away from the origin
+    /// leaves the layer exactly where it was on the page: the new
+    /// parent's space is taken back out of the layer's own transform.
+    #[test]
+    fn a_layer_dropped_into_a_frame_stays_where_it_was() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(120.0, 90.0),
+            })
+            .unwrap();
+        let board = session
+            .add_artboard("Artboard 1", 100.0, 80.0, 60.0, 60.0, None)
+            .unwrap();
+        let before = session.bounds_of(rect).unwrap();
+        session.reparent(rect, board, 0).unwrap();
+        let after = session.bounds_of(rect).unwrap();
+        for (a, b) in before.iter().zip(&after) {
+            assert!((a - b).abs() < 1e-3, "{before:?} -> {after:?}");
+        }
+        assert_eq!(session.child_count(board), 1);
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Move rect"),
+            "and it is one entry in history"
+        );
+        session.undo().unwrap();
+        assert_eq!(session.child_count(board), 0);
+        let back = session.bounds_of(rect).unwrap();
+        for (a, b) in before.iter().zip(&back) {
+            assert!((a - b).abs() < 1e-3, "one undo puts it back: {back:?}");
+        }
+    }
+
+    /// A frame takes what is drawn inside it and exports on its own.
+    #[test]
+    fn a_frame_takes_what_is_drawn_in_it_and_exports_at_its_own_size() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let board = session
+            .add_artboard("Artboard 1", 40.0, 30.0, 50.0, 60.0, None)
+            .unwrap();
+        assert_eq!(session.frame_at(60.0, 50.0), Some(board));
+        assert_eq!(session.frame_at(10.0, 10.0), None, "off the frame");
+        let inside = session.point_inside(board, 60.0, 50.0).unwrap();
+        assert_eq!(inside, [20.0, 20.0], "the frame's own coordinates");
+        assert!(
+            session.layers().iter().any(|l| l.kind == "artboard"),
+            "the panel calls it what it is"
+        );
+        let png = session.artboard_png(board, 1.0).unwrap();
+        // PNG's IHDR carries the size in the two big-endian words at 16.
+        let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!((w, h), (50, 60));
+        assert!(
+            session.artboard_png(NodeId(0), 1.0).is_err(),
+            "and nothing else is a frame"
+        );
     }
 
     #[test]

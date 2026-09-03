@@ -191,6 +191,9 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
         // A paint layer's box is not anchored at its origin — a stroke
         // can be laid anywhere on it — so it reports its own bounds
         // instead, and callers that only want a size get nothing.
+        // A frame's box is its own, whatever it holds: it cuts its
+        // contents to that size, so nothing inside can enlarge it.
+        NodeKind::Artboard { width, height, .. } => Some((*width, *height)),
         NodeKind::Group
         | NodeKind::Paint { .. }
         | NodeKind::Clone { .. }
@@ -300,7 +303,9 @@ fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => {
                 return Ok(true)
             }
-            NodeKind::Group if reads_backdrop(doc, child)? => return Ok(true),
+            NodeKind::Group | NodeKind::Artboard { .. } if reads_backdrop(doc, child)? => {
+                return Ok(true)
+            }
             _ => {}
         }
     }
@@ -862,13 +867,105 @@ fn render_child(
         // time would cost the strokes' length at every pixel.
         // A group is isolated on a surface of its own, in that surface's
         // coordinates, so its mask is worked out there instead of here.
-        let plane = if matches!(node.kind, NodeKind::Group) {
+        let plane = if node.kind.holds_children() {
             None
         } else {
             MaskRef::plane_for(node.mask.as_ref(), parent, clip, (dst.width, dst.height))
         };
         let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
+            NodeKind::Artboard {
+                width,
+                height,
+                background,
+            } => {
+                // The frame's own box, in the space it is placed in.
+                let frame = transformed_local_bounds(t, (0.0, 0.0, *width, *height));
+                let Bounds::Rect(fx0, fy0, fx1, fy1) = frame else {
+                    return Ok(());
+                };
+                // Rounded to whole pixels rather than grown outward: an
+                // artboard's edge is a page edge, and a page edge is
+                // crisp. A frame that has been turned takes the other
+                // path, where its edge is worked out per pixel.
+                let board = ClipRect {
+                    x0: (fx0.round().max(0.0) as u32).min(dst.width),
+                    y0: (fy0.round().max(0.0) as u32).min(dst.height),
+                    x1: (fx1.round().max(0.0) as u32).min(dst.width),
+                    y1: (fy1.round().max(0.0) as u32).min(dst.height),
+                };
+                let ground = background.map(|c| resolve_color(doc, c));
+                let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
+                let plain =
+                    node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none();
+                if upright && plain {
+                    // Upright and composited like its contents would be:
+                    // the frame is nothing but a narrower region to paint
+                    // in, so paint in it. Everything inside — an
+                    // adjustment included — then sees the page below the
+                    // frame, which is what being on the page means.
+                    let inside = board.intersect(clip);
+                    if inside.is_empty() {
+                        return Ok(());
+                    }
+                    if let Some(color) = ground {
+                        fill_region(dst, inside, color, blend);
+                    }
+                    return render_group(doc, child, dst, inside, t);
+                }
+                // Turned, or composited as a whole: the frame is drawn on
+                // a surface of its own and cut to shape by how much of
+                // each pixel it covers, so its edge is as smooth as any
+                // other edge in the picture.
+                let sub_clip = match frame.to_clip(dst.width, dst.height) {
+                    Some(b) => b.intersect(clip),
+                    None => return Ok(()),
+                };
+                if sub_clip.is_empty() {
+                    return Ok(());
+                }
+                let (ox, oy) = (sub_clip.x0, sub_clip.y0);
+                let window = Transform::translation(-(ox as f32), -(oy as f32));
+                let inner = ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: sub_clip.x1 - ox,
+                    y1: sub_clip.y1 - oy,
+                };
+                let mut sub = Surface::new(inner.x1, inner.y1);
+                let shifted = window.compose(t);
+                if let Some(color) = ground {
+                    // Over the whole window, not just the frame: the cut
+                    // below gives the ground the frame's own edge, and a
+                    // shape painted here would give it a second one.
+                    fill_region(&mut sub, inner, color, BlendMode::Normal);
+                }
+                render_group(doc, child, &mut sub, inner, shifted)?;
+                if let Some(inv) = Inverse::of(shifted) {
+                    for y in inner.y0..inner.y1 {
+                        for x in inner.x0..inner.x1 {
+                            let cov = rect_coverage(*width, *height, shifted, inv, x, y);
+                            if cov < 1.0 {
+                                let i = (y * sub.width + x) as usize;
+                                sub.pixels[i] = scale_alpha(sub.pixels[i], cov);
+                            }
+                        }
+                    }
+                }
+                if node.mask.is_some() {
+                    let shifted_parent = window.compose(parent);
+                    let plane = MaskRef::plane_for(
+                        node.mask.as_ref(),
+                        shifted_parent,
+                        inner,
+                        (sub.width, sub.height),
+                    );
+                    let m =
+                        MaskRef::new(node.mask.as_ref(), shifted_parent).with_plane(plane.as_ref());
+                    apply_mask(doc, m, &mut sub, inner);
+                }
+                composite_from(dst, &sub, (ox, oy), node.opacity, blend, sub_clip);
+            }
             NodeKind::Group => {
                 // Isolate the group on its own surface so group opacity,
                 // blend, and mask apply to the composite, not per child.
@@ -1363,6 +1460,18 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
 /// pixel is inside that window.
 fn at_in(origin: (u32, u32), width: u32, x: u32, y: u32) -> usize {
     ((y - origin.1) * width + (x - origin.0)) as usize
+}
+
+/// Lay one flat paint over a whole region, with no edge to work out —
+/// what a frame's ground is, since the frame's own edge is applied to
+/// everything in it at once.
+fn fill_region(dst: &mut Surface, clip: ClipRect, color: LinearRgba, mode: BlendMode) {
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let i = (y * dst.width + x) as usize;
+            dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
+        }
+    }
 }
 
 /// Composite a window of source pixels: `src` holds the destination's
@@ -3042,6 +3151,119 @@ fn fit_into_square(doc: &Document, id: NodeId, size: u32) -> Result<Option<Trans
     }))
 }
 
+/// A transform's inverse as a transform, for the times a caller needs the
+/// map itself rather than the per-point [`Inverse`] — turning a frame's
+/// placement on the page back into the frame's own space, say, or keeping
+/// a layer where it is while it changes parents. `None` when the
+/// transform collapses.
+pub fn invert(t: Transform) -> Option<Transform> {
+    let det = t.a * t.d - t.b * t.c;
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let (a, b, c, d) = (t.d / det, -t.b / det, -t.c / det, t.a / det);
+    Some(Transform {
+        a,
+        b,
+        c,
+        d,
+        e: -(a * t.e + c * t.f),
+        f: -(b * t.e + d * t.f),
+    })
+}
+
+/// The space a node's children are written in: its own transform with
+/// every ancestor's on top, which is what carries a point on the page
+/// into the coordinates a layer inside it uses.
+pub fn own_space(doc: &Document, id: NodeId) -> Result<Transform, DocError> {
+    Ok(ancestor_space(doc, id).compose(doc.node(id)?.transform))
+}
+
+/// The frame under a document point: the topmost artboard whose own box
+/// covers it, searched the way a pick is. `None` off every frame.
+pub fn frame_at(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    frame_in(doc, doc.root(), x, y, Transform::default())
+}
+
+fn frame_in(
+    doc: &Document,
+    group: NodeId,
+    x: f32,
+    y: f32,
+    parent: Transform,
+) -> Result<Option<NodeId>, DocError> {
+    for &child in doc.children_of(group)?.iter().rev() {
+        let node = doc.node(child)?;
+        if !node.visible || node.locked {
+            continue;
+        }
+        let t = parent.compose(node.transform);
+        match &node.kind {
+            NodeKind::Artboard { width, height, .. } => {
+                if let Some((lx, ly)) = to_local(t, x, y) {
+                    if lx >= 0.0 && ly >= 0.0 && lx < *width && ly < *height {
+                        // A frame inside a frame is the one that counts.
+                        return Ok(Some(frame_in(doc, child, x, y, t)?.unwrap_or(child)));
+                    }
+                }
+            }
+            NodeKind::Group => {
+                if let Some(hit) = frame_in(doc, child, x, y, t)? {
+                    return Ok(Some(hit));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+/// A frame rendered on its own, upright, at the size it shows on the
+/// page times `scale` — what "export this artboard" means. Everything
+/// outside the frame is left out, because the frame cuts to its box; a
+/// frame that has been turned comes out square, since what is wanted is
+/// its contents, not its angle.
+///
+/// `None` when the node is not a frame, or has collapsed to nothing.
+pub fn artboard_pixels(
+    doc: &Document,
+    id: NodeId,
+    scale: f32,
+) -> Result<Option<Surface>, DocError> {
+    let node = doc.node(id)?;
+    let NodeKind::Artboard { width, height, .. } = &node.kind else {
+        return Ok(None);
+    };
+    let world = ancestor_space(doc, id).compose(node.transform);
+    // How much the page enlarges the frame, on each of its own axes.
+    let (sx, sy) = (
+        (world.a * world.a + world.b * world.b).sqrt(),
+        (world.c * world.c + world.d * world.d).sqrt(),
+    );
+    let (pw, ph) = (
+        (width * sx * scale).round().max(1.0),
+        (height * sy * scale).round().max(1.0),
+    );
+    if !(pw.is_finite() && ph.is_finite() && pw <= 16384.0 && ph <= 16384.0) {
+        return Ok(None);
+    }
+    let fit = Transform {
+        a: pw / width,
+        d: ph / height,
+        ..Default::default()
+    };
+    let Some(back) = invert(node.transform) else {
+        return Ok(None);
+    };
+    let mut surface = Surface::new(pw as u32, ph as u32);
+    let clip = surface.full_clip();
+    // `render_layer` composes the node's own transform onto what it is
+    // given, so undo that transform first: what is left is the frame in
+    // its own space, blown up to the surface.
+    render_layer(doc, id, &mut surface, clip, fit.compose(back))?;
+    Ok(Some(surface))
+}
+
 /// A layer's mask fitted into the same square [`thumbnail`] fits the
 /// layer into, so the two sit side by side and line up: white where the
 /// layer shows through and clear where it is hidden.
@@ -3580,6 +3802,32 @@ fn hit_in_group(
                     return Ok(Some(hit));
                 }
             }
+            NodeKind::Artboard {
+                width,
+                height,
+                background,
+            } => {
+                let t = parent.compose(node.transform);
+                let Some((lx, ly)) = to_local(t, x, y) else {
+                    continue;
+                };
+                // A frame cuts its contents to its box, so nothing outside
+                // it can be picked through it — not even a layer that
+                // reaches past the edge.
+                if lx < 0.0 || ly < 0.0 || lx >= *width || ly >= *height {
+                    continue;
+                }
+                if let Some(hit) = hit_in_group(doc, child, x, y, t)? {
+                    return Ok(Some(hit));
+                }
+                // Its own ground picks the frame, the way clicking the
+                // empty part of a frame picks the frame in every editor
+                // that has them. A frame with no ground is a window onto
+                // the page and lets the pick through.
+                if background.is_some() {
+                    return Ok(Some(child));
+                }
+            }
             NodeKind::Vector {
                 shape,
                 fill,
@@ -3727,8 +3975,140 @@ mod tests {
         a: 1.0,
     };
 
+    fn artboard(doc: &mut Document, w: f32, h: f32, at: (f32, f32)) -> NodeId {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        let mut node = Node::artboard("frame", w, h, Some(WHITE));
+        node.transform = Transform::translation(at.0, at.1);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+        doc.children_of(root).unwrap()[index]
+    }
+
+    const WHITE: AuthoredColor = AuthoredColor::Srgb {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    /// A frame paints its ground, and cuts whatever is put in it to its
+    /// own box however far past the edge that thing reaches.
+    #[test]
+    fn a_frame_grounds_its_contents_and_cuts_them_to_its_box() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let board = artboard(&mut doc, 20.0, 20.0, (10.0, 10.0));
+        doc.apply(Command::AddNode {
+            parent: board,
+            index: 0,
+            node: filled_rect("wide", 100.0, 100.0, RED),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(15, 15).to_srgb8(),
+            [255, 0, 0, 255],
+            "inside the frame the rect shows"
+        );
+        assert_eq!(
+            s.get(40, 40).a,
+            0.0,
+            "and past the frame's edge nothing does"
+        );
+        assert_eq!(s.get(5, 5).a, 0.0, "nor before it starts");
+
+        // With the rect gone the frame's own ground is what is there.
+        let inner = doc.children_of(board).unwrap()[0];
+        doc.apply(Command::RemoveNode { id: inner }).unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(15, 15).to_srgb8(), [255, 255, 255, 255], "the ground");
+        assert_eq!(s.get(40, 40).a, 0.0, "and only inside the frame");
+    }
+
+    /// The frame's box is the frame's, not its contents': a layer
+    /// hanging out of it cannot make the frame bigger.
+    #[test]
+    fn a_frames_box_is_its_own_size() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let board = artboard(&mut doc, 20.0, 20.0, (10.0, 10.0));
+        doc.apply(Command::AddNode {
+            parent: board,
+            index: 0,
+            node: filled_rect("wide", 100.0, 100.0, RED),
+        })
+        .unwrap();
+        assert_eq!(
+            node_visual_bounds(&doc, board).unwrap(),
+            Bounds::Rect(10.0, 10.0, 30.0, 30.0)
+        );
+    }
+
+    /// Exporting a frame gives the frame at its own size, upright, with
+    /// nothing of the page around it.
+    #[test]
+    fn a_frame_exports_at_its_own_size() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        // A layer on the page that overlaps the frame but is not in it.
+        add(&mut doc, filled_rect("loose", 200.0, 200.0, RED));
+        let board = artboard(&mut doc, 40.0, 30.0, (20.0, 25.0));
+        doc.apply(Command::AddNode {
+            parent: board,
+            index: 0,
+            node: filled_rect("inside", 10.0, 10.0, BLUE),
+        })
+        .unwrap();
+        let out = artboard_pixels(&doc, board, 1.0).unwrap().unwrap();
+        assert_eq!((out.width, out.height), (40, 30));
+        assert_eq!(
+            out.get(5, 5).to_srgb8(),
+            [0, 0, 255, 255],
+            "what is in the frame, at the frame's own origin"
+        );
+        assert_eq!(
+            out.get(30, 20).to_srgb8(),
+            [255, 255, 255, 255],
+            "the frame's ground, not the page's red"
+        );
+        // Twice the size is twice the pixels and the same picture.
+        let big = artboard_pixels(&doc, board, 2.0).unwrap().unwrap();
+        assert_eq!((big.width, big.height), (80, 60));
+        assert_eq!(big.get(10, 10).to_srgb8(), [0, 0, 255, 255]);
+    }
+
+    /// A frame turned on the page is still cut to its box — with a
+    /// smooth edge, since a turned edge cannot be a row of pixels.
+    #[test]
+    fn a_turned_frame_keeps_a_smooth_edge() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let board = artboard(&mut doc, 30.0, 30.0, (25.0, 25.0));
+        let angle = 0.4f32;
+        doc.apply(Command::SetTransform {
+            id: board,
+            transform: Transform {
+                a: angle.cos(),
+                b: angle.sin(),
+                c: -angle.sin(),
+                d: angle.cos(),
+                e: 30.0,
+                f: 10.0,
+            },
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        let rim: Vec<f32> = (0..80).map(|x| s.get(x, 20).a).collect();
+        assert!(
+            rim.iter().any(|a| *a > 0.01 && *a < 0.99),
+            "the turned edge is feathered, not a step: {rim:?}"
+        );
+        assert!(rim.iter().any(|a| *a > 0.99), "and solid inside it");
+    }
+
     /// A layer clipped to the one below shows where that one does and
-    /// nowhere else — which is the whole of what clipping means.
+    /// nowhere else — which is the whole of what clipping means."""
     #[test]
     fn a_clipped_layer_shows_only_where_the_one_below_it_does() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);

@@ -2726,6 +2726,75 @@ assert(
   );
 }
 
+// 8x6c. Artboards: a frame dragged out of the Frame tool is a page within
+// the page — it grounds what is in it, cuts it to its box, takes what is
+// drawn inside it, and exports at its own size on its own.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const drag = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await page.click('button[aria-label="Frame"]');
+  await drag(100, 100, 300, 300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "the frame is a layer",
+  );
+  const white = await canvasPixel(200, 200);
+  assert(
+    white.slice(0, 3).join() === "255,255,255" && white[3] === 255,
+    `the frame grounds its box (${white})`,
+  );
+  assert(
+    (await canvasPixel(50, 50))[3] === 0,
+    "and only its box: the page around it is bare",
+  );
+
+  // A shape drawn inside the frame goes into the frame, where it was drawn.
+  await page.click('button[aria-label="Rect"]');
+  await drag(150, 150, 250, 250);
+  const rows = await page.locator(".panel ul li").count();
+  assert(rows === 2, `the rect is a layer too (${rows})`);
+  assert(
+    (await page.locator(".panel ul li").first().getAttribute("style")) !==
+      (await page.locator(".panel ul li").nth(1).getAttribute("style")),
+    "and it is indented under the frame, not beside it",
+  );
+  const painted = await canvasPixel(200, 200);
+  assert(
+    painted.slice(0, 3).join() !== "255,255,255",
+    `the rect landed where it was drawn (${painted})`,
+  );
+
+  // Dragged out past the frame's edge, the rect is cut at the edge. The
+  // panel runs top-first and the frame owns the rect, so the frame is
+  // the first row and the rect the second.
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").nth(1).click();
+  await page.waitForTimeout(200);
+  await page.mouse.move(...at(200, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 200), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const kept = await canvasPixel(270, 200);
+  assert(
+    kept[3] === 255 && kept.slice(0, 3).join() !== "255,255,255",
+    `the part still inside the frame is drawn (${kept})`,
+  );
+  const gone = await canvasPixel(320, 200);
+  assert(
+    gone[3] === 0,
+    `and what left the frame is not drawn outside it (${gone})`,
+  );
+}
+
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.
 {

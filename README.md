@@ -12,7 +12,8 @@ renderer pixel for pixel, moxcms ICC color pipeline, codecs) + Tauri 2
 shells + TypeScript/React UI. The UI never touches pixels: it sends commands over
 the WASM boundary and presents the frames the engine renders.
 
-**Today:** shapes, pen and brush paths with bezier handles and booleans,
+**Today:** artboards — frames on the page that cut what is in them and
+export one PNG each — shapes, pen and brush paths with bezier handles and booleans,
 a paint brush that lays pixels on a layer of live strokes (and an eraser
 for them), a clone brush that paints with what is already there, follows it when it
 changes, and can heal — texture from there, colour from where it lands — placed images, live text (shaped by the font, any face loaded, bold /

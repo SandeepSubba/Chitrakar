@@ -435,6 +435,26 @@ pub enum NodeKind {
     Adjustment(Adjustment),
     Filter(Filter),
     Text(TextSpec),
+    /// A frame on the page: a group with a size of its own that cuts its
+    /// contents to that box, paints a ground behind them, and exports at
+    /// exactly that many pixels however it is placed or scaled. What lets
+    /// one document hold several pictures — three screen sizes, a set of
+    /// cards, a poster and its detail — instead of one.
+    Artboard {
+        width: f32,
+        height: f32,
+        /// Painted behind the contents, inside the frame. `None` is a
+        /// frame that shows what is under it on the page.
+        background: Option<AuthoredColor>,
+    },
+}
+
+impl NodeKind {
+    /// Whether the node is one that holds other layers — what a parent
+    /// has to be for anything to go into it.
+    pub fn holds_children(&self) -> bool {
+        matches!(self, NodeKind::Group | NodeKind::Artboard { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -597,6 +617,22 @@ impl Node {
 
     pub fn group(name: &str) -> Self {
         Self::base(name, NodeKind::Group)
+    }
+
+    pub fn artboard(
+        name: &str,
+        width: f32,
+        height: f32,
+        background: Option<AuthoredColor>,
+    ) -> Self {
+        Self::base(
+            name,
+            NodeKind::Artboard {
+                width,
+                height,
+                background,
+            },
+        )
     }
 
     pub fn vector(name: &str, shape: VectorShape) -> Self {
