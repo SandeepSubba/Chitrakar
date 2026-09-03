@@ -164,6 +164,11 @@ without reading anything else.*
   leaves the original), by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels.
+  The document keeps a palette of its own: colours added from whatever
+  is being drawn with, saved with the file, clicked to draw with and to
+  give to the picked shape or block of text, alt-clicked to take out
+  again. In a CMYK document they are ink, and resolve through the press
+  profile exactly as a fill does.
   The eyedropper (I) takes the colour the page shows under the cursor —
   the composite, effects and opacity included — as the colour to draw
   with, and gives it to the picked shape or block of text.
@@ -257,9 +262,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~248),
+- **Verify before committing:** `cargo test --workspace` (~249),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~483 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~488 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

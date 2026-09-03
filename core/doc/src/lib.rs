@@ -83,6 +83,20 @@ pub struct Document {
     /// state, but not artwork: nothing renders or exports them. Additive.
     #[serde(default)]
     guides: Vec<Guide>,
+    /// The colours this document is drawn in, kept by name. Not artwork
+    /// either — a palette to pick from, so a page's colours are chosen
+    /// once and reached for rather than typed again. Additive.
+    #[serde(default)]
+    swatches: Vec<Swatch>,
+}
+
+/// One colour in the document's palette. Authored like any other colour,
+/// so a CMYK document's swatches are ink and resolve through its press
+/// profile exactly as a fill does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Swatch {
+    pub name: String,
+    pub color: chitrakar_color::AuthoredColor,
 }
 
 /// An immutable source image (8-bit sRGB RGBA). The original bytes a raster
@@ -117,6 +131,7 @@ impl Document {
             cmyk_profile_bytes: None,
             cmyk_cms: None,
             guides: Vec::new(),
+            swatches: Vec::new(),
         }
     }
 
@@ -203,6 +218,10 @@ impl Document {
 
     pub fn guides(&self) -> &[Guide] {
         &self.guides
+    }
+
+    pub fn swatches(&self) -> &[Swatch] {
+        &self.swatches
     }
 
     pub fn root(&self) -> NodeId {
@@ -535,6 +554,10 @@ impl Document {
                 let prev = std::mem::replace(&mut self.guides, guides);
                 Ok(Command::SetGuides { guides: prev })
             }
+            Command::SetSwatches { swatches } => {
+                let prev = std::mem::replace(&mut self.swatches, swatches);
+                Ok(Command::SetSwatches { swatches: prev })
+            }
             Command::SetEffects { id, effects } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = std::mem::replace(&mut node.effects, effects);
@@ -745,6 +768,10 @@ pub enum Command {
     /// obvious inverse.
     SetGuides {
         guides: Vec<Guide>,
+    },
+    /// Replace the document's palette, the same whole-list way.
+    SetSwatches {
+        swatches: Vec<Swatch>,
     },
     /// Change the page's size, shifting every top-level layer by
     /// `(dx, dy)` so a crop keeps the picture where it was. Its own

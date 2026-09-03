@@ -207,6 +207,12 @@ export interface Pinning {
   y: Pin;
 }
 
+/** One colour in the document's palette. */
+export interface Swatch {
+  name: string;
+  color: AuthoredColor;
+}
+
 export type NodeKind =
   | "Group"
   | {
@@ -256,6 +262,7 @@ export type Command =
   | { SetMask: { id: NodeId; mask: Mask | null } }
   | { SetEffects: { id: NodeId; effects: Effect[] } }
   | { SetGuides: { guides: ({ Vertical: number } | { Horizontal: number })[] } }
+  | { SetSwatches: { swatches: Swatch[] } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
   | { Batch: Command[] };
 

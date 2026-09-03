@@ -200,6 +200,45 @@ mod tests {
     /// somewhere; what this one is for is the gap between them — a kind
     /// added to the model and not to the file, which no per-kind test
     /// would notice because each of those builds its document in memory.
+    /// The palette is document state like the guides are: it saves with
+    /// the file and comes back, and setting it is its own inverse.
+    #[test]
+    fn the_palette_saves_with_the_document() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let swatches = vec![
+            chitrakar_doc::Swatch {
+                name: "ink".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.12,
+                    a: 1.0,
+                },
+            },
+            chitrakar_doc::Swatch {
+                name: "paper".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.98,
+                    g: 0.97,
+                    b: 0.92,
+                    a: 1.0,
+                },
+            },
+        ];
+        doc.apply(Command::SetSwatches {
+            swatches: swatches.clone(),
+        })
+        .unwrap();
+        let back = load_chitra(&save_chitra(&doc).unwrap()).unwrap();
+        assert_eq!(back.swatches(), swatches.as_slice());
+        // A document written before there was a palette still reads.
+        let bare = Document::new(8, 8, ColorMode::Rgb);
+        assert!(load_chitra(&save_chitra(&bare).unwrap())
+            .unwrap()
+            .swatches()
+            .is_empty());
+    }
+
     #[test]
     fn a_document_of_everything_survives_the_round_trip() {
         let mut doc = Document::new(120, 120, ColorMode::Rgb);

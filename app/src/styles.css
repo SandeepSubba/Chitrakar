@@ -1268,6 +1268,32 @@ body {
 .lock-toggle[aria-pressed="true"] {
   opacity: 1;
 }
+/* The document's palette, beside the colour being drawn with. */
+.palette {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  max-width: 7rem;
+}
+.palette .swatch {
+  width: 1rem;
+  height: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+}
+.palette .swatch.add {
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+}
+.palette .swatch.add:hover {
+  color: var(--text);
+}
+
 /* What a copy can differ in: one row per layer of the original. */
 .overrides {
   display: flex;

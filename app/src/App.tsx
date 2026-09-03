@@ -13,6 +13,7 @@ import {
   NodeId,
   NodeKind,
   Pin,
+  Swatch,
   Transform,
   VectorShape,
   WasmSession,
@@ -629,6 +630,8 @@ export function App() {
    * artboards is a long list otherwise, and most of it is not what is
    * being worked on. */
   const [collapsed, setCollapsed] = useState<number[]>([]);
+  /** The document's palette, re-read whenever the document changes. */
+  const [swatches, setSwatches] = useState<Swatch[]>([]);
   /** Four runs of 256 counts — red, green, blue, luminance — of what the
    * picked adjustment layer sees, for the graphs drawn over them. */
   const [histogram, setHistogram] = useState<Uint32Array | null>(null);
@@ -830,6 +833,7 @@ export function App() {
       }
       setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
       setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
+      setSwatches(JSON.parse(s.swatches_json()) as Swatch[]);
       // The page's size is document state like anything else — undoing a
       // crop changes it — so it is read back here rather than only being
       // written where a crop or a new document sets it.
@@ -970,6 +974,10 @@ export function App() {
   }, [session, followHistory]);
 
   /** Pick every top-level layer. */
+  /** Replace the palette, one history entry. */
+  const setPalette = (next: Swatch[]) =>
+    run({ SetSwatches: { swatches: next } });
+
   const selectAll = useCallback(() => {
     const top = layers.filter((l) => l.depth === 0).map((l) => l.id as NodeId);
     if (top.length === 0) return;
@@ -1726,26 +1734,7 @@ export function App() {
       // and make it the colour to draw with. With a shape or a block of
       // text picked, it becomes that layer's fill as well.
       const hex = colorUnder(session, x, y);
-      if (hex) {
-        setFill(hex);
-        const colour = cmyk ? hexToCmykColor(hex) : hexColor(hex);
-        if (selectedKind && typeof selectedKind === "object") {
-          if ("Vector" in selectedKind) {
-            setKind(
-              {
-                Vector: {
-                  ...selectedKind.Vector,
-                  fill: colour,
-                  gradient: null,
-                },
-              },
-              false,
-            );
-          } else if ("Text" in selectedKind) {
-            setKind({ Text: { ...selectedKind.Text, fill: colour } }, false);
-          }
-        }
-      }
+      if (hex) applyColour(hex);
       setTool("Move");
       return;
     }
@@ -3368,6 +3357,24 @@ export function App() {
     return () => clearTimeout(id);
   }, [session, selected, selectedKind, layers, saveTick]);
 
+  /** Draw with this colour from now on, and give it to the picked shape
+   * or block of text — what the eyedropper does with the colour it
+   * lifts, and what clicking a colour in the palette does with that. */
+  const applyColour = (hex: string) => {
+    setFill(hex);
+    const colour = cmyk ? hexToCmykColor(hex) : hexColor(hex);
+    if (selectedKind && typeof selectedKind === "object") {
+      if ("Vector" in selectedKind) {
+        setKind(
+          { Vector: { ...selectedKind.Vector, fill: colour, gradient: null } },
+          false,
+        );
+      } else if ("Text" in selectedKind) {
+        setKind({ Text: { ...selectedKind.Text, fill: colour } }, false);
+      }
+    }
+  };
+
   /** Replace the selected layer's effect list. Slider drags preview, so a
    * whole drag is one history entry. */
   const setEffects = (effects: Effect[], gesture = false) => {
@@ -4252,6 +4259,45 @@ export function App() {
             aria-label="Fill colour"
             className="fill-swatch"
           />
+          {/* The document's own colours, kept by name and saved with it:
+              a page's palette is chosen once and reached for, rather than
+              typed again every time. Clicking one draws with it — and
+              gives it to the picked shape or block of text, the way the
+              eyedropper does. Alt-clicking takes it out of the palette. */}
+          <div className="palette" role="group" aria-label="Palette">
+            {swatches.map((sw, i) => (
+              <button
+                key={i}
+                className="swatch"
+                style={{ background: colorToHex(sw.color) }}
+                title={`${sw.name} — alt-click to take it out`}
+                aria-label={`Colour ${sw.name}`}
+                onClick={(e) => {
+                  if (e.altKey) {
+                    setPalette(swatches.filter((_, j) => j !== i));
+                    return;
+                  }
+                  applyColour(colorToHex(sw.color));
+                }}
+              />
+            ))}
+            <button
+              className="swatch add"
+              onClick={() =>
+                setPalette([
+                  ...swatches,
+                  {
+                    name: fill,
+                    color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                  },
+                ])
+              }
+              title="Keep this colour in the document's palette"
+              aria-label="Add to the palette"
+            >
+              +
+            </button>
+          </div>
           {(tool === "Paint" || tool === "Clone") && (
             <>
               <input

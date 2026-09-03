@@ -588,6 +588,11 @@ impl WasmSession {
         self.inner.guides_json()
     }
 
+    /// The document's palette as JSON: an array of `{name, color}`.
+    pub fn swatches_json(&self) -> String {
+        self.inner.swatches_json()
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: f64) -> Result<String, JsError> {
         self.inner.effects_json(NodeId(id as u64)).map_err(to_js)

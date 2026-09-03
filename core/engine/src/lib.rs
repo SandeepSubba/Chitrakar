@@ -246,6 +246,9 @@ impl Session {
             // Guides are not artwork: nothing renders them, so nothing
             // needs repainting when they change; nor does a lock.
             | Command::SetGuides { .. }
+            // Nor does the palette: it is what colours are picked from,
+            // not anything the page draws.
+            | Command::SetSwatches { .. }
             | Command::SetLocked { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
@@ -489,6 +492,13 @@ impl Session {
                     "Clear guides".into()
                 } else {
                     format!("{} guides", guides.len())
+                }
+            }
+            Command::SetSwatches { swatches } => {
+                if swatches.is_empty() {
+                    "Clear the palette".into()
+                } else {
+                    format!("{} colours in the palette", swatches.len())
                 }
             }
             Command::ResizeCanvas { width, height, .. } => {
@@ -2802,6 +2812,11 @@ impl Session {
     /// The document's guides as JSON.
     pub fn guides_json(&self) -> String {
         serde_json::to_string(self.doc.guides()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The document's palette as JSON.
+    pub fn swatches_json(&self) -> String {
+        serde_json::to_string(self.doc.swatches()).unwrap_or_else(|_| "[]".into())
     }
 
     /// A node's effect list as JSON.

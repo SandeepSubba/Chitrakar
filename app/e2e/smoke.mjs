@@ -4222,6 +4222,62 @@ assert(
   );
 }
 
+// 9j. The document's palette: colours kept by name, saved with the file,
+// clicked to draw with and to give to the picked layer.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  assert(
+    (await page.locator(".palette .swatch:not(.add)").count()) === 0,
+    "a new document starts with no palette",
+  );
+  await setColor("Fill colour", "#ff0066");
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".palette .swatch:not(.add)").count()) === 1,
+    "the colour being drawn with goes into the palette",
+  );
+
+  // Draw something, then give it a palette colour.
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 250), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await setColor("Fill colour", "#00aaff");
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(250);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.locator(".palette .swatch:not(.add)").first().click();
+  await page.waitForTimeout(300);
+  const px = await canvasPixel(200, 175);
+  assert(
+    px[0] > 200 && px[1] < 60 && px[2] > 60 && px[2] < 160,
+    `clicking a palette colour gives it to the picked layer (${px})`,
+  );
+
+  // Alt-click takes one out, and the whole palette saves with the file.
+  await page.locator(".palette .swatch:not(.add)").first().click({
+    modifiers: ["Alt"],
+  });
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".palette .swatch:not(.add)").count()) === 1,
+    "alt-click takes a colour out of the palette",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".palette .swatch:not(.add)").count()) === 2,
+    "and one undo puts it back",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
