@@ -836,6 +836,7 @@ impl Session {
             softness,
             erase,
             source: [0.0, 0.0],
+            heal: false,
         };
         self.preview(Command::AddStroke {
             id: layer,
@@ -940,9 +941,11 @@ impl Session {
     }
 
     /// Where the stroke being drawn reads from, as an offset in the
-    /// layer's own space. A clone stroke set after it has begun still
-    /// takes it, since the whole stroke is one preview.
-    pub fn paint_source(&mut self, dx: f32, dy: f32) -> Result<(), EngineError> {
+    /// layer's own space, and whether it heals — laying the source's
+    /// texture down in the colour of the place it lands. A clone stroke
+    /// set after it has begun still takes both, since the whole stroke
+    /// is one preview.
+    pub fn paint_source(&mut self, dx: f32, dy: f32, heal: bool) -> Result<(), EngineError> {
         let Some(painting) = self.painting.as_ref() else {
             return Ok(());
         };
@@ -952,6 +955,7 @@ impl Session {
         let scale = chitrakar_render::layer_scale(&self.doc, layer, on_mask)?.max(1e-6);
         let painting = self.painting.as_mut().expect("checked above");
         painting.stroke.source = [dx / scale, dy / scale];
+        painting.stroke.heal = heal;
         let stroke = Box::new(painting.stroke.clone());
         self.preview(Command::SetStroke {
             id: layer,
@@ -4445,7 +4449,7 @@ mod save_probe {
             .paint_begin(layer, 80.0, 80.0, 7.0, red, 0.0, false, false)
             .unwrap();
         // Read from the patch, which is 60 up and to the left.
-        session.paint_source(-60.0, -60.0).unwrap();
+        session.paint_source(-60.0, -60.0, false).unwrap();
         session.paint_extend(84.0, 84.0, 7.0).unwrap();
         assert!(session.commit_preview());
         assert_eq!(

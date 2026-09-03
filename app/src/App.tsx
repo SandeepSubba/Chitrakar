@@ -554,6 +554,9 @@ export function App() {
   const [paintSize, setPaintSize] = useState(24);
   const [paintSoftness, setPaintSoftness] = useState(0.5);
   const [erasing, setErasing] = useState(false);
+  /** Whether the clone brush heals: laying the source's texture down in
+   * the colour of the place it lands, rather than as it found it. */
+  const [healing, setHealing] = useState(true);
   /** Where the brush is hovering, in the canvas's own coordinates, so the
    * ring that shows how big it is can sit under the pointer. Null when the
    * pointer is not over the canvas, or the brush is not the tool in hand. */
@@ -1494,7 +1497,7 @@ export function App() {
           false,
           false,
         );
-        session.paint_source(cloneFrom[0] - x, cloneFrom[1] - y);
+        session.paint_source(cloneFrom[0] - x, cloneFrom[1] - y, healing);
       } catch (err) {
         alert(`Clone: ${err}`);
         return;
@@ -3908,6 +3911,17 @@ export function App() {
                 aria-label="Brush softness"
                 className="paint-softness"
               />
+              {tool === "Clone" && (
+                <button
+                  className={`icon-button${healing ? " active" : ""}`}
+                  onClick={() => setHealing((on) => !on)}
+                  title="Heal: lay the texture down in the colour of the place it lands"
+                  aria-label="Heal"
+                  aria-pressed={healing}
+                >
+                  <Icon name="heal" />
+                </button>
+              )}
               {tool === "Paint" && (
               <button
                 className={`icon-button${erasing ? " active" : ""}`}
@@ -5092,6 +5106,10 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["N", "Paint (a brush that lays pixels)"],
       ["S", "Clone (paint with what is already there)"],
       ["Alt-click (clone)", "Set the place to clone from"],
+      [
+        "Heal (clone)",
+        "Lay the texture down in the colour of the place it lands",
+      ],
       ["[  ]", "Thinner, thicker brush"],
       ["Alt-click (brush)", "Take the colour under the brush"],
       ["Shift-click (brush)", "Paint a straight line on from the last stroke"],

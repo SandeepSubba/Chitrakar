@@ -131,6 +131,12 @@ pub struct PaintStroke {
     /// stroke written before cloning existed reads as no offset at all.
     #[serde(default)]
     pub source: [f32; 2],
+    /// Heal rather than clone: lay down the texture from the source but
+    /// the colour of the place it lands in, so a patch lifted from
+    /// somewhere lighter or darker still sits into its surroundings.
+    /// Only a clone layer reads it, and it is additive.
+    #[serde(default)]
+    pub heal: bool,
 }
 
 impl PaintStroke {

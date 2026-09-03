@@ -78,7 +78,10 @@ without reading anything else.*
   says where to read from, and every stroke carries that offset, so what
   it lays down is whatever the page shows there *now* — retouch the
   source and the clone follows, which is what a stamped copy of pixels
-  could not do. The page is snapshotted before a stroke is laid, so a
+  could not do. With healing on (its default) it lays the source's
+  texture down in the colour of the place it lands, so a patch lifted
+  from somewhere lighter sits into its surroundings instead of showing
+  as a disc. The page is snapshotted before a stroke is laid, so a
   stroke crossing its own source lifts what was there when it began
   rather than what it has just put down.
   Rubbing at a layer that is not a paint layer takes a piece out of it
@@ -185,9 +188,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~219),
+- **Verify before committing:** `cargo test --workspace` (~220),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~411 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~415 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -528,7 +531,9 @@ chitrakar/
   Proper shaping (`rustybuzz`/`parley`), font choice, and weights pending.
 - Brush engine for raster painting ✅ first pass: a paint layer holding
   live strokes (line, per-point radius, colour, soft edge, erase), each
-  one removable; healing/clone as non-destructive ops still to come.
+  one removable. Clone and heal ✅ as non-destructive ops: a clone layer
+  holds strokes that read the page at their own offset, so what they lay
+  down follows the source when it changes.
 - Live effects (drop shadow, outline), styles, symbols/components.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

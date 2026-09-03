@@ -572,6 +572,7 @@ mod tests {
                         softness: 0.0,
                         erase: true,
                         source: [0.0, 0.0],
+                        heal: false,
                     }],
                 },
                 invert: false,

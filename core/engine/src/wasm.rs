@@ -283,9 +283,10 @@ impl WasmSession {
             .map_err(to_js)
     }
 
-    /// Where the stroke being drawn reads from, in document units.
-    pub fn paint_source(&mut self, dx: f32, dy: f32) -> Result<(), JsError> {
-        self.inner.paint_source(dx, dy).map_err(to_js)
+    /// Where the stroke being drawn reads from, in document units, and
+    /// whether it heals rather than clones.
+    pub fn paint_source(&mut self, dx: f32, dy: f32, heal: bool) -> Result<(), JsError> {
+        self.inner.paint_source(dx, dy, heal).map_err(to_js)
     }
 
     /// Carry the stroke being drawn on to another point.

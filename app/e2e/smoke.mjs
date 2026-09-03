@@ -3472,6 +3472,73 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
   assert((await canvasPixel(170, 360))[3] === 0, "and it undoes away");
+
+  // Healing lays the source's texture down in the colour of the place it
+  // lands. Give it somewhere to land that is a different colour from the
+  // source, and the same stroke comes out differently with it on and off.
+  const beforeHeal = await page.inputValue('input[aria-label="Fill colour"]');
+  const rowsBeforeHeal = await page.locator(".panel ul li").count();
+  await page.click('button[aria-label="Paint"]');
+  await page.fill('input[aria-label="Fill colour"]', "#dddddd");
+  await page.waitForTimeout(150);
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 100), { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const pale = await canvasPixel(300, 100);
+  assert(pale[0] > 180 && pale[3] > 200, `a pale stroke to land on (${pale})`);
+
+  await page.click('button[aria-label="Clone"]');
+  await page.waitForTimeout(150);
+  await page.keyboard.down("Alt");
+  await page.mouse.move(...at(160, 200));
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(200);
+  const dab = async () => {
+    await page.mouse.move(...at(300, 100));
+    await page.mouse.down();
+    await page.mouse.move(...at(306, 100), { steps: 3 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const px = await canvasPixel(300, 100);
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(250);
+    return px;
+  };
+  const healed = await dab();
+  await page.click('button[aria-label="Heal"]');
+  await page.waitForTimeout(150);
+  const stamped = await dab();
+  assert(
+    Math.abs(healed[0] - pale[0]) < 40,
+    `healing kept the colour it landed in (${pale} -> ${healed})`,
+  );
+  assert(
+    stamped[1] > stamped[0] + 30,
+    `and with it off the source comes over as it is (${stamped})`,
+  );
+  await page.click('button[aria-label="Heal"]');
+  // Take the whole trial back — the strokes and the layers they made —
+  // by undoing until the stack is where it was, rather than by counting
+  // entries, which is easy to get wrong and hard to notice.
+  for (let i = 0; i < 8; i++) {
+    if (
+      (await page.locator(".panel ul li").count()) === rowsBeforeHeal &&
+      (await canvasPixel(300, 100))[3] === 0
+    )
+      break;
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(150);
+  }
+  assert(
+    (await page.locator(".panel ul li").count()) === rowsBeforeHeal &&
+      (await canvasPixel(300, 100))[3] === 0,
+    "and the whole trial undoes away",
+  );
+  await page.fill('input[aria-label="Fill colour"]', beforeHeal);
   await page.click('button[aria-label="Move"]');
   await page.waitForTimeout(150);
 

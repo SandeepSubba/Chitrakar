@@ -2778,6 +2778,46 @@ fn draw_clone(
             }
             source[(y - from.y0 as i64) as usize * row + (x - from.x0 as i64) as usize]
         };
+        let at_source = |px: u32, py: u32| {
+            read(
+                (px as f32 + sx).round() as i64,
+                (py as f32 + sy).round() as i64,
+            )
+        };
+        // Healing takes the texture from the source and the colour from
+        // where it lands: the shift between what the two average over
+        // the stroke, added to every pixel it lifts. That is what lets a
+        // patch taken from somewhere lighter sit into its surroundings
+        // rather than showing as a disc.
+        let shift = stroke.heal.then(|| {
+            let (mut lifted, mut under, mut total) = ([0.0f32; 3], [0.0f32; 3], 0.0f32);
+            for py in bbox.y0..bbox.y1 {
+                for px in bbox.x0..bbox.x1 {
+                    let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
+                    let from = at_source(px, py);
+                    let to = dst.pixels[(py * dst.width + px) as usize];
+                    if c <= 0.0 || from.a <= 0.0 || to.a <= 0.0 {
+                        continue;
+                    }
+                    for (k, (f, t)) in [(from.r, to.r), (from.g, to.g), (from.b, to.b)]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        lifted[k] += f / from.a * c;
+                        under[k] += t / to.a * c;
+                    }
+                    total += c;
+                }
+            }
+            if total <= 0.0 {
+                return [0.0f32; 3];
+            }
+            [
+                (under[0] - lifted[0]) / total,
+                (under[1] - lifted[1]) / total,
+                (under[2] - lifted[2]) / total,
+            ]
+        });
         for py in bbox.y0..bbox.y1 {
             for px in bbox.x0..bbox.x1 {
                 let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
@@ -2788,12 +2828,19 @@ fn draw_clone(
                 if weight <= 0.0 {
                     continue;
                 }
-                let lifted = read(
-                    (px as f32 + sx).round() as i64,
-                    (py as f32 + sy).round() as i64,
-                );
+                let mut lifted = at_source(px, py);
                 if lifted.a <= 0.0 {
                     continue;
+                }
+                if let Some(shift) = shift {
+                    let a = lifted.a;
+                    let moved = |v: f32, d: f32| (v / a + d).max(0.0) * a;
+                    lifted = LinearRgba {
+                        r: moved(lifted.r, shift[0]),
+                        g: moved(lifted.g, shift[1]),
+                        b: moved(lifted.b, shift[2]),
+                        a,
+                    };
                 }
                 let i = (py * dst.width + px) as usize;
                 dst.pixels[i] = blend_pixel(scale_alpha(lifted, weight), dst.pixels[i], blend);
@@ -3440,6 +3487,7 @@ mod tests {
             softness: 0.0,
             erase: false,
             source: [0.0, 0.0],
+            heal: false,
         }
     }
 
@@ -3637,6 +3685,7 @@ mod tests {
                     softness: 0.5,
                     erase: false,
                     source: [0.0, 0.0],
+                    heal: false,
                 }
             })
             .collect();
@@ -3715,6 +3764,78 @@ mod tests {
             recoloured.get(60, 60).to_srgb8(),
             [0, 0, 255, 255],
             "the clone follows its source rather than keeping a copy"
+        );
+    }
+
+    /// Healing lays the source's texture down in the colour of the place
+    /// it lands, so a patch lifted from somewhere darker does not show
+    /// as a disc of the wrong colour.
+    #[test]
+    fn healing_takes_the_texture_from_there_and_the_colour_from_here() {
+        let dark = AuthoredColor::Srgb {
+            r: 0.2,
+            g: 0.2,
+            b: 0.2,
+            a: 1.0,
+        };
+        let light = AuthoredColor::Srgb {
+            r: 0.8,
+            g: 0.8,
+            b: 0.8,
+            a: 1.0,
+        };
+        let build = |heal: bool| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            // A light field with a dark patch in one corner to lift from.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("field", 80.0, 80.0, light),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: filled_rect("patch", 24.0, 24.0, dark),
+            })
+            .unwrap();
+            let patch = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: patch,
+                transform: Transform::translation(4.0, 4.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[2];
+            let mut s = stroke(&[[60.0, 60.0]], 8.0, light);
+            s.source = [-44.0, -44.0]; // reads the dark patch
+            s.heal = heal;
+            doc.apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(s),
+                on_mask: false,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        let cloned = build(false).get(60, 60).to_srgb8();
+        let healed = build(true).get(60, 60).to_srgb8();
+        let around = build(true).get(20, 60).to_srgb8();
+        assert!(
+            cloned[0] < 100,
+            "cloning brings the dark patch over as it is ({cloned:?})"
+        );
+        assert!(
+            (healed[0] as i32 - around[0] as i32).abs() < 12,
+            "healing lands in the colour it was dropped into ({healed:?} against {around:?})"
         );
     }
 

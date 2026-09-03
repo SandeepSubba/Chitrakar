@@ -290,6 +290,7 @@ mod tests {
                 softness: 0.4,
                 erase: false,
                 source: [0.0, 0.0],
+                heal: false,
             }),
             on_mask: false,
         })
@@ -305,6 +306,7 @@ mod tests {
                         softness: 0.0,
                         erase: true,
                         source: [0.0, 0.0],
+                        heal: false,
                     }],
                 },
                 invert: false,
@@ -383,6 +385,7 @@ mod tests {
                 softness: 0.5,
                 erase: false,
                 source: [0.0, 0.0],
+                heal: false,
             }),
         })
         .unwrap();
