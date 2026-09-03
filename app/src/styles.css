@@ -627,6 +627,15 @@ body {
     -4px 0;
 }
 
+/* A mask's picture reads as coverage rather than as artwork, so it sits
+   on black: what it lets through is white, what it hides is nothing. */
+.mask-thumb {
+  width: 15px;
+  height: 15px;
+  background-color: #111;
+  background-image: none;
+}
+
 /* The brush's own cursor is the ring, so the pointer gets out of its
    way: a crosshair says where the centre is without hiding the paint. */
 .canvas-host.painting {

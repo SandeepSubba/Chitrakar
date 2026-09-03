@@ -217,6 +217,14 @@ impl WasmSession {
             .unwrap_or_default()
     }
 
+    /// A small square picture of a layer's mask, fitted the way the
+    /// layer's own picture is. Empty when there is no mask.
+    pub fn mask_thumbnail(&self, id: f64, size: u32) -> Vec<u8> {
+        self.inner
+            .mask_thumbnail(NodeId(id as u64), size)
+            .unwrap_or_default()
+    }
+
     /// Add an empty layer to paint on at the top of the document.
     /// Returns its id.
     pub fn add_paint_layer(&mut self, name: &str) -> Result<f64, JsError> {

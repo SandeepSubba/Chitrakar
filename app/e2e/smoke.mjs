@@ -1967,7 +1967,9 @@ assert(
   assert((await canvasPixel(200, 200))[3] === 255, "what the shape covered shows");
   assert((await canvasPixel(400, 200))[3] === 0, "and what it did not is hidden");
   assert(
-    (await page.locator('.panel ul li [title="This layer has a mask"]').count()) === 1,
+    (await page
+      .locator('.panel ul li [title="What this layer\'s mask lets through"]')
+      .count()) === 1,
     "the row marks the mask it now carries",
   );
   await page.keyboard.press("Control+z");
@@ -3236,6 +3238,14 @@ assert(
   assert(
     (await canvasPixel(300, 340))[3] > 200,
     "and the brush puts the piece back",
+  );
+  // The row shows what the mask lets through, beside the layer itself.
+  await page.waitForTimeout(700);
+  const maskShot = page.locator(".panel ul li .mask-thumb").first();
+  assert((await maskShot.count()) === 1, "the mask has a picture of its own");
+  assert(
+    (await maskShot.getAttribute("src")).startsWith("data:image/png"),
+    "and it is a picture, not a glyph",
   );
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");

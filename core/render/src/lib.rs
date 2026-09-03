@@ -717,8 +717,12 @@ fn render_child(
                 }
                 let mut sub = Surface::new(dst.width, dst.height);
                 render_group(doc, child, &mut sub, sub_clip, t)?;
-                if let Some(m) = mask.mask {
-                    apply_mask(doc, m, &mut sub, sub_clip, parent);
+                if mask.mask.is_some() {
+                    // The mask the walk already worked out, rather than
+                    // one worked out again: a painted mask is rasterized
+                    // to read it, and doing that twice for one group is
+                    // the whole region's worth of work wasted.
+                    apply_mask(doc, mask, &mut sub, sub_clip);
                 }
                 composite(dst, &sub, node.opacity, blend, sub_clip);
             }
@@ -2251,15 +2255,7 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
 }
 
 /// Multiply a surface region by a mask's coverage (used for group masks).
-fn apply_mask(
-    doc: &Document,
-    mask: &Mask,
-    surface: &mut Surface,
-    clip: ClipRect,
-    parent: Transform,
-) {
-    let plane = MaskRef::plane_for(Some(mask), parent, clip, (surface.width, surface.height));
-    let m = MaskRef::new(Some(mask), parent).with_plane(plane.as_ref());
+fn apply_mask(doc: &Document, m: MaskRef<'_>, surface: &mut Surface, clip: ClipRect) {
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
             let c = coverage_at(doc, m, x, y);
@@ -2576,26 +2572,8 @@ fn lay_strokes(
 /// nothing on a transparent square. A layer never scales up past its own
 /// size, so a small one sits small in its square rather than going soft.
 pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>>, DocError> {
-    if size == 0 {
+    let Some(fit) = fit_into_square(doc, id, size)? else {
         return Ok(None);
-    }
-    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
-        return Ok(None);
-    };
-    let (w, h) = (x1 - x0, y1 - y0);
-    if !(w > 0.0 && h > 0.0) {
-        return Ok(None);
-    }
-    let scale = (size as f32 / w.max(h)).min(1.0);
-    // The layer's own transform is applied by the walk; this only says
-    // where the box it lands in goes on the square.
-    let fit = Transform {
-        a: scale,
-        b: 0.0,
-        c: 0.0,
-        d: scale,
-        e: (size as f32 - w * scale) / 2.0 - x0 * scale,
-        f: (size as f32 - h * scale) / 2.0 - y0 * scale,
     };
     let mut surface = Surface::new(size, size);
     let clip = ClipRect {
@@ -2620,6 +2598,64 @@ pub struct PaintedPixels {
     pub height: u32,
     pub origin: [f32; 2],
     pub rgba8: Vec<u8>,
+}
+
+/// Where a layer's box goes on a square `size` across: fitted inside
+/// and centred, and never enlarged past its own size, so a small layer
+/// sits small in its square rather than going soft. The layer's own
+/// transform is applied by the walk; this only places the box it lands
+/// in. `None` when the layer has no box.
+fn fit_into_square(doc: &Document, id: NodeId, size: u32) -> Result<Option<Transform>, DocError> {
+    if size == 0 {
+        return Ok(None);
+    }
+    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+        return Ok(None);
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    if !(w > 0.0 && h > 0.0) {
+        return Ok(None);
+    }
+    let scale = (size as f32 / w.max(h)).min(1.0);
+    Ok(Some(Transform {
+        a: scale,
+        b: 0.0,
+        c: 0.0,
+        d: scale,
+        e: (size as f32 - w * scale) / 2.0 - x0 * scale,
+        f: (size as f32 - h * scale) / 2.0 - y0 * scale,
+    }))
+}
+
+/// A layer's mask fitted into the same square [`thumbnail`] fits the
+/// layer into, so the two sit side by side and line up: white where the
+/// layer shows through and clear where it is hidden.
+///
+/// `None` when the layer has no mask, or no box to fit.
+pub fn mask_thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>>, DocError> {
+    let node = doc.node(id)?;
+    let Some(mask) = node.mask.as_ref() else {
+        return Ok(None);
+    };
+    let Some(fit) = fit_into_square(doc, id, size)? else {
+        return Ok(None);
+    };
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: size,
+        y1: size,
+    };
+    let plane = MaskRef::plane_for(Some(mask), fit, clip, (size, size));
+    let m = MaskRef::new(Some(mask), fit).with_plane(plane.as_ref());
+    let mut rgba8 = Vec::with_capacity((size * size) as usize * 4);
+    for y in 0..size {
+        for x in 0..size {
+            let a = (coverage_at(doc, m, x, y).clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba8.extend_from_slice(&[255, 255, 255, a]);
+        }
+    }
+    Ok(Some(rgba8))
 }
 
 /// A layer's mask as an image: what it lets through over the layer's
@@ -3436,6 +3472,54 @@ mod tests {
         assert_eq!(
             render(&doc).unwrap().get(30, 30).to_srgb8(),
             [255, 0, 0, 255]
+        );
+    }
+
+    /// A layer's mask gets a picture of its own, fitted the same way the
+    /// layer's is: white where the layer shows through, clear where it
+    /// is hidden.
+    #[test]
+    fn a_mask_gets_a_picture_of_what_it_lets_through() {
+        let mut doc = Document::new(100, 100, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("photo", 60.0, 60.0, RED),
+        })
+        .unwrap();
+        let photo = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: photo,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        assert!(
+            mask_thumbnail(&doc, photo, 24).unwrap().is_none(),
+            "no mask, no picture of one"
+        );
+
+        let mut rub = stroke(&[[50.0, 50.0]], 20.0, RED);
+        rub.erase = true;
+        doc.apply(Command::SetMask {
+            id: photo,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Painted { strokes: vec![rub] },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        let thumb = mask_thumbnail(&doc, photo, 24).unwrap().unwrap();
+        assert_eq!(thumb.len(), 24 * 24 * 4);
+        let at = |x: usize, y: usize| thumb[(y * 24 + x) * 4 + 3];
+        // The rub is at the middle of the layer's box, so it is at the
+        // middle of the square too.
+        assert_eq!(at(12, 12), 0, "clear where the mask hides the layer");
+        assert_eq!(at(1, 1), 255, "and white where it lets it through");
+        assert_eq!(
+            &thumb[0..3],
+            &[255, 255, 255],
+            "white throughout, with the coverage in the alpha"
         );
     }
 

@@ -917,6 +917,14 @@ impl Session {
         Ok(chitrakar_render::thumbnail(&self.doc, id, size)?.unwrap_or_default())
     }
 
+    /// A small square picture of a layer's mask, fitted the same way its
+    /// own picture is so the two line up: white where the layer shows
+    /// through and clear where it is hidden. Empty when there is no
+    /// mask.
+    pub fn mask_thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
+        Ok(chitrakar_render::mask_thumbnail(&self.doc, id, size)?.unwrap_or_default())
+    }
+
     /// How many strokes a paint layer holds, which is where the next one
     /// goes.
     pub fn stroke_count(&self, id: NodeId, on_mask: bool) -> Result<usize, EngineError> {

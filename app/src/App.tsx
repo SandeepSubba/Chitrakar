@@ -543,6 +543,9 @@ export function App() {
    * refreshes the layer list many times a second and none of those frames
    * is worth a re-render of the whole stack. */
   const [thumbs, setThumbs] = useState<Record<number, string>>({});
+  /** And a picture of each layer's mask, fitted the same way, so the row
+   * shows what is being let through as well as what is under it. */
+  const [maskThumbs, setMaskThumbs] = useState<Record<number, string>>({});
   /** The live document's pixel size. Every screen/document conversion goes
    * through this rather than a constant, so an opened file of any size
    * lands on a canvas that fits it. */
@@ -1284,24 +1287,31 @@ export function App() {
       canvas.height = THUMB;
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
-      const next: Record<number, string> = {};
-      for (const l of layers) {
-        let px: Uint8Array;
-        try {
-          px = session.thumbnail(l.id, THUMB);
-        } catch {
-          continue;
-        }
-        if (px.length !== THUMB * THUMB * 4) continue;
+      const draw = (px: Uint8Array) => {
         ctx.clearRect(0, 0, THUMB, THUMB);
         ctx.putImageData(
           new ImageData(new Uint8ClampedArray(px), THUMB, THUMB),
           0,
           0,
         );
-        next[l.id] = canvas.toDataURL();
+        return canvas.toDataURL();
+      };
+      const next: Record<number, string> = {};
+      const masks: Record<number, string> = {};
+      for (const l of layers) {
+        try {
+          const px = session.thumbnail(l.id, THUMB);
+          if (px.length === THUMB * THUMB * 4) next[l.id] = draw(px);
+          if (l.has_mask) {
+            const mp = session.mask_thumbnail(l.id, THUMB);
+            if (mp.length === THUMB * THUMB * 4) masks[l.id] = draw(mp);
+          }
+        } catch {
+          continue;
+        }
       }
       setThumbs(next);
+      setMaskThumbs(masks);
     }, 350);
     return () => clearTimeout(id);
   }, [session, layers, saveTick]);
@@ -4848,8 +4858,19 @@ export function App() {
                   </span>
                 )}
                 {l.has_mask && (
-                  <span className="kind" title="This layer has a mask">
-                    <Icon name="mask" size={14} />
+                  <span
+                    className="kind"
+                    title="What this layer's mask lets through"
+                  >
+                    {maskThumbs[l.id] ? (
+                      <img
+                        className="layer-thumb mask-thumb"
+                        src={maskThumbs[l.id]}
+                        alt=""
+                      />
+                    ) : (
+                      <Icon name="mask" size={14} />
+                    )}
                   </span>
                 )}
                 {l.has_effects && (

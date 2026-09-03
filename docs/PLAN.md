@@ -74,8 +74,11 @@ without reading anything else.*
   photo is taken out without touching the photo.
   Layer rows carry a small picture of the layer itself — what the page
   would draw of it, effects and all, fitted into its own square — in
-  place of the glyph that says what kind it is, and regenerated a breath
-  after the document settles rather than every frame.
+  place of the glyph that says what kind it is, and a picture of its
+  mask beside that, fitted the same way so the two line up: white where
+  the layer shows through, clear where it is hidden. Both are
+  regenerated a breath after the document settles rather than every
+  frame.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
   free of it — and the same lines catch a resize handle. A
@@ -158,9 +161,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~208),
+- **Verify before committing:** `cargo test --workspace` (~209),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~386 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~388 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
