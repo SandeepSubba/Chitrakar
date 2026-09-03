@@ -7,6 +7,7 @@ struct VsOut {
     @location(0) local: vec2f,
     @location(1) @interpolate(flat) params: vec4f,
     @location(2) @interpolate(flat) color: vec4f,
+    @location(3) @interpolate(flat) grad: vec4f,
 };
 
 struct Page {
@@ -16,20 +17,25 @@ struct Page {
 
 @group(0) @binding(0) var<uniform> page: Page;
 
+// Document pixels to clip space, y downwards as the document has it.
+fn clip(doc: vec2f) -> vec4f {
+    return vec4f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0, 0.0, 1.0);
+}
+
 @vertex
 fn vs(
     @location(0) doc: vec2f,
     @location(1) local: vec2f,
     @location(2) params: vec4f,
     @location(3) color: vec4f,
+    @location(4) grad: vec4f,
 ) -> VsOut {
     var out: VsOut;
-    // Document pixels to clip space, y downwards as the document has it.
-    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
-    out.pos = vec4f(ndc, 0.0, 1.0);
+    out.pos = clip(doc);
     out.local = local;
     out.params = params;
     out.color = color;
+    out.grad = grad;
     return out;
 }
 
@@ -40,8 +46,9 @@ fn rect_distance(p: vec2f, size: vec2f, r: f32) -> f32 {
     return length(max(q, vec2f(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-@fragment
-fn fs(in: VsOut) -> @location(0) vec4f {
+// How much of this pixel the shape covers, from the shape's own signed
+// distance.
+fn coverage(in: VsOut) -> f32 {
     var d: f32;
     if in.params.w < 0.5 {
         d = rect_distance(in.local, in.params.xy, in.params.z);
@@ -57,8 +64,12 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     }
     // The band is one device pixel wide however the shape is transformed:
     // fwidth measures the distance's own rate of change on the screen.
-    let cov = clamp(0.5 - d / max(fwidth(d), 1e-6), 0.0, 1.0);
-    return in.color * cov;
+    return clamp(0.5 - d / max(fwidth(d), 1e-6), 0.0, 1.0);
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4f {
+    return in.color * coverage(in);
 }
 
 // Stencil pass for a path: nothing but position, no colour written. The
@@ -66,8 +77,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 // set exactly where an even-odd fill covers it.
 @vertex
 fn vs_stencil(@location(0) doc: vec2f) -> @builtin(position) vec4f {
-    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
-    return vec4f(ndc, 0.0, 1.0);
+    return clip(doc);
 }
 
 // A pipeline in a pass that has a colour attachment must name one too,
@@ -81,15 +91,23 @@ fn fs_stencil() -> @location(0) vec4f {
 // fill reached, and clears the stencil behind it.
 struct CoverOut {
     @builtin(position) pos: vec4f,
-    @location(0) @interpolate(flat) color: vec4f,
+    @location(0) uv: vec2f,
+    @location(1) @interpolate(flat) color: vec4f,
+    @location(2) @interpolate(flat) grad: vec4f,
 };
 
 @vertex
-fn vs_cover(@location(0) doc: vec2f, @location(3) color: vec4f) -> CoverOut {
+fn vs_cover(
+    @location(0) doc: vec2f,
+    @location(1) local: vec2f,
+    @location(3) color: vec4f,
+    @location(4) grad: vec4f,
+) -> CoverOut {
     var out: CoverOut;
-    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
-    out.pos = vec4f(ndc, 0.0, 1.0);
+    out.pos = clip(doc);
+    out.uv = local;
     out.color = color;
+    out.grad = grad;
     return out;
 }
 
@@ -101,6 +119,10 @@ fn fs_cover(in: CoverOut) -> @location(0) vec4f {
 // A placed image: the quad's own coordinates are its texture coordinates,
 // and the texels are already premultiplied linear, so the filtering
 // happens in the same space the compositor works in.
+//
+// The same binding carries a gradient's ramp — a single row of texels,
+// its stops resolved and premultiplied on the CPU — so the two share a
+// bind group layout and a sampler.
 struct ImageOut {
     @builtin(position) pos: vec4f,
     @location(0) uv: vec2f,
@@ -113,8 +135,7 @@ struct ImageOut {
 @vertex
 fn vs_image(@location(0) doc: vec2f, @location(1) uv: vec2f, @location(3) color: vec4f) -> ImageOut {
     var out: ImageOut;
-    let ndc = vec2f(doc.x / page.size.x * 2.0 - 1.0, 1.0 - doc.y / page.size.y * 2.0);
-    out.pos = vec4f(ndc, 0.0, 1.0);
+    out.pos = clip(doc);
     out.uv = uv;
     out.alpha = color.a;
     return out;
@@ -123,4 +144,51 @@ fn vs_image(@location(0) doc: vec2f, @location(1) uv: vec2f, @location(3) color:
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4f {
     return textureSample(image, image_sampler, in.uv) * in.alpha;
+}
+
+// Where a point of the shape's normalized box sits along its gradient:
+// the projection onto the line from `from` to `to`, or the distance from
+// the centre in units of the radius, clamped past either end — the same
+// arithmetic the CPU renderer does per pixel.
+fn ramp_at(uv: vec2f, geom: vec4f, radial: bool) -> f32 {
+    if radial {
+        if geom.z < 1e-6 {
+            return 1.0;
+        }
+        return clamp(length(uv - geom.xy) / geom.z, 0.0, 1.0);
+    }
+    let d = geom.zw - geom.xy;
+    let len2 = dot(d, d);
+    if len2 < 1e-12 {
+        return 0.0;
+    }
+    return clamp(dot(uv - geom.xy, d) / len2, 0.0, 1.0);
+}
+
+// The ramp's colour at `t`. The row's first and last texels are the ends
+// of the ramp, so t maps onto their centres and the sampler interpolates
+// the rest.
+fn ramp_color(t: f32) -> vec4f {
+    let n = f32(textureDimensions(image).x);
+    let u = (t * (n - 1.0) + 0.5) / n;
+    return textureSampleLevel(image, image_sampler, vec2f(u, 0.5), 0.0);
+}
+
+// A gradient-filled rectangle or ellipse: coverage as any other shape,
+// colour from the ramp. `color` carries only which gradient this is (in
+// r) and the layer's alpha (in a) — the paint itself is in the texture.
+@fragment
+fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
+    let cov = coverage(in);
+    let uv = in.local / max(in.params.xy, vec2f(1e-6, 1e-6));
+    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5)) * in.color.a * cov;
+}
+
+// A gradient-filled path: the stencil already said where the fill
+// reached, so the cover quad only has to say what colour it is. Its
+// corners carry the normalized box coordinates, which interpolate
+// across the quad however the layer is transformed.
+@fragment
+fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
+    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5)) * in.color.a;
 }

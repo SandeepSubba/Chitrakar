@@ -140,7 +140,7 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~188),
+- **Verify before committing:** `cargo test --workspace` (~190),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~377 browser
   assertions). Both suites self-skip CMYK-profile steps unless
@@ -159,19 +159,24 @@ without reading anything else.*
   it. A placed image is a textured quad whose texels are premultiplied
   into linear light before upload, so the filtering happens where the
   compositor works; shrunk — where the CPU box-filters the texels a pixel
-  covers — it hands the page back rather than aliasing. It declines
-  anything else — strokes, gradients, text, masks, effects, filters,
+  covers — it hands the page back rather than aliasing. A gradient fill —
+  linear or radial, on any of those shapes — is a ramp baked into a row
+  of 512 texels and sampled across the shape's own normalized box, so it
+  follows the shape the way the CPU's does, and the layer's opacity
+  scales it in the fragment. It declines
+  anything else — strokes, text, masks, effects, filters,
   adjustments, blend modes, a group that needs isolating, ink authored
-  for a press — and the caller falls back to the CPU. Its tests render the same page both ways and compare: mean channel
-  difference under 0.004 for the analytic shapes and 0.012 for the
-  stencilled paths, interiors, holes and bare page exact, the antialiased
-  edges tracking the CPU's. Nothing depends on it yet: the engine still
+  for a press (a gradient stop included) — and the caller falls back to
+  the CPU. Its tests render the same page both ways and compare: mean channel
+  difference under 0.004 for the analytic shapes, 0.012 for the
+  stencilled paths and 0.006 for the gradients, interiors, holes and bare
+  page exact, the antialiased edges tracking the CPU's. Nothing depends on it yet: the engine still
   renders on the CPU. On llvmpipe (a CPU driver, so this measures plumbing
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
 - **Next up (rough priority):**
-  1. Extend the GPU backend to strokes, gradients and text,
+  1. Extend the GPU backend to strokes and text,
      then wire it into the engine behind a feature and let the viewport
      present from it (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it

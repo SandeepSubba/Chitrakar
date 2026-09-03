@@ -18,10 +18,13 @@
 //! texels premultiplied into linear light before they are uploaded so
 //! the filtering happens where the compositor works — magnified or at
 //! its own size; shrunk, where the CPU box-filters the texels a pixel
-//! covers, the page goes back. Everything else — strokes, gradients,
-//! text, masks, effects, filters, adjustments, blend modes, a group
-//! that has to be composited on its own, ink authored for a press — is
-//! declined, and the caller falls back to the CPU.
+//! covers, the page goes back. A gradient fill — linear or radial, on
+//! any of those shapes — is a ramp baked into a row of texels and
+//! sampled across the shape's own normalized box, so it follows the
+//! shape the way the CPU's does. Everything else — strokes, text,
+//! masks, effects, filters, adjustments, blend modes, a group that has
+//! to be composited on its own, ink authored for a press — is declined,
+//! and the caller falls back to the CPU.
 
 use chitrakar_color::LinearRgba;
 use chitrakar_doc::{BlendMode, Document, NodeId, NodeKind, Transform, VectorShape};
@@ -31,13 +34,20 @@ use wgpu::util::DeviceExt;
 /// One vertex of a shape's quad: where it lands on the page, where that
 /// is in the shape's own space, the shape's parameters (size, corner
 /// radius, and which kind it is) and its premultiplied linear colour.
+///
+/// A gradient-filled shape reads two of these differently: its paint is
+/// a ramp texture rather than a colour, so `color` carries only which
+/// gradient it is (in `r`) and the layer's alpha (in `a`), and `grad`
+/// carries the gradient's geometry in the shape's normalized box — the
+/// two ends of a linear ramp, or a radial one's centre and radius.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     doc: [f32; 2],
     local: [f32; 2],
     params: [f32; 4],
     color: [f32; 4],
+    grad: [f32; 4],
 }
 
 /// Samples per pixel. A path's edge is as smooth as the stencil is
@@ -91,10 +101,16 @@ fn stencil_state(
 /// One thing to draw, in painter's order: a shape whose fragment finds
 /// its own coverage, or a path stencilled and then covered.
 enum Draw {
-    Shape(std::ops::Range<u32>),
+    /// A rectangle or an ellipse. `ramp` names the scene texture its
+    /// gradient was baked into, or nothing when it is a flat fill.
+    Shape {
+        quad: std::ops::Range<u32>,
+        ramp: Option<usize>,
+    },
     Path {
         stencil: std::ops::Range<u32>,
         cover: std::ops::Range<u32>,
+        ramp: Option<usize>,
     },
     /// A placed image: the quad, and which of the scene's textures it
     /// samples.
@@ -112,6 +128,10 @@ pub struct GpuRenderer {
     stencil: wgpu::RenderPipeline,
     cover: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    /// The same two passes again, painting from a gradient's ramp
+    /// instead of a flat colour.
+    shape_gradient: wgpu::RenderPipeline,
+    cover_gradient: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -208,7 +228,8 @@ impl GpuRenderer {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![
-                0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4
+                0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4,
+                4 => Float32x4
             ],
         };
         // The stencil pass writes no colour and flips the buffer under
@@ -302,7 +323,7 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(target)],
+                targets: &[Some(target.clone())],
             }),
             primitive: wgpu::PrimitiveState::default(),
             // The same attachment the paths use, left alone: a pass has
@@ -315,6 +336,57 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // The gradient pipelines differ from their flat counterparts only
+        // in the fragment they run and the ramp they bind, so they borrow
+        // everything else from them.
+        let shape_gradient = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shapes (gradient)"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_shape_gradient"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        let cover_gradient = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("path cover (gradient)"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_cover"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cover_gradient"),
+                compilation_options: Default::default(),
+                targets: &[Some(target)],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Zero,
+                wgpu::CompareFunction::NotEqual,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         Some(Self {
             device,
             queue,
@@ -322,6 +394,8 @@ impl GpuRenderer {
             stencil,
             cover,
             image,
+            shape_gradient,
+            cover_gradient,
             layout,
             texture_layout,
             sampler,
@@ -399,13 +473,17 @@ impl GpuRenderer {
                 resource: page.as_entire_binding(),
             }],
         });
-        let quads = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("shapes"),
-                contents: bytemuck::cast_slice(&scene.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        // A page with nothing on it gets no vertex buffer: wgpu will
+        // not hand out a slice of an empty one, and the pass below still
+        // clears the target, which is the whole of what such a page is.
+        let quads = (!scene.vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("shapes"),
+                    contents: bytemuck::cast_slice(&scene.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         // Rows of the readback buffer are aligned, so a narrow page is
         // padded out and unpadded again below.
         let row = (width as usize * 8).div_ceil(256) * 256;
@@ -419,7 +497,7 @@ impl GpuRenderer {
         // A texture per image the page places, premultiplied linear
         // already, so nothing has to be converted per sample.
         let textures: Vec<wgpu::BindGroup> = scene
-            .images
+            .textures
             .iter()
             .map(|img| {
                 let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -499,25 +577,43 @@ impl GpuRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, &bind, &[]);
-            pass.set_vertex_buffer(0, quads.slice(..));
-            pass.set_stencil_reference(0);
-            for draw in &scene.draws {
-                match draw {
-                    Draw::Shape(range) => {
-                        pass.set_pipeline(&self.pipeline);
-                        pass.draw(range.clone(), 0..1);
-                    }
-                    Draw::Path { stencil, cover } => {
-                        pass.set_pipeline(&self.stencil);
-                        pass.draw(stencil.clone(), 0..1);
-                        pass.set_pipeline(&self.cover);
-                        pass.draw(cover.clone(), 0..1);
-                    }
-                    Draw::Image { quad, texture } => {
-                        pass.set_pipeline(&self.image);
-                        pass.set_bind_group(1, &textures[*texture], &[]);
-                        pass.draw(quad.clone(), 0..1);
+            if let Some(quads) = &quads {
+                pass.set_bind_group(0, &bind, &[]);
+                pass.set_vertex_buffer(0, quads.slice(..));
+                pass.set_stencil_reference(0);
+                for draw in &scene.draws {
+                    match draw {
+                        Draw::Shape { quad, ramp } => {
+                            match ramp {
+                                Some(ramp) => {
+                                    pass.set_pipeline(&self.shape_gradient);
+                                    pass.set_bind_group(1, &textures[*ramp], &[]);
+                                }
+                                None => pass.set_pipeline(&self.pipeline),
+                            }
+                            pass.draw(quad.clone(), 0..1);
+                        }
+                        Draw::Path {
+                            stencil,
+                            cover,
+                            ramp,
+                        } => {
+                            pass.set_pipeline(&self.stencil);
+                            pass.draw(stencil.clone(), 0..1);
+                            match ramp {
+                                Some(ramp) => {
+                                    pass.set_pipeline(&self.cover_gradient);
+                                    pass.set_bind_group(1, &textures[*ramp], &[]);
+                                }
+                                None => pass.set_pipeline(&self.cover),
+                            }
+                            pass.draw(cover.clone(), 0..1);
+                        }
+                        Draw::Image { quad, texture } => {
+                            pass.set_pipeline(&self.image);
+                            pass.set_bind_group(1, &textures[*texture], &[]);
+                            pass.draw(quad.clone(), 0..1);
+                        }
                     }
                 }
             }
@@ -622,14 +718,17 @@ fn f16_to_f32(bits: u16) -> f32 {
 struct Scene {
     vertices: Vec<Vertex>,
     draws: Vec<Draw>,
-    /// The pixels behind each placed image, premultiplied in linear
-    /// light and half-precision — one entry per resource used, however
-    /// many layers place it.
-    images: Vec<Image>,
-    ids: Vec<String>,
+    /// Everything the fragment shaders sample, premultiplied in linear
+    /// light and half-precision: the pixels behind a placed image, and
+    /// the baked ramp behind a gradient.
+    textures: Vec<Image>,
+    /// Which texture a placed resource went to, so a resource placed by
+    /// several layers is uploaded once. Ramps are not shared: they are
+    /// small, and two layers rarely carry the same one.
+    ids: Vec<(String, usize)>,
 }
 
-/// A resource ready to upload: its size and its texels.
+/// A texture ready to upload: its size and its texels.
 struct Image {
     width: u32,
     height: u32,
@@ -680,23 +779,40 @@ fn collect(
                 stroke,
                 gradient,
             } => {
-                if stroke.is_some() || gradient.is_some() {
+                if stroke.is_some() {
                     return None;
                 }
-                let fill = (*fill)?;
-                // Ink authored for a press resolves through the profile,
-                // which is the CPU's business.
-                let chitrakar_color::AuthoredColor::Srgb { .. } = fill else {
-                    return None;
-                };
-                let color = chitrakar_color::to_working(fill);
                 let alpha = node.opacity * opacity;
-                let color = [
-                    color.r * alpha,
-                    color.g * alpha,
-                    color.b * alpha,
-                    color.a * alpha,
-                ];
+                // A gradient paints in place of the flat fill, from a
+                // ramp baked here once and sampled there per pixel; the
+                // layer's own opacity scales it in the fragment, so two
+                // layers could share a ramp even at different opacities.
+                let (color, grad, ramp) = match gradient {
+                    // No stops is nothing to paint, as it is on the CPU
+                    // — and the flat fill stays covered up.
+                    Some(g) if g.stops().is_empty() => continue,
+                    Some(g) => {
+                        let (ramp, geom, radial) = bake(g)?;
+                        let at = out.textures.len();
+                        out.textures.push(ramp);
+                        let kind = if radial { 1.0 } else { 0.0 };
+                        ([kind, 0.0, 0.0, alpha], geom, Some(at))
+                    }
+                    None => {
+                        let fill = (*fill)?;
+                        // Ink authored for a press resolves through the
+                        // profile, which is the CPU's business.
+                        let chitrakar_color::AuthoredColor::Srgb { .. } = fill else {
+                            return None;
+                        };
+                        let c = chitrakar_color::to_working(fill);
+                        (
+                            [c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha],
+                            [0.0; 4],
+                            None,
+                        )
+                    }
+                };
                 let (size, radius, kind) = match shape {
                     VectorShape::Rect {
                         width,
@@ -728,53 +844,72 @@ fn collect(
                         if rings.is_empty() {
                             continue;
                         }
+                        // The stencil pass reads nothing but position.
                         let mut fan = Vec::new();
-                        let mut box_ = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
                         for ring in &rings {
-                            for p in ring {
-                                box_ = [
-                                    box_[0].min(p[0]),
-                                    box_[1].min(p[1]),
-                                    box_[2].max(p[0]),
-                                    box_[3].max(p[1]),
-                                ];
-                            }
                             for i in 1..ring.len() - 1 {
                                 for p in [ring[0], ring[i], ring[i + 1]] {
                                     fan.push(Vertex {
                                         doc: p,
-                                        local: [0.0, 0.0],
-                                        params: [0.0; 4],
-                                        color,
+                                        ..Default::default()
                                     });
                                 }
                             }
                         }
                         let stencil = out.push(fan);
-                        let corner = |x: f32, y: f32| Vertex {
-                            doc: [x, y],
-                            local: [0.0, 0.0],
-                            params: [0.0; 4],
-                            color,
+                        // The cover quad is the layer's own box carried
+                        // through its transform — a parallelogram that
+                        // holds every point the fill can reach, grown by
+                        // a device pixel so it cannot cut the edge short.
+                        // Its corners carry the box's normalized
+                        // coordinates, which a gradient interpolates
+                        // across however the layer is turned.
+                        let Some([x0, y0, x1, y1]) =
+                            chitrakar_render::local_bounds_of(doc, child).ok()?
+                        else {
+                            continue;
                         };
-                        let (x0, y0, x1, y1) = (box_[0], box_[1], box_[2], box_[3]);
+                        let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6);
+                        let (mu, mv) = (1.0 / scale / (x1 - x0), 1.0 / scale / (y1 - y0));
+                        let corner = |u: f32, v: f32| {
+                            let (lx, ly) = (x0 + (x1 - x0) * u, y0 + (y1 - y0) * v);
+                            Vertex {
+                                doc: [t.a * lx + t.c * ly + t.e, t.b * lx + t.d * ly + t.f],
+                                local: [u, v],
+                                params: [0.0; 4],
+                                color,
+                                grad,
+                            }
+                        };
+                        let (lo, hi) = ((-mu, -mv), (1.0 + mu, 1.0 + mv));
                         let cover = out.push(vec![
-                            corner(x0, y0),
-                            corner(x1, y0),
-                            corner(x1, y1),
-                            corner(x0, y0),
-                            corner(x1, y1),
-                            corner(x0, y1),
+                            corner(lo.0, lo.1),
+                            corner(hi.0, lo.1),
+                            corner(hi.0, hi.1),
+                            corner(lo.0, lo.1),
+                            corner(hi.0, hi.1),
+                            corner(lo.0, hi.1),
                         ]);
-                        out.draws.push(Draw::Path { stencil, cover });
+                        out.draws.push(Draw::Path {
+                            stencil,
+                            cover,
+                            ramp,
+                        });
                         continue;
                     }
                 };
                 if !(size[0] > 0.0 && size[1] > 0.0) {
                     continue;
                 }
-                let range = out.push(quad(t, size, [size[0], size[1], radius, kind], color, 1.5));
-                out.draws.push(Draw::Shape(range));
+                let range = out.push(quad(
+                    t,
+                    size,
+                    [size[0], size[1], radius, kind],
+                    color,
+                    grad,
+                    1.5,
+                ));
+                out.draws.push(Draw::Shape { quad: range, ramp });
             }
             NodeKind::Raster(raster) => {
                 let Some(res) = doc.resource(&raster.resource_id) else {
@@ -793,12 +928,13 @@ fn collect(
                 if scale < 0.99 {
                     return None;
                 }
-                let at = match out.ids.iter().position(|id| *id == raster.resource_id) {
-                    Some(at) => at,
+                let at = match out.ids.iter().find(|(id, _)| *id == raster.resource_id) {
+                    Some((_, at)) => *at,
                     None => {
-                        out.ids.push(raster.resource_id.clone());
-                        out.images.push(premultiplied(res));
-                        out.images.len() - 1
+                        let at = out.textures.len();
+                        out.textures.push(premultiplied(res));
+                        out.ids.push((raster.resource_id.clone(), at));
+                        at
                     }
                 };
                 let alpha = node.opacity * opacity;
@@ -806,7 +942,7 @@ fn collect(
                 // The quad is the image's own box; its local coordinates
                 // are the texture's, so the vertex shader passes them
                 // straight through as texture coordinates.
-                let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], 0.0);
+                let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 0.0);
                 for v in &mut verts {
                     v.local = [v.local[0] / size[0], v.local[1] / size[1]];
                 }
@@ -817,6 +953,87 @@ fn collect(
         }
     }
     Some(())
+}
+
+/// How many texels a gradient's ramp is baked into. Its stops are
+/// resolved here and the sampler interpolates between them, so the only
+/// error is at a stop landing between two texels: the ramp bends a
+/// five-hundredth of its length early or late, and nowhere else.
+const RAMP: u32 = 512;
+
+/// A gradient as the shader wants it: its ramp baked into a row of
+/// premultiplied linear texels, its geometry in the shape's normalized
+/// box, and whether that geometry is a radial one.
+///
+/// `None` declines the page: a stop authored for a press resolves
+/// through the document's profile, which is the CPU's business. The
+/// caller has already ruled out a gradient with no stops.
+fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
+    let mut stops = Vec::with_capacity(g.stops().len());
+    for stop in g.stops() {
+        let chitrakar_color::AuthoredColor::Srgb { .. } = stop.color else {
+            return None;
+        };
+        stops.push((stop.offset, chitrakar_color::to_working(stop.color)));
+    }
+    stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut texels = Vec::with_capacity(RAMP as usize * 4);
+    for i in 0..RAMP {
+        let c = ramp_at(&stops, i as f32 / (RAMP - 1) as f32);
+        texels.extend_from_slice(&[
+            f32_to_f16(c.r),
+            f32_to_f16(c.g),
+            f32_to_f16(c.b),
+            f32_to_f16(c.a),
+        ]);
+    }
+    let (geom, radial) = match g {
+        chitrakar_doc::Gradient::Linear { from, to, .. } => {
+            ([from[0], from[1], to[0], to[1]], false)
+        }
+        chitrakar_doc::Gradient::Radial { center, radius, .. } => {
+            ([center[0], center[1], *radius, 0.0], true)
+        }
+    };
+    Some((
+        Image {
+            width: RAMP,
+            height: 1,
+            texels,
+        },
+        geom,
+        radial,
+    ))
+}
+
+/// Colour at `t` along a sorted ramp, clamped past either end: the same
+/// walk the CPU renderer does per pixel, done once per texel here.
+fn ramp_at(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
+    let (first, last) = (stops[0], stops[stops.len() - 1]);
+    if t <= first.0 {
+        return first.1;
+    }
+    if t >= last.0 {
+        return last.1;
+    }
+    for w in stops.windows(2) {
+        if t <= w[1].0 {
+            let span = w[1].0 - w[0].0;
+            let k = if span.abs() < 1e-6 {
+                0.0
+            } else {
+                (t - w[0].0) / span
+            };
+            let mix = |a: f32, b: f32| a + (b - a) * k;
+            return LinearRgba {
+                r: mix(w[0].1.r, w[1].1.r),
+                g: mix(w[0].1.g, w[1].1.g),
+                b: mix(w[0].1.b, w[1].1.b),
+                a: mix(w[0].1.a, w[1].1.a),
+            };
+        }
+    }
+    last.1
 }
 
 /// A resource's pixels as the compositor wants them: linear light,
@@ -839,7 +1056,14 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
 /// `grow` device pixels so an antialiased edge has somewhere to land.
 /// A shape wants a pixel and a half of that; an image wants none — its
 /// texture ends where the box does, and a margin would sample past it.
-fn quad(t: Transform, size: [f32; 2], params: [f32; 4], color: [f32; 4], grow: f32) -> Vec<Vertex> {
+fn quad(
+    t: Transform,
+    size: [f32; 2],
+    params: [f32; 4],
+    color: [f32; 4],
+    grad: [f32; 4],
+    grow: f32,
+) -> Vec<Vertex> {
     let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6);
     let m = grow / scale;
     let corners = [
@@ -853,6 +1077,7 @@ fn quad(t: Transform, size: [f32; 2], params: [f32; 4], color: [f32; 4], grow: f
         local: p,
         params,
         color,
+        grad,
     };
     let [tl, tr, br, bl] = corners;
     vec![
@@ -896,6 +1121,12 @@ mod tests {
     const BLUE: AuthoredColor = AuthoredColor::Srgb {
         r: 0.1,
         g: 0.3,
+        b: 0.9,
+        a: 1.0,
+    };
+    const WHITE: AuthoredColor = AuthoredColor::Srgb {
+        r: 0.95,
+        g: 0.95,
         b: 0.9,
         a: 1.0,
     };
@@ -1261,7 +1492,7 @@ mod tests {
         .unwrap();
         let mut scene = Scene::default();
         collect(&doc, doc.root(), Transform::default(), 1.0, &mut scene).unwrap();
-        assert_eq!(scene.images.len(), 1, "one texture for two placements");
+        assert_eq!(scene.textures.len(), 1, "one texture for two placements");
         assert_eq!(scene.draws.len(), 2);
 
         // Shrunk, the CPU box-filters the texels a pixel covers; rather
@@ -1291,6 +1522,169 @@ mod tests {
         assert_eq!(f32_to_f16(1e-9), 0);
     }
 
+    fn ramp(offsets: &[(f32, AuthoredColor)]) -> Vec<chitrakar_doc::GradientStop> {
+        offsets
+            .iter()
+            .map(|(offset, color)| chitrakar_doc::GradientStop {
+                offset: *offset,
+                color: *color,
+            })
+            .collect()
+    }
+
+    fn gradient_filled(name: &str, shape: VectorShape, g: chitrakar_doc::Gradient) -> Box<Node> {
+        let mut node = Node::vector(name, shape);
+        if let NodeKind::Vector { fill, gradient, .. } = &mut node.kind {
+            // A fill underneath, which the gradient paints in place of:
+            // if the two ever swapped the difference would be loud.
+            *fill = Some(RED);
+            *gradient = Some(g);
+        }
+        Box::new(node)
+    }
+
+    /// A gradient is a ramp baked into a row of texels here and a flat
+    /// colour interpolated per pixel there — the same paint either way,
+    /// on every shape that can carry it and through a transform.
+    #[test]
+    fn gradients_ramp_the_way_the_cpu_ramps_them() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(120, 80, ColorMode::Rgb);
+        // Corner to corner, through a middle stop that is not halfway.
+        add(
+            &mut doc,
+            gradient_filled(
+                "rect",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 6.0,
+                },
+                chitrakar_doc::Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [1.0, 1.0],
+                    stops: ramp(&[(0.0, RED), (0.3, BLUE), (1.0, WHITE)]),
+                },
+            ),
+            Transform::translation(8.0, 8.0),
+        );
+        // Radial, on an ellipse, turned: the box it ramps across turns
+        // with it, so the ramp does too.
+        add(
+            &mut doc,
+            gradient_filled(
+                "ellipse",
+                VectorShape::Ellipse { rx: 20.0, ry: 14.0 },
+                chitrakar_doc::Gradient::Radial {
+                    center: [0.4, 0.45],
+                    radius: 0.8,
+                    stops: ramp(&[(0.0, WHITE), (1.0, BLUE)]),
+                },
+            ),
+            Transform {
+                a: 0.9,
+                b: 0.44,
+                c: -0.44,
+                d: 0.9,
+                e: 78.0,
+                f: 14.0,
+            },
+        );
+        // And on a path, where the stencil says where the fill reached
+        // and the cover quad says what colour it is.
+        add(
+            &mut doc,
+            gradient_filled(
+                "path",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [44.0, 6.0], [38.0, 30.0], [6.0, 24.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                chitrakar_doc::Gradient::Linear {
+                    from: [0.0, 1.0],
+                    to: [0.0, 0.0],
+                    stops: ramp(&[(0.0, RED), (1.0, BLUE)]),
+                },
+            ),
+            Transform::translation(12.0, 44.0),
+        );
+
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.006,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // Well inside each shape the colour is the reference's, not
+        // merely close on average.
+        for (x, y) in [(20, 20), (30, 20), (40, 20), (90, 35), (81, 31), (34, 59)] {
+            let (g, c) = (drawn.get(x, y), reference.get(x, y));
+            assert!(
+                (g.r - c.r).abs() < 0.02
+                    && (g.g - c.g).abs() < 0.02
+                    && (g.b - c.b).abs() < 0.02
+                    && (g.a - c.a).abs() < 0.02,
+                "at ({x}, {y}): {g:?} vs {c:?}"
+            );
+        }
+        // It really ramps: across the rect the blue channel climbs, and
+        // it climbs the way the reference's does.
+        let across = |s: &Surface| {
+            (12..44)
+                .step_by(4)
+                .map(|x| s.get(x, 20).b)
+                .collect::<Vec<f32>>()
+        };
+        let (got, want) = (across(&drawn), across(&reference));
+        assert!(
+            got.windows(2).any(|w| w[1] > w[0] + 0.02),
+            "a ramp, not a flat fill: {got:?}"
+        );
+        assert!(
+            got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.03),
+            "the ramp the CPU draws: {got:?} vs {want:?}"
+        );
+    }
+
+    /// A gradient with no stops paints nothing at all — and does not
+    /// fall back to the flat fill underneath it, which is what the CPU
+    /// does with one.
+    #[test]
+    fn a_gradient_without_stops_paints_nothing() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(
+            &mut doc,
+            gradient_filled(
+                "empty",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                chitrakar_doc::Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [1.0, 0.0],
+                    stops: Vec::new(),
+                },
+            ),
+            Transform::translation(10.0, 10.0),
+        );
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        assert_eq!(drawn.get(20, 20).a, 0.0, "a bare page");
+        assert_eq!(reference.get(20, 20).a, 0.0, "which is what the CPU draws");
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -1306,8 +1700,8 @@ mod tests {
         );
         assert!(GpuRenderer::can_render(&doc));
 
-        // A stroke, a gradient, a path, text, an adjustment, a mask, a
-        // blend mode: each on its own is enough to hand the page back.
+        // A stroke, text, a blend mode: each on its own is enough to
+        // hand the page back.
         let mut with_stroke = doc.clone();
         with_stroke
             .apply(Command::SetKind {
@@ -1348,6 +1742,38 @@ mod tests {
             })
             .unwrap();
         assert!(!GpuRenderer::can_render(&with_text));
+
+        // Ink authored for a press resolves through the document's
+        // profile, so a gradient with a CMYK stop goes back too.
+        let mut pressed = doc.clone();
+        pressed
+            .apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Vector {
+                    shape: rect.clone(),
+                    fill: None,
+                    stroke: None,
+                    gradient: Some(chitrakar_doc::Gradient::Linear {
+                        from: [0.0, 0.0],
+                        to: [1.0, 0.0],
+                        stops: ramp(&[
+                            (0.0, RED),
+                            (
+                                1.0,
+                                AuthoredColor::Cmyk {
+                                    c: 0.1,
+                                    m: 0.8,
+                                    y: 0.2,
+                                    k: 0.0,
+                                    a: 1.0,
+                                },
+                            ),
+                        ]),
+                    }),
+                }),
+            })
+            .unwrap();
+        assert!(!GpuRenderer::can_render(&pressed));
 
         // A hidden layer it cannot draw is no obstacle: it is not drawn.
         let hidden = with_text.children_of(root).unwrap()[1];
