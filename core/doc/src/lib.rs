@@ -9,7 +9,7 @@ mod node;
 
 pub use node::{
     Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Guide, Mask, MaskKind, Node,
-    NodeKind, RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
+    NodeKind, PaintStroke, RasterRef, Stroke, TextAlign, TextSpec, Transform, VectorShape,
 };
 
 use chitrakar_color::ColorMode;
@@ -25,6 +25,14 @@ pub enum DocError {
     UnknownNode(NodeId),
     #[error("node {0:?} is not a group")]
     NotAGroup(NodeId),
+    #[error("node {0:?} is not a paint layer")]
+    NotAPaintLayer(NodeId),
+    #[error("no stroke {index} on paint layer {id:?}, which has {len}")]
+    NoSuchStroke {
+        id: NodeId,
+        index: usize,
+        len: usize,
+    },
     #[error("index {index} out of bounds for group {group:?} with {len} children")]
     IndexOutOfBounds {
         group: NodeId,
@@ -227,6 +235,15 @@ impl Document {
         self.nodes.iter()
     }
 
+    /// The strokes of a paint layer, to add to or take from.
+    fn strokes_mut(&mut self, id: NodeId) -> Result<&mut Vec<PaintStroke>, DocError> {
+        let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+        match &mut node.kind {
+            NodeKind::Paint { strokes } => Ok(strokes),
+            _ => Err(DocError::NotAPaintLayer(id)),
+        }
+    }
+
     /// Apply a command, returning its inverse (for undo).
     pub fn apply(&mut self, cmd: Command) -> Result<Command, DocError> {
         match cmd {
@@ -334,6 +351,41 @@ impl Document {
                 Ok(Command::SetKind {
                     id,
                     kind: Box::new(prev),
+                })
+            }
+            Command::AddStroke { id, index, stroke } => {
+                let strokes = self.strokes_mut(id)?;
+                if index > strokes.len() {
+                    let len = strokes.len();
+                    return Err(DocError::NoSuchStroke { id, index, len });
+                }
+                strokes.insert(index, *stroke);
+                Ok(Command::RemoveStroke { id, index })
+            }
+            Command::RemoveStroke { id, index } => {
+                let strokes = self.strokes_mut(id)?;
+                if index >= strokes.len() {
+                    let len = strokes.len();
+                    return Err(DocError::NoSuchStroke { id, index, len });
+                }
+                let stroke = strokes.remove(index);
+                Ok(Command::AddStroke {
+                    id,
+                    index,
+                    stroke: Box::new(stroke),
+                })
+            }
+            Command::SetStroke { id, index, stroke } => {
+                let strokes = self.strokes_mut(id)?;
+                if index >= strokes.len() {
+                    let len = strokes.len();
+                    return Err(DocError::NoSuchStroke { id, index, len });
+                }
+                let prev = std::mem::replace(&mut strokes[index], *stroke);
+                Ok(Command::SetStroke {
+                    id,
+                    index,
+                    stroke: Box::new(prev),
                 })
             }
             Command::SetName { id, name } => {
@@ -543,6 +595,25 @@ pub enum Command {
     SetKind {
         id: NodeId,
         kind: Box<NodeKind>,
+    },
+    /// Lay a stroke onto a paint layer, at `index` in the order the
+    /// layer's strokes are painted in.
+    AddStroke {
+        id: NodeId,
+        index: usize,
+        stroke: Box<PaintStroke>,
+    },
+    /// Take one back off.
+    RemoveStroke {
+        id: NodeId,
+        index: usize,
+    },
+    /// Replace one in place, which is what a brush gesture does to the
+    /// stroke it is still drawing.
+    SetStroke {
+        id: NodeId,
+        index: usize,
+        stroke: Box<PaintStroke>,
     },
     SetName {
         id: NodeId,

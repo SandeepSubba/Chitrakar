@@ -198,8 +198,32 @@ impl Session {
             | Command::SetKind { id, .. }
             | Command::SetName { id, .. }
             | Command::SetMask { id, .. }
-            | Command::MoveNode { id, .. } => Some(*id),
+            | Command::MoveNode { id, .. }
+            | Command::AddStroke { id, .. }
+            | Command::RemoveStroke { id, .. }
+            | Command::SetStroke { id, .. } => Some(*id),
         }
+    }
+
+    /// The box a command disturbs when that is narrower than the whole
+    /// node's: a stroke laid on, replaced in, or taken off a paint layer
+    /// touches only where that stroke is, and a painting can be large.
+    fn stroke_bounds(&self, cmd: &Command) -> Option<Bounds> {
+        let (id, box_) = match cmd {
+            Command::AddStroke { id, stroke, .. } | Command::SetStroke { id, stroke, .. } => {
+                (*id, stroke.bounds()?)
+            }
+            Command::RemoveStroke { id, index } => {
+                let chitrakar_doc::NodeKind::Paint { strokes } = &self.doc.node(*id).ok()?.kind
+                else {
+                    return None;
+                };
+                (*id, strokes.get(*index)?.bounds()?)
+            }
+            _ => return None,
+        };
+        let t = self.doc.node(id).ok()?.transform;
+        Some(chitrakar_render::transformed_box(t, box_))
     }
 
     fn bounds_of_target(&self, id: Option<NodeId>) -> Bounds {
@@ -225,10 +249,14 @@ impl Session {
         // even means.
         let batch = matches!(cmd, Command::Batch(_) | Command::ResizeCanvas { .. });
         let target = Self::command_target(&cmd);
-        let pre = self.bounds_of_target(target);
+        let pre = self
+            .stroke_bounds(&cmd)
+            .unwrap_or_else(|| self.bounds_of_target(target));
         let inverse = self.doc.apply(cmd)?;
         let post_target = Self::command_target(&inverse);
-        let post = self.bounds_of_target(post_target);
+        let post = self
+            .stroke_bounds(&inverse)
+            .unwrap_or_else(|| self.bounds_of_target(post_target));
         self.last_touched = post_target.or(target);
         if batch {
             self.mark_dirty(Bounds::Everything);
@@ -274,6 +302,14 @@ impl Session {
             Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
             Command::SetKind { id, .. } => format!("Edit {}", name(id)),
             Command::SetName { id, .. } => format!("Rename {}", name(id)),
+            Command::AddStroke { id, stroke, .. } | Command::SetStroke { id, stroke, .. } => {
+                format!(
+                    "{} on {}",
+                    if stroke.erase { "Erase" } else { "Paint" },
+                    name(id)
+                )
+            }
+            Command::RemoveStroke { id, .. } => format!("Take a stroke off {}", name(id)),
             Command::SetMask { id, mask } => format!(
                 "{} mask on {}",
                 if mask.is_some() { "Set" } else { "Clear" },
@@ -1470,6 +1506,7 @@ impl Session {
                     NodeKind::Adjustment(_) => "adjustment",
                     NodeKind::Filter(_) => "filter",
                     NodeKind::Text(_) => "text",
+                    NodeKind::Paint { .. } => "paint",
                 },
                 visible: node.visible,
                 opacity: node.opacity,

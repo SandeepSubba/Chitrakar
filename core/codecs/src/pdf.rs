@@ -339,7 +339,9 @@ impl<'a> Page<'a> {
                 gradient, stroke, ..
             } => gradient.is_none() && stroke.as_ref().is_none_or(|s| s.widths.is_empty()),
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
+            // A brush layer has no live form in PDF, so it goes over as
+            // the pixels it paints.
+            NodeKind::Paint { .. } | NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
         })
     }
 
@@ -553,6 +555,8 @@ impl<'a> Page<'a> {
             );
         }
         match &node.kind {
+            // `is_live` already sent this one down the pixel path.
+            NodeKind::Paint { .. } => {}
             NodeKind::Group => {
                 // Full opacity and the default blend by construction (see
                 // is_live): nothing to set, just the children in order.

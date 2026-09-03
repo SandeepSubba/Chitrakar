@@ -191,6 +191,23 @@ fn write_children(
                     }
                 }
             }
+            // SVG has no brush, so a paint layer travels as the pixels
+            // it paints, placed where its paint actually sits.
+            NodeKind::Paint { .. } => {
+                if let Ok(Some(painted)) = chitrakar_render::paint_pixels(doc, child) {
+                    let (w, h) = (painted.width, painted.height);
+                    let [x, y] = painted.origin;
+                    if let Ok(png) = crate::encode_png(w, h, &painted.rgba8) {
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        let _ = writeln!(
+                            out,
+                            r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                            base64(&png)
+                        );
+                        let _ = writeln!(out, "{pad}</g>");
+                    }
+                }
+            }
             NodeKind::Text(spec) => {
                 // SVG text is baseline-anchored and single-line; our node
                 // origin is the block's top and its text can hold newlines

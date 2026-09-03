@@ -193,6 +193,50 @@ mod tests {
         assert_eq!(restored.meta.width, 320);
     }
 
+    /// A painting is strokes, not pixels, so it saves as what it is and
+    /// comes back still editable.
+    #[test]
+    fn a_painting_saves_as_its_strokes() {
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::paint("brush")),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddStroke {
+            id,
+            index: 0,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[4.0, 4.0], [20.0, 30.0]],
+                radii: vec![3.0, 6.0],
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.9,
+                    a: 1.0,
+                },
+                softness: 0.5,
+                erase: false,
+            }),
+        })
+        .unwrap();
+
+        let restored = load_chitra(&save_chitra(&doc).unwrap()).unwrap();
+        let node = restored
+            .node(restored.children_of(restored.root()).unwrap()[0])
+            .unwrap();
+        let chitrakar_doc::NodeKind::Paint { strokes } = &node.kind else {
+            panic!("not a paint layer: {:?}", node.kind);
+        };
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].points, vec![[4.0, 4.0], [20.0, 30.0]]);
+        assert_eq!(strokes[0].radii, vec![3.0, 6.0]);
+        assert_eq!(strokes[0].softness, 0.5);
+    }
+
     #[test]
     fn resources_roundtrip_through_container() {
         let mut doc = Document::new(64, 64, ColorMode::Rgb);

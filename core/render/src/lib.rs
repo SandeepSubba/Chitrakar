@@ -169,13 +169,32 @@ impl Bounds {
     }
 }
 
+/// The box a paint layer's strokes cover in its own space, or nothing
+/// when none of them covers anything.
+fn painted_bounds(strokes: &[chitrakar_doc::PaintStroke]) -> Option<[f32; 4]> {
+    strokes.iter().filter_map(|s| s.bounds()).reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    })
+}
+
 /// Local size (width, height) of a node's own content, before its transform.
 fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
     match kind {
         NodeKind::Vector { shape, .. } => Some(shape_size(shape)),
         NodeKind::Raster(r) => Some((r.width as f32, r.height as f32)),
         NodeKind::Text(spec) => Some(text::measure(spec)),
-        NodeKind::Group | NodeKind::Adjustment(_) | NodeKind::Filter(_) => None,
+        // A paint layer's box is not anchored at its origin — a stroke
+        // can be laid anywhere on it — so it reports its own bounds
+        // instead, and callers that only want a size get nothing.
+        NodeKind::Group
+        | NodeKind::Paint { .. }
+        | NodeKind::Adjustment(_)
+        | NodeKind::Filter(_) => None,
     }
 }
 
@@ -210,6 +229,11 @@ fn local_bounds(shape: &VectorShape) -> (f32, f32, f32, f32) {
             (0.0, 0.0, w, h)
         }
     }
+}
+
+/// The document-space box a local one occupies under a transform.
+pub fn transformed_box(t: Transform, box_: [f32; 4]) -> Bounds {
+    transformed_local_bounds(t, (box_[0], box_[1], box_[2], box_[3]))
 }
 
 /// Doc-space bounds of a local box: the axis-aligned box around all four
@@ -374,6 +398,10 @@ fn bounds_in_parent_space_inner(
             let [x0, y0, x1, y1] = text::bounds(spec);
             transformed_local_bounds(node.transform, (x0, y0, x1, y1))
         }
+        NodeKind::Paint { strokes } => match painted_bounds(strokes) {
+            Some([x0, y0, x1, y1]) => transformed_local_bounds(node.transform, (x0, y0, x1, y1)),
+            None => Bounds::None,
+        },
         kind => {
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
@@ -396,6 +424,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
         }
         NodeKind::Text(spec) => Some(text::bounds(spec)),
+        NodeKind::Paint { strokes } => painted_bounds(strokes),
         kind => match local_size(kind) {
             Some((w, h)) => Some([0.0, 0.0, w, h]),
             // A group's own box is the union of its children, which are
@@ -743,6 +772,9 @@ fn render_child(
                 max_scale(parent),
             ),
             NodeKind::Text(spec) => draw_text(dst, doc, spec, t, node.opacity, blend, clip, mask),
+            NodeKind::Paint { strokes } => {
+                draw_paint(dst, doc, strokes, t, node.opacity, blend, clip, mask)
+            }
         }
     }
     Ok(())
@@ -2220,6 +2252,199 @@ pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextR
     (text::rasterize_at(spec, scale), scale)
 }
 
+/// How much paint a stroke lays at a point of the layer's own space.
+///
+/// The stroke covers the union of the round-capped segments between its
+/// points — the shape a stroked path covers — with the coverage falling
+/// off across the soft edge instead of stopping dead. The pieces are
+/// combined by taking the most any of them lays rather than adding
+/// them, so a stroke that doubles back over itself is not darker where
+/// it crossed: within one stroke the brush lays paint once.
+///
+/// `band` is the narrowest that fade may be, in the layer's own units —
+/// one device pixel — so even a hard brush has an antialiased edge.
+fn stroke_coverage(stroke: &chitrakar_doc::PaintStroke, band: f32, x: f32, y: f32) -> f32 {
+    let n = stroke.points.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let softness = stroke.softness.clamp(0.0, 1.0);
+    let mut most = 0.0f32;
+    // One point is a single dab, which is the segment from it to itself.
+    for i in 0..n.saturating_sub(1).max(1) {
+        let j = (i + 1).min(n - 1);
+        let (a, b) = (stroke.points[i], stroke.points[j]);
+        let (ra, rb) = (stroke.radius(i), stroke.radius(j));
+        let t = segment_parameter(x, y, a, b);
+        let r = ra + (rb - ra) * t;
+        if r <= 0.0 {
+            continue;
+        }
+        let fade = (r * softness).max(band);
+        let d = segment_distance(x, y, a, b);
+        most = most.max(((r - d) / fade).clamp(0.0, 1.0));
+        if most >= 1.0 {
+            return 1.0;
+        }
+    }
+    most
+}
+
+/// Lay a paint layer's strokes onto a surface, in the order they were
+/// laid: paint goes on with source-over, an eraser takes off what is
+/// already there.
+fn lay_strokes(
+    dst: &mut Surface,
+    doc: &Document,
+    strokes: &[chitrakar_doc::PaintStroke],
+    t: Transform,
+    inv: Inverse,
+    band: f32,
+    clip: ClipRect,
+) {
+    for stroke in strokes {
+        let Some(box_) = stroke.bounds() else {
+            continue;
+        };
+        let bbox = match transformed_local_bounds(t, (box_[0], box_[1], box_[2], box_[3]))
+            .to_clip(dst.width, dst.height)
+        {
+            Some(b) => b.intersect(clip),
+            None => continue,
+        };
+        let color = resolve_color(doc, stroke.color);
+        for py in bbox.y0..bbox.y1 {
+            for px in bbox.x0..bbox.x1 {
+                let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+                let c = stroke_coverage(stroke, band, lx, ly);
+                if c <= 0.0 {
+                    continue;
+                }
+                let i = (py * dst.width + px) as usize;
+                dst.pixels[i] = if stroke.erase {
+                    scale_alpha(dst.pixels[i], 1.0 - c)
+                } else {
+                    scale_alpha(color, c).over(dst.pixels[i])
+                };
+            }
+        }
+    }
+}
+
+/// A paint layer handed over as an image: its size, where its top-left
+/// sits in the layer's own space, and its pixels as straight-alpha sRGB
+/// bytes.
+pub struct PaintedPixels {
+    pub width: u32,
+    pub height: u32,
+    pub origin: [f32; 2],
+    pub rgba8: Vec<u8>,
+}
+
+/// A paint layer rendered on its own at one pixel per document unit,
+/// for an exporter whose format has no brush in it and has to hand the
+/// layer over as an image. `None` when the layer has no paint on it.
+pub fn paint_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    let node = doc.node(id)?;
+    let NodeKind::Paint { strokes } = &node.kind else {
+        return Ok(None);
+    };
+    let Some([x0, y0, x1, y1]) = painted_bounds(strokes) else {
+        return Ok(None);
+    };
+    let (w, h) = (
+        (x1 - x0).ceil().max(1.0) as u32,
+        (y1 - y0).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    let t = Transform::translation(-x0, -y0);
+    let Some(inv) = Inverse::of(t) else {
+        return Ok(None);
+    };
+    let mut surface = Surface::new(w, h);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    lay_strokes(&mut surface, doc, strokes, t, inv, 1.0, clip);
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for px in &surface.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
+/// Paint a brush layer.
+///
+/// Strokes go straight onto the destination when nothing about the
+/// layer needs it composited as a whole: source-over is associative, so
+/// laying them one after another there gives the same picture. An
+/// eraser, a layer opacity, a blend or a mask does need it — what an
+/// eraser takes off is the layer's own paint, not what lies under it —
+/// and then the layer is laid on a surface of its own first.
+#[allow(clippy::too_many_arguments)]
+fn draw_paint(
+    dst: &mut Surface,
+    doc: &Document,
+    strokes: &[chitrakar_doc::PaintStroke],
+    t: Transform,
+    opacity: f32,
+    blend: BlendMode,
+    clip: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    let Some(inv) = Inverse::of(t) else {
+        return;
+    };
+    // The softest fade is still one device pixel wide, so a hard brush
+    // has an antialiased edge for the same reason every other edge here
+    // does.
+    let band = 1.0 / max_scale(t).max(1e-6);
+    let alone = opacity >= 1.0
+        && blend == BlendMode::Normal
+        && mask.mask.is_none()
+        && !strokes.iter().any(|s| s.erase);
+    if alone {
+        lay_strokes(dst, doc, strokes, t, inv, band, clip);
+        return;
+    }
+    let Some(extent) = painted_bounds(strokes)
+        .map(|b| transformed_local_bounds(t, (b[0], b[1], b[2], b[3])))
+        .and_then(|b| b.to_clip(dst.width, dst.height))
+        .map(|b| b.intersect(clip))
+    else {
+        return;
+    };
+    if extent.is_empty() {
+        return;
+    }
+    let mut sub = Surface::new(dst.width, dst.height);
+    lay_strokes(&mut sub, doc, strokes, t, inv, band, extent);
+    for py in extent.y0..extent.y1 {
+        for px in extent.x0..extent.x1 {
+            let w = opacity * coverage_at(doc, mask, px, py);
+            if w <= 0.0 {
+                continue;
+            }
+            let i = (py * dst.width + px) as usize;
+            let src = sub.pixels[i];
+            if src.a <= 0.0 && src.r == 0.0 && src.g == 0.0 && src.b == 0.0 {
+                continue;
+            }
+            dst.pixels[i] = blend_pixel(scale_alpha(src, w), dst.pixels[i], blend);
+        }
+    }
+}
+
 /// Rasterize a text block at the size it will be seen at and blit its
 /// coverage through the node transform.
 #[allow(clippy::too_many_arguments)]
@@ -2522,6 +2747,22 @@ fn hit_in_group(
                     }
                 }
             }
+            // A paint layer is picked where it has paint, not over its
+            // whole box: a brush layer is mostly empty, and an empty
+            // part of it should let through what is under it. An
+            // eraser's own stroke is not paint, so it picks nothing.
+            NodeKind::Paint { strokes } => {
+                let t = parent.compose(node.transform);
+                if let Some((lx, ly)) = to_local(t, x, y) {
+                    let band = 1.0 / max_scale(t).max(1e-6);
+                    if strokes
+                        .iter()
+                        .any(|s| !s.erase && stroke_coverage(s, band, lx, ly) > 0.0)
+                    {
+                        return Ok(Some(child));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2555,6 +2796,203 @@ mod tests {
         b: 0.0,
         a: 1.0,
     };
+
+    fn painted(doc: &mut Document, strokes: Vec<chitrakar_doc::PaintStroke>) -> NodeId {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(Node::paint("paint")),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[index];
+        for (i, stroke) in strokes.into_iter().enumerate() {
+            doc.apply(Command::AddStroke {
+                id,
+                index: i,
+                stroke: Box::new(stroke),
+            })
+            .unwrap();
+        }
+        id
+    }
+
+    fn stroke(
+        points: &[[f32; 2]],
+        radius: f32,
+        color: AuthoredColor,
+    ) -> chitrakar_doc::PaintStroke {
+        chitrakar_doc::PaintStroke {
+            points: points.to_vec(),
+            radii: vec![radius],
+            color,
+            softness: 0.0,
+            erase: false,
+        }
+    }
+
+    /// A brush lays paint along the line it was drawn, with a round end
+    /// at either stop, and only there.
+    #[test]
+    fn a_stroke_paints_along_its_line_and_nowhere_else() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        painted(
+            &mut doc,
+            vec![stroke(&[[8.0, 20.0], [32.0, 20.0]], 5.0, RED)],
+        );
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(20, 20).to_srgb8(), [255, 0, 0, 255], "on the line");
+        assert!(s.get(20, 16).a > 0.9, "and out to the brush's radius");
+        assert_eq!(s.get(20, 30).a, 0.0, "but not past it");
+        // The ends are round: half a radius beyond the last point is
+        // still paint, a whole radius past it is not.
+        assert!(s.get(34, 20).a > 0.5, "the cap reaches past the end");
+        assert_eq!(s.get(38, 20).a, 0.0, "but only by the radius");
+        // The edge is not a step.
+        let rim: Vec<f32> = (23..27).map(|y| s.get(20, y).a).collect();
+        assert!(
+            rim.iter().any(|a| *a > 0.01 && *a < 0.99),
+            "a soft rim: {rim:?}"
+        );
+    }
+
+    /// A stroke that doubles back over itself is not darker where it
+    /// crossed: within one stroke the brush lays paint once.
+    #[test]
+    fn a_stroke_does_not_paint_itself_twice() {
+        let half = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        };
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        painted(
+            &mut doc,
+            vec![stroke(
+                &[[10.0, 20.0], [30.0, 20.0], [10.0, 20.0]],
+                4.0,
+                half,
+            )],
+        );
+        let crossed = render(&doc).unwrap().get(20, 20).a;
+        // Two strokes over each other do double up, which is what makes
+        // the one above worth checking.
+        let mut twice = Document::new(40, 40, ColorMode::Rgb);
+        painted(
+            &mut twice,
+            vec![
+                stroke(&[[10.0, 20.0], [30.0, 20.0]], 4.0, half),
+                stroke(&[[10.0, 20.0], [30.0, 20.0]], 4.0, half),
+            ],
+        );
+        let stacked = render(&twice).unwrap().get(20, 20).a;
+        assert!((crossed - 0.5).abs() < 0.01, "one coat: {crossed}");
+        assert!(stacked > crossed + 0.2, "two coats: {stacked}");
+    }
+
+    /// An eraser takes off the layer's own paint and leaves what is
+    /// under the layer alone.
+    #[test]
+    fn an_eraser_takes_off_this_layer_only() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("under", 40.0, 40.0, RED),
+        })
+        .unwrap();
+        let blue = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let mut rub = stroke(&[[20.0, 20.0]], 6.0, RED);
+        rub.erase = true;
+        painted(
+            &mut doc,
+            vec![stroke(&[[6.0, 20.0], [34.0, 20.0]], 8.0, blue), rub],
+        );
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(20, 20).to_srgb8(),
+            [255, 0, 0, 255],
+            "the rubbed-out spot shows the layer beneath, not a hole"
+        );
+        assert_eq!(
+            s.get(10, 20).to_srgb8(),
+            [0, 0, 255, 255],
+            "paint elsewhere"
+        );
+    }
+
+    /// A paint layer is picked where it has paint, so the empty part of
+    /// one lets through what is under it.
+    #[test]
+    fn a_paint_layer_is_picked_only_where_it_has_paint() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("under", 40.0, 40.0, RED),
+        })
+        .unwrap();
+        let under = doc.children_of(root).unwrap()[0];
+        let layer = painted(&mut doc, vec![stroke(&[[20.0, 20.0]], 5.0, RED)]);
+        assert_eq!(hit_test(&doc, 20.0, 20.0).unwrap(), Some(layer));
+        assert_eq!(hit_test(&doc, 4.0, 4.0).unwrap(), Some(under));
+    }
+
+    /// A layer's opacity applies to the picture the strokes make, not to
+    /// each of them, so overlapping strokes do not show through one
+    /// another when the layer is faded.
+    #[test]
+    fn layer_opacity_fades_the_painting_not_each_stroke() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let id = painted(
+            &mut doc,
+            vec![
+                stroke(&[[6.0, 20.0], [34.0, 20.0]], 8.0, RED),
+                stroke(&[[6.0, 20.0], [34.0, 20.0]], 8.0, RED),
+            ],
+        );
+        doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        let a = render(&doc).unwrap().get(20, 20).a;
+        assert!((a - 0.5).abs() < 0.01, "half of one opaque coat: {a}");
+    }
+
+    /// Every stroke can be taken back off, and the layer is what is left.
+    #[test]
+    fn strokes_come_off_the_way_they_went_on() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let id = painted(
+            &mut doc,
+            vec![
+                stroke(&[[6.0, 10.0], [34.0, 10.0]], 4.0, RED),
+                stroke(&[[6.0, 30.0], [34.0, 30.0]], 4.0, RED),
+            ],
+        );
+        let inverse = doc.apply(Command::RemoveStroke { id, index: 0 }).unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(20, 10).a, 0.0, "the first is gone");
+        assert!(s.get(20, 30).a > 0.9, "the second is not");
+        doc.apply(inverse).unwrap();
+        assert!(render(&doc).unwrap().get(20, 10).a > 0.9, "and comes back");
+        // Nothing else is a paint layer.
+        let root = doc.root();
+        assert!(matches!(
+            doc.apply(Command::RemoveStroke { id: root, index: 0 }),
+            Err(DocError::NotAPaintLayer(_))
+        ));
+        assert!(matches!(
+            doc.apply(Command::RemoveStroke { id, index: 9 }),
+            Err(DocError::NoSuchStroke { .. })
+        ));
+    }
 
     #[test]
     fn empty_document_renders_transparent() {

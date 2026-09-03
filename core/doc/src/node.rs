@@ -101,6 +101,62 @@ impl Gradient {
     }
 }
 
+/// One stroke of paint: the line it was drawn along in the layer's own
+/// space, the brush radius at each of its points, the colour it lays
+/// down, how far in from the rim its edge fades, and whether it paints
+/// or takes paint away.
+///
+/// The region it covers is the union of round-capped segments between
+/// consecutive points — the same shape a stroked path covers — with the
+/// coverage falling off across the soft edge instead of stopping dead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaintStroke {
+    pub points: Vec<[f32; 2]>,
+    /// Radius at each point. A shorter list repeats its last entry, so a
+    /// stroke of one radius needs only one.
+    pub radii: Vec<f32>,
+    pub color: AuthoredColor,
+    /// How much of the radius the edge fades over: 0 is a hard edge and
+    /// 1 a brush with no solid core at all. Additive, so a stroke
+    /// written before softness existed reads as a hard one.
+    #[serde(default)]
+    pub softness: f32,
+    /// Takes paint off the layer instead of laying it down.
+    #[serde(default)]
+    pub erase: bool,
+}
+
+impl PaintStroke {
+    /// The brush radius at point `i`, which is the last one given for
+    /// every point past the end of the list.
+    pub fn radius(&self, i: usize) -> f32 {
+        match self.radii.len() {
+            0 => 0.0,
+            n => self.radii[i.min(n - 1)],
+        }
+    }
+
+    /// The box the stroke covers in the layer's own space, or nothing
+    /// when it covers none.
+    pub fn bounds(&self) -> Option<[f32; 4]> {
+        let mut box_: Option<[f32; 4]> = None;
+        for (i, p) in self.points.iter().enumerate() {
+            let r = self.radius(i).max(0.0);
+            let b = [p[0] - r, p[1] - r, p[0] + r, p[1] + r];
+            box_ = Some(match box_ {
+                None => b,
+                Some(a) => [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ],
+            });
+        }
+        box_.filter(|b| b[2] > b[0] && b[3] > b[1])
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum VectorShape {
     Rect {
@@ -317,6 +373,13 @@ impl TextSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodeKind {
     Group,
+    /// A layer painted with a brush: the strokes that were laid on it,
+    /// in the order they were laid, still live — each one can be taken
+    /// off again, and the layer is re-rendered rather than kept as
+    /// pixels.
+    Paint {
+        strokes: Vec<PaintStroke>,
+    },
     Vector {
         shape: VectorShape,
         fill: Option<AuthoredColor>,
@@ -499,6 +562,16 @@ impl Node {
 
     pub fn filter(name: &str, filter: Filter) -> Self {
         Self::base(name, NodeKind::Filter(filter))
+    }
+
+    /// An empty layer to paint on.
+    pub fn paint(name: &str) -> Self {
+        Self::base(
+            name,
+            NodeKind::Paint {
+                strokes: Vec::new(),
+            },
+        )
     }
 
     pub fn text(name: &str, spec: TextSpec) -> Self {
