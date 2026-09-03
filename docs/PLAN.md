@@ -29,7 +29,11 @@ without reading anything else.*
   white balance, vibrance, levels,
   curves drawn on a graph in the panel — a master curve and one per
   channel run after it, which is what a colour grade is made of, with
-  the channels not in hand drawn faintly behind the one that is) and
+  the channels not in hand drawn faintly behind the one that is; the
+  curves and levels graphs are drawn over a histogram of what the layer
+  actually sees — everything composited under it, not the finished page
+  — so a black point can be set where the picture stops rather than by
+  eye) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
@@ -214,9 +218,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~235),
+- **Verify before committing:** `cargo test --workspace` (~236),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~451 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~453 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

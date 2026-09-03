@@ -1264,6 +1264,22 @@ body {
 .lock-toggle[aria-pressed="true"] {
   opacity: 1;
 }
+/* The tones the graph is drawn over: filled shapes, faint enough that
+   the curve and its points stay the thing being read. */
+.histogram path {
+  opacity: 0.4;
+  mix-blend-mode: screen;
+}
+.levels-histogram {
+  width: 100%;
+  height: 44px;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgb(0 0 0 / 0.25);
+  margin-bottom: 4px;
+}
+
 /* The channel picker over a tone curve: four small buttons in the ink of
    the channel each draws, the one in hand filled. */
 .curve-channels {

@@ -842,6 +842,78 @@ impl Session {
         Ok(self.doc.children_of(parent)?[index])
     }
 
+    /// How the page's tones are spread, as four runs of 256 counts —
+    /// red, green, blue, then luminance — in the display encoding, which
+    /// is the encoding the graphs that read a histogram are drawn over.
+    ///
+    /// `below` asks for what an adjustment layer *sees* rather than for
+    /// the finished page: everything composited under it, which is what
+    /// its own graph has to be read against. Transparent pixels are not
+    /// counted — a histogram of a half-empty page should describe the
+    /// picture on it, not the hole around it.
+    ///
+    /// Taken from a render shrunk to about a hundred thousand pixels: a
+    /// histogram is a shape, and the shape settles long before the last
+    /// pixel is counted.
+    pub fn histogram(&self, below: Option<NodeId>) -> Result<Vec<u32>, EngineError> {
+        let mut doc = self.doc.clone();
+        if let Some(id) = below {
+            let mut order = Vec::new();
+            Self::painter_order(&doc, doc.root(), &mut order);
+            if let Some(at) = order.iter().position(|&n| n == id) {
+                for &later in &order[at..] {
+                    // Already invisible layers are left alone: setting
+                    // them again would only cost a command.
+                    if doc.node(later).map(|n| n.visible).unwrap_or(false) {
+                        doc.apply(Command::SetVisible {
+                            id: later,
+                            visible: false,
+                        })?;
+                    }
+                }
+            }
+        }
+        let (w, h) = (doc.meta.width.max(1) as f32, doc.meta.height.max(1) as f32);
+        let scale = (100_000.0 / (w * h)).sqrt().min(1.0);
+        let (pw, ph) = (
+            (w * scale).round().max(1.0) as u32,
+            (h * scale).round().max(1.0) as u32,
+        );
+        let mut surface = Surface::new(pw, ph);
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: pw,
+                y1: ph,
+            },
+            Transform {
+                a: scale,
+                d: scale,
+                ..Default::default()
+            },
+        )?;
+        let mut bins = vec![0u32; 256 * 4];
+        for px in &surface.pixels {
+            if px.a <= 0.0 {
+                continue;
+            }
+            let [r, g, b, _] = px.to_srgb8();
+            bins[r as usize] += 1;
+            bins[256 + g as usize] += 1;
+            bins[512 + b as usize] += 1;
+            // Luminance is a linear quantity, encoded for display once it
+            // has been worked out — not an average of encoded channels.
+            let lin = |v: f32| v / px.a;
+            let y = 0.2126 * lin(px.r) + 0.7152 * lin(px.g) + 0.0722 * lin(px.b);
+            let y = chitrakar_color::linear_to_srgb(y.clamp(0.0, 1.0));
+            bins[768 + (y * 255.0).round() as usize] += 1;
+        }
+        Ok(bins)
+    }
+
     /// The frame under a document point, if any — what a shape drawn
     /// there should go into.
     pub fn frame_at(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -2176,6 +2248,25 @@ impl Session {
         let surface = self.render()?;
         chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Every layer in the order the page is painted in — a parent before
+    /// what it holds, and each layer before the ones drawn over it. What
+    /// "everything below this layer" means.
+    fn painter_order(doc: &Document, group: NodeId, out: &mut Vec<NodeId>) {
+        let Ok(children) = doc.children_of(group) else {
+            return;
+        };
+        for &id in children {
+            out.push(id);
+            if doc
+                .node(id)
+                .map(|n| n.kind.holds_children())
+                .unwrap_or(false)
+            {
+                Self::painter_order(doc, id, out);
+            }
+        }
     }
 
     /// Flattened layer tree (depth-first, topmost layer first) for the UI's
@@ -4389,6 +4480,58 @@ mod tests {
         // same point reads the same.
         session.set_viewport(0.25, 0.0, 0.0, 10, 10);
         assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// A histogram describes the picture on the page, not the hole
+    /// around it, and an adjustment layer's asks about what is under it
+    /// rather than about the finished page.
+    #[test]
+    fn a_histogram_counts_the_picture_and_an_adjustment_sees_what_is_under_it() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 30.0, 30.0);
+        // The rect covers a quarter of the page; the rest is bare.
+        let h = session.histogram(None).unwrap();
+        assert_eq!(h.len(), 1024);
+        let counted: u32 = h[768..1024].iter().sum();
+        assert!(counted > 0, "something was counted");
+        assert_eq!(
+            counted,
+            h[0..256].iter().sum::<u32>(),
+            "every channel counts the same pixels"
+        );
+        // Only the covered quarter: a transparent page is not black.
+        assert_eq!(h[768], 0, "and the bare page is not counted as black");
+
+        // Under a curve that drives everything to white, the page reads
+        // white — but the curve's own histogram is of what is beneath it,
+        // so it does not.
+        let before = session.histogram(None).unwrap();
+        let root = session.document().root();
+        let index = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "curve",
+                    chitrakar_doc::Adjustment::Curves {
+                        points: vec![[0.0, 1.0], [1.0, 1.0]],
+                        red: Vec::new(),
+                        green: Vec::new(),
+                        blue: Vec::new(),
+                    },
+                )),
+            })
+            .unwrap();
+        let white = session.document().children_of(root).unwrap()[index];
+        let after = session.histogram(None).unwrap();
+        assert_ne!(after, before, "the page changed under the curve");
+        assert_eq!(
+            session.histogram(Some(white)).unwrap(),
+            before,
+            "and the curve is shown what it is given, not what it makes"
+        );
+        let _ = rect;
     }
 
     /// Dropping a layer into a frame that sits away from the origin

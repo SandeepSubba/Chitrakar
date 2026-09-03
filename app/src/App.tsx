@@ -586,6 +586,9 @@ export function App() {
   /** And a picture of each layer's mask, fitted the same way, so the row
    * shows what is being let through as well as what is under it. */
   const [maskThumbs, setMaskThumbs] = useState<Record<number, string>>({});
+  /** Four runs of 256 counts — red, green, blue, luminance — of what the
+   * picked adjustment layer sees, for the graphs drawn over them. */
+  const [histogram, setHistogram] = useState<Uint32Array | null>(null);
   /** The live document's pixel size. Every screen/document conversion goes
    * through this rather than a constant, so an opened file of any size
    * lands on a canvas that fits it. */
@@ -3239,6 +3242,34 @@ export function App() {
     }
   }
 
+  /** The tones behind the graphs that read them. Counted only while a
+   * layer that has such a graph is picked, and only once the document
+   * has settled: it costs a render of its own, and a slider being
+   * dragged would ask for one on every frame. */
+  useEffect(() => {
+    if (!session || selected === null) {
+      setHistogram(null);
+      return;
+    }
+    const wanted =
+      selectedKind !== null &&
+      typeof selectedKind === "object" &&
+      "Adjustment" in selectedKind &&
+      ("Curves" in selectedKind.Adjustment || "Levels" in selectedKind.Adjustment);
+    if (!wanted) {
+      setHistogram(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      try {
+        setHistogram(session.histogram(selected));
+      } catch {
+        setHistogram(null);
+      }
+    }, 250);
+    return () => clearTimeout(id);
+  }, [session, selected, selectedKind, layers, saveTick]);
+
   /** Replace the selected layer's effect list. Slider drags preview, so a
    * whole drag is one history entry. */
   const setEffects = (effects: Effect[], gesture = false) => {
@@ -4970,6 +5001,7 @@ export function App() {
               {selectedKind && (
                 <KindProps
                   kind={selectedKind}
+                  bins={histogram}
                   onEdit={setKind}
                   onGestureEnd={endGesture}
                   cmyk={cmyk}
@@ -5700,6 +5732,61 @@ function curveSamples(points: [number, number][], n = 64): [number, number][] {
   return Array.from({ length: n + 1 }, (_, i) => [i / n, at(i / n)]);
 }
 
+/** The spread of tones in the picture, as a filled shape per channel —
+ * what every graph that reads one is drawn over, so the eye can see
+ * where the tones actually are before deciding where to move them.
+ *
+ * Counts come from the engine as four runs of 256. The tallest bin sets
+ * the height, with the top and bottom bins left out of that reckoning:
+ * a picture on a bare page piles clipped tones at one end, and letting
+ * that spike set the scale flattens everything worth seeing.
+ */
+function Histogram({
+  bins,
+  channel = "rgb",
+  width,
+  height,
+}: {
+  bins: Uint32Array | null;
+  channel?: CurveChannel;
+  width: number;
+  height: number;
+}) {
+  if (!bins || bins.length < 1024) return null;
+  const runs: [string, number][] =
+    channel === "rgb"
+      ? [
+          ["#e5484d", 0],
+          ["#30a46c", 256],
+          ["#3e63dd", 512],
+        ]
+      : [
+          [
+            CURVE_CHANNELS.find(([k]) => k === channel)![2],
+            { red: 0, green: 256, blue: 512 }[channel],
+          ],
+        ];
+  let peak = 1;
+  for (const [, at] of runs) {
+    for (let i = 1; i < 255; i++) peak = Math.max(peak, bins[at + i]);
+  }
+  const path = (at: number) => {
+    const pts = Array.from({ length: 256 }, (_, i) => {
+      const x = (i / 255) * width;
+      const y = height - Math.min(1, bins[at + i] / peak) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    return `M0,${height} L${pts.join(" L")} L${width},${height} Z`;
+  };
+  return (
+    <g className="histogram" aria-hidden="true">
+      {runs.map(([colour, at]) => (
+        <path key={at} d={path(at)} style={{ fill: colour }} />
+      ))}
+    </g>
+  );
+}
+
 /** A tone curve to draw on: press anywhere to add a point and drag it in
  * the same gesture, drag a point to move it (it stays between its
  * neighbours), double-click one to take it away. The document previews
@@ -5709,6 +5796,8 @@ function CurveEditor({
   onEdit,
   onGestureEnd,
   label = "Tone curve",
+  bins = null,
+  channel = "rgb",
   colour,
   ghosts = [],
 }: {
@@ -5716,8 +5805,12 @@ function CurveEditor({
   onEdit: (points: [number, number][], gesture: boolean) => void;
   onGestureEnd: () => void;
   label?: string;
-  /** What the curve being edited is drawn in; the panel's own ink when
-   * left out. */
+  /** The tones in the picture the curve is about to move, drawn behind
+   * the graph. */
+  bins?: Uint32Array | null;
+  /** Which run of the histogram to draw, and what the curve being edited
+   * is drawn in; the panel's own ink when left out. */
+  channel?: CurveChannel;
   colour?: string;
   /** The other channels' curves, drawn faintly behind, so a grade can be
    * read as a whole while one channel of it is worked on. */
@@ -5827,6 +5920,7 @@ function CurveEditor({
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
       >
+        <Histogram bins={bins} channel={channel} width={SIZE} height={SIZE} />
         {[0.25, 0.5, 0.75].map((v) => (
           <g key={v} className="grid">
             <line x1={px(v)} y1={0} x2={px(v)} y2={SIZE} />
@@ -5897,9 +5991,11 @@ type CurveChannel = (typeof CURVE_CHANNELS)[number][0];
  * the one in hand and the grade reads as a whole. */
 function CurvesPanel({
   curves,
+  bins,
   onEdit,
   onGestureEnd,
 }: {
+  bins: Uint32Array | null;
   curves: {
     points: [number, number][];
     red: [number, number][];
@@ -5948,6 +6044,8 @@ function CurvesPanel({
       <CurveEditor
         key={channel}
         points={of(channel)}
+        bins={bins}
+        channel={channel}
         colour={ink(channel)}
         label={CURVE_CHANNELS.find(([k]) => k === channel)![3]}
         ghosts={CURVE_CHANNELS.filter(([k]) => k !== channel && touched(k)).map(
@@ -5984,6 +6082,9 @@ interface CurvesPanelProps {
 
 interface KindPropsProps {
   kind: NodeKind;
+  /** How the tones under this layer are spread, for the graphs that read
+   * one. Null until the document has settled long enough to count them. */
+  bins: Uint32Array | null;
   /** gesture=true routes through preview (live, uncommitted). */
   onEdit: (kind: NodeKind, gesture: boolean) => void;
   onGestureEnd: () => void;
@@ -6002,6 +6103,7 @@ interface KindPropsProps {
  * every layer's settings revisitable (the non-destructive contract). */
 function KindProps({
   kind,
+  bins,
   onEdit,
   onGestureEnd,
   cmyk,
@@ -6095,6 +6197,7 @@ function KindProps({
       return (
         <CurvesPanel
           curves={adj.Curves}
+          bins={bins}
           onEdit={(curves, gesture) => onEdit(wrap({ Curves: curves }), gesture)}
           onGestureEnd={onGestureEnd}
         />
@@ -6106,6 +6209,18 @@ function KindProps({
         wrap({ Levels: { ...p, ...patch } });
       return (
         <>
+          {/* The tones the sliders are about to move, so the black and
+              white points can be set to where the picture actually
+              starts and stops rather than by eye. */}
+          <svg
+            className="levels-histogram"
+            viewBox="0 0 256 64"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="Tones in the picture"
+          >
+            <Histogram bins={bins} width={256} height={64} />
+          </svg>
           {slider("Input black", p.in_black, 0, 1, 0.01, (v) =>
             set({ in_black: v }),
           )}

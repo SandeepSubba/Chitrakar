@@ -257,6 +257,15 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// How the page's tones are spread: 4 × 256 counts (red, green,
+    /// blue, luminance) in the display encoding. A layer id asks for
+    /// what that layer sees — everything under it — rather than for the
+    /// finished page; pass -1 for the page itself.
+    pub fn histogram(&self, below: f64) -> Result<Vec<u32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner.histogram(below).map_err(to_js)
+    }
+
     /// The frame under a document point, or -1 where there is none.
     pub fn frame_at(&self, x: f32, y: f32) -> f64 {
         self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)
