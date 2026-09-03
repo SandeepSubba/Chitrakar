@@ -4703,6 +4703,75 @@ mod tests {
     }
 
     #[test]
+    fn a_group_casts_its_shadow_from_what_is_in_it() {
+        // The other way the two windows nest: the effect is on the group
+        // rather than inside it, so the layer's window is opened over
+        // the group's. A shadow cast from a group is cast from what the
+        // group holds, and lands where that holds it.
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 8.0,
+            dy: 6.0,
+            blur: 1.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        let build = |grouped: bool| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            let parent = if grouped {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                doc.children_of(root).unwrap()[0]
+            } else {
+                root
+            };
+            doc.apply(Command::AddNode {
+                parent,
+                index: 0,
+                node: filled_rect("r", 20.0, 20.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(25.0, 25.0),
+            })
+            .unwrap();
+            // On the group when there is one, on the layer when there
+            // is not: the same silhouette either way.
+            doc.apply(Command::SetEffects {
+                id: if grouped { parent } else { id },
+                effects: vec![shadow.clone()],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let (alone, grouped) = (build(false), build(true));
+        for y in 0..80 {
+            for x in 0..80 {
+                let (a, b) = (alone.get(x, y), grouped.get(x, y));
+                assert!(
+                    (a.a - b.a).abs() < 0.01 && (a.r - b.r).abs() < 0.01,
+                    "at ({x}, {y}): {b:?} against {a:?}"
+                );
+            }
+        }
+        assert!(
+            grouped.get(40, 38).a > 0.1,
+            "and there really is a shadow to compare"
+        );
+    }
+
+    #[test]
     fn a_drop_shadow_falls_where_it_is_aimed_and_leaves_the_layer_alone() {
         // The shadow is the layer's silhouette in one colour, offset and
         // blurred, painted behind it: so it darkens the offset side, the

@@ -1290,11 +1290,18 @@ impl Session {
     pub fn paste_style(&mut self, json: &str, ids: &[NodeId]) -> Result<(), EngineError> {
         let style: Style =
             serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        // A look taken from a layer that has nothing to paint with — an
+        // adjustment, a group, a placed photo — says nothing about how
+        // to paint, so it leaves the target's own paint alone rather
+        // than stripping it. A shape that really is painted with
+        // nothing but a stroke still clears a fill, which is the answer
+        // that was asked for.
+        let paints = style.fill.is_some() || style.stroke.is_some() || style.gradient.is_some();
         let mut cmds = Vec::new();
         for &id in ids {
             let node = self.doc.node(id)?;
             match &node.kind {
-                chitrakar_doc::NodeKind::Vector { shape, .. } => {
+                chitrakar_doc::NodeKind::Vector { shape, .. } if paints => {
                     cmds.push(Command::SetKind {
                         id,
                         kind: Box::new(chitrakar_doc::NodeKind::Vector {
@@ -1305,7 +1312,7 @@ impl Session {
                         }),
                     });
                 }
-                chitrakar_doc::NodeKind::Text(spec) => {
+                chitrakar_doc::NodeKind::Text(spec) if paints => {
                     if let Some(fill) = style.fill {
                         let mut spec = spec.clone();
                         spec.fill = fill;
@@ -4355,6 +4362,66 @@ mod save_probe {
         session.undo().unwrap();
         assert_eq!(session.document().node(ellipse).unwrap().opacity, 1.0);
         assert!(session.document().node(text).unwrap().effects.is_empty());
+    }
+
+    /// A look taken from a layer that has nothing to paint with says
+    /// nothing about how to paint, so it leaves the target's own paint
+    /// where it is rather than stripping it.
+    #[test]
+    fn a_style_with_no_paint_in_it_leaves_the_paint_alone() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut shape = chitrakar_doc::Node::vector(
+            "shape",
+            chitrakar_doc::VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut shape.kind {
+            *fill = Some(red);
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(shape),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "exposure",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            })
+            .unwrap();
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        let (shape_id, adj) = (kids[0], kids[1]);
+        session
+            .apply(Command::SetOpacity {
+                id: adj,
+                opacity: 0.25,
+            })
+            .unwrap();
+
+        let style = session.copy_style(adj).unwrap();
+        session.paste_style(&style, &[shape_id]).unwrap();
+        let node = session.document().node(shape_id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { fill, .. } = &node.kind else {
+            panic!("not a shape any more");
+        };
+        assert_eq!(*fill, Some(red), "the shape kept its fill");
+        assert_eq!(node.opacity, 0.25, "and took what the style did carry");
     }
 
     /// Rubbing at a layer that is not a paint layer takes a piece out of
