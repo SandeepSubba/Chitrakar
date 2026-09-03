@@ -18,7 +18,8 @@ for them), a clone brush that paints with what is already there, follows it when
 changes, and can heal — texture from there, colour from where it lands — placed images, live text (shaped by the font, any face loaded, bold /
 italic / underline, wrapped, aligned, set along a path, typed on the
 canvas), adjustment and filter layers (exposure, brightness/contrast,
-hue/saturation, white balance, vibrance, levels, curves, blur, sharpen), masks, live effects
+hue/saturation, white balance, vibrance, levels, curves, blur, sharpen) over the whole page
+or clipped to the layer below, masks, live effects
 (shadows, outlines), groups, alignment, snapping, guides and rulers in
 pixels or millimetres, crop, flip, rotate, a labelled undo history,
 CMYK documents with press profiles and soft proofing, autosaved drafts,

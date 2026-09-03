@@ -2614,6 +2614,118 @@ assert(
   );
 }
 
+// 8x6b. Clipping to the layer below: the upper layer shows only where the
+// lower one does, goes when it goes, and an adjustment clipped the same
+// way changes only what the layer under it covers.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const draw = async (x0, y0, x1, y1) => {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  };
+  await draw(100, 100, 300, 300);
+  await draw(50, 50, 550, 350);
+  await page.click('button[aria-label="Move"]');
+  assert(
+    (await canvasPixel(450, 200))[3] === 255,
+    "the upper rect covers the page on its own",
+  );
+  // The top row of the panel is the layer drawn last.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Clip to the layer below"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(200, 200))[3] === 255,
+    "clipped, it still covers what it is clipped to",
+  );
+  assert(
+    (await canvasPixel(450, 200))[3] === 0,
+    "and shows nothing past that layer's edge",
+  );
+  assert(
+    (await page.locator(".clip-mark").count()) === 1,
+    "the row says so with a hook",
+  );
+
+  // It goes when the layer under it goes.
+  await page.locator(".panel ul li").nth(1).locator("button.visibility").click();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(200, 200))[3] === 0,
+    "hiding the layer below takes the clipped layer with it",
+  );
+  await page.locator(".panel ul li").nth(1).locator("button.visibility").click();
+  await page.waitForTimeout(300);
+
+  // Ctrl+Alt+G is the same switch, so it lets the layer out again.
+  await page.keyboard.press("Control+Alt+g");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(450, 200))[3] === 255 &&
+      (await page.locator(".clip-mark").count()) === 0,
+    "the shortcut releases it",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(450, 200))[3] === 0,
+    "and clipping is one undo step",
+  );
+}
+
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  for (const [x0, y0, x1, y1] of [
+    [50, 50, 250, 250],
+    [350, 50, 550, 250],
+  ]) {
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  }
+  await page.click('button[aria-label="Move"]');
+  const leftBefore = await canvasPixel(150, 150);
+  const rightBefore = await canvasPixel(450, 150);
+  await page.selectOption(
+    'select[aria-label="Add adjustment layer"]',
+    "exposure",
+  );
+  await page.waitForTimeout(300);
+  // An adjustment over everything below lands on top without being
+  // picked; its controls come with picking it.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await setSlider("Stops", -3);
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(150, 150))[2] < leftBefore[2] * 0.6 &&
+      (await canvasPixel(450, 150))[2] < rightBefore[2] * 0.6,
+    "unclipped, the adjustment darkens both rects",
+  );
+  await page.click('button[aria-label="Clip to the layer below"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await canvasPixel(150, 150)).join() === leftBefore.join(),
+    "clipped, it lets the rect it is not over alone",
+  );
+  assert(
+    (await canvasPixel(450, 150))[2] < rightBefore[2] * 0.6,
+    "and still darkens the one below it",
+  );
+}
+
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.
 {

@@ -55,6 +55,14 @@ fn write_children(
         // userSpaceOnUse mask in the space in force where it is
         // referenced, and the layer's own transform belongs inside that.
         let masked = mask_attrs(doc, child, defs);
+        // A layer confined to the one below it is the same idea one level
+        // out: SVG has no clipping to another layer's alpha, so what that
+        // layer lets through travels as a mask of its own, on a wrapper
+        // outside the layer's own.
+        let confined = clip_attrs(doc, child, defs);
+        if !confined.is_empty() {
+            let _ = writeln!(out, "{pad}<g{confined}>");
+        }
         if !masked.is_empty() {
             let _ = writeln!(out, "{pad}<g{masked}>");
         }
@@ -323,6 +331,9 @@ fn write_children(
         if !masked.is_empty() {
             let _ = writeln!(out, "{pad}</g>");
         }
+        if !confined.is_empty() {
+            let _ = writeln!(out, "{pad}</g>");
+        }
     }
     Ok(())
 }
@@ -341,6 +352,26 @@ fn mask_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
     let (w, h) = (m.width, m.height);
     let [x, y] = m.origin;
     let name = format!("mask{}", id.0);
+    let _ = writeln!(
+        defs,
+        r#"<mask id="{name}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><image x="{x}" y="{y}" width="{w}" height="{h}" href="data:image/png;base64,{}"/></mask>"#,
+        base64(&png)
+    );
+    format!(r#" mask="url(#{name})""#)
+}
+
+/// The same for a clipped layer, whose mask is the picture the layer
+/// below it makes. Empty when the layer is not clipped to anything.
+fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
+    let Ok(Some(m)) = chitrakar_render::clip_pixels(doc, id) else {
+        return String::new();
+    };
+    let Ok(png) = crate::encode_png(m.width, m.height, &m.rgba8) else {
+        return String::new();
+    };
+    let (w, h) = (m.width, m.height);
+    let [x, y] = m.origin;
+    let name = format!("clip{}", id.0);
     let _ = writeln!(
         defs,
         r#"<mask id="{name}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><image x="{x}" y="{y}" width="{w}" height="{h}" href="data:image/png;base64,{}"/></mask>"#,
@@ -524,6 +555,60 @@ mod tests {
         b: 0.0,
         a: 1.0,
     };
+
+    fn filled(doc: &mut Document, name: &str, w: f32, h: f32) -> NodeId {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        let mut rect = Node::vector(
+            name,
+            VectorShape::Rect {
+                width: w,
+                height: h,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut rect.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(rect),
+        })
+        .unwrap();
+        doc.children_of(root).unwrap()[index]
+    }
+
+    /// SVG has no clipping to another layer's alpha, so a clipped layer
+    /// travels as a mask made of the layer it is clipped to.
+    #[test]
+    fn a_clipped_layer_travels_as_a_mask_of_the_layer_below() {
+        let mut doc = Document::new(200, 200, ColorMode::Rgb);
+        filled(&mut doc, "under", 80.0, 60.0);
+        let over = filled(&mut doc, "over", 200.0, 200.0);
+        assert!(
+            !export_svg(&doc).unwrap().contains("<mask"),
+            "nothing clipped, no mask element"
+        );
+
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"<mask id="clip"#) && svg.contains(r#"mask="url(#clip"#),
+            "the layer below travels as a mask the upper one references"
+        );
+        // It is the lower layer's box that is masked out, not the page.
+        let at = svg.find(r#"<mask id="clip"#).unwrap();
+        let head = &svg[at..at + 140];
+        assert!(
+            head.contains(r#"width="80""#) && head.contains(r#"height="60""#),
+            "over the box of what it is clipped to: {head}"
+        );
+    }
 
     /// A mask travels as a picture of what it lets through, on a wrapper
     /// that carries no transform: SVG reads a userSpaceOnUse mask in the

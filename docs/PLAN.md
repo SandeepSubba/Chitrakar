@@ -87,6 +87,11 @@ without reading anything else.*
   as a disc. The page is snapshotted before a stroke is laid, so a
   stroke crossing its own source lifts what was there when it began
   rather than what it has just put down.
+  A layer can be confined to the one below it — Ctrl+Alt+G, or the hook
+  in the layer bar — so it shows only where that one does and goes when
+  it goes: a texture cut to a shape, a photo poured into lettering, or,
+  most of all, an adjustment or a filter that reaches one layer instead
+  of the whole page. A run of them stacks against the same layer.
   Rubbing at a layer that is not a paint layer takes a piece out of it
   instead: the stroke goes into a painted mask, so the layer is
   untouched and the brush puts the piece back — which is how part of a
@@ -191,9 +196,9 @@ without reading anything else.*
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
   instead of crawling.
-- **Verify before committing:** `cargo test --workspace` (~221),
+- **Verify before committing:** `cargo test --workspace` (~227),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~419 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~429 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -472,8 +477,12 @@ chitrakar/
   coverage) and raster masks (luminance × alpha, transform-sampled) modulate
   a shape's/image's paint, a group's composite, and an adjustment's or
   filter's strength; invert supported; UI adds an inscribed ellipse mask
-  with invert/remove. Paintable raster masks await the brush engine;
-  on-canvas mask geometry editing and clipping groups pending.
+  with invert/remove. Clipping ✅: a layer confined to the one below it
+  shows only where that one does and is hidden with it, a run of them
+  stacking against the same layer; an adjustment, a filter or a clone —
+  which are changes to what is under them rather than pictures of their
+  own — is applied where it stands and mixed back by the confinement
+  instead. SVG carries it as a mask of the layer below, PDF as pixels.
 - Full undo/redo history panel ✅: every edit records a human-readable label
   (from the forward command and the touched layer's name); the panel lists
   past and undone-future edits and clicking jumps the document to that point.

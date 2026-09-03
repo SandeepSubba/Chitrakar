@@ -500,6 +500,13 @@ pub struct Node {
     /// renders and can still be reached through the panel. Additive.
     #[serde(default)]
     pub locked: bool,
+    /// Confined to the layer below it: the layer shows only where that one
+    /// does, and inherits its fate — hide the layer below and this one goes
+    /// with it. A run of them stacks against the same layer, which is the
+    /// nearest unclipped one underneath. The bottom layer of a parent has
+    /// nothing to clip to, so the flag is ignored there. Additive.
+    #[serde(default)]
+    pub clipped: bool,
 }
 
 /// A live effect attached to a layer. Effects are rendered from the layer's
@@ -584,6 +591,7 @@ impl Node {
             mask: None,
             effects: Vec::new(),
             locked: false,
+            clipped: false,
         }
     }
 

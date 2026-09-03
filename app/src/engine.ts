@@ -202,6 +202,7 @@ export type Command =
   | { SetOpacity: { id: NodeId; opacity: number } }
   | { SetVisible: { id: NodeId; visible: boolean } }
   | { SetLocked: { id: NodeId; locked: boolean } }
+  | { SetClipped: { id: NodeId; clipped: boolean } }
   | { SetBlendMode: { id: NodeId; blend: BlendMode } }
   | { SetTransform: { id: NodeId; transform: Transform } }
   | { SetKind: { id: NodeId; kind: NodeKind } }
@@ -232,6 +233,8 @@ export interface LayerInfo {
   has_effects: boolean;
   /** Cannot be picked or moved on the canvas. */
   locked: boolean;
+  /** Shows only where the layer below it does, and goes when it goes. */
+  clipped: boolean;
   depth: number;
   /** Slot in the parent group, painter's order (0 = bottom). */
   parent: NodeId;

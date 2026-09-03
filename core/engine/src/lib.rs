@@ -245,6 +245,7 @@ impl Session {
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
             | Command::SetVisible { id, .. }
+            | Command::SetClipped { id, .. }
             | Command::SetBlendMode { id, .. }
             | Command::SetEffects { id, .. }
             | Command::SetTransform { id, .. }
@@ -384,6 +385,9 @@ impl Session {
             }
             Command::SetLocked { id, locked } => {
                 format!("{} {}", if *locked { "Lock" } else { "Unlock" }, name(id))
+            }
+            Command::SetClipped { id, clipped } => {
+                format!("{} {}", if *clipped { "Clip" } else { "Unclip" }, name(id))
             }
             Command::SetBlendMode { id, .. } => format!("Blend of {}", name(id)),
             Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
@@ -2117,6 +2121,7 @@ impl Session {
                 ),
                 has_effects: !node.effects.is_empty(),
                 locked: node.locked,
+                clipped: node.clipped && index > 0,
                 depth,
                 parent: group.0,
                 index,
@@ -2508,6 +2513,9 @@ pub struct LayerInfo {
     pub painted_mask: bool,
     pub has_effects: bool,
     pub locked: bool,
+    /// Confined to the layer below it. The bottom layer of a parent has
+    /// nothing under it, so the flag reads false there however it is set.
+    pub clipped: bool,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,

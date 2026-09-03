@@ -319,6 +319,13 @@ impl<'a> Page<'a> {
         if node.mask.is_some() || !node.effects.is_empty() {
             return Ok(false);
         }
+        // A layer confined to the one below it, and the layer it is
+        // confined to: neither can be drawn on its own, so both go to
+        // pixels — and, being neighbours, into the same picture, where
+        // the engine works the confinement out as it always does.
+        if self.in_clip_run(id)? {
+            return Ok(false);
+        }
         Ok(match &node.kind {
             NodeKind::Group => {
                 // Less than full opacity, or a blend, applies to the
@@ -352,6 +359,27 @@ impl<'a> Page<'a> {
     /// and place what comes out as an image, trimmed to its ink, landing
     /// with `blend`. Opacity is already in the pixels; a blend is not, as
     /// there was nothing under them to blend with.
+    /// Whether the node is part of a run of clipped layers — either one
+    /// of the clipped layers, or the one they are all confined to.
+    fn in_clip_run(&self, id: NodeId) -> Result<bool, PdfError> {
+        let Some(parent) = self.doc.parent_of(id) else {
+            return Ok(false);
+        };
+        let siblings = self.doc.children_of(parent)?;
+        let Some(at) = siblings.iter().position(|&s| s == id) else {
+            return Ok(false);
+        };
+        // The bottom-most layer has nothing under it, so a flag on it
+        // confines nothing — exactly as the renderer reads it.
+        if at > 0 && self.doc.node(id)?.clipped {
+            return Ok(true);
+        }
+        Ok(siblings
+            .get(at + 1)
+            .map(|&above| self.doc.node(above).map(|n| n.clipped).unwrap_or(false))
+            .unwrap_or(false))
+    }
+
     fn place_rendered(&mut self, shown: &[NodeId], blend: BlendMode) -> Result<(), PdfError> {
         let mut alone = self.doc.clone();
         let root = alone.root();

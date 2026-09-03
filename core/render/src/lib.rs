@@ -573,10 +573,80 @@ fn render_group(
     parent: Transform,
 ) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
-    for &child in doc.children_of(group)? {
-        render_layer(doc, child, dst, clip, parent)?;
+    let children = doc.children_of(group)?;
+    let mut i = 0;
+    while i < children.len() {
+        // A run of layers clipped to the one below them: the first is what
+        // they are confined to, and it is drawn as it always was. The
+        // bottom-most child has nothing under it, so its own flag — if it
+        // carries one — has nothing to bite on and is ignored here.
+        let mut end = i + 1;
+        while end < children.len() && doc.node(children[end])?.clipped {
+            end += 1;
+        }
+        let capture = (end > i + 1).then(|| {
+            // The layers about to be cut by this one read pixels beyond
+            // the ones they cover — a shadow's blur does — so the cut has
+            // to be known that much further out than the repainted region.
+            let reach = children[i + 1..end]
+                .iter()
+                .filter_map(|&c| doc.node(c).ok())
+                .flat_map(|n| n.effects.iter().map(Effect::reach))
+                .fold(0.0f32, f32::max);
+            (reach * max_scale(parent)).ceil() as u32
+        });
+        let cover = draw_layer(doc, children[i], dst, clip, parent, None, capture)?;
+        for &above in &children[i + 1..end] {
+            draw_layer(doc, above, dst, clip, parent, cover.as_ref(), None)?;
+        }
+        i = end;
     }
     Ok(())
+}
+
+/// Where a clipped layer is allowed to show: the alpha of the layer it is
+/// clipped to, over the window that layer was drawn in. Anything outside
+/// the window is outside the layer too, so it shows nothing.
+struct Cover {
+    alpha: Vec<f32>,
+    origin: (u32, u32),
+    width: u32,
+    height: u32,
+}
+
+impl Cover {
+    /// A layer that draws nothing — hidden, fully transparent, or landing
+    /// nowhere in the region being painted. Everything clipped to it
+    /// disappears with it, which is what makes hiding the layer below hide
+    /// the stack riding on it.
+    fn nothing() -> Self {
+        Cover {
+            alpha: Vec::new(),
+            origin: (0, 0),
+            width: 0,
+            height: 0,
+        }
+    }
+
+    /// A cover that confines nothing over the region it spans.
+    fn everywhere(rect: ClipRect) -> Self {
+        let (width, height) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+        Cover {
+            alpha: vec![1.0; (width * height) as usize],
+            origin: (rect.x0, rect.y0),
+            width,
+            height,
+        }
+    }
+
+    fn rect(&self) -> ClipRect {
+        ClipRect {
+            x0: self.origin.0,
+            y0: self.origin.1,
+            x1: self.origin.0 + self.width,
+            y1: self.origin.1 + self.height,
+        }
+    }
 }
 
 /// Draw one layer where its parent puts it: its own picture, its effects
@@ -592,10 +662,28 @@ fn render_layer(
     clip: ClipRect,
     parent: Transform,
 ) -> Result<(), DocError> {
+    draw_layer(doc, child, dst, clip, parent, None, None).map(|_| ())
+}
+
+/// The same, with what clipping needs on either side of it: `cover`
+/// confines the layer to another one's alpha, and `capture` asks for this
+/// layer's own alpha back so the layers clipped to it can be confined in
+/// turn. Its value is how far past the region being repainted that alpha
+/// is still wanted — the reach of the effects hanging off the layers
+/// about to be cut by it, which read pixels they do not themselves cover.
+fn draw_layer(
+    doc: &Document,
+    child: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+    cover: Option<&Cover>,
+    capture: Option<u32>,
+) -> Result<Option<Cover>, DocError> {
     {
         let node = doc.node(child)?;
         if !node.visible || node.opacity <= 0.0 {
-            return Ok(());
+            return Ok(capture.map(|_| Cover::nothing()));
         }
         // Effects are drawn from the layer's own silhouette, so a layer
         // that has any must exist as a picture before they can be. An
@@ -604,8 +692,46 @@ fn render_layer(
         // ignored rather than given a surface.
         let effected = !node.effects.is_empty()
             && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
-        if !effected {
-            return render_child(doc, child, dst, clip, parent, node.blend);
+        // Clipping needs the layer as a picture before it goes down —
+        // to be cut by what is under it, or to be read as the cut — so
+        // either end of it forces the same surface effects ask for.
+        if !effected && cover.is_none() && capture.is_none() {
+            render_child(doc, child, dst, clip, parent, node.blend)?;
+            return Ok(None);
+        }
+        // An adjustment, a filter and a clone are transformations of what
+        // is already on the page rather than pictures of their own: drawn
+        // on a surface of their own they would have nothing to work on. So
+        // one of these is applied where it stands, over the region it is
+        // confined to, and mixed back into what was there by how much of
+        // that region its cover lets through.
+        if matches!(
+            node.kind,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
+        ) {
+            if let Some(c) = cover {
+                let region = clip.intersect(c.rect());
+                if region.is_empty() {
+                    return Ok(None);
+                }
+                let before = blur::snapshot(dst, region);
+                let corner = (region.x0, region.y0);
+                let stride = region.x1 - region.x0;
+                render_child(doc, child, dst, region, parent, node.blend)?;
+                for y in region.y0..region.y1 {
+                    for x in region.x0..region.x1 {
+                        let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                        let i = (y * dst.width + x) as usize;
+                        dst.pixels[i] = lerp(before[at_in(corner, stride, x, y)], dst.pixels[i], a);
+                    }
+                }
+                return Ok(None);
+            }
+            render_child(doc, child, dst, clip, parent, node.blend)?;
+            // Nothing clipped to one of these is confined by it: it has no
+            // shape of its own to be confined to, so it lets everything
+            // through rather than nothing.
+            return Ok(capture.map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
         }
         let scale = max_scale(parent);
         let reach = node
@@ -613,26 +739,27 @@ fn render_layer(
             .iter()
             .map(Effect::reach)
             .fold(0.0f32, f32::max);
-        let pad = (reach * scale).ceil() as u32;
+        let pad = ((reach * scale).ceil() as u32).max(capture.unwrap_or(0));
         // The layer has to be drawn wherever it could feed a visible
         // effect pixel, which is further out than the region being
         // repainted — by exactly the effects' reach.
-        let grown = ClipRect {
-            x0: clip.x0.saturating_sub(pad),
-            y0: clip.y0.saturating_sub(pad),
-            x1: (clip.x1 + pad).min(dst.width),
-            y1: (clip.y1 + pad).min(dst.height),
-        };
+        let grown = grow(clip, pad, dst.width, dst.height);
         let extent = match bounds_in_parent_space(doc, child)? {
             Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
             other => other,
         };
+        // A clipped layer cannot show outside what it is clipped to, so
+        // its surface need never be bigger than that layer's window.
+        let confined = match cover {
+            Some(c) => grown.intersect(c.rect()),
+            None => grown,
+        };
         let layer_clip = match extent.to_clip(dst.width, dst.height) {
-            Some(b) => b.intersect(grown),
-            None => return Ok(()),
+            Some(b) => b.intersect(confined),
+            None => return Ok(capture.map(|_| Cover::nothing())),
         };
         if layer_clip.is_empty() {
-            return Ok(());
+            return Ok(capture.map(|_| Cover::nothing()));
         }
         // The layer's own surface covers only where it can land, not the
         // whole page: at A4 one small shape with a shadow was allocating
@@ -652,6 +779,24 @@ fn render_layer(
             window.compose(parent),
             BlendMode::Normal,
         )?;
+        // Cut the layer to what it is clipped to before anything is made
+        // of it, so its effects grow from the shape that will actually be
+        // seen rather than from the whole of it.
+        if let Some(c) = cover {
+            for y in layer_clip.y0..layer_clip.y1 {
+                for x in layer_clip.x0..layer_clip.x1 {
+                    let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                    let i = at_in(origin, layer.width, x, y);
+                    layer.pixels[i] = scale_alpha(layer.pixels[i], a);
+                }
+            }
+        }
+        let taken = capture.map(|_| Cover {
+            alpha: layer.pixels.iter().map(|p| p.a).collect(),
+            origin,
+            width: layer.width,
+            height: layer.height,
+        });
         // Effects behind the layer, then the layer, then the ones that
         // belong on top of it — an inner shadow shades the pixels it sits
         // on, so it cannot be painted before they are there.
@@ -691,8 +836,8 @@ fn render_layer(
                 node.opacity,
             );
         }
+        Ok(taken)
     }
-    Ok(())
 }
 
 /// Draw one layer, with its own blend supplied rather than read, so a layer
@@ -995,6 +1140,17 @@ fn silhouette(
     }
     blur::gaussian_blur(&mut out, shift_clip(clip, origin), sigma);
     out
+}
+
+/// A region reaching `pad` pixels further out on every side, kept inside
+/// the surface it indexes.
+fn grow(clip: ClipRect, pad: u32, width: u32, height: u32) -> ClipRect {
+    ClipRect {
+        x0: clip.x0.saturating_sub(pad),
+        y0: clip.y0.saturating_sub(pad),
+        x1: (clip.x1 + pad).min(width),
+        y1: (clip.y1 + pad).min(height),
+    }
 }
 
 /// A device-space region in the coordinates of a surface holding the
@@ -2917,6 +3073,67 @@ pub fn mask_thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Ve
     Ok(Some(rgba8))
 }
 
+/// The layer a clipped layer is confined to: the nearest sibling below it
+/// that is not itself clipped. `None` when the layer is not clipped, or
+/// when nothing is under it — a run's own base carries no confinement,
+/// however its flag is set.
+pub fn clip_base(doc: &Document, id: NodeId) -> Result<Option<NodeId>, DocError> {
+    if !doc.node(id)?.clipped {
+        return Ok(None);
+    }
+    let Some(parent) = doc.parent_of(id) else {
+        return Ok(None);
+    };
+    let siblings = doc.children_of(parent)?;
+    let Some(mut at) = siblings.iter().position(|&s| s == id) else {
+        return Ok(None);
+    };
+    while at > 0 {
+        at -= 1;
+        if !doc.node(siblings[at])?.clipped {
+            return Ok(Some(siblings[at]));
+        }
+    }
+    Ok(None)
+}
+
+/// What a clipped layer is let through by, as an image over the box of
+/// the layer it is clipped to — white with that layer's own alpha, the
+/// same shape [`mask_pixels`] hands a mask over in. For an exporter whose
+/// format has no clipping of this kind and has to say it as a mask.
+/// `None` when the layer is not clipped, or its base covers nothing.
+pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    let Some(base) = clip_base(doc, id)? else {
+        return Ok(None);
+    };
+    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, base)? else {
+        return Ok(None);
+    };
+    let (w, h) = (
+        (x1 - x0).ceil().max(1.0) as u32,
+        (y1 - y0).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    // The base is drawn in the space it shares with the layer clipped to
+    // it, shifted so its own box starts at the image's corner.
+    let space = Transform::translation(-x0, -y0);
+    let mut surface = Surface::new(w, h);
+    let clip = surface.full_clip();
+    render_layer(doc, base, &mut surface, clip, space)?;
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for p in &surface.pixels {
+        rgba8.extend_from_slice(&[255, 255, 255, (p.a.clamp(0.0, 1.0) * 255.0).round() as u8]);
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
 /// A layer's mask as an image: what it lets through over the layer's
 /// own box, one pixel per document unit.
 ///
@@ -3488,6 +3705,163 @@ mod tests {
             erase: false,
             source: [0.0, 0.0],
             heal: false,
+        }
+    }
+
+    fn add(doc: &mut Document, node: Box<Node>) -> NodeId {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node,
+        })
+        .unwrap();
+        doc.children_of(root).unwrap()[index]
+    }
+
+    const BLUE: AuthoredColor = AuthoredColor::Srgb {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    /// A layer clipped to the one below shows where that one does and
+    /// nowhere else — which is the whole of what clipping means.
+    #[test]
+    fn a_clipped_layer_shows_only_where_the_one_below_it_does() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(&mut doc, filled_rect("under", 20.0, 20.0, RED));
+        let over = add(&mut doc, filled_rect("over", 40.0, 40.0, BLUE));
+        // Before it is clipped the upper layer covers the page.
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(30, 30).to_srgb8(), [0, 0, 255, 255]);
+
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(10, 10).to_srgb8(),
+            [0, 0, 255, 255],
+            "it still covers what it is clipped to"
+        );
+        assert_eq!(
+            s.get(30, 30).a,
+            0.0,
+            "and shows nothing at all past that layer's edge"
+        );
+    }
+
+    /// It inherits the fate of the layer it rides on: hide that one and
+    /// the clipped layer goes with it.
+    #[test]
+    fn hiding_the_layer_below_hides_what_is_clipped_to_it() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let under = add(&mut doc, filled_rect("under", 20.0, 20.0, RED));
+        let over = add(&mut doc, filled_rect("over", 40.0, 40.0, BLUE));
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetVisible {
+            id: under,
+            visible: false,
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(s.get(10, 10).a, 0.0, "nothing is left of either");
+    }
+
+    /// An adjustment cannot be drawn on a surface of its own and cut
+    /// afterwards — it is a change to what is under it. Clipped, it has
+    /// to change that only where the layer below reaches.
+    #[test]
+    fn an_adjustment_clipped_to_a_layer_leaves_the_rest_of_the_page_alone() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(&mut doc, filled_rect("page", 40.0, 40.0, grey));
+        add(&mut doc, filled_rect("patch", 20.0, 20.0, grey));
+        let plain = render(&doc).unwrap();
+        let adj = add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "brighter",
+                Adjustment::Exposure { stops: 1.0 },
+            )),
+        );
+        let before = render(&doc).unwrap();
+        assert!(
+            before.get(30, 30).r > plain.get(30, 30).r + 0.1,
+            "unclipped, it lifts the whole page"
+        );
+
+        doc.apply(Command::SetClipped {
+            id: adj,
+            clipped: true,
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        assert_eq!(
+            s.get(10, 10).to_srgb8(),
+            before.get(10, 10).to_srgb8(),
+            "over the patch it does what it always did"
+        );
+        assert!(
+            (s.get(30, 30).r - plain.get(30, 30).r).abs() < 1e-5,
+            "off it, the page is left exactly as it was"
+        );
+    }
+
+    /// Repainting a piece of the page has to give the same pixels as
+    /// repainting all of it: the cut a clipped layer is made with is
+    /// worked out per region, and a region boundary must not show.
+    #[test]
+    fn a_clipped_layer_repaints_the_same_by_the_piece_as_whole() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(&mut doc, filled_rect("under", 24.0, 24.0, RED));
+        let over = add(&mut doc, filled_rect("over", 40.0, 40.0, BLUE));
+        doc.apply(Command::SetTransform {
+            id: over,
+            transform: Transform::translation(6.0, 6.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        let whole = render(&doc).unwrap();
+        let mut piecemeal = Surface::new(40, 40);
+        for band in 0..4 {
+            render_region(
+                &doc,
+                &mut piecemeal,
+                ClipRect {
+                    x0: 0,
+                    y0: band * 10,
+                    x1: 40,
+                    y1: band * 10 + 10,
+                },
+            )
+            .unwrap();
+        }
+        for (i, (a, b)) in whole.pixels.iter().zip(&piecemeal.pixels).enumerate() {
+            assert!(
+                (a.r - b.r).abs() < 1e-5 && (a.a - b.a).abs() < 1e-5,
+                "pixel {} of {}: {a:?} vs {b:?}",
+                i,
+                whole.pixels.len()
+            );
         }
     }
 

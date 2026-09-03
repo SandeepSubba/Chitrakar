@@ -339,6 +339,12 @@ impl Document {
                 node.locked = locked;
                 Ok(Command::SetLocked { id, locked: prev })
             }
+            Command::SetClipped { id, clipped } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = node.clipped;
+                node.clipped = clipped;
+                Ok(Command::SetClipped { id, clipped: prev })
+            }
             Command::SetBlendMode { id, blend } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = node.blend;
@@ -607,6 +613,11 @@ pub enum Command {
         id: NodeId,
         locked: bool,
     },
+    /// Confine a layer to the one below it, or let it out again.
+    SetClipped {
+        id: NodeId,
+        clipped: bool,
+    },
     SetBlendMode {
         id: NodeId,
         blend: BlendMode,
@@ -747,6 +758,41 @@ mod tests {
                 radius: 0.0,
             },
         ))
+    }
+
+    /// Confining a layer to the one below it is a plain switch with a
+    /// plain inverse, and a document written before it existed loads as
+    /// what it was: nothing confined.
+    #[test]
+    fn clipping_a_layer_undoes_to_where_it_started() {
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        let mut history = History::default();
+        let root = doc.root();
+        history
+            .apply(
+                &mut doc,
+                Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: rect("r1"),
+                },
+            )
+            .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        assert!(!doc.node(id).unwrap().clipped);
+        history
+            .apply(&mut doc, Command::SetClipped { id, clipped: true })
+            .unwrap();
+        assert!(doc.node(id).unwrap().clipped);
+        assert!(history.undo(&mut doc).unwrap());
+        assert!(!doc.node(id).unwrap().clipped);
+
+        // A node written without the field reads as unconfined.
+        let json = serde_json::to_value(doc.node(id).unwrap()).unwrap();
+        let mut object = json.as_object().unwrap().clone();
+        assert!(object.remove("clipped").is_some(), "it is written out");
+        let old: Node = serde_json::from_value(object.into()).unwrap();
+        assert!(!old.clipped);
     }
 
     #[test]

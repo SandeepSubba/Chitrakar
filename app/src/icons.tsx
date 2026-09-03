@@ -27,6 +27,7 @@ export type IconName =
   | "lower"
   | "group"
   | "ungroup"
+  | "clip"
   | "brush"
   | "duplicate"
   | "shadow"
@@ -275,6 +276,14 @@ const PATHS: Record<IconName, JSX.Element> = {
     <>
       <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
       <rect x="11.5" y="11.5" width="9" height="9" rx="1.5" />
+    </>
+  ),
+  // Clipped to the layer below: the upper box hooked down onto the lower.
+  clip: (
+    <>
+      <rect x="7.5" y="3.5" width="12" height="7" rx="1.5" />
+      <rect x="4.5" y="13.5" width="12" height="7" rx="1.5" />
+      <path d="M7.5 10.5v3" />
     </>
   ),
   // Layer kinds and row state

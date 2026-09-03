@@ -2452,6 +2452,11 @@ export function App() {
           pasteStyle();
           return;
         }
+        if (k === "g") {
+          e.preventDefault();
+          clipSelection();
+          return;
+        }
       }
       if ((e.metaKey || e.ctrlKey) && !typing) {
         const k = e.key.toLowerCase();
@@ -2628,6 +2633,24 @@ export function App() {
     } catch (err) {
       alert(`Group: ${err}`);
     }
+  };
+
+  /** Confine the picked layers to the layer below each of them, or let
+   * them out again — one entry however many are picked. The whole
+   * selection follows the first one's state, so a mixed selection ends up
+   * agreeing rather than each flipping past the others. The bottom layer
+   * of a parent has nothing under it and is left alone. */
+  const clipSelection = () => {
+    if (!session || selectionSet.length === 0) return;
+    const rows = layers.filter(
+      (l) => selectionSet.includes(l.id) && l.index > 0,
+    );
+    if (rows.length === 0) return;
+    const clipped = !rows[0].clipped;
+    const cmds = rows.map((l) => ({
+      SetClipped: { id: l.id, clipped },
+    }));
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
   const ungroupSelection = () => {
@@ -3031,6 +3054,11 @@ export function App() {
   };
 
   const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  // Something has to be under a layer for it to be clipped to it, so the
+  // bottom-most layer of a parent cannot be.
+  const clippable = layers.some(
+    (l) => selectionSet.includes(l.id) && l.index > 0,
+  );
   // Adjustment and filter layers act on everything below them and have no
   // box of their own; everything else, groups included, can be moved,
   // scaled and turned.
@@ -4649,6 +4677,15 @@ export function App() {
               <Icon name="ungroup" size={16} />
             </button>
             <button
+              onClick={clipSelection}
+              disabled={!clippable}
+              aria-pressed={selectedLayer?.clipped ?? false}
+              title="Clip to the layer below (Ctrl+Alt+G)"
+              aria-label="Clip to the layer below"
+            >
+              <Icon name="clip" size={16} />
+            </button>
+            <button
               onClick={duplicateSelected}
               disabled={selected === null}
               title="Duplicate layer (Ctrl+D)"
@@ -5030,6 +5067,18 @@ export function App() {
                 >
                   <Icon name={l.locked ? "lock" : "unlock"} size={14} />
                 </button>
+                {/* A layer confined to the one below it says so with a
+                    hook pointing down at it, the way the panel of every
+                    editor that has clipping does. */}
+                {l.clipped && (
+                  <span
+                    className="clip-mark"
+                    title="Clipped to the layer below"
+                    aria-label="Clipped to the layer below"
+                  >
+                    <Icon name="clip" size={12} />
+                  </span>
+                )}
                 {/* What the layer holds, when it holds anything: a
                     small picture of it on its own. An adjustment or a
                     filter is a change to what is under it and has none,
@@ -5191,6 +5240,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
       ["Ctrl+D", "Duplicate"],
       ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
+      ["Ctrl+Alt+G", "Clip to the layer below"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
       ["Ctrl+A", "Select all"],
