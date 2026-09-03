@@ -46,25 +46,54 @@ fn rect_distance(p: vec2f, size: vec2f, r: f32) -> f32 {
     return length(max(q, vec2f(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-// How much of this pixel the shape covers, from the shape's own signed
-// distance.
-fn coverage(in: VsOut) -> f32 {
-    var d: f32;
-    if in.params.w < 0.5 {
-        d = rect_distance(in.local, in.params.xy, in.params.z);
-    } else {
-        // An ellipse's implicit function, divided by its own gradient:
-        // the first-order distance to the rim, which is what an edge a
-        // pixel wide needs.
-        let r = in.params.xy * 0.5;
-        let k = (in.local - r) / r;
-        let f = dot(k, k) - 1.0;
-        let g = 2.0 * vec2f(k.x / r.x, k.y / r.y);
-        d = f / max(length(g), 1e-6);
-    }
-    // The band is one device pixel wide however the shape is transformed:
-    // fwidth measures the distance's own rate of change on the screen.
+// An ellipse's implicit function about `c` with radii `r`, divided by
+// its own gradient: the first-order distance to the rim, which is what
+// an edge a pixel wide needs.
+fn ellipse_distance(p: vec2f, c: vec2f, r: vec2f) -> f32 {
+    let k = (p - c) / r;
+    let f = dot(k, k) - 1.0;
+    let g = 2.0 * vec2f(k.x / r.x, k.y / r.y);
+    return f / max(length(g), 1e-6);
+}
+
+// How much of this pixel a signed distance covers. The soft band is one
+// device pixel wide however the shape is transformed: fwidth measures
+// the distance's own rate of change on the screen. Derivatives have to
+// be taken in uniform control flow, which is why every distance below
+// is computed and only then selected between.
+fn edge(d: f32) -> f32 {
     return clamp(0.5 - d / max(fwidth(d), 1e-6), 0.0, 1.0);
+}
+
+// How much of this pixel the shape covers. `params.w` says which shape
+// it is — 0 a rounded rectangle, 1 an ellipse, and 2 or 3 the same two
+// as a stroke: the innermost `grad.x` of the shape, which is where the
+// CPU renderer puts a rect's or an ellipse's stroke so that stroking
+// one never grows its bounds.
+fn coverage(in: VsOut) -> f32 {
+    let size = in.params.xy;
+    let r = size * 0.5;
+    let band = in.params.w >= 2.0;
+    let ellipse = in.params.w - select(0.0, 2.0, band) > 0.5;
+    let width = in.grad.x;
+
+    let outer = select(
+        rect_distance(in.local, size, in.params.z),
+        ellipse_distance(in.local, r, r),
+        ellipse,
+    );
+    // The inside edge of a band. A rounded rect's is its own distance
+    // pushed in by the width; an ellipse's is the ellipse shrunk by the
+    // width on each axis, which is a different curve — and once that has
+    // shrunk to nothing the band is the whole inside.
+    let shrunk = r - vec2f(width, width);
+    let inner = select(
+        outer + width,
+        select(ellipse_distance(in.local, r, max(shrunk, vec2f(1e-6, 1e-6))), 1e9, shrunk.x <= 0.0 || shrunk.y <= 0.0),
+        ellipse,
+    );
+    let cov = edge(outer);
+    return select(cov, clamp(cov - edge(inner), 0.0, 1.0), band);
 }
 
 @fragment

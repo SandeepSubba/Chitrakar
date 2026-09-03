@@ -1431,6 +1431,67 @@ fn segment_distance(px: f32, py: f32, a: [f32; 2], b: [f32; 2]) -> f32 {
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
 
+/// One ring of a path's stroke skeleton: the points of the flattened
+/// ring, the half-width at each of them, and whether the ring closes.
+pub struct StrokeRing {
+    pub points: Vec<[f32; 2]>,
+    /// Half-width at each point, one entry per point.
+    pub half: Vec<f32>,
+    pub closed: bool,
+}
+
+/// The skeleton a path's stroke covers, in the shape's local space.
+///
+/// The stroke is the union of the round-capped segments between
+/// consecutive points of these rings, the half-width running linearly
+/// from one point to the next. That is the region [`stroke_covers`]
+/// tests one sample at a time; this states it as geometry, for a
+/// renderer that draws the region instead of sampling it. The two must
+/// agree, and what keeps them honest is the GPU backend's test, which
+/// draws a stroked page both ways and compares the pixels.
+///
+/// Empty for anything but a path, or a path with fewer than two points
+/// — which is what the sampler answers `false` to everywhere.
+pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<StrokeRing> {
+    let flat = flatten_shape(shape);
+    let VectorShape::Path {
+        points,
+        closed,
+        subpaths,
+        ..
+    } = flat.as_ref()
+    else {
+        return Vec::new();
+    };
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let half = width / 2.0;
+    // The same widths the sampler is handed: resampled onto the
+    // flattened polyline, and absent when the stroke does not vary.
+    let flat_widths = flatten_widths(shape, widths);
+    let varying = !flat_widths.is_empty();
+    let at = |i: usize| flat_widths.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+    let mut rings = vec![StrokeRing {
+        half: (0..points.len())
+            .map(|i| if varying { half * at(i) } else { half })
+            .collect(),
+        points: points.clone(),
+        closed: *closed,
+    }];
+    // Extra rings are always closed and never carry varying widths.
+    for ring in subpaths {
+        if ring.len() >= 2 {
+            rings.push(StrokeRing {
+                half: vec![half; ring.len()],
+                points: ring.clone(),
+                closed: true,
+            });
+        }
+    }
+    rings
+}
+
 /// Stroke coverage. Rects and ellipses use an inner band of the given width
 /// (bounds stay stable); paths use a stroke centered on the line so open
 /// paths render as line art.

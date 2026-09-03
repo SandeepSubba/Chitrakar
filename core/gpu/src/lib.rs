@@ -21,7 +21,13 @@
 //! covers, the page goes back. A gradient fill — linear or radial, on
 //! any of those shapes — is a ramp baked into a row of texels and
 //! sampled across the shape's own normalized box, so it follows the
-//! shape the way the CPU's does. Everything else — strokes, text,
+//! shape the way the CPU's does. A stroke is an inner band on a
+//! rectangle or an ellipse, measured from the two rims so that stroking
+//! one never grows its bounds; on a path it is the union of the
+//! round-capped segments the CPU tests a sample against, laid down as
+//! geometry — a trapezoid per segment and a disc at every point — and
+//! unioned in the stencil, so joins, caps and a width that swells and
+//! tapers all come out of the one region. Everything else — text,
 //! masks, effects, filters, adjustments, blend modes, a group that has
 //! to be composited on its own, ink authored for a press — is declined,
 //! and the caller falls back to the CPU.
@@ -112,6 +118,13 @@ enum Draw {
         cover: std::ops::Range<u32>,
         ramp: Option<usize>,
     },
+    /// A path's stroke: the pieces that make up the region it covers,
+    /// which the stencil takes the union of, and the quad that paints
+    /// the union.
+    Stroke {
+        union: std::ops::Range<u32>,
+        cover: std::ops::Range<u32>,
+    },
     /// A placed image: the quad, and which of the scene's textures it
     /// samples.
     Image {
@@ -132,6 +145,9 @@ pub struct GpuRenderer {
     /// instead of a flat colour.
     shape_gradient: wgpu::RenderPipeline,
     cover_gradient: wgpu::RenderPipeline,
+    /// Sets the stencil rather than flipping it, so overlapping pieces
+    /// of one stroke union instead of cancelling.
+    union: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -336,6 +352,33 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        let union = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stroke union"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_stencil"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_stencil"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    write_mask: wgpu::ColorWrites::empty(),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Replace,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         // The gradient pipelines differ from their flat counterparts only
         // in the fragment they run and the ramp they bind, so they borrow
         // everything else from them.
@@ -396,6 +439,7 @@ impl GpuRenderer {
             image,
             shape_gradient,
             cover_gradient,
+            union,
             layout,
             texture_layout,
             sampler,
@@ -609,6 +653,18 @@ impl GpuRenderer {
                             }
                             pass.draw(cover.clone(), 0..1);
                         }
+                        Draw::Stroke { union, cover } => {
+                            // The pieces set the stencil to one wherever
+                            // any of them reaches, so overlapping ones
+                            // union; the cover pass paints that and
+                            // clears up behind itself.
+                            pass.set_stencil_reference(1);
+                            pass.set_pipeline(&self.union);
+                            pass.draw(union.clone(), 0..1);
+                            pass.set_stencil_reference(0);
+                            pass.set_pipeline(&self.cover);
+                            pass.draw(cover.clone(), 0..1);
+                        }
                         Draw::Image { quad, texture } => {
                             pass.set_pipeline(&self.image);
                             pass.set_bind_group(1, &textures[*texture], &[]);
@@ -778,139 +834,17 @@ fn collect(
                 fill,
                 stroke,
                 gradient,
-            } => {
-                if stroke.is_some() {
-                    return None;
-                }
-                let alpha = node.opacity * opacity;
-                // A gradient paints in place of the flat fill, from a
-                // ramp baked here once and sampled there per pixel; the
-                // layer's own opacity scales it in the fragment, so two
-                // layers could share a ramp even at different opacities.
-                let (color, grad, ramp) = match gradient {
-                    // No stops is nothing to paint, as it is on the CPU
-                    // — and the flat fill stays covered up.
-                    Some(g) if g.stops().is_empty() => continue,
-                    Some(g) => {
-                        let (ramp, geom, radial) = bake(g)?;
-                        let at = out.textures.len();
-                        out.textures.push(ramp);
-                        let kind = if radial { 1.0 } else { 0.0 };
-                        ([kind, 0.0, 0.0, alpha], geom, Some(at))
-                    }
-                    None => {
-                        let fill = (*fill)?;
-                        // Ink authored for a press resolves through the
-                        // profile, which is the CPU's business.
-                        let chitrakar_color::AuthoredColor::Srgb { .. } = fill else {
-                            return None;
-                        };
-                        let c = chitrakar_color::to_working(fill);
-                        (
-                            [c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha],
-                            [0.0; 4],
-                            None,
-                        )
-                    }
-                };
-                let (size, radius, kind) = match shape {
-                    VectorShape::Rect {
-                        width,
-                        height,
-                        radius,
-                    } => {
-                        let r = radius.max(0.0).min(width.min(*height).max(0.0) / 2.0);
-                        ([*width, *height], r, 0.0)
-                    }
-                    VectorShape::Ellipse { rx, ry } => ([rx * 2.0, ry * 2.0], 0.0, 1.0),
-                    // A path is stencilled from its rings and covered:
-                    // parity gives the even-odd fill the CPU draws,
-                    // holes and crossings included.
-                    VectorShape::Path { .. } => {
-                        let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
-                            .into_iter()
-                            .map(|ring| {
-                                ring.into_iter()
-                                    .map(|p| {
-                                        [
-                                            t.a * p[0] + t.c * p[1] + t.e,
-                                            t.b * p[0] + t.d * p[1] + t.f,
-                                        ]
-                                    })
-                                    .collect()
-                            })
-                            .filter(|ring: &Vec<[f32; 2]>| ring.len() >= 3)
-                            .collect();
-                        if rings.is_empty() {
-                            continue;
-                        }
-                        // The stencil pass reads nothing but position.
-                        let mut fan = Vec::new();
-                        for ring in &rings {
-                            for i in 1..ring.len() - 1 {
-                                for p in [ring[0], ring[i], ring[i + 1]] {
-                                    fan.push(Vertex {
-                                        doc: p,
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                        let stencil = out.push(fan);
-                        // The cover quad is the layer's own box carried
-                        // through its transform — a parallelogram that
-                        // holds every point the fill can reach, grown by
-                        // a device pixel so it cannot cut the edge short.
-                        // Its corners carry the box's normalized
-                        // coordinates, which a gradient interpolates
-                        // across however the layer is turned.
-                        let Some([x0, y0, x1, y1]) =
-                            chitrakar_render::local_bounds_of(doc, child).ok()?
-                        else {
-                            continue;
-                        };
-                        let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6);
-                        let (mu, mv) = (1.0 / scale / (x1 - x0), 1.0 / scale / (y1 - y0));
-                        let corner = |u: f32, v: f32| {
-                            let (lx, ly) = (x0 + (x1 - x0) * u, y0 + (y1 - y0) * v);
-                            Vertex {
-                                doc: [t.a * lx + t.c * ly + t.e, t.b * lx + t.d * ly + t.f],
-                                local: [u, v],
-                                params: [0.0; 4],
-                                color,
-                                grad,
-                            }
-                        };
-                        let (lo, hi) = ((-mu, -mv), (1.0 + mu, 1.0 + mv));
-                        let cover = out.push(vec![
-                            corner(lo.0, lo.1),
-                            corner(hi.0, lo.1),
-                            corner(hi.0, hi.1),
-                            corner(lo.0, lo.1),
-                            corner(hi.0, hi.1),
-                            corner(lo.0, hi.1),
-                        ]);
-                        out.draws.push(Draw::Path {
-                            stencil,
-                            cover,
-                            ramp,
-                        });
-                        continue;
-                    }
-                };
-                if !(size[0] > 0.0 && size[1] > 0.0) {
-                    continue;
-                }
-                let range = out.push(quad(
-                    t,
-                    size,
-                    [size[0], size[1], radius, kind],
-                    color,
-                    grad,
-                    1.5,
-                ));
-                out.draws.push(Draw::Shape { quad: range, ramp });
-            }
+            } => vector(
+                doc,
+                child,
+                shape,
+                *fill,
+                stroke.as_ref(),
+                gradient.as_ref(),
+                t,
+                node.opacity * opacity,
+                out,
+            )?,
             NodeKind::Raster(raster) => {
                 let Some(res) = doc.resource(&raster.resource_id) else {
                     // A resource whose pixels never came back is drawn by
@@ -953,6 +887,298 @@ fn collect(
         }
     }
     Some(())
+}
+
+/// Turn one vector layer into quads: its fill, and then its stroke over
+/// it, which is the order the CPU paints them in. `None` declines the
+/// page.
+#[allow(clippy::too_many_arguments)]
+fn vector(
+    doc: &Document,
+    id: NodeId,
+    shape: &VectorShape,
+    fill: Option<chitrakar_color::AuthoredColor>,
+    stroke: Option<&chitrakar_doc::Stroke>,
+    gradient: Option<&chitrakar_doc::Gradient>,
+    t: Transform,
+    alpha: f32,
+    out: &mut Scene,
+) -> Option<()> {
+    // A gradient paints in place of the flat fill, from a ramp baked
+    // here once and sampled there per pixel; the layer's own opacity
+    // scales it in the fragment, so two layers could share a ramp even
+    // at different opacities.
+    let paint = match gradient {
+        // No stops is nothing to paint, as it is on the CPU — and the
+        // flat fill stays covered up.
+        Some(g) if g.stops().is_empty() => None,
+        Some(g) => {
+            let (ramp, geom, radial) = bake(g)?;
+            let at = out.textures.len();
+            out.textures.push(ramp);
+            let kind = if radial { 1.0 } else { 0.0 };
+            Some(([kind, 0.0, 0.0, alpha], geom, Some(at)))
+        }
+        None => match fill {
+            Some(c) => Some((premultiplied_color(c, alpha)?, [0.0; 4], None)),
+            None => None,
+        },
+    };
+    let ink = match stroke {
+        Some(s) if s.width > 0.0 => Some((premultiplied_color(s.color, alpha)?, s)),
+        _ => None,
+    };
+    if paint.is_none() && ink.is_none() {
+        return Some(());
+    }
+
+    // A path is stencilled and covered: parity gives the even-odd fill
+    // the CPU draws, holes and crossings included; a stroke is the union
+    // of the round-capped segments the CPU tests against, which the
+    // stencil takes as geometry.
+    if let VectorShape::Path { .. } = shape {
+        if let Some((color, grad, ramp)) = paint {
+            fill_path(doc, id, shape, t, color, grad, ramp, out);
+        }
+        if let Some((color, s)) = ink {
+            stroke_path(shape, t, color, s, out);
+        }
+        return Some(());
+    }
+
+    let (size, radius) = match shape {
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        } => (
+            [*width, *height],
+            radius.max(0.0).min(width.min(*height).max(0.0) / 2.0),
+        ),
+        VectorShape::Ellipse { rx, ry } => ([rx * 2.0, ry * 2.0], 0.0),
+        VectorShape::Path { .. } => unreachable!("handled above"),
+    };
+    if !(size[0] > 0.0 && size[1] > 0.0) {
+        return Some(());
+    }
+    let ellipse = matches!(shape, VectorShape::Ellipse { .. });
+    let kind = if ellipse { 1.0 } else { 0.0 };
+    if let Some((color, grad, ramp)) = paint {
+        let quad = out.push(quad(
+            t,
+            size,
+            [size[0], size[1], radius, kind],
+            color,
+            grad,
+            1.5,
+        ));
+        out.draws.push(Draw::Shape { quad, ramp });
+    }
+    if let Some((color, s)) = ink {
+        // A rect's or an ellipse's stroke is the innermost `width` of
+        // it, so stroking one never grows its bounds; the fragment
+        // measures both rims and takes the band between them.
+        let quad = out.push(quad(
+            t,
+            size,
+            [size[0], size[1], radius, kind + 2.0],
+            color,
+            [s.width, 0.0, 0.0, 0.0],
+            1.5,
+        ));
+        out.draws.push(Draw::Shape { quad, ramp: None });
+    }
+    Some(())
+}
+
+/// An authored colour premultiplied into linear light and scaled by the
+/// layer's opacity. `None` declines the page: ink authored for a press
+/// resolves through the document's profile, which is the CPU's business.
+fn premultiplied_color(color: chitrakar_color::AuthoredColor, alpha: f32) -> Option<[f32; 4]> {
+    let chitrakar_color::AuthoredColor::Srgb { .. } = color else {
+        return None;
+    };
+    let c = chitrakar_color::to_working(color);
+    Some([c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha])
+}
+
+/// Stencil a path's rings and cover them.
+#[allow(clippy::too_many_arguments)]
+fn fill_path(
+    doc: &Document,
+    id: NodeId,
+    shape: &VectorShape,
+    t: Transform,
+    color: [f32; 4],
+    grad: [f32; 4],
+    ramp: Option<usize>,
+    out: &mut Scene,
+) {
+    let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
+        .into_iter()
+        .map(|ring| ring.into_iter().map(|p| place(t, p)).collect())
+        .filter(|ring: &Vec<[f32; 2]>| ring.len() >= 3)
+        .collect();
+    if rings.is_empty() {
+        return;
+    }
+    // The stencil pass reads nothing but position.
+    let mut fan = Vec::new();
+    for ring in &rings {
+        for i in 1..ring.len() - 1 {
+            for p in [ring[0], ring[i], ring[i + 1]] {
+                fan.push(Vertex {
+                    doc: p,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    let stencil = out.push(fan);
+    // The cover quad is the layer's own box carried through its
+    // transform — a parallelogram that holds every point the fill can
+    // reach, grown by a device pixel so it cannot cut the edge short.
+    // Its corners carry the box's normalized coordinates, which a
+    // gradient interpolates across however the layer is turned.
+    let Ok(Some([x0, y0, x1, y1])) = chitrakar_render::local_bounds_of(doc, id) else {
+        return;
+    };
+    let (mu, mv) = (
+        1.0 / device_scale(t) / (x1 - x0),
+        1.0 / device_scale(t) / (y1 - y0),
+    );
+    let corner = |u: f32, v: f32| Vertex {
+        doc: place(t, [x0 + (x1 - x0) * u, y0 + (y1 - y0) * v]),
+        local: [u, v],
+        params: [0.0; 4],
+        color,
+        grad,
+    };
+    let (lo, hi) = ((-mu, -mv), (1.0 + mu, 1.0 + mv));
+    let cover = out.push(vec![
+        corner(lo.0, lo.1),
+        corner(hi.0, lo.1),
+        corner(hi.0, hi.1),
+        corner(lo.0, lo.1),
+        corner(hi.0, hi.1),
+        corner(lo.0, hi.1),
+    ]);
+    out.draws.push(Draw::Path {
+        stencil,
+        cover,
+        ramp,
+    });
+}
+
+/// Draw a path's stroke: the union of the round-capped segments the CPU
+/// tests a sample against, laid down as geometry — a trapezoid per
+/// segment between the two half-widths at its ends, and a disc at every
+/// point where the segments meet or the line stops. The stencil takes
+/// the union (a pixel is in the stroke if any piece covers it, however
+/// the pieces overlap), and one quad covers it.
+fn stroke_path(
+    shape: &VectorShape,
+    t: Transform,
+    color: [f32; 4],
+    stroke: &chitrakar_doc::Stroke,
+    out: &mut Scene,
+) {
+    let scale = device_scale(t);
+    let mut tris: Vec<Vertex> = Vec::new();
+    let mut box_ = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let vertex = |p: [f32; 2], box_: &mut [f32; 4]| {
+        let doc = place(t, p);
+        *box_ = [
+            box_[0].min(doc[0]),
+            box_[1].min(doc[1]),
+            box_[2].max(doc[0]),
+            box_[3].max(doc[1]),
+        ];
+        Vertex {
+            doc,
+            ..Default::default()
+        }
+    };
+    for ring in chitrakar_render::stroke_skeleton(shape, stroke.width, &stroke.widths) {
+        let n = ring.points.len();
+        let segments = if ring.closed { n } else { n - 1 };
+        for i in 0..segments {
+            let j = (i + 1) % n;
+            let (a, b) = (ring.points[i], ring.points[j]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-9 {
+                continue;
+            }
+            // The boundary of a segment whose half-width runs linearly
+            // from one end to the other is a straight line, so the piece
+            // between the two discs is a trapezoid.
+            let (nx, ny) = (-dy / len, dx / len);
+            let (ha, hb) = (ring.half[i], ring.half[j]);
+            let corners = [
+                [a[0] + nx * ha, a[1] + ny * ha],
+                [b[0] + nx * hb, b[1] + ny * hb],
+                [b[0] - nx * hb, b[1] - ny * hb],
+                [a[0] - nx * ha, a[1] - ny * ha],
+            ];
+            for k in [0, 1, 2, 0, 2, 3] {
+                tris.push(vertex(corners[k], &mut box_));
+            }
+        }
+        for (i, p) in ring.points.iter().enumerate() {
+            // A disc at every point: the round join between two
+            // segments and the round cap at either end are the same
+            // thing, which is what a distance test gives.
+            let h = ring.half[i];
+            if h <= 0.0 || (!ring.closed && segments == 0) {
+                continue;
+            }
+            let sides = ((h * scale) as usize + 8).clamp(8, 64);
+            for k in 0..sides {
+                let angle = |k: usize| k as f32 / sides as f32 * std::f32::consts::TAU;
+                let (a0, a1) = (angle(k), angle(k + 1));
+                for q in [
+                    *p,
+                    [p[0] + h * a0.cos(), p[1] + h * a0.sin()],
+                    [p[0] + h * a1.cos(), p[1] + h * a1.sin()],
+                ] {
+                    tris.push(vertex(q, &mut box_));
+                }
+            }
+        }
+    }
+    if tris.is_empty() {
+        return;
+    }
+    let union = out.push(tris);
+    // A device-space box around the geometry, grown by a pixel: the
+    // stroke carries no gradient, so the cover quad needs no coordinates
+    // of its own.
+    let corner = |x: f32, y: f32| Vertex {
+        doc: [x, y],
+        color,
+        ..Default::default()
+    };
+    let (x0, y0, x1, y1) = (box_[0] - 1.0, box_[1] - 1.0, box_[2] + 1.0, box_[3] + 1.0);
+    let cover = out.push(vec![
+        corner(x0, y0),
+        corner(x1, y0),
+        corner(x1, y1),
+        corner(x0, y0),
+        corner(x1, y1),
+        corner(x0, y1),
+    ]);
+    out.draws.push(Draw::Stroke { union, cover });
+}
+
+/// A local-space point on the page.
+fn place(t: Transform, p: [f32; 2]) -> [f32; 2] {
+    [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f]
+}
+
+/// How many device pixels a unit of the layer's own space spans.
+fn device_scale(t: Transform) -> f32 {
+    (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6)
 }
 
 /// How many texels a gradient's ramp is baked into. Its stops are
@@ -1685,6 +1911,134 @@ mod tests {
         assert_eq!(reference.get(20, 20).a, 0.0, "which is what the CPU draws");
     }
 
+    fn stroked(name: &str, shape: VectorShape, width: f32, widths: Vec<f32>) -> Box<Node> {
+        let mut node = Node::vector(name, shape);
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width,
+                widths,
+            });
+        }
+        Box::new(node)
+    }
+
+    /// A stroke is an inner band on a rect or an ellipse — so stroking
+    /// one never grows its bounds — and on a path it is the union of
+    /// round-capped segments, joins and caps included, laid down as
+    /// geometry rather than tested per sample.
+    #[test]
+    fn strokes_cover_what_the_cpu_strokes() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(140, 90, ColorMode::Rgb);
+        add(
+            &mut doc,
+            stroked(
+                "round rect",
+                VectorShape::Rect {
+                    width: 34.0,
+                    height: 26.0,
+                    radius: 7.0,
+                },
+                4.0,
+                Vec::new(),
+            ),
+            Transform::translation(8.0, 8.0),
+        );
+        add(
+            &mut doc,
+            stroked(
+                "ellipse",
+                VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+                5.0,
+                Vec::new(),
+            ),
+            Transform::translation(56.0, 8.0),
+        );
+        // An open path: three segments, so two round joins and two caps.
+        add(
+            &mut doc,
+            stroked(
+                "line",
+                VectorShape::Path {
+                    points: vec![[0.0, 20.0], [16.0, 0.0], [32.0, 22.0], [48.0, 2.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                6.0,
+                Vec::new(),
+            ),
+            Transform::translation(10.0, 52.0),
+        );
+        // And one that swells and tapers, the way a pressure stroke does.
+        add(
+            &mut doc,
+            stroked(
+                "taper",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [18.0, 10.0], [36.0, 0.0], [54.0, 12.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                9.0,
+                vec![0.15, 1.0, 0.6, 0.2],
+            ),
+            Transform::translation(74.0, 56.0),
+        );
+
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        // A stroke is nearly all edge, and a stencilled edge is as fine
+        // as the sampling rather than exact, so a pixel of it can be a
+        // quarter out — over the page that comes to well under this.
+        assert!(
+            mean < 0.004,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // The band is inside the shape: its middle is hollow and its
+        // outside is bare, on both.
+        for (x, y, what) in [(25, 21, "the rect's middle"), (74, 20, "the ellipse's")] {
+            assert_eq!(drawn.get(x, y).a, 0.0, "{what} is hollow");
+            assert_eq!(reference.get(x, y).a, 0.0, "{what} is hollow on the CPU");
+        }
+        assert_eq!(drawn.get(4, 4).a, 0.0, "and nothing outside it");
+        // The rim itself is painted, and to the reference's own weight.
+        for (x, y) in [(9, 21), (25, 9), (56, 20), (18, 62), (101, 61)] {
+            let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
+            assert!(g > 0.5, "the band at ({x}, {y}) is painted: {g}");
+            assert!((g - c).abs() < 0.2, "at ({x}, {y}): {g} vs {c}");
+        }
+        // A round cap reaches past the last anchor by half the width,
+        // and does it on both.
+        for (x, y) in [(59, 52), (9, 73)] {
+            let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
+            assert!((g - c).abs() < 0.25, "the cap at ({x}, {y}): {g} vs {c}");
+        }
+        // The tapering one really tapers: thin at the start, fat in the
+        // middle, and the same thickness the CPU draws.
+        let thickness = |s: &Surface, x: u32| (50..80).filter(|y| s.get(x, *y).a > 0.5).count();
+        for x in [76, 92, 110] {
+            let (g, c) = (thickness(&drawn, x), thickness(&reference, x));
+            assert!(
+                g.abs_diff(c) <= 2,
+                "column {x} is {g} thick, the CPU's is {c}"
+            );
+        }
+        assert!(
+            thickness(&drawn, 92) > thickness(&drawn, 76),
+            "it swells from its thin start"
+        );
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -1700,8 +2054,9 @@ mod tests {
         );
         assert!(GpuRenderer::can_render(&doc));
 
-        // A stroke, text, a blend mode: each on its own is enough to
-        // hand the page back.
+        // Text, a blend mode, ink authored for a press: each on its own
+        // is enough to hand the page back. A stroke is not — that one it
+        // draws.
         let mut with_stroke = doc.clone();
         with_stroke
             .apply(Command::SetKind {
@@ -1718,7 +2073,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&with_stroke));
+        assert!(GpuRenderer::can_render(&with_stroke));
 
         let mut blended = doc.clone();
         blended
