@@ -2194,6 +2194,10 @@ export function App() {
     // the point is carried into the layer's own space.
     let [px, py] = docPoint(e);
     const next: Guides = { x: [], y: [] };
+    // Which axes caught a line: with the proportions locked, a caught
+    // axis is the one the corner has to land exactly on, and the other
+    // follows from the shape rather than from the cursor.
+    const caught = [false, false];
     if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
       const tol = SNAP_PX / view.zoom;
       const sx = snapAxis([px], drag.snapX, tol);
@@ -2202,6 +2206,8 @@ export function App() {
       py += sy.delta;
       if (sx.guide !== null) next.x.push(sx.guide);
       if (sy.guide !== null) next.y.push(sy.guide);
+      caught[0] = sx.guide !== null;
+      caught[1] = sy.guide !== null;
     }
     setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
     // Resize happens in the layer's own space: bring the cursor there,
@@ -2221,24 +2227,46 @@ export function App() {
     // The corner that stays put, in local units.
     const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
     const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
+    // What the corner started as far from the one holding still: the
+    // sides of the box being dragged, and the diagonal it runs along.
+    const [w0, h0] = [span(west ? x0 : x1, fx), span(north ? y0 : y1, fy)];
+    /** How far along that diagonal the cursor has come.
+     *
+     * A dragged corner keeps the shape's proportions unless shift is
+     * held, which is the way round that suits a picture: letting go of a
+     * photograph a little squashed is a mistake nobody notices until it
+     * is printed, and stretching one on purpose is the rarer ask. The
+     * corner follows the point on the diagonal nearest the cursor rather
+     * than either axis alone, so it tracks the line the shape's own
+     * proportions describe. */
+    const locked = (cx: number, cy: number) =>
+      Math.max(
+        MIN_SIZE / Math.max(w0, h0),
+        // A caught axis is exact — the corner is on that line and the
+        // other side follows from the shape. With neither caught, the
+        // diagonal decides.
+        caught[0]
+          ? span(cx, fx) / w0
+          : caught[1]
+            ? span(cy, fy) / h0
+            : (Math.abs(cx - fx) * w0 + Math.abs(cy - fy) * h0) /
+              (w0 * w0 + h0 * h0),
+      );
+    const free = e.shiftKey;
     if (drag.frame) {
       // The frame becomes the dragged rectangle instead of being scaled
       // into it, and the engine moves what is inside by how each layer is
       // pinned. Its own box always starts at (0, 0), so pulling the west
       // or north edge moves the frame's origin, which the engine takes up
       // in the frame's transform.
-      resizeFrame(
-        drag.id,
-        span(lx, fx),
-        span(ly, fy),
-        Math.min(lx, fx),
-        Math.min(ly, fy),
-        true,
-      );
+      const s = free ? 0 : locked(lx, ly);
+      const [w, h] = free ? [span(lx, fx), span(ly, fy)] : [w0 * s, h0 * s];
+      resizeFrame(drag.id, w, h, west ? fx - w : fx, north ? fy - h : fy, true);
       return;
     }
-    const sx = span(lx, fx) / span(west ? x0 : x1, fx);
-    const sy = span(ly, fy) / span(north ? y0 : y1, fy);
+    const s = free ? 0 : locked(lx, ly);
+    const sx = free ? span(lx, fx) / w0 : s;
+    const sy = free ? span(ly, fy) / h0 : s;
 
     // T' = T0 . scale(sx, sy) about (fx, fy), composed in local space.
     const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
@@ -5885,6 +5913,8 @@ const KEY_HELP: [string, [string, string][]][] = [
     "Moving",
     [
       ["Drag", "Move; the edges snap to the page and to other layers"],
+      ["Drag a corner", "Resize, keeping the shape's proportions"],
+      ["Shift-drag a corner", "Resize free of them"],
       ["Ctrl while dragging", "Ignore the snapping"],
       ["Alt-drag", "Leave the original and carry a copy"],
       ["Arrow keys", "Nudge a pixel; shift for ten"],

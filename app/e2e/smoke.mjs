@@ -3209,13 +3209,16 @@ assert(
   assert((await size()) === "200", `the frame is 200 wide (${await size()})`);
   const inner = await canvasPixel(150, 150);
 
-  // Pull the south-east corner out. The frame gets bigger; the rect in
-  // it does not.
+  // Pull the south-east corner out, shift held so the drag is free of
+  // the frame's proportions. The frame gets bigger; the rect in it does
+  // not.
   const se = await page.locator(".handle.se").boundingBox();
+  await page.keyboard.down("Shift");
   await page.mouse.move(se.x + se.width / 2, se.y + se.height / 2);
   await page.mouse.down();
   await page.mouse.move(...at(500, 380), { steps: 8 });
   await page.mouse.up();
+  await page.keyboard.up("Shift");
   await page.waitForTimeout(350);
   const grown = Number(await size());
   assert(grown > 380, `the frame grew to ${grown}`);
@@ -4735,6 +4738,68 @@ assert(
   await menuClick("Page", "Mirror left to right");
   await page.waitForTimeout(400);
   assert(await inked(150, 150), "twice over is where it started");
+}
+
+// 9j5. A dragged corner keeps the shape's proportions, and shift lets go
+// of them. Letting go of a photograph a little squashed is a mistake
+// nobody notices until it is printed, so that is the way round.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(...at(50, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(250, 150), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(250);
+  const size = async () => [
+    Number(await page.locator('input[aria-label="W size"]').inputValue()),
+    Number(await page.locator('input[aria-label="H size"]').inputValue()),
+  ];
+  const [w0, h0] = await size();
+  assert(
+    Math.abs(w0 - 200) < 3 && Math.abs(h0 - 100) < 3,
+    `a rect twice as wide as it is tall (${w0}x${h0})`,
+  );
+
+  // Pull the corner out and well down: the height has to come along
+  // rather than following the cursor.
+  const pull = async (x, y, shift) => {
+    const se = await page.locator(".handle.se").boundingBox();
+    if (shift) await page.keyboard.down("Shift");
+    await page.mouse.move(se.x + se.width / 2, se.y + se.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(...at(x, y), { steps: 8 });
+    await page.mouse.up();
+    if (shift) await page.keyboard.up("Shift");
+    await page.waitForTimeout(350);
+  };
+  await pull(450, 350, false);
+  const [w1, h1] = await size();
+  assert(
+    Math.abs(w1 / h1 - w0 / h0) < 0.05,
+    `the shape kept its proportions (${w1}x${h1}, was ${w0}x${h0})`,
+  );
+  assert(w1 > w0 + 20, `and it did grow (${w1} from ${w0})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // The same drag with shift held follows the cursor on both axes, so
+  // the shape comes out a different one.
+  await pull(450, 350, true);
+  const [w2, h2] = await size();
+  assert(
+    Math.abs(w2 - 400) < 6 && Math.abs(h2 - 300) < 6,
+    `shift takes the corner to the cursor (${w2}x${h2})`,
+  );
+  assert(
+    Math.abs(w2 / h2 - w0 / h0) > 0.2,
+    "which is a shape of its own, not the one it started as",
+  );
 }
 
 // 10. Recovery: a draft of the document is kept as it changes, and a

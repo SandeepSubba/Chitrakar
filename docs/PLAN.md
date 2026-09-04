@@ -24,7 +24,11 @@ without reading anything else.*
   ellipses and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
-  drag preview, turn with a rotation knob, flip a selection about its
+  drag preview — a dragged corner keeps the shape's proportions and
+  shift lets go of them, which is the way round a picture wants: letting
+  go of a photograph a little squashed is a mistake nobody notices until
+  it is printed; a corner caught on a snap line lands exactly on it and
+  the other side follows from the shape — turn with a rotation knob, flip a selection about its
   own box; adjustment layers (exposure, brightness/contrast, hue/sat,
   white balance, vibrance, levels,
   curves drawn on a graph in the panel — a master curve and one per
@@ -374,7 +378,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~288),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~543 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~548 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
