@@ -118,7 +118,13 @@ export interface Stroke {
   cap: StrokeCap;
   /** How the line turns a corner. Paths only, for the same reason. */
   join: StrokeJoin;
+  /** What sits at the line's first point, and at its last. An open path
+   * only, and where the line stops rather than where each dash does. */
+  start_marker: Marker;
+  end_marker: Marker;
 }
+
+export type Marker = "None" | "Arrow" | "Bar" | "Dot";
 
 export type StrokeCap = "Butt" | "Round" | "Square";
 export type StrokeJoin = "Miter" | "Round" | "Bevel";

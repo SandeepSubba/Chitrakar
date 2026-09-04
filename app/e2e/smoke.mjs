@@ -4612,6 +4612,22 @@ assert(
   assert(!(await ink(...thePoint)), "a bevelled one is cut across");
   assert(await ink(...byTheCorner), "and still fills the turn");
 
+  // A line can point at something. The head is sized from the line, so
+  // it reaches well past where the line itself stops.
+  // The tip is on the line's last point and the head reaches back along
+  // the line from there, three widths long and one and a half either
+  // side — so it is wider than the line well before the tip.
+  await pick("ends", "Butt");
+  assert(!(await ink(315, 240)), "the line is only as wide as it is");
+  await page.selectOption('select[aria-label="Line end"]', "Arrow");
+  await page.waitForTimeout(300);
+  assert(await ink(315, 240), "a head is wider than the line it is on");
+  assert(await ink(350, 220), "and wider still further from its tip");
+  assert(!(await ink(300, 260)), "narrowing to the tip rather than filling a box");
+  await page.selectOption('select[aria-label="Line end"]', "None");
+  await page.waitForTimeout(300);
+  assert(!(await ink(315, 240)), "and it comes off again");
+
   // A rect's stroke is a band inside a closed outline: it never stops
   // and its corners are its own, so neither question is asked of it.
   await page.click('button[aria-label="Rect"]');

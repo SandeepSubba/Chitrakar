@@ -610,7 +610,7 @@ fn paint_attrs(
                     r#" stroke="{}" stroke-width="{}"{}"#,
                     color_hex(doc, stroke.color),
                     stroke.width,
-                    stroke_attrs(stroke, ends)
+                    stroke_attrs(doc, stroke, ends, id, defs)
                 );
             }
             return s;
@@ -632,7 +632,7 @@ fn paint_attrs(
             r#" stroke="{}" stroke-width="{}"{}"#,
             color_hex(doc, stroke.color),
             stroke.width,
-            stroke_attrs(stroke, ends)
+            stroke_attrs(doc, stroke, ends, id, defs)
         );
     }
     s
@@ -645,7 +645,13 @@ fn paint_attrs(
 /// SVG takes butt ends and mitred corners as read and so writes nothing
 /// for them; the rest are said out loud. The miter limit is four in both,
 /// so that too goes without saying.
-fn stroke_attrs(stroke: &chitrakar_doc::Stroke, ends: bool) -> String {
+fn stroke_attrs(
+    doc: &Document,
+    stroke: &chitrakar_doc::Stroke,
+    ends: bool,
+    id: NodeId,
+    defs: &mut String,
+) -> String {
     let mut s = String::new();
     if !stroke.dash.is_empty() && stroke.dash.iter().any(|d| *d > 0.0) {
         let lengths: Vec<String> = stroke.dash.iter().map(|d| d.to_string()).collect();
@@ -664,7 +670,74 @@ fn stroke_attrs(stroke: &chitrakar_doc::Stroke, ends: bool) -> String {
         chitrakar_doc::StrokeJoin::Round => s.push_str(r#" stroke-linejoin="round""#),
         chitrakar_doc::StrokeJoin::Bevel => s.push_str(r#" stroke-linejoin="bevel""#),
     }
+    // What sits at either end travels as a real marker, so a reader can
+    // still take it off or restyle it — a picture of an arrowhead would
+    // be a picture. It is written in units of the stroke's width, which
+    // is what sizes one from the line here too.
+    for (marker, at_start) in [(stroke.start_marker, true), (stroke.end_marker, false)] {
+        let Some(shape) = marker_path(marker, at_start) else {
+            continue;
+        };
+        let name = format!(
+            "chitrakar-{}-{}",
+            if at_start { "start" } else { "end" },
+            id.0
+        );
+        let (l, r) = (chitrakar_doc::MARKER_LENGTH, chitrakar_doc::MARKER_REACH);
+        let _ = write!(
+            defs,
+            concat!(
+                r#"    <marker id="{name}" markerUnits="strokeWidth" markerWidth="{w}""#,
+                r#" markerHeight="{h}" refX="{rx}" refY="{ry}" orient="auto">"#,
+                "\n      <path d=\"{shape}\" fill=\"{fill}\"/>\n    </marker>\n"
+            ),
+            name = name,
+            w = l,
+            h = r * 2.0,
+            // The tip is the point the marker is placed by: at the
+            // line's own end for a head, at the middle for a bar or a
+            // dot, which is why each shape names its own.
+            rx = if at_start { 0.0 } else { l },
+            ry = r,
+            shape = shape,
+            fill = color_hex(doc, stroke.color),
+        );
+        let _ = write!(
+            s,
+            r##" marker-{}="url(#{name})""##,
+            if at_start { "start" } else { "end" }
+        );
+    }
     s
+}
+
+/// One marker's outline in a box `MARKER_LENGTH` long and twice
+/// `MARKER_REACH` tall, in units of the stroke's width.
+///
+/// SVG turns a marker to the direction the line travels, which points
+/// away from the line at its last point and into it at its first — so
+/// the two ends are drawn as mirror images rather than being placed
+/// differently.
+fn marker_path(marker: chitrakar_doc::Marker, at_start: bool) -> Option<String> {
+    let (l, r) = (chitrakar_doc::MARKER_LENGTH, chitrakar_doc::MARKER_REACH);
+    // Where the tip is, and where the body is measured to.
+    let (tip, base) = if at_start { (0.0, l) } else { (l, 0.0) };
+    Some(match marker {
+        chitrakar_doc::Marker::None => return None,
+        chitrakar_doc::Marker::Arrow => format!("M{tip},{r} L{base},0 L{base},{h} z", h = r * 2.0),
+        // Half a width either side of the point it is placed on.
+        chitrakar_doc::Marker::Bar => {
+            let (a, b) = (tip - 0.5, tip + 0.5);
+            format!("M{a},0 L{b},0 L{b},{h} L{a},{h} z", h = r * 2.0)
+        }
+        // A disc, as four quarter arcs about the point.
+        chitrakar_doc::Marker::Dot => format!(
+            "M{x},{y} m-{r},0 a{r},{r} 0 1,0 {d},0 a{r},{r} 0 1,0 -{d},0 z",
+            x = tip,
+            y = r,
+            d = r * 2.0
+        ),
+    })
 }
 
 fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut String) {
@@ -893,6 +966,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             }))),
         })
         .unwrap();
@@ -928,6 +1003,8 @@ mod tests {
                 dash,
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             }),
             gradient: None,
         };
@@ -976,6 +1053,8 @@ mod tests {
                 dash: Vec::new(),
                 cap,
                 join,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             }),
             gradient: None,
         };
@@ -1037,6 +1116,8 @@ mod tests {
                     dash: Vec::new(),
                     cap: chitrakar_doc::StrokeCap::Round,
                     join: chitrakar_doc::StrokeJoin::Round,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
                 }),
                 gradient: None,
             }),
@@ -1756,6 +1837,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         place(&mut doc, ring, [60.0, 10.0]);
@@ -1878,6 +1961,10 @@ mod tests {
                 dash: Vec::new(),
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
+                // A head at one end and nothing at the other, which is
+                // what most arrows are.
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::Arrow,
             });
         }
         place(&mut doc, elbow, [98.0, 6.0]);
@@ -1939,8 +2026,12 @@ mod tests {
             }
         }
         let mean = total as f64 / (ours.pixels.len() * 3) as f64;
+        // Every diagonal edge on the page costs a little of this, since
+        // the two rasterizers antialias one their own way — so the
+        // number goes up as the page gains elements, and it is the spot
+        // checks below, not this, that catch a shape in the wrong place.
         assert!(
-            mean < 3.0,
+            mean < 3.5,
             "mean channel difference {mean:.2}; worst pixel {},{} off by {}",
             worst.1 % 120,
             worst.1 / 120,
@@ -1995,6 +2086,19 @@ mod tests {
             at(114, 3),
             &[255, 255, 255],
             "its corner is cut across, not carried out to a point"
+        );
+        // The head at the line's far end: inside it, and outside it but
+        // within the box it lies in, which is what says a head that had
+        // travelled the wrong size or the wrong way round would fail.
+        assert!(
+            at(108, 12)[2] > 200 && at(108, 12)[0] < 60,
+            "the head is drawn where the line points {:?}",
+            at(108, 12)
+        );
+        assert_eq!(
+            at(104, 20),
+            &[255, 255, 255],
+            "and narrows to its tip rather than filling its box"
         );
 
         // Text is the one thing a mean would forgive being a line off:

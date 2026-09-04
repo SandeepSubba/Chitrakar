@@ -742,7 +742,42 @@ pub struct Stroke {
     /// How the stroke turns a corner. Paths only, for the same reason.
     #[serde(default)]
     pub join: StrokeJoin,
+    /// What sits at the line's first point, and at its last. A line has
+    /// two ends and they are asked separately, since an arrow at one end
+    /// and nothing at the other is what most arrows are.
+    ///
+    /// An open path only: a closed ring, a rect and an ellipse have no
+    /// ends to put anything on. These go where the *line* stops, not
+    /// where each dash does, so a dashed arrow has one head and not a
+    /// dozen.
+    #[serde(default)]
+    pub start_marker: Marker,
+    #[serde(default)]
+    pub end_marker: Marker,
 }
+
+/// What a line carries at an end.
+///
+/// Sized from the stroke's own width rather than given a size of its
+/// own, which is what SVG's `markerUnits="strokeWidth"` means and what
+/// keeps a head in proportion to the line it is on when the line is made
+/// thicker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Marker {
+    #[default]
+    None,
+    /// A head pointing away from the line, its tip on the last point.
+    Arrow,
+    /// A tick across the line, as a dimension line is finished.
+    Bar,
+    /// A disc centred on the last point.
+    Dot,
+}
+
+/// How far an arrowhead reaches back from its tip, and how far a head or
+/// a bar reaches to either side, both as multiples of the stroke's width.
+pub const MARKER_LENGTH: f32 = 3.0;
+pub const MARKER_REACH: f32 = 1.5;
 
 /// How a stroke ends where its line stops.
 ///

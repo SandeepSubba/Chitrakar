@@ -734,6 +734,18 @@ impl<'a> Page<'a> {
                                     num(chitrakar_doc::MITER_LIMIT),
                                     num(stroke.width)
                                 );
+                                // PDF has no markers, so what a line
+                                // carries at its ends is drawn: filled
+                                // outlines in the line's own colour,
+                                // which keeps them vector rather than a
+                                // picture of themselves.
+                                for piece in marker_outlines(shape, stroke) {
+                                    let _ = writeln!(
+                                        self.content,
+                                        "{}\n{piece}f",
+                                        self.color_op(stroke.color, false)?
+                                    );
+                                }
                             }
                         }
                     }
@@ -1045,6 +1057,69 @@ impl<'a> Page<'a> {
 
 /// A number as PDF wants it: no exponent, no more digits than the page
 /// can show.
+/// The outlines of what a line carries at its ends, as path operators in
+/// the shape's own space, ready to be filled.
+///
+/// The engine states these as pieces of the stroke's own region, so this
+/// asks it rather than working them out again: a head drawn on a page a
+/// hair from where the engine draws it is exactly the kind of drift a
+/// second copy of the arithmetic invites.
+fn marker_outlines(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec<String> {
+    if stroke.start_marker == chitrakar_doc::Marker::None
+        && stroke.end_marker == chitrakar_doc::Marker::None
+    {
+        return Vec::new();
+    }
+    let bare = chitrakar_doc::Stroke {
+        start_marker: chitrakar_doc::Marker::None,
+        end_marker: chitrakar_doc::Marker::None,
+        ..stroke.clone()
+    };
+    // Whatever the markers add to the line's own region is the markers.
+    let plain = chitrakar_render::stroke_pieces(shape, &bare).len();
+    chitrakar_render::stroke_pieces(shape, stroke)
+        .into_iter()
+        .skip(plain)
+        .filter_map(|piece| match piece {
+            chitrakar_render::StrokePiece::Corner(pts, n) => {
+                let mut out = format!("{} {} m\n", num(pts[0][0]), num(pts[0][1]));
+                for p in &pts[1..n] {
+                    let _ = writeln!(out, "{} {} l", num(p[0]), num(p[1]));
+                }
+                out.push_str("h\n");
+                Some(out)
+            }
+            // A disc as four bezier quarters, the same way an ellipse is
+            // written out on a page.
+            chitrakar_render::StrokePiece::Disc { at, r } => {
+                let k = r * 0.5522847;
+                let (x, y) = (at[0], at[1]);
+                let mut out = format!("{} {} m\n", num(x + r), num(y));
+                for [c1x, c1y, c2x, c2y, ex, ey] in [
+                    [x + r, y + k, x + k, y + r, x, y + r],
+                    [x - k, y + r, x - r, y + k, x - r, y],
+                    [x - r, y - k, x - k, y - r, x, y - r],
+                    [x + k, y - r, x + r, y - k, x + r, y],
+                ] {
+                    let _ = writeln!(
+                        out,
+                        "{} {} {} {} {} {} c",
+                        num(c1x),
+                        num(c1y),
+                        num(c2x),
+                        num(c2y),
+                        num(ex),
+                        num(ey)
+                    );
+                }
+                out.push_str("h\n");
+                Some(out)
+            }
+            chitrakar_render::StrokePiece::Band { .. } => None,
+        })
+        .collect()
+}
+
 fn num(v: f32) -> String {
     if v == 0.0 {
         return "0".to_string(); // and not "-0"
@@ -1441,6 +1516,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         add(&mut doc, ring, [60.0, 10.0]);
@@ -1501,6 +1578,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::Arrow,
             });
         }
         add(&mut doc, elbow, [98.0, 6.0]);
@@ -1866,6 +1945,16 @@ mod tests {
             at(114, 3),
             &[255, 255, 255],
             "its corner is cut across, not carried out to a point"
+        );
+        assert!(
+            at(108, 12)[2] > 200 && at(108, 12)[0] < 60,
+            "the head is drawn where the line points {:?}",
+            at(108, 12)
+        );
+        assert_eq!(
+            at(104, 20),
+            &[255, 255, 255],
+            "and narrows to its tip rather than filling its box"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1076,6 +1076,8 @@ export function App() {
                         dash: [],
                         cap: "Round",
                         join: "Round",
+                        start_marker: "None",
+                        end_marker: "None",
                       },
                   gradient: null,
                 },
@@ -2091,6 +2093,8 @@ export function App() {
                   dash: [],
                   cap: "Round",
                   join: "Round",
+                  start_marker: "None",
+                  end_marker: "None",
                 },
                 gradient: null,
               },
@@ -7599,6 +7603,8 @@ function KindProps({
                         dash: [],
                         cap: "Round",
                         join: "Round",
+                        start_marker: "None",
+                        end_marker: "None",
                       }
                     : null,
                 }),
@@ -7660,6 +7666,37 @@ function KindProps({
             </select>
           </label>
         )}
+        {/* What the line carries at its ends. An open path only: a ring,
+            a rect and an ellipse have no ends to put anything on. */}
+        {v.stroke &&
+          "Path" in v.shape &&
+          !v.shape.Path.closed &&
+          (
+            [
+              ["Start", "start_marker"],
+              ["End", "end_marker"],
+            ] as const
+          ).map(([label, key]) => (
+            <label className="row" key={key}>
+              {label}
+              <select
+                value={v.stroke![key] ?? "None"}
+                onChange={(e) =>
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, [key]: e.target.value } }),
+                    false,
+                  )
+                }
+                aria-label={`Line ${label.toLowerCase()}`}
+              >
+                {["None", "Arrow", "Bar", "Dot"].map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
         {/* Where a line stops and how it turns a corner. A rect's and an
             ellipse's stroke is a band lying inside a closed outline: it
             never stops, and its corners are the shape's own — so neither

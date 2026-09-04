@@ -108,6 +108,19 @@ without reading anything else.*
   usual patterns in the panel and the same lengths carried into SVG and
   PDF. A dashed outline is still picked along the whole of it, so
   clicking a gap catches the line.
+  A line can point at something: an arrowhead, a tick across the end or
+  a dot, asked separately of its two ends, on an open path — a ring, a
+  rect and an ellipse have no ends to put anything on. What one carries
+  is sized from the line's own width rather than given a size of its
+  own, so making the line thicker keeps the head in proportion, and it
+  goes where the line stops rather than where each dash does, so a
+  dashed arrow has one head and not a dozen. They are stated as pieces
+  of the stroke's own region, which is why they are painted in the
+  line's colour, picked with the line, and drawn by the GPU without it
+  being told about markers at all. SVG gets real `<marker>` elements in
+  units of the stroke width, so a reader can still take one off; PDF has
+  no markers and gets the outlines filled, which the exporter asks the
+  engine for rather than working out a second time.
   A line says where it stops and how it turns: flat on the last point,
   rounded or squared off past it, and a corner carried out to where the
   two outer edges cross (up to four half-widths, past which it is cut
@@ -382,9 +395,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~288),
+- **Verify before committing:** `cargo test --workspace` (~289),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~552 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~557 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

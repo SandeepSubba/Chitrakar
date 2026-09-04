@@ -2032,6 +2032,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         Box::new(node)
@@ -2186,6 +2188,10 @@ mod tests {
             {
                 s.cap = cap;
                 s.join = join;
+                // A head at the far end of each: what a line carries is
+                // stated as pieces of its own region, so the GPU draws
+                // one without being told about markers at all.
+                s.start_marker = chitrakar_doc::Marker::Arrow;
             }
             add(
                 &mut doc,
@@ -2377,6 +2383,8 @@ mod tests {
                         dash: Vec::new(),
                         cap: Default::default(),
                         join: Default::default(),
+                        start_marker: Default::default(),
+                        end_marker: Default::default(),
                     }),
                     gradient: None,
                 }),

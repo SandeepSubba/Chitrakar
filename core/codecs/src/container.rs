@@ -360,6 +360,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
             *gradient = Some(chitrakar_doc::Gradient::Linear {
                 from: [0.0, 0.0],

@@ -21,8 +21,8 @@ pub mod tiles;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Mask, MaskKind, NodeId,
-    NodeKind, Transform, VectorShape,
+    Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Marker, Mask, MaskKind,
+    NodeId, NodeKind, Transform, VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -2509,12 +2509,92 @@ pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec
                 &mut out,
             );
         }
+        marker_pieces(shape, stroke, &mut out);
         return out;
     }
     for ring in stroke_skeleton(shape, stroke.width, &stroke.widths) {
         ring_pieces(&ring, stroke.cap, stroke.join, &mut out);
     }
+    marker_pieces(shape, stroke, &mut out);
     out
+}
+
+/// What a line carries at its ends, if anything and if it has ends.
+///
+/// Added to whatever the stroke itself covers, so a head is painted in
+/// the line's own colour and picked with the line — and so the GPU draws
+/// it without being told about markers at all.
+fn marker_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke, out: &mut Vec<StrokePiece>) {
+    if stroke.start_marker == Marker::None && stroke.end_marker == Marker::None {
+        return;
+    }
+    // A closed ring, a rect and an ellipse have no ends to put anything
+    // on, and a line of one point has no direction to point along.
+    let VectorShape::Path {
+        points,
+        closed: false,
+        ..
+    } = shape
+    else {
+        return;
+    };
+    if points.len() < 2 {
+        return;
+    }
+    let n = points.len();
+    let (length, reach) = (
+        stroke.width * chitrakar_doc::MARKER_LENGTH,
+        stroke.width * chitrakar_doc::MARKER_REACH,
+    );
+    // At each end, the way the line is travelling there: into the last
+    // point, and out of the first.
+    for (marker, at, along) in [
+        (
+            stroke.start_marker,
+            points[0],
+            direction(points[1], points[0]),
+        ),
+        (
+            stroke.end_marker,
+            points[n - 1],
+            direction(points[n - 2], points[n - 1]),
+        ),
+    ] {
+        // `d` points away from the line at either end — out of the first
+        // point, on past the last — so a head's own body is measured
+        // back along it, into the line.
+        let Some(d) = along else { continue };
+        let (back, nrm) = ([-d[0], -d[1]], [-d[1], d[0]]);
+        let side = |into: f32, across: f32| {
+            [
+                at[0] + back[0] * into + nrm[0] * across,
+                at[1] + back[1] * into + nrm[1] * across,
+            ]
+        };
+        match marker {
+            Marker::None => {}
+            // The tip is on the last point and the body reaches back
+            // along the line, so an arrow points where the line goes.
+            Marker::Arrow => out.push(StrokePiece::Corner(
+                [at, side(length, reach), side(length, -reach), at],
+                3,
+            )),
+            // A tick across the line, the line's own width thick.
+            Marker::Bar => {
+                let half = stroke.width / 2.0;
+                out.push(StrokePiece::Corner(
+                    [
+                        side(-half, reach),
+                        side(half, reach),
+                        side(half, -reach),
+                        side(-half, -reach),
+                    ],
+                    4,
+                ));
+            }
+            Marker::Dot => out.push(StrokePiece::Disc { at, r: reach }),
+        }
+    }
 }
 
 /// The pieces of one ring: a band per segment, a join at every corner,
@@ -2720,11 +2800,19 @@ pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<S
 /// (a square cap's corner a little further, but not past a whole one),
 /// and a mitred corner as far as the limit allows.
 pub fn stroke_pad(stroke: &chitrakar_doc::Stroke) -> f32 {
-    if stroke.join == chitrakar_doc::StrokeJoin::Miter {
+    let corner = if stroke.join == chitrakar_doc::StrokeJoin::Miter {
         stroke.width * chitrakar_doc::MITER_LIMIT / 2.0
     } else {
         stroke.width
-    }
+    };
+    // A head reaches past the last point rather than around it, and
+    // further than any corner does.
+    let marked = stroke.start_marker != Marker::None || stroke.end_marker != Marker::None;
+    corner.max(if marked {
+        stroke.width * chitrakar_doc::MARKER_LENGTH.max(chitrakar_doc::MARKER_REACH)
+    } else {
+        0.0
+    })
 }
 
 /// A stroke worked out once for a paint, rather than once per sample:
@@ -5202,6 +5290,8 @@ mod tests {
                 dash,
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             }),
             gradient: None,
         };
@@ -5270,6 +5360,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: StrokeCap::Round,
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -5317,6 +5409,124 @@ mod tests {
         assert!(the_corner(&square), "a square end has a corner");
     }
 
+    /// A line can point at something. What sits at an end is sized from
+    /// the line's own width, so a thicker line carries a bigger head
+    /// rather than the same head looking lost on it.
+    #[test]
+    fn a_line_carries_what_is_put_on_its_ends() {
+        use chitrakar_doc::Marker;
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let root = doc.root();
+        // Level, six wide, from x = 20 to x = 80. A head is three widths
+        // long and one and a half wide either side: eighteen back from
+        // the tip, nine across.
+        let mut node = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[20.0, 30.0], [80.0, 30.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: StrokeCap::Butt,
+                join: Default::default(),
+                start_marker: Marker::None,
+                end_marker: Marker::None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let ends = |doc: &mut Document, start, end| {
+            let mut kind = doc.node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                if let Some(s) = stroke.take() {
+                    *stroke = Some(chitrakar_doc::Stroke {
+                        start_marker: start,
+                        end_marker: end,
+                        ..s
+                    });
+                }
+            }
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            render(doc).unwrap()
+        };
+        // Wide of the line, back from its last point: inside a head and
+        // outside anything else. And past the last point, where only the
+        // tip of a head or the far side of a dot reaches.
+        let wide = |s: &Surface| s.get(65, 35).a > 0.5;
+        let past = |s: &Surface| s.get(85, 30).a > 0.5;
+        let across_the_start = |s: &Surface| s.get(35, 35).a > 0.5;
+
+        let bare = ends(&mut doc, Marker::None, Marker::None);
+        assert!(bare.get(50, 30).a > 0.5, "the line itself is drawn");
+        assert!(!wide(&bare), "and is only as wide as it is");
+        assert!(!past(&bare), "and stops where it stops");
+
+        let arrow = ends(&mut doc, Marker::None, Marker::Arrow);
+        assert!(wide(&arrow), "a head is wider than the line it is on");
+        assert!(
+            arrow.get(50, 35).a < 0.5,
+            "and narrows to nothing away from its tip"
+        );
+        assert!(!across_the_start(&arrow), "the other end is left alone");
+
+        let both = ends(&mut doc, Marker::Arrow, Marker::Arrow);
+        assert!(across_the_start(&both), "the two ends are asked separately");
+
+        let bar = ends(&mut doc, Marker::None, Marker::Bar);
+        assert!(!wide(&bar), "a bar is a tick, not a wedge");
+        assert!(bar.get(80, 36).a > 0.5, "it crosses the line at the end");
+        assert!(!past(&bar), "and does not reach past it");
+
+        let dot = ends(&mut doc, Marker::None, Marker::Dot);
+        assert!(
+            past(&dot),
+            "a dot is centred on the point, so it reaches past"
+        );
+        assert!(dot.get(80, 37).a > 0.5, "and out to either side of it");
+
+        // A head is measured from the line: twice as thick a line carries
+        // one that reaches twice as far.
+        let mut kind = doc.node(id).unwrap().kind.clone();
+        if let NodeKind::Vector { stroke, .. } = &mut kind {
+            if let Some(s) = stroke.take() {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    width: 12.0,
+                    end_marker: Marker::Arrow,
+                    ..s
+                });
+            }
+        }
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+        let thick = render(&doc).unwrap();
+        assert!(
+            thick.get(55, 41).a > 0.5,
+            "the head grew with the line under it"
+        );
+    }
+
     /// Where a line turns is the other question: carried out to the
     /// point the two edges cross, rounded off, or cut across.
     #[test]
@@ -5345,6 +5555,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: StrokeCap::Butt,
                 join: StrokeJoin::Round,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -5444,6 +5656,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -5478,6 +5692,8 @@ mod tests {
                         dash,
                         cap: Default::default(),
                         join: Default::default(),
+                        start_marker: Default::default(),
+                        end_marker: Default::default(),
                     }),
                     gradient: None,
                 }),
@@ -5529,6 +5745,8 @@ mod tests {
                 dash: vec![8.0, 8.0],
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8078,6 +8296,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8587,6 +8807,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -9536,6 +9758,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -9602,6 +9826,8 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         doc.apply(Command::AddNode {

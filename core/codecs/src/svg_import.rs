@@ -327,6 +327,11 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
                         chitrakar_doc::StrokeJoin::Miter
                     }
                 },
+                // A file's own markers are shapes of its choosing, drawn
+                // from a definition this engine has no room for; they
+                // come in as the paths they are, alongside the line.
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             })
         });
     }

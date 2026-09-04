@@ -6000,6 +6000,8 @@ mod save_probe {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
             });
         }
         session
