@@ -28,7 +28,13 @@ without reading anything else.*
   shift lets go of them, which is the way round a picture wants: letting
   go of a photograph a little squashed is a mistake nobody notices until
   it is printed; a corner caught on a snap line lands exactly on it and
-  the other side follows from the shape — turn with a rotation knob, flip a selection about its
+  the other side follows from the shape. Shift while a shape is being
+  drawn squares off the box being dragged — a circle rather than an
+  ellipse, a square page rather than a wide one — and shift-clicking
+  with the pen holds the segment to an eighth of a turn. Shift means the
+  other one either way round: a shape being drawn has no proportions
+  yet, so shift is what asks for the one worth naming; a shape being
+  resized has them, so shift is what lets go — turn with a rotation knob, flip a selection about its
   own box; adjustment layers (exposure, brightness/contrast, hue/sat,
   white balance, vibrance, levels,
   curves drawn on a graph in the panel — a master curve and one per
@@ -378,7 +384,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~288),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~548 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~552 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
