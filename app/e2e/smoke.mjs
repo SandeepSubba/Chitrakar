@@ -620,6 +620,94 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   );
 }
 
+// 4d. The three that decide what a picture is made of: black and white
+// mixed by its weights, a gradient map reading a tone off a ramp, and a
+// negative. Each is added, checked against the picture, and undone.
+{
+  const shown = async () => await canvasPixel(500, 325);
+  const start = await shown();
+  const grey = (px) => Math.abs(px[0] - px[1]) < 3 && Math.abs(px[1] - px[2]) < 3;
+  assert(!grey(start), "the picture has colour in it to take away");
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "black-and-white");
+  await page.waitForTimeout(250);
+  assert(grey(await shown()), "black and white takes the colour out");
+  await page.locator(".panel ul li", { hasText: "Black & white" }).click();
+  await page.waitForTimeout(150);
+  const byLuma = (await shown())[0];
+  // The weights are a recipe: leaning on one channel changes which
+  // colours come out light, so the same pixel comes out a different grey.
+  await setSlider("Red weight", 2);
+  await page.waitForTimeout(200);
+  const leaning = await shown();
+  assert(grey(leaning), "it is still grey");
+  assert(
+    Math.abs(leaning[0] - byLuma) > 4,
+    `and a different one (${leaning[0]} against ${byLuma})`,
+  );
+  await page.click("text=Plain luminance");
+  await page.waitForTimeout(200);
+  assert(
+    Math.abs((await shown())[0] - byLuma) < 2,
+    "and the button puts the plain recipe back",
+  );
+  for (let i = 0; i < 3; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(120);
+  }
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Black & white" }).count()) === 0 &&
+      (await shown()).join() === start.join(),
+    "and undo takes the layer and every weight with it",
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "gradient-map");
+  await page.waitForTimeout(250);
+  assert(grey(await shown()), "a black-to-white ramp is a monochrome map");
+  await page.locator(".panel ul li", { hasText: "Gradient map" }).click();
+  await page.waitForTimeout(150);
+  // Colour the shadows end: every tone now reads off a ramp that starts
+  // red, so the picture takes the ramp's colour rather than its own.
+  await page.locator('input[aria-label="Map stop 1"]').evaluate((el) => {
+    const set = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    ).set;
+    set.call(el, "#ff0000");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  const mapped = await shown();
+  assert(mapped[0] > mapped[2] + 10, `the ramp's colour is what shows (${mapped})`);
+  for (let i = 0; i < 2; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(120);
+  }
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Gradient map" }).count()) === 0 &&
+      (await shown()).join() === start.join(),
+    "and undo takes the map back",
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "invert");
+  await page.waitForTimeout(250);
+  const negative = await shown();
+  // A negative on the values a device shows: the two sides of each
+  // channel add up to the whole of it.
+  assert(
+    [0, 1, 2].every((c) => Math.abs(negative[c] + start[c] - 255) < 4),
+    `each channel is turned inside out (${negative} against ${start})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Invert" }).count()) === 0 &&
+      (await shown()).join() === start.join(),
+    "and undo puts the picture back",
+  );
+}
+
 // 5. Undo three times: stops edit, adjustment layer, ellipse all revert.
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(100);

@@ -81,7 +81,18 @@ export type Adjustment =
       };
     }
   | { WhiteBalance: { temperature: number; tint: number } }
-  | { Vibrance: { amount: number } };
+  | { Vibrance: { amount: number } }
+  /** Monochrome, mixed by hand: the weights are normalized by their own
+   * total, so moving one changes the mix and not the brightness. */
+  | { BlackAndWhite: { red: number; green: number; blue: number } }
+  /** Every tone replaced by the colour at its own place along a ramp. */
+  | { GradientMap: { stops: GradientStop[] } }
+  /** Turned inside out, on the values a device shows. */
+  | { Invert: { amount: number } };
+
+/** How much each channel contributes to brightness: the Rec. 709
+ * weights, and the default recipe for a black-and-white conversion. */
+export const LUMA: [number, number, number] = [0.2126, 0.7152, 0.0722];
 
 export interface Transform {
   a: number;

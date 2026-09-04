@@ -33,7 +33,17 @@ without reading anything else.*
   curves and levels graphs are drawn over a histogram of what the layer
   actually sees — everything composited under it, not the finished page
   — so a black point can be set where the picture stops rather than by
-  eye) and
+  eye;
+  black and white, which is a recipe rather than a switch — the weights
+  decide which colours come out light, so a high red weight darkens a
+  blue sky the way a red filter on the lens did, and they are normalized
+  by their own total so a slider changes the mix and not the brightness;
+  gradient map, where every tone is replaced by the colour at its own
+  place along a ramp — duotones, split tones and the whole family of
+  graded looks — read at the brightness a device shows, which is what
+  lands the middle of the ramp on the tones that look middling; and
+  invert, taken on the shown values too, since light inverted is not
+  what anyone means by a negative) and
   filter layers (gaussian blur, sharpen) — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
@@ -337,9 +347,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~281),
+- **Verify before committing:** `cargo test --workspace` (~284),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~513 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~527 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

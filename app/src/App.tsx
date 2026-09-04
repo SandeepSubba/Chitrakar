@@ -10,6 +10,7 @@ import {
   EffectKind,
   GradientStop,
   LayerInfo,
+  LUMA,
   Mask,
   NodeId,
   NodeKind,
@@ -2311,6 +2312,31 @@ export function App() {
     vibrance: {
       name: "Vibrance",
       kind: { Adjustment: { Vibrance: { amount: 0 } } },
+    },
+    "black-and-white": {
+      name: "Black & white",
+      kind: {
+        Adjustment: {
+          BlackAndWhite: { red: LUMA[0], green: LUMA[1], blue: LUMA[2] },
+        },
+      },
+    },
+    "gradient-map": {
+      name: "Gradient map",
+      kind: {
+        Adjustment: {
+          GradientMap: {
+            stops: [
+              { offset: 0, color: hexColor("#000000") },
+              { offset: 1, color: hexColor("#ffffff") },
+            ],
+          },
+        },
+      },
+    },
+    invert: {
+      name: "Invert",
+      kind: { Adjustment: { Invert: { amount: 1 } } },
     },
     levels: {
       name: "Levels",
@@ -6353,6 +6379,113 @@ type CurveChannel = (typeof CURVE_CHANNELS)[number][0];
  * drawn on, and the graph for it. The master curve runs first and each
  * channel's own after it, so the other channels are drawn faintly behind
  * the one in hand and the grade reads as a whole. */
+/** The stops of a colour ramp: a strip of the ramp itself, so the list
+ * reads as a whole, and a row for each stop. Shared by a shape's
+ * gradient fill and by a gradient map, so a ramp is edited the same way
+ * wherever one turns up. */
+function StopList({
+  stops,
+  name,
+  authored,
+  onChange,
+  onGestureEnd,
+}: {
+  stops: GradientStop[];
+  /** What one row is called, in the labels a reader is read them by. */
+  name: string;
+  authored: (hex: string) => AuthoredColor;
+  onChange: (stops: GradientStop[], gesture: boolean) => void;
+  onGestureEnd: () => void;
+}) {
+  const set = (i: number, changes: Partial<GradientStop>) =>
+    onChange(
+      stops.map((s, j) => (j === i ? { ...s, ...changes } : s)),
+      true,
+    );
+  /** Insert a stop in the widest gap, coloured by what the ramp already
+   * shows there, so adding one changes nothing until it is moved. */
+  const add = () => {
+    let at = 0;
+    for (let i = 1; i < stops.length; i++) {
+      if (
+        stops[i].offset - stops[i - 1].offset >
+        stops[at + 1].offset - stops[at].offset
+      )
+        at = i - 1;
+    }
+    const [a, b] = [stops[at], stops[at + 1]];
+    onChange(
+      [
+        ...stops.slice(0, at + 1),
+        {
+          offset: (a.offset + b.offset) / 2,
+          color: mixAuthored(a.color, b.color, 0.5),
+        },
+        ...stops.slice(at + 1),
+      ],
+      false,
+    );
+  };
+  // CSS mixes a gradient on the values a device shows, which is where
+  // the engine mixes one too, so the strip is the ramp.
+  const rampCss = `linear-gradient(90deg, ${stops
+    .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
+    .join(", ")})`;
+  return (
+    <>
+      <div
+        className="ramp-preview"
+        style={{ background: rampCss }}
+        aria-hidden="true"
+      />
+      {stops.map((stop, i) => (
+        <div className="stop-row" key={i}>
+          <input
+            type="color"
+            value={colorToHex(stop.color)}
+            onChange={(e) => set(i, { color: authored(e.target.value) })}
+            onBlur={onGestureEnd}
+            aria-label={`${name} ${i + 1}`}
+          />
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={stop.offset}
+            onChange={(e) => set(i, { offset: Number(e.target.value) })}
+            onPointerUp={onGestureEnd}
+            onKeyUp={onGestureEnd}
+            onBlur={onGestureEnd}
+            aria-label={`${name} ${i + 1} position`}
+          />
+          <button
+            className="stop-remove"
+            disabled={stops.length <= 2}
+            onClick={() =>
+              onChange(
+                stops.filter((_, j) => j !== i),
+                false,
+              )
+            }
+            title={
+              stops.length <= 2
+                ? "A ramp needs at least two stops"
+                : `Remove stop ${i + 1}`
+            }
+            aria-label={`Remove ${name.toLowerCase()} ${i + 1}`}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        </div>
+      ))}
+      <button className="mask-button" onClick={add}>
+        Add stop
+      </button>
+    </>
+  );
+}
+
 function CurvesPanel({
   curves,
   bins,
@@ -6563,6 +6696,63 @@ function KindProps({
     if ("Vibrance" in adj) {
       return slider("Vibrance", adj.Vibrance.amount, -1, 1, 0.01, (v) =>
         wrap({ Vibrance: { amount: v } }),
+      );
+    }
+    if ("BlackAndWhite" in adj) {
+      const p = adj.BlackAndWhite;
+      // The weights are normalized by the engine, so what these change
+      // is which colours come out light and which dark — not how bright
+      // the picture is. Negative is allowed: it is what darkens one
+      // colour to make another stand out.
+      return (
+        <>
+          {(["red", "green", "blue"] as const).map((k) =>
+            slider(
+              `${k[0].toUpperCase()}${k.slice(1)} weight`,
+              p[k],
+              -0.5,
+              2,
+              0.01,
+              (v) => wrap({ BlackAndWhite: { ...p, [k]: v } }),
+            ),
+          )}
+          <button
+            className="mask-button"
+            onClick={() =>
+              onEdit(
+                wrap({
+                  BlackAndWhite: {
+                    red: LUMA[0],
+                    green: LUMA[1],
+                    blue: LUMA[2],
+                  },
+                }),
+                false,
+              )
+            }
+          >
+            Plain luminance
+          </button>
+        </>
+      );
+    }
+    if ("GradientMap" in adj) {
+      const stops = adj.GradientMap.stops;
+      return (
+        <StopList
+          stops={stops}
+          name="Map stop"
+          authored={(hex) => (cmyk ? hexToCmykColor(hex) : hexColor(hex))}
+          onChange={(next, gesture) =>
+            onEdit(wrap({ GradientMap: { stops: next } }), gesture)
+          }
+          onGestureEnd={onGestureEnd}
+        />
+      );
+    }
+    if ("Invert" in adj) {
+      return slider("Amount", adj.Invert.amount, 0, 1, 0.01, (v) =>
+        wrap({ Invert: { amount: v } }),
       );
     }
     if ("Curves" in adj) {
@@ -7023,38 +7213,6 @@ function KindProps({
         return patch({ gradient: { Radial: { ...grad.Radial, stops } } });
       return patch({});
     };
-    const setStop = (i: number, changes: Partial<GradientStop>): NodeKind =>
-      withStops(gradStops.map((s, j) => (j === i ? { ...s, ...changes } : s)));
-    /** Insert a stop in the widest gap, coloured by what the ramp already
-     * shows there, so adding one changes nothing until it is moved. */
-    const addStop = (): NodeKind => {
-      let at = 0;
-      for (let i = 1; i < gradStops.length; i++) {
-        if (
-          gradStops[i].offset - gradStops[i - 1].offset >
-          gradStops[at + 1].offset - gradStops[at].offset
-        )
-          at = i - 1;
-      }
-      const [a, b] = [gradStops[at], gradStops[at + 1]];
-      const stop: GradientStop = {
-        offset: (a.offset + b.offset) / 2,
-        color: mixAuthored(a.color, b.color, 0.5),
-      };
-      return withStops([
-        ...gradStops.slice(0, at + 1),
-        stop,
-        ...gradStops.slice(at + 1),
-      ]);
-    };
-    const removeStop = (i: number): NodeKind =>
-      withStops(gradStops.filter((_, j) => j !== i));
-    // A preview of the ramp itself, so the stop list is readable as a
-    // whole. CSS mixes a gradient on the values a device shows, which is
-    // where the engine mixes one too, so the strip is the ramp.
-    const rampCss = `linear-gradient(90deg, ${gradStops
-      .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
-      .join(", ")})`;
 
     return (
       <>
@@ -7072,60 +7230,13 @@ function KindProps({
         </label>
         {grad && (
           <>
-            <div
-              className="ramp-preview"
-              style={{ background: rampCss }}
-              aria-hidden="true"
+            <StopList
+              stops={gradStops}
+              name="Gradient stop"
+              authored={authored}
+              onChange={(next, gesture) => onEdit(withStops(next), gesture)}
+              onGestureEnd={onGestureEnd}
             />
-            {gradStops.map((stop, i) => (
-              <div className="stop-row" key={i}>
-                <input
-                  type="color"
-                  value={colorToHex(stop.color)}
-                  onChange={(e) =>
-                    onEdit(
-                      setStop(i, { color: authored(e.target.value) }),
-                      true,
-                    )
-                  }
-                  onBlur={onGestureEnd}
-                  aria-label={`Gradient stop ${i + 1}`}
-                />
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={stop.offset}
-                  onChange={(e) =>
-                    onEdit(setStop(i, { offset: Number(e.target.value) }), true)
-                  }
-                  onPointerUp={onGestureEnd}
-                  onKeyUp={onGestureEnd}
-                  onBlur={onGestureEnd}
-                  aria-label={`Gradient stop ${i + 1} position`}
-                />
-                <button
-                  className="stop-remove"
-                  disabled={gradStops.length <= 2}
-                  onClick={() => onEdit(removeStop(i), false)}
-                  title={
-                    gradStops.length <= 2
-                      ? "A gradient needs at least two stops"
-                      : `Remove stop ${i + 1}`
-                  }
-                  aria-label={`Remove gradient stop ${i + 1}`}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
-            ))}
-            <button
-              className="mask-button"
-              onClick={() => onEdit(addStop(), false)}
-            >
-              Add stop
-            </button>
             {"Linear" in grad
               ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
                   patch({

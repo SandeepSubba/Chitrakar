@@ -316,7 +316,50 @@ pub enum Adjustment {
     Vibrance {
         amount: f32,
     },
+    /// Monochrome, mixed by hand. Every colour becomes the weighted sum
+    /// of its channels, and the weights are the whole point: a picture
+    /// taken to grey by one recipe is a different picture from the same
+    /// one taken to grey by another — a high red weight darkens a blue
+    /// sky the way a red filter on the lens did.
+    ///
+    /// The weights are normalized by their own total, so moving one
+    /// changes the mix rather than the brightness; exposure and levels
+    /// are what brightness is for. [`LUMA`] is the default and is the
+    /// answer for "just make it grey".
+    BlackAndWhite {
+        red: f32,
+        green: f32,
+        blue: f32,
+    },
+    /// Every tone replaced by the colour at its own place along a ramp:
+    /// the shadows take the first stop, the highlights the last, and
+    /// everything between is read off the ramp. Duotones, split tones
+    /// and the whole family of graded looks are this one adjustment.
+    ///
+    /// Where a tone sits along the ramp is its brightness as a device
+    /// shows it, not as light measures it — the same reason a tone curve
+    /// is drawn over the display encoding, and what makes the middle of
+    /// the ramp land on the tones that look middling.
+    GradientMap {
+        stops: Vec<GradientStop>,
+    },
+    /// Turned inside out: what was light is dark and every colour becomes
+    /// its opposite. `amount` is how far to take it, so half way is the
+    /// flat grey the two sides meet at.
+    ///
+    /// On the values a device shows rather than on light itself. Light
+    /// inverted is not what anyone means by a negative: linear 0.5 shows
+    /// as 188, so inverting in light would turn a middle grey into a
+    /// near-black rather than into itself.
+    Invert {
+        amount: f32,
+    },
 }
+
+/// How much each channel contributes to brightness — the Rec. 709
+/// weights, which is what "luminance" means everywhere else in this
+/// engine and the default recipe for [`Adjustment::BlackAndWhite`].
+pub const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 /// Non-destructive convolution filters; like adjustments they apply at
 /// render time to everything composited below the layer. Unlike adjustments

@@ -4618,6 +4618,60 @@ fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) 
             let f = |v: f32| (lum + (v - lum) * s).clamp(0.0, 1.0);
             (f(r), f(g), f(b))
         }
+        Adjustment::BlackAndWhite { red, green, blue } => {
+            // Normalized by their own total, so a slider changes the mix
+            // and not the brightness. A total of nothing is not a recipe
+            // at all, so that falls back to plain luminance.
+            let total = red + green + blue;
+            let [wr, wg, wb] = if total.abs() < 1e-4 {
+                chitrakar_doc::LUMA
+            } else {
+                [red / total, green / total, blue / total]
+            };
+            let grey = (r * wr + g * wg + b * wb).clamp(0.0, 1.0);
+            (grey, grey, grey)
+        }
+        Adjustment::GradientMap { stops } => {
+            if stops.len() < 2 {
+                (r, g, b)
+            } else {
+                let mut ramp: Vec<(f32, LinearRgba)> = stops
+                    .iter()
+                    .map(|s| (s.offset, to_working(s.color)))
+                    .collect();
+                ramp.sort_by(|a, b| a.0.total_cmp(&b.0));
+                // Where a tone sits along the ramp is its brightness as a
+                // device shows it: the middle of the ramp should land on
+                // the tones that look middling, and linear light's middle
+                // shows as a light grey.
+                let lum = chitrakar_color::linear_to_srgb(
+                    (chitrakar_doc::LUMA[0] * r
+                        + chitrakar_doc::LUMA[1] * g
+                        + chitrakar_doc::LUMA[2] * b)
+                        .clamp(0.0, 1.0),
+                );
+                // The stops are premultiplied by their own alpha; the
+                // pixel keeps the alpha it already had, so the ramp's is
+                // divided back out.
+                let c = ramp_color(&ramp, lum);
+                if c.a > 0.0 {
+                    (c.r / c.a, c.g / c.a, c.b / c.a)
+                } else {
+                    (r, g, b)
+                }
+            }
+        }
+        Adjustment::Invert { amount } => {
+            // On the values a device shows: light inverted is not what
+            // anyone means by a negative, since linear 0.5 shows as 188
+            // and would come back a near-black rather than itself.
+            let k = amount.clamp(0.0, 1.0);
+            let f = |v: f32| {
+                let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
+                chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k)
+            };
+            (f(r), f(g), f(b))
+        }
         Adjustment::Curves { .. } => {
             let table;
             let luts = match luts {
@@ -6418,6 +6472,195 @@ mod tests {
         assert!(
             (after.r - after.g).abs() < 1e-6 && (after.g - after.b).abs() < 1e-6,
             "grey stays grey: {after:?}"
+        );
+    }
+
+    /// Black and white is a recipe, not a switch: the same colours taken
+    /// to grey by different weights come out different greys, which is
+    /// the whole reason to have the weights at all.
+    #[test]
+    fn black_and_white_is_mixed_by_its_weights() {
+        let srgb = |r: f32, g: f32, b: f32| to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let grey = |adj: &Adjustment, c: LinearRgba| {
+            let out = apply_adjustment(adj, None, c);
+            assert!(
+                (out.r - out.g).abs() < 1e-6 && (out.g - out.b).abs() < 1e-6,
+                "it comes out grey: {out:?}"
+            );
+            out.r
+        };
+        let [lr, lg, lb] = chitrakar_doc::LUMA;
+        let luma = Adjustment::BlackAndWhite {
+            red: lr,
+            green: lg,
+            blue: lb,
+        };
+        // Plain luminance is what the rest of the engine means by
+        // brightness, so a colour keeps the brightness it had.
+        let sky = srgb(0.2, 0.4, 0.9);
+        let by_luma = grey(&luma, sky);
+        assert!(
+            (by_luma - (lr * sky.r + lg * sky.g + lb * sky.b)).abs() < 1e-5,
+            "the default recipe is luminance"
+        );
+        // A red filter darkens a blue sky and lifts a red roof — the two
+        // move in opposite directions, which a switch could not do.
+        let filter = Adjustment::BlackAndWhite {
+            red: 1.0,
+            green: 0.2,
+            blue: 0.0,
+        };
+        let roof = srgb(0.8, 0.2, 0.15);
+        assert!(
+            grey(&filter, sky) < by_luma,
+            "the sky goes dark under a red filter"
+        );
+        assert!(
+            grey(&filter, roof) > grey(&luma, roof),
+            "and the roof comes up"
+        );
+        // The weights are a mix: doubling all three changes nothing.
+        let doubled = Adjustment::BlackAndWhite {
+            red: lr * 2.0,
+            green: lg * 2.0,
+            blue: lb * 2.0,
+        };
+        assert!(
+            (grey(&doubled, sky) - by_luma).abs() < 1e-5,
+            "twice the weights is the same mix"
+        );
+        // A recipe of nothing is no recipe, so it falls back to luminance
+        // rather than to a black frame.
+        let nothing = Adjustment::BlackAndWhite {
+            red: 0.0,
+            green: 0.0,
+            blue: 0.0,
+        };
+        assert!((grey(&nothing, sky) - by_luma).abs() < 1e-5);
+    }
+
+    /// A gradient map replaces every tone with the colour at its own
+    /// place along a ramp — and the place is the brightness a device
+    /// shows, so the middle of the ramp lands on the middling tones.
+    #[test]
+    fn a_gradient_map_reads_a_tone_off_its_ramp() {
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        // Black to red to white: the shadows go black, the highlights
+        // white, and everything between passes through red.
+        let map = Adjustment::GradientMap {
+            stops: vec![
+                stop(0.0, 0.0, 0.0, 0.0),
+                stop(0.5, 1.0, 0.0, 0.0),
+                stop(1.0, 1.0, 1.0, 1.0),
+            ],
+        };
+        let srgb = |v: f32| {
+            to_working(AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            })
+        };
+        let out = |v: f32| apply_adjustment(&map, None, srgb(v));
+        let black = out(0.0);
+        assert!(
+            black.r < 0.01 && black.g < 0.01,
+            "the shadows take the first stop: {black:?}"
+        );
+        let white = out(1.0);
+        assert!(
+            white.r > 0.99 && white.g > 0.99 && white.b > 0.99,
+            "and the highlights the last: {white:?}"
+        );
+        // A middling grey — one that *looks* middling, which is 0.5 in
+        // the display encoding — lands on the middle stop. Read in
+        // linear light it would sit a long way past it and come back
+        // nearly white.
+        let mid = out(0.5);
+        assert!(
+            mid.r > 0.9 && mid.g < 0.05 && mid.b < 0.05,
+            "the middle of the ramp is where a middling tone lands: {mid:?}"
+        );
+        // The colour it lands on is the ramp's, not the pixel's: a
+        // saturated blue of the same brightness comes out the same.
+        let blue = apply_adjustment(
+            &map,
+            None,
+            to_working(AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.34,
+                b: 1.0,
+                a: 1.0,
+            }),
+        );
+        let same = out(chitrakar_color::linear_to_srgb(
+            (chitrakar_doc::LUMA[0] * 0.0
+                + chitrakar_doc::LUMA[1] * chitrakar_color::srgb_to_linear(0.34)
+                + chitrakar_doc::LUMA[2] * 1.0)
+                .clamp(0.0, 1.0),
+        ));
+        assert!(
+            (blue.r - same.r).abs() < 1e-5 && (blue.b - same.b).abs() < 1e-5,
+            "only the brightness is read: {blue:?} vs {same:?}"
+        );
+        // A ramp of one stop is no ramp, and leaves the picture alone.
+        let bare = Adjustment::GradientMap {
+            stops: vec![stop(0.0, 1.0, 0.0, 0.0)],
+        };
+        let left = apply_adjustment(&bare, None, srgb(0.5));
+        assert!(
+            (left.r - srgb(0.5).r).abs() < 1e-6,
+            "nothing to map through"
+        );
+    }
+
+    /// A negative is taken on the values a device shows, so a middling
+    /// grey inverts to itself rather than to a near-black.
+    #[test]
+    fn a_negative_is_taken_where_a_picture_is_seen() {
+        let srgb = |v: f32| {
+            to_working(AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            })
+        };
+        let all = Adjustment::Invert { amount: 1.0 };
+        let shown_of = |p: LinearRgba| chitrakar_color::linear_to_srgb(p.r);
+        assert!(
+            shown_of(apply_adjustment(&all, None, srgb(0.0))) > 0.99,
+            "black goes white"
+        );
+        assert!(
+            shown_of(apply_adjustment(&all, None, srgb(1.0))) < 0.01,
+            "and white black"
+        );
+        let mid = shown_of(apply_adjustment(&all, None, srgb(0.5)));
+        assert!(
+            (mid - 0.5).abs() < 0.005,
+            "a middling grey inverts to itself ({mid}); in linear light it would come back {}",
+            chitrakar_color::linear_to_srgb(1.0 - chitrakar_color::srgb_to_linear(0.5))
+        );
+        // Half way is the grey the two sides meet at, and none of it is
+        // the picture untouched.
+        let half = shown_of(apply_adjustment(
+            &Adjustment::Invert { amount: 0.5 },
+            None,
+            srgb(0.2),
+        ));
+        assert!(
+            (half - 0.5).abs() < 0.005,
+            "half way is the middle ({half})"
+        );
+        let none = apply_adjustment(&Adjustment::Invert { amount: 0.0 }, None, srgb(0.2));
+        assert!(
+            (shown_of(none) - 0.2).abs() < 0.005,
+            "and none of it is nothing"
         );
     }
 

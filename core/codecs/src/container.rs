@@ -450,6 +450,26 @@ mod tests {
                 chitrakar_doc::Adjustment::Vibrance { amount: 0.5 },
             )),
         );
+        // A gradient map carries a ramp of its own, which is the only
+        // adjustment whose settings have any shape to lose.
+        add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "duotone",
+                chitrakar_doc::Adjustment::GradientMap {
+                    stops: vec![
+                        chitrakar_doc::GradientStop {
+                            offset: 0.0,
+                            color: blue,
+                        },
+                        chitrakar_doc::GradientStop {
+                            offset: 0.6,
+                            color: red,
+                        },
+                    ],
+                },
+            )),
+        );
 
         // A frame with something pinned inside it, a live copy of the
         // shape, a layer confined to the one below it, and a curve with
