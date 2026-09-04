@@ -1901,6 +1901,23 @@ assert(
     await page.click('button[aria-label="Bold"]');
     await page.waitForTimeout(300);
     const half = await outline();
+    // A toggle reports the stretch it is pointed at: moving the
+    // selection changes what it reads with nothing pressed in between,
+    // and what it reads is what pressing it will act on.
+    await select(0, 4);
+    await page.waitForTimeout(50);
+    assert(
+      (await page.locator('button[aria-label="Bold"]').getAttribute("aria-pressed")) ===
+        "true",
+      "the toggle follows the selection onto the bolded word",
+    );
+    await select(5, 9);
+    await page.waitForTimeout(50);
+    assert(
+      (await page.locator('button[aria-label="Bold"]').getAttribute("aria-pressed")) ===
+        "false",
+      "and reads as off over the plain one",
+    );
     await select(0, 9);
     await page.click('button[aria-label="Bold"]');
     await page.waitForTimeout(300);

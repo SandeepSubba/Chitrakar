@@ -251,6 +251,11 @@ const BLEND_NAMES: Partial<Record<BlendMode, string>> = {
 };
 /** Minimum travel between recorded brush samples, and how far a simplified
  * stroke may stray from the one that was drawn — both in document units. */
+/** The two boxes a block's text can be typed into: the panel's field and
+ * the one that opens over the block on the canvas. A style button reads
+ * whichever of them holds the caret. */
+const TEXT_BOXES = ["Text on canvas", "Text content"];
+
 const BRUSH_STEP = 3;
 /** How many pixels a layer's picture in the panel is across. Twice the
  * size it is shown at, so it stays crisp on a display that has the
@@ -2379,6 +2384,26 @@ export function App() {
   const endGesture = () => {
     if (session?.commit_preview()) refresh(session);
   };
+
+  /** The text style buttons show what the selection says, and moving a
+   * selection is not a state change — so nothing would re-render them
+   * and a button would go on showing, and applying, what the last
+   * selection said. Only while a text box holds the caret, so a caret
+   * moving anywhere else costs nothing. */
+  const [, noteSelection] = useState(0);
+  useEffect(() => {
+    const onSelect = () => {
+      const el = document.activeElement;
+      if (
+        el instanceof HTMLTextAreaElement &&
+        TEXT_BOXES.includes(el.getAttribute("aria-label") ?? "")
+      ) {
+        noteSelection((n) => n + 1);
+      }
+    };
+    document.addEventListener("selectionchange", onSelect);
+    return () => document.removeEventListener("selectionchange", onSelect);
+  }, []);
 
   const [renaming, setRenaming] = useState<{
     id: NodeId;
@@ -6615,7 +6640,7 @@ function KindProps({
     // block when there is not, which is what every editor does — and the
     // offsets survive the button taking focus away from the box.
     const selection = (): [number, number] | null => {
-      for (const label of ["Text on canvas", "Text content"]) {
+      for (const label of TEXT_BOXES) {
         const el = document.querySelector<HTMLTextAreaElement>(
           `textarea[aria-label="${label}"]`,
         );
@@ -6732,16 +6757,19 @@ function KindProps({
             // by naming the bold face, so that still reads as bold here
             // and un-bolds back to the face it was a twin of.
             const named = (t.font ?? "").endsWith(" Bold");
-            const on = isOn("bold") || named;
+            // Read afresh on the press rather than reusing what the last
+            // render worked out: a selection can move between the two,
+            // and then the answer is about the wrong stretch of text.
+            const bolded = () => isOn("bold") || named;
             return (
               <button
-                className={on ? "active" : undefined}
+                className={bolded() ? "active" : undefined}
                 title="Bold"
                 aria-label="Bold"
-                aria-pressed={on}
+                aria-pressed={bolded()}
                 onClick={() =>
                   onEdit(
-                    on && named
+                    bolded() && named
                       ? {
                           Text: {
                             ...t,
@@ -6749,7 +6777,7 @@ function KindProps({
                             font: t.font.slice(0, -" Bold".length),
                           },
                         }
-                      : styled({ bold: !on }),
+                      : styled({ bold: !bolded() }),
                     false,
                   )
                 }
