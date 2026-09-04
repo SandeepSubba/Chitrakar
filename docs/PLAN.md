@@ -80,7 +80,9 @@ without reading anything else.*
   shapes with union/subtract/intersect/exclude into a compound path that
   can carry holes, opacity/blend,
   rename, lock (a locked layer is drawn but neither picked nor moved from
-  the canvas), labelled history with jump-to-state. Opacity and blend
+  the canvas), and a layer carried to the front or the back of its own
+  group in one step (Ctrl+Shift+] and Ctrl+Shift+[) rather than one step
+  per layer in the way, labelled history with jump-to-state. Opacity and blend
   reach every picked layer at once, in one entry.
   Transforms nest: a group moves, scales and turns as a unit, and
   dissolving one folds its transform into its children. Documents are any
@@ -301,6 +303,9 @@ without reading anything else.*
   unit through it. Rulers run along the canvas edges; dragging out of one places a guide
   that layers snap to and that saves with the document, and dropping it
   back throws it away.
+  The view has the keys every editor has: Ctrl+= and Ctrl+- zoom about
+  the middle of the window, Ctrl+0 fits the page to it and Ctrl+1 shows
+  the page's own pixels one for one.
   Zooming in re-renders rather than magnifies: the engine composites a
   viewport at the resolution the canvas is displayed at, so outlines,
   gradients and glyphs are re-solved instead of interpolated, and a page
@@ -457,7 +462,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~613 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~621 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

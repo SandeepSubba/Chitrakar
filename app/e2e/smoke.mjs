@@ -5344,6 +5344,87 @@ assert(
   );
 }
 
+// 9l. The keys for the view and for the order of things: zoom in, out,
+// fit and actual size, and a layer carried to the front or the back in
+// one step rather than one step per layer in the way.
+{
+  await newDocument(400, 300, "rgb");
+  const pageWidth = async () =>
+    (await page.locator("#engine-page").boundingBox()).width;
+  await page.keyboard.press("Control+1");
+  await page.waitForTimeout(250);
+  const actual = await pageWidth();
+  assert(
+    Math.abs(actual - 400) < 2,
+    `ctrl+1 shows the page's own pixels (${actual})`,
+  );
+  await page.keyboard.press("Control+=");
+  await page.waitForTimeout(250);
+  const zoomed = await pageWidth();
+  assert(zoomed > actual * 1.2, `ctrl+= zoomed in (${actual} -> ${zoomed})`);
+  await page.keyboard.press("Control+-");
+  await page.waitForTimeout(250);
+  assert(
+    Math.abs((await pageWidth()) - actual) < 2,
+    "and ctrl+- zoomed back out to where it was",
+  );
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(300);
+  const fitted = await pageWidth();
+  assert(
+    fitted > actual * 1.5,
+    `ctrl+0 fit the page to the window (${fitted})`,
+  );
+
+  // Three rects, each over the last, all crossing one point.
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape"); // colour goes to the picked layer
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await paint("#ff0000", 50, 50, 250, 250);
+  await paint("#00cc00", 100, 80, 300, 220);
+  await paint("#0000ff", 150, 100, 350, 200);
+  const over = () => canvasPixel(200, 150);
+  const reads = (px, [r, g, bl]) =>
+    Math.abs(px[0] - r) < 40 && Math.abs(px[1] - g) < 40 && Math.abs(px[2] - bl) < 40;
+  assert(reads(await over(), [0, 0, 255]), `the last drawn is on top (${await over()})`);
+
+  // The red one is the bottom row; carried to the front it is what shows.
+  await pickTool("Move");
+  await page.locator(".panel ul li").last().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+Shift+BracketRight");
+  await page.waitForTimeout(300);
+  assert(
+    reads(await over(), [255, 0, 0]),
+    `ctrl+shift+] brought the bottom layer to the front (${await over()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    reads(await over(), [0, 0, 255]),
+    "and one undo puts the order back",
+  );
+
+  // The blue one is the top row; sent to the back the green one shows.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+Shift+BracketLeft");
+  await page.waitForTimeout(300);
+  assert(
+    reads(await over(), [0, 204, 0]),
+    `ctrl+shift+[ sent the top layer to the back (${await over()})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

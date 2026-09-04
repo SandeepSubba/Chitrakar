@@ -1298,6 +1298,24 @@ export function App() {
         if (e.shiftKey) redo();
         else undo();
       }
+      // The zoom keys every editor has: in, out, the whole page, and the
+      // page's own pixels one for one. "+" is where "=" is on a keyboard
+      // that has not been asked for shift, so both mean the same thing.
+      if ((e.metaKey || e.ctrlKey) && !typing) {
+        const zooms: Record<string, () => void> = {
+          "=": () => zoomBy(1.25),
+          "+": () => zoomBy(1.25),
+          "-": () => zoomBy(0.8),
+          _: () => zoomBy(0.8),
+          "0": fitView,
+          "1": () => zoomTo(1),
+        };
+        const zoom = zooms[e.key];
+        if (zoom) {
+          e.preventDefault();
+          zoom();
+        }
+      }
       // Escape cancels whatever is in flight; with nothing in flight it
       // drops the selection, which is what every editor does with it.
       if (e.key === "Escape") {
@@ -1336,7 +1354,18 @@ export function App() {
     };
     // `showKeys` is in here because Escape reads it: without it the
     // listener would keep a closure from before the sheet opened.
-  }, [undo, redo, cancelGesture, finishPath, selectAll, deselect, showKeys]);
+  }, [
+    undo,
+    redo,
+    cancelGesture,
+    finishPath,
+    selectAll,
+    deselect,
+    showKeys,
+    zoomBy,
+    zoomTo,
+    fitView,
+  ]);
 
   // Keep the viewport measurement in step with the element it describes.
   useEffect(() => {
@@ -3127,6 +3156,19 @@ export function App() {
           }, 80);
         }
       }
+      // The brackets carry the brush's size on their own; with ctrl and
+      // shift they carry a layer to the front or the back, which is the
+      // pairing every editor uses.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !typing) {
+        if (e.code === "BracketRight") {
+          e.preventDefault();
+          orderSelected(true);
+        }
+        if (e.code === "BracketLeft") {
+          e.preventDefault();
+          orderSelected(false);
+        }
+      }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
         deleteSelected();
@@ -4102,6 +4144,20 @@ export function App() {
     });
   };
 
+  /** All the way to the top of its own group, or all the way under it.
+   * Stepping there is as many clicks as there are layers in the way, and
+   * as many entries in the history; this is one of each. A layer already
+   * at that end is left alone rather than recorded as a move to where it
+   * already is. */
+  const orderSelected = (toFront: boolean) => {
+    if (!selectedLayer) return;
+    const index = toFront ? Math.max(0, selectedLayer.sibling_count - 1) : 0;
+    if (index === selectedLayer.index) return;
+    run({
+      MoveNode: { id: selectedLayer.id, parent: selectedLayer.parent, index },
+    });
+  };
+
   /** Opacity and blend reach every picked layer, not only the one whose
    * properties the panel happens to be showing — one history entry for
    * the lot, named after how many it touched. */
@@ -4584,6 +4640,20 @@ export function App() {
             <MenuItem icon="paste" onClick={pasteStyle} hint="Ctrl+Alt+V">
               Paste style
             </MenuItem>
+            <MenuItem
+              icon="raise"
+              onClick={() => orderSelected(true)}
+              hint="Ctrl+Shift+]"
+            >
+              Bring to front
+            </MenuItem>
+            <MenuItem
+              icon="lower"
+              onClick={() => orderSelected(false)}
+              hint="Ctrl+Shift+["
+            >
+              Send to back
+            </MenuItem>
             <MenuItem icon="flipH" onClick={() => flipSelection(true)}>
               Flip horizontal
             </MenuItem>
@@ -4648,19 +4718,19 @@ export function App() {
               </MenuItem>
             ))}
             <hr />
-            <MenuItem icon="fit" onClick={fitView}>
+            <MenuItem icon="fit" onClick={fitView} hint="Ctrl+0">
               Fit document to window
             </MenuItem>
             <MenuItem icon="text" onClick={() => setShowKeys(true)} hint="?">
               Keys and gestures
             </MenuItem>
-            <MenuItem icon="zoomIn" onClick={() => zoomBy(1.25)}>
+            <MenuItem icon="zoomIn" onClick={() => zoomBy(1.25)} hint="Ctrl++">
               Zoom in
             </MenuItem>
-            <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)}>
+            <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)} hint="Ctrl+-">
               Zoom out
             </MenuItem>
-            <MenuItem icon="actualSize" onClick={() => zoomTo(1)}>
+            <MenuItem icon="actualSize" onClick={() => zoomTo(1)} hint="Ctrl+1">
               Actual size
             </MenuItem>
             <MenuItem icon="selectAll" onClick={zoomToSelection}>
@@ -6406,6 +6476,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Wheel", "Zoom about the cursor"],
       ["Space-drag, middle-drag", "Pan"],
       ["Drag out of a ruler", "Place a guide; drop it back to remove it"],
+      ["Ctrl++, Ctrl+-", "Zoom in, out"],
+      ["Ctrl+0, Ctrl+1", "Fit the page to the window, actual size"],
     ],
   ],
   [
@@ -6416,6 +6488,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+D", "Duplicate"],
       ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
       ["Ctrl+Alt+G", "Clip to the layer below"],
+      ["Ctrl+Shift+], Ctrl+Shift+[", "Bring to the front, send to the back"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
       ["Ctrl+A", "Select all"],
