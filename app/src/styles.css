@@ -283,6 +283,43 @@ body {
   color: var(--accent);
 }
 
+/* A short line of context inside a dialog: the size the page is now, or
+   what happens to what falls outside it. */
+.modal-note {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* The nine points of the page, one of which stays where it is while the
+   rest grows or shrinks around it. */
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1.4rem);
+  gap: 3px;
+  justify-content: center;
+  margin: 0.3rem 0;
+}
+
+.anchor-grid .anchor-cell {
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.anchor-grid .anchor-cell:hover {
+  border-color: var(--accent);
+}
+
+.anchor-grid .anchor-cell.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;

@@ -68,11 +68,21 @@ without reading anything else.*
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK, and the crop tool
   re-frames one after the fact — the page becomes the dragged rectangle
-  and the picture stays where it was inside it. The Page menu turns the
+  and the picture stays where it was inside it. Canvas size is the
+  other half of that: cropping can only ever take room away, and this
+  gives the page room — the couple of centimetres of white around a
+  photograph that every print asks for — with one of the page's nine
+  points staying where it is while the rest grows or shrinks around it,
+  so nothing has to be moved by hand. What falls outside a page made
+  smaller is off the page, not gone. The Page menu also turns the
   page a quarter of the way round either way, or the whole way over: an
   odd turn stands it on its end, and layers and guides go round with it,
   so a portrait photograph opened into a landscape page is one menu item
-  away from being the right way up.
+  away from being the right way up; and it mirrors the page across
+  either middle, which is a different thing from flipping a selection —
+  the guides cross with the artwork. Turning and mirroring are one
+  transform of the page's own space put through one function, so the
+  rule that says what becomes of a guide is written once.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
@@ -351,9 +361,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~285),
+- **Verify before committing:** `cargo test --workspace` (~286),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~534 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~543 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -413,7 +423,7 @@ without reading anything else.*
   key and gesture, since half of what this editor can do is a gesture
   nobody would guess at. Document actions live in a File/Edit/Page/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, Page
-  the turns, View
+  the page's own size, its turns and its mirrors, View
   fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
   none of it depends on knowing the shortcut; the tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`

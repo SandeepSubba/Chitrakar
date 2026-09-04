@@ -667,6 +667,7 @@ export function App() {
     setDocSize([w, h]);
   }, []);
   const [newDocOpen, setNewDocOpen] = useState(false);
+  const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
   /** The sheet of keys and gestures, opened with "?" or from the View
    * menu: half of what this editor can do is a gesture nobody would
    * guess at, and a menu cannot show a gesture. */
@@ -2455,6 +2456,33 @@ export function App() {
     }
   };
 
+  /** Mirror the page across its own middle. Its size does not change, so
+   * the view is left where it was. */
+  const mirrorPage = (acrossX: boolean) => {
+    if (!session) return;
+    try {
+      session.mirror_canvas(acrossX);
+      refresh(session);
+    } catch (err) {
+      alert(`Mirror: ${err}`);
+    }
+  };
+
+  /** Give the page a new size, with one of its nine points staying where
+   * it is. Growing it is the only way to put room around a picture —
+   * cropping can only ever take room away. */
+  const resizePage = (w: number, h: number, dx: number, dy: number) => {
+    if (!session) return;
+    try {
+      session.resize_canvas(w, h, dx, dy);
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Canvas size: ${err}`);
+    }
+  };
+
   const [renaming, setRenaming] = useState<{
     id: NodeId;
     value: string;
@@ -4172,6 +4200,10 @@ export function App() {
             onHover={() => openMenu && setOpenMenu("page")}
             onClose={() => setOpenMenu(null)}
           >
+            <MenuItem icon="crop" onClick={() => setCanvasSizeOpen(true)}>
+              Canvas size…
+            </MenuItem>
+            <hr />
             <MenuItem icon="turnRight" onClick={() => turnPage(1)}>
               Turn right
             </MenuItem>
@@ -4180,6 +4212,13 @@ export function App() {
             </MenuItem>
             <MenuItem icon="turnRight" onClick={() => turnPage(2)}>
               Turn upside down
+            </MenuItem>
+            <hr />
+            <MenuItem icon="flipH" onClick={() => mirrorPage(true)}>
+              Mirror left to right
+            </MenuItem>
+            <MenuItem icon="flipV" onClick={() => mirrorPage(false)}>
+              Mirror top to bottom
             </MenuItem>
           </MenuButton>
 
@@ -4338,6 +4377,19 @@ export function App() {
         />
       </header>
       {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
+      {canvasSizeOpen && (
+        <CanvasSizeDialog
+          width={docSize[0]}
+          height={docSize[1]}
+          units={units}
+          dpi={docDpi}
+          onCancel={() => setCanvasSizeOpen(false)}
+          onResize={(w, h, dx, dy) => {
+            setCanvasSizeOpen(false);
+            resizePage(w, h, dx, dy);
+          }}
+        />
+      )}
       {newDocOpen && (
         <NewDocDialog
           onCancel={() => setNewDocOpen(false)}
@@ -6009,6 +6061,137 @@ function NewDocDialog({
             onClick={() => onCreate(w, h, mode === "cmyk", dpi)}
           >
             Create
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Canvas-size dialog: the page's own size, and which of its nine points
+ * stays where it is while the rest of it grows or shrinks around that.
+ *
+ * This is the other half of cropping. Cropping takes the page in to a
+ * rectangle drawn on it, which can only ever make it smaller; this gives
+ * the page room — the two centimetres of white around a photograph that
+ * every print asks for — without a single layer having to be moved by
+ * hand. Both are one command: a new size, and the shift that decides
+ * where the old page sits inside it. */
+function CanvasSizeDialog({
+  width,
+  height,
+  units,
+  dpi,
+  onResize,
+  onCancel,
+}: {
+  width: number;
+  height: number;
+  units: Units;
+  dpi: number;
+  onResize: (width: number, height: number, dx: number, dy: number) => void;
+  onCancel: () => void;
+}) {
+  const per = perPixel(units, dpi);
+  const [w, setW] = useState(inUnits(width, units, dpi));
+  const [h, setH] = useState(inUnits(height, units, dpi));
+  // Which point of the old page stays put, as a fraction along each side.
+  const [anchor, setAnchor] = useState<[number, number]>([0.5, 0.5]);
+  const px = (v: number) => Math.max(1, Math.round(v / per));
+  const apply = () => {
+    const [nw, nh] = [px(w), px(h)];
+    // The anchor point of the old page has to land on the same point of
+    // the new one, and every top-level layer carries that shift.
+    onResize(
+      nw,
+      nh,
+      anchor[0] * (nw - width),
+      anchor[1] * (nh - height),
+    );
+  };
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  const field = (
+    label: string,
+    value: number,
+    set: (v: number) => void,
+  ) => (
+    <label className="row">
+      {label}
+      <input
+        type="number"
+        min={0}
+        step={units === "px" ? 1 : 0.01}
+        value={value}
+        onChange={(e) => set(Number(e.target.value))}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") apply();
+        }}
+        aria-label={label}
+      />
+      <span className="unit">{units}</span>
+    </label>
+  );
+
+  const [nw, nh] = [px(w), px(h)];
+  const bigger = nw >= width && nh >= height;
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Canvas size"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Canvas size</h2>
+        <p className="modal-note">
+          {inUnits(width, units, dpi)} × {inUnits(height, units, dpi)} {units}{" "}
+          now
+        </p>
+        {field("Canvas width", w, setW)}
+        {field("Canvas height", h, setH)}
+        <div className="anchor-grid" aria-label="Anchor">
+          {[0, 0.5, 1].map((ay) =>
+            [0, 0.5, 1].map((ax) => (
+              <button
+                key={`${ax},${ay}`}
+                className={
+                  anchor[0] === ax && anchor[1] === ay
+                    ? "anchor-cell active"
+                    : "anchor-cell"
+                }
+                onClick={() => setAnchor([ax, ay])}
+                aria-label={`Anchor ${["left", "centre", "right"][ax * 2]} ${
+                  ["top", "middle", "bottom"][ay * 2]
+                }`}
+                aria-pressed={anchor[0] === ax && anchor[1] === ay}
+              />
+            )),
+          )}
+        </div>
+        <p className="modal-note">
+          {bigger
+            ? "The page grows around the point you pick."
+            : "What falls outside the new page is still there — it is off the page, not gone."}
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={apply}
+            aria-label="Resize the page"
+          >
+            Resize
           </button>
         </div>
       </div>

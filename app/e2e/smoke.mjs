@@ -4680,6 +4680,63 @@ assert(
   assert(!(await inked(550, 40)), "and nothing where the turn had put it");
 }
 
+// 9j4. The other half of cropping: the page is given room around the
+// picture rather than taken in to it, with one of its nine points
+// staying where it is. And the page mirrors.
+{
+  await newDocument(400, 300, "rgb");
+  const at = await page.locator("#engine-page").boundingBox();
+  const [ux, uy] = [at.width / 400, at.height / 300];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(at.x + 20 * ux, at.y + 20 * uy);
+  await page.mouse.down();
+  await page.mouse.move(at.x + 80 * ux, at.y + 80 * uy, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const inked = (x, y) => canvasPixel(x, y).then((px) => px[3] > 128);
+  assert(await inked(50, 50), "a mark near the page's top left");
+
+  // Anchored at the top left, a bigger page adds its room to the right
+  // and below — so the mark does not move at all.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  assert(
+    await page.isVisible('[role="dialog"][aria-label="Canvas size"]'),
+    "the canvas-size dialog opens",
+  );
+  await page.locator('input[aria-label="Canvas width"]').fill("600");
+  await page.locator('input[aria-label="Canvas height"]').fill("500");
+  await page.click('button[aria-label="Anchor left top"]');
+  await page.click('button[aria-label="Resize the page"]');
+  await page.waitForTimeout(400);
+  assert(await inked(50, 50), "anchored top left, the mark stays put");
+  assert(!(await inked(550, 450)), "and the new room is bare page");
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  // Anchored in the middle, the same growth is shared all round, so the
+  // mark moves by half of it: a hundred across and a hundred down.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  await page.locator('input[aria-label="Canvas width"]').fill("600");
+  await page.locator('input[aria-label="Canvas height"]').fill("500");
+  await page.click('button[aria-label="Anchor centre middle"]');
+  await page.click('button[aria-label="Resize the page"]');
+  await page.waitForTimeout(400);
+  assert(await inked(150, 150), "anchored in the middle, it moved with it");
+  assert(!(await inked(50, 50)), "and left where it was");
+
+  // Mirroring keeps the page's size and crosses what is on it. The mark
+  // sits 100..180 across a 600-wide page, so it lands at 420..500.
+  await menuClick("Page", "Mirror left to right");
+  await page.waitForTimeout(400);
+  assert(await inked(450, 150), "the mark crossed to the other side");
+  assert(!(await inked(150, 150)), "and is not where it was");
+  await menuClick("Page", "Mirror left to right");
+  await page.waitForTimeout(400);
+  assert(await inked(150, 150), "twice over is where it started");
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

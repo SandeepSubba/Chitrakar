@@ -294,6 +294,36 @@ impl Document {
         }
     }
 
+    /// Put the whole page through a transform of the page's own space:
+    /// what turning it and mirroring it both come down to.
+    ///
+    /// Top-level layers are placed against the page, so the map goes in
+    /// front of what each already does; anything deeper is placed
+    /// against its parent and travels with it. Guides travel too — and a
+    /// map like these either moves a guide or stands it on its end,
+    /// which falls out of where two of the guide's own points land
+    /// rather than out of a table of which becomes which.
+    fn map_page(&mut self, m: Transform) {
+        let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
+        for id in top {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.transform = m.compose(node.transform);
+            }
+        }
+        let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
+        for guide in &mut self.guides {
+            let (p, q) = match *guide {
+                Guide::Vertical(v) => (at(v, 0.0), at(v, 1.0)),
+                Guide::Horizontal(v) => (at(0.0, v), at(1.0, v)),
+            };
+            *guide = if (p.0 - q.0).abs() < 1e-4 {
+                Guide::Vertical(p.0)
+            } else {
+                Guide::Horizontal(p.1)
+            };
+        }
+    }
+
     /// Apply a command, returning its inverse (for undo).
     pub fn apply(&mut self, cmd: Command) -> Result<Command, DocError> {
         // An instance draws whatever it is a copy of, so a copy that
@@ -567,6 +597,23 @@ impl Document {
                     dy: -dy,
                 })
             }
+            Command::MirrorCanvas { across_x } => {
+                let (w, h) = (self.meta.width as f32, self.meta.height as f32);
+                self.map_page(if across_x {
+                    Transform {
+                        a: -1.0,
+                        e: w,
+                        ..Default::default()
+                    }
+                } else {
+                    Transform {
+                        d: -1.0,
+                        f: h,
+                        ..Default::default()
+                    }
+                });
+                Ok(Command::MirrorCanvas { across_x })
+            }
             Command::TurnCanvas { quarters } => {
                 let turns = quarters % 4;
                 if turns == 0 {
@@ -607,35 +654,7 @@ impl Document {
                 if turns % 2 == 1 {
                     std::mem::swap(&mut self.meta.width, &mut self.meta.height);
                 }
-                // Top-level layers are placed against the page, so the
-                // turn goes in front of what each already does. Anything
-                // deeper is placed against its parent and turns with it.
-                let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
-                for id in top {
-                    if let Some(node) = self.nodes.get_mut(&id) {
-                        node.transform = turn.compose(node.transform);
-                    }
-                }
-                // A guide is a line, so a quarter turn either moves it or
-                // stands it on its end; which of the two falls out of
-                // where two of its own points land.
-                let at = |x: f32, y: f32| {
-                    (
-                        turn.a * x + turn.c * y + turn.e,
-                        turn.b * x + turn.d * y + turn.f,
-                    )
-                };
-                for guide in &mut self.guides {
-                    let (p, q) = match *guide {
-                        Guide::Vertical(v) => (at(v, 0.0), at(v, 1.0)),
-                        Guide::Horizontal(v) => (at(0.0, v), at(1.0, v)),
-                    };
-                    *guide = if (p.0 - q.0).abs() < 1e-4 {
-                        Guide::Vertical(p.0)
-                    } else {
-                        Guide::Horizontal(p.1)
-                    };
-                }
+                self.map_page(turn);
                 Ok(Command::TurnCanvas {
                     quarters: 4 - turns,
                 })
@@ -871,6 +890,13 @@ pub enum Command {
         height: u32,
         dx: f32,
         dy: f32,
+    },
+    /// Mirror the page, left to right across its middle when `across_x`
+    /// and top to bottom when not. The page keeps its size and
+    /// everything on it — layers and guides — is reflected with it. Its
+    /// own inverse: doing it twice is doing nothing.
+    MirrorCanvas {
+        across_x: bool,
     },
     /// Turn the page a quarter of the way round, `quarters` times
     /// clockwise. An odd number swaps the page's width and height, and

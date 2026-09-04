@@ -582,6 +582,12 @@ impl WasmSession {
         self.inner.turn_canvas(quarters).map_err(to_js)
     }
 
+    /// Mirror the page across its own middle: left to right when
+    /// `across_x`, top to bottom when not.
+    pub fn mirror_canvas(&mut self, across_x: bool) -> Result<(), JsError> {
+        self.inner.mirror_canvas(across_x).map_err(to_js)
+    }
+
     /// Force the next `render_frame` to redraw everything, for when the
     /// canvas it is copied into has been replaced.
     pub fn invalidate(&mut self) {

@@ -254,6 +254,7 @@ impl Session {
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
             | Command::TurnCanvas { .. }
+            | Command::MirrorCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
             // needs repainting when they change; nor does a lock.
             | Command::SetGuides { .. }
@@ -409,7 +410,10 @@ impl Session {
         // even means.
         let batch = matches!(
             cmd,
-            Command::Batch(_) | Command::ResizeCanvas { .. } | Command::TurnCanvas { .. }
+            Command::Batch(_)
+                | Command::ResizeCanvas { .. }
+                | Command::TurnCanvas { .. }
+                | Command::MirrorCanvas { .. }
         );
         let target = Self::command_target(&cmd);
         let pre = self
@@ -517,6 +521,13 @@ impl Session {
             }
             Command::ResizeCanvas { width, height, .. } => {
                 format!("Resize canvas to {width}x{height}")
+            }
+            Command::MirrorCanvas { across_x } => {
+                if *across_x {
+                    "Mirror the page left to right".into()
+                } else {
+                    "Mirror the page top to bottom".into()
+                }
             }
             Command::TurnCanvas { quarters } => match quarters % 4 {
                 1 => "Turn the page right".into(),
@@ -2827,6 +2838,12 @@ impl Session {
         self.apply(Command::TurnCanvas { quarters })
     }
 
+    /// Mirror the page across its own middle, left to right when
+    /// `across_x` and top to bottom when not.
+    pub fn mirror_canvas(&mut self, across_x: bool) -> Result<(), EngineError> {
+        self.apply(Command::MirrorCanvas { across_x })
+    }
+
     /// Force the next present to recompute the whole canvas. The surface
     /// the frame is copied into lives outside the engine, so when that is
     /// replaced — a resized canvas element, say — the engine has to be
@@ -3657,6 +3674,64 @@ mod tests {
         session.turn_canvas(1).unwrap();
         let (both, _) = session.render_cached().unwrap();
         assert_eq!(both.get(5, 5).a, 1.0, "left and then right is neither");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn mirroring_the_page_reflects_everything_on_it() {
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 0.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            })
+            .unwrap();
+
+        session.mirror_canvas(true).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40),
+            "a mirror leaves the page the size it was"
+        );
+        let (flipped, _) = session.render_cached().unwrap();
+        assert_eq!(flipped.get(75, 5).a, 1.0, "the mark crossed to the right");
+        assert_eq!(flipped.get(5, 5).a, 0.0, "and is not where it was");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(70.0), Guide::Horizontal(4.0)],
+            "a line down the page crossed with it; one across it did not"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // Its own inverse: twice is nothing, and so is one and an undo.
+        session.mirror_canvas(true).unwrap();
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 5).a, 1.0, "twice over is where it started");
+        assert!(session.undo().unwrap());
+        let (once, _) = session.render_cached().unwrap();
+        assert_eq!(once.get(75, 5).a, 1.0, "and undo takes one of them back");
+        assert_cache_matches_fresh(&mut session);
+
+        // The other way round moves what the first one left alone.
+        session.undo().unwrap();
+        session.mirror_canvas(false).unwrap();
+        let (down, _) = session.render_cached().unwrap();
+        assert_eq!(down.get(5, 35).a, 1.0, "the mark went to the bottom");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(10.0), Guide::Horizontal(36.0)],
+            "and the line across the page went with it"
+        );
         assert_cache_matches_fresh(&mut session);
     }
 
