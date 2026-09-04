@@ -34,7 +34,10 @@ without reading anything else.*
   with the pen holds the segment to an eighth of a turn. Shift means the
   other one either way round: a shape being drawn has no proportions
   yet, so shift is what asks for the one worth naming; a shape being
-  resized has them, so shift is what lets go — turn with a rotation knob, flip a selection about its
+  resized has them, so shift is what lets go. Alt says the drag is about
+  a middle rather than a corner — a shape drawn out from where the drag
+  began, a shape resized about its own middle — which is how a circle is
+  put on a target rather than beside one, and the two modifiers combine — turn with a rotation knob, flip a selection about its
   own box; adjustment layers (exposure, brightness/contrast, hue/sat,
   white balance, vibrance, levels,
   curves drawn on a graph in the panel — a master curve and one per
@@ -421,7 +424,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~292),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~567 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~571 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

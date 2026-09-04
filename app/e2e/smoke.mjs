@@ -4842,6 +4842,37 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
 
+  // Alt holds the shape's middle rather than its far corner, so the box
+  // grows both ways at once: the same pull gives twice the size and
+  // leaves the middle where it was.
+  const middle = async () => {
+    const [x, y] = [
+      Number(await page.locator('input[aria-label="X position"]').inputValue()),
+      Number(await page.locator('input[aria-label="Y position"]').inputValue()),
+    ];
+    const [w, h] = await size();
+    return [x + w / 2, y + h / 2];
+  };
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(250);
+  const wasMiddle = await middle();
+  await page.keyboard.down("Alt");
+  await pull(350, 250, false);
+  await page.keyboard.up("Alt");
+  const nowMiddle = await middle();
+  assert(
+    Math.abs(nowMiddle[0] - wasMiddle[0]) < 6 &&
+      Math.abs(nowMiddle[1] - wasMiddle[1]) < 6,
+    `alt keeps the middle where it was (${nowMiddle} against ${wasMiddle})`,
+  );
+  const [aw, ah] = await size();
+  assert(
+    Math.abs(aw / ah - w0 / h0) < 0.05 && aw > w0,
+    `and it still keeps its proportions (${aw}x${ah})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
   // The same drag with shift held follows the cursor on both axes, so
   // the shape comes out a different one.
   await pull(450, 350, true);
@@ -4864,14 +4895,16 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  const drawn = async (tool, x0, y0, x1, y1, shift) => {
+  const drawn = async (tool, x0, y0, x1, y1, shift, alt) => {
     await page.click(`button[aria-label="${tool}"]`);
     if (shift) await page.keyboard.down("Shift");
+    if (alt) await page.keyboard.down("Alt");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 8 });
     await page.mouse.up();
     if (shift) await page.keyboard.up("Shift");
+    if (alt) await page.keyboard.up("Alt");
     await page.waitForTimeout(300);
     await page.click('button[aria-label="Move"]');
     await page.locator(".panel ul li").first().click();
@@ -4900,6 +4933,24 @@ assert(
   assert(
     Math.abs(cw - ch) < 4,
     `and an ellipse comes out a circle (${cw}x${ch})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  // Alt draws out from the middle, which is how a circle is put on a
+  // target rather than beside one: the same drag makes twice the box,
+  // centred on where it began.
+  const [mw, mh] = await drawn("Rect", 160, 110, 260, 160, false, true);
+  assert(
+    Math.abs(mw - 200) < 4 && Math.abs(mh - 100) < 4,
+    `alt draws out from the middle, so it is twice the drag (${mw}x${mh})`,
+  );
+  const [mx, my] = [
+    Number(await page.locator('input[aria-label="X position"]').inputValue()),
+    Number(await page.locator('input[aria-label="Y position"]').inputValue()),
+  ];
+  assert(
+    Math.abs(mx + mw / 2 - 160) < 4 && Math.abs(my + mh / 2 - 110) < 4,
+    `centred on where the drag began (${mx + mw / 2},${my + mh / 2})`,
   );
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(250);

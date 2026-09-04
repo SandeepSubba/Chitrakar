@@ -417,6 +417,33 @@ function isTextEntry(target: EventTarget | null): boolean {
 /** The tools that drag a box out of nothing, which shift squares off. */
 const BOX_TOOLS = new Set<string>(["Rect", "Ellipse", "Frame", "Crop"]);
 
+/** The box a drag out of nothing describes: from the point it began to
+ * the point it is at, or about that first point when it is the middle
+ * rather than a corner. */
+function dragBox(drag: {
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  fromCentre?: boolean;
+}): [number, number, number, number] {
+  const [dx, dy] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+  if (drag.fromCentre) {
+    return [
+      drag.startX - Math.abs(dx),
+      drag.startY - Math.abs(dy),
+      Math.abs(dx) * 2,
+      Math.abs(dy) * 2,
+    ];
+  }
+  return [
+    Math.min(drag.startX, drag.lastX),
+    Math.min(drag.startY, drag.lastY),
+    Math.abs(dx),
+    Math.abs(dy),
+  ];
+}
+
 /** `to`, moved onto the nearest eighth of a turn from `from` and keeping
  * the distance it was at — what shift does to a line being drawn. */
 function onEighths(
@@ -492,6 +519,9 @@ interface ToolDrag {
   lastX: number;
   lastY: number;
   moved: boolean;
+  /** A box tool: the point the drag began is the box's middle rather
+   * than a corner, because alt was held. */
+  fromCentre?: boolean;
   /** Move tool: the node being dragged and its full starting transform. */
   target?: NodeId;
   t0?: Transform;
@@ -1903,6 +1933,11 @@ export function App() {
     // rather than an ellipse, a square page rather than a wide one.
     // There is no shape yet to keep the proportions of, so shift is the
     // only way to ask for the one shape worth naming.
+    // Alt makes the point the drag began at the box's middle rather than
+    // its corner, which is how a circle is put on a target rather than
+    // beside one. It is remembered on the drag, since the box is worked
+    // out again on the way up, when no event says whether alt was held.
+    drag.fromCentre = e.altKey && BOX_TOOLS.has(drag.tool);
     if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
       const side = Math.max(
         Math.abs(drag.lastX - drag.startX),
@@ -1941,14 +1976,10 @@ export function App() {
         view.x + x * view.zoom,
         view.y + y * view.zoom,
       ];
-      const [ax, ay] = toHost(drag.startX, drag.startY);
-      const [bx, by] = toHost(drag.lastX, drag.lastY);
-      setCropRect([
-        Math.min(ax, bx),
-        Math.min(ay, by),
-        Math.max(ax, bx),
-        Math.max(ay, by),
-      ]);
+      const [bx, by, bw, bh] = dragBox(drag);
+      const [ax, ay] = toHost(bx, by);
+      const [cx, cy] = toHost(bx + bw, by + bh);
+      setCropRect([ax, ay, cx, cy]);
       drag.moved = true;
       return;
     }
@@ -2110,10 +2141,7 @@ export function App() {
     }
 
     // Shape tools: commit the dragged bounds as a new object.
-    const x0 = Math.min(drag.startX, drag.lastX);
-    const y0 = Math.min(drag.startY, drag.lastY);
-    const w = Math.abs(drag.lastX - drag.startX);
-    const h = Math.abs(drag.lastY - drag.startY);
+    const [x0, y0, w, h] = dragBox(drag);
     if (w < MIN_SIZE || h < MIN_SIZE) return;
     if (drag.tool === "Crop") {
       // Crop to the dragged rectangle, clamped to the page: the document
@@ -2265,8 +2293,11 @@ export function App() {
     const [x0, y0, x1, y1] = drag.b0;
     const west = drag.corner === "nw" || drag.corner === "sw";
     const north = drag.corner === "nw" || drag.corner === "ne";
-    // The corner that stays put, in local units.
-    const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
+    // What stays put: the far corner, or — with alt — the box's own
+    // middle, so a thing keeps its place while it changes size.
+    const [fx, fy] = e.altKey
+      ? [(x0 + x1) / 2, (y0 + y1) / 2]
+      : [west ? x1 : x0, north ? y1 : y0];
     const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
     // What the corner started as far from the one holding still: the
     // sides of the box being dragged, and the diagonal it runs along.
@@ -2301,8 +2332,14 @@ export function App() {
       // or north edge moves the frame's origin, which the engine takes up
       // in the frame's transform.
       const s = free ? 0 : locked(lx, ly);
-      const [w, h] = free ? [span(lx, fx), span(ly, fy)] : [w0 * s, h0 * s];
-      resizeFrame(drag.id, w, h, west ? fx - w : fx, north ? fy - h : fy, true);
+      const grip = e.altKey ? 2.0 : 1.0;
+      const [w, h] = free
+        ? [span(lx, fx) * grip, span(ly, fy) * grip]
+        : [w0 * s * grip, h0 * s * grip];
+      const [ox, oy] = e.altKey
+        ? [fx - w / 2, fy - h / 2]
+        : [west ? fx - w : fx, north ? fy - h : fy];
+      resizeFrame(drag.id, w, h, ox, oy, true);
       return;
     }
     const s = free ? 0 : locked(lx, ly);
@@ -5976,6 +6013,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Drag a corner", "Resize, keeping the shape's proportions"],
       ["Shift-drag a corner", "Resize free of them"],
       ["Shift while drawing", "A square, a circle, a square page"],
+      ["Alt while drawing", "Out from the middle rather than a corner"],
+      ["Alt-drag a corner", "Resize about the middle, not the far corner"],
       ["Shift-click with the pen", "Hold the segment to 45°"],
       ["Ctrl while dragging", "Ignore the snapping"],
       ["Alt-drag", "Leave the original and carry a copy"],
