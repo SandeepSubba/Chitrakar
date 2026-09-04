@@ -4802,6 +4802,82 @@ assert(
   );
 }
 
+// 9j6. Shift squares off what is being dragged out, and holds a pen
+// segment to an eighth of a turn. Nothing has proportions of its own yet
+// when it is being drawn, so shift is what asks for the one shape worth
+// naming — which is the other way round from resizing something that has.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const drawn = async (tool, x0, y0, x1, y1, shift) => {
+    await page.click(`button[aria-label="${tool}"]`);
+    if (shift) await page.keyboard.down("Shift");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 8 });
+    await page.mouse.up();
+    if (shift) await page.keyboard.up("Shift");
+    await page.waitForTimeout(300);
+    await page.click('button[aria-label="Move"]');
+    await page.locator(".panel ul li").first().click();
+    await page.waitForTimeout(250);
+    return [
+      Number(await page.locator('input[aria-label="W size"]').inputValue()),
+      Number(await page.locator('input[aria-label="H size"]').inputValue()),
+    ];
+  };
+
+  const [w, h] = await drawn("Rect", 60, 60, 300, 180, false);
+  assert(
+    Math.abs(w - 240) < 4 && Math.abs(h - 120) < 4,
+    `dragged out, a rect is the box that was dragged (${w}x${h})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const [sw, sh] = await drawn("Rect", 60, 60, 300, 180, true);
+  assert(
+    Math.abs(sw - sh) < 4 && Math.abs(sw - 240) < 4,
+    `with shift it is a square, on the longer side (${sw}x${sh})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const [cw, ch] = await drawn("Ellipse", 60, 60, 300, 180, true);
+  assert(
+    Math.abs(cw - ch) < 4,
+    `and an ellipse comes out a circle (${cw}x${ch})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
+  // A pen segment held to 45°: clicked well off the diagonal, the anchor
+  // lands on it. The path is two anchors, finished with Enter, so its
+  // box is the segment's own.
+  await page.click('button[aria-label="Pen"]');
+  await page.mouse.click(...at(100, 300));
+  await page.waitForTimeout(120);
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(300, 340));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(120);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(250);
+  const [pw, ph] = [
+    Number(await page.locator('input[aria-label="W size"]').inputValue()),
+    Number(await page.locator('input[aria-label="H size"]').inputValue()),
+  ];
+  // 200 across and 40 down is nearest the level eighth, so the segment
+  // lies flat at the length it was dragged — 204 — inside a box the
+  // stroke's own width reaches four past at either end.
+  assert(
+    Math.abs(pw - 212) < 4 && ph < 12,
+    `the segment went level rather than where it was clicked (${pw}x${ph})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

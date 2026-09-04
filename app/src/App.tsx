@@ -414,6 +414,23 @@ function isTextEntry(target: EventTarget | null): boolean {
   ].includes(target.type);
 }
 
+/** The tools that drag a box out of nothing, which shift squares off. */
+const BOX_TOOLS = new Set<string>(["Rect", "Ellipse", "Frame", "Crop"]);
+
+/** `to`, moved onto the nearest eighth of a turn from `from` and keeping
+ * the distance it was at — what shift does to a line being drawn. */
+function onEighths(
+  from: [number, number],
+  to: [number, number],
+): [number, number] {
+  const [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+  const r = Math.hypot(dx, dy);
+  if (r < 1e-6) return to;
+  const step = Math.PI / 4;
+  const a = Math.round(Math.atan2(dy, dx) / step) * step;
+  return [from[0] + r * Math.cos(a), from[1] + r * Math.sin(a)];
+}
+
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
 /** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
 const HANDLE_CORNER = [0, 1, 3, 2];
@@ -1738,7 +1755,13 @@ export function App() {
       ) {
         finishPath(true);
       } else {
-        setPenPoints((pts) => [...pts, [x, y]]);
+        // Shift holds the segment to eighths of a turn, which is what
+        // draws a level rule or a true diagonal by hand.
+        const last = penPoints[penPoints.length - 1];
+        setPenPoints((pts) => [
+          ...pts,
+          e.shiftKey && last ? onEighths(last, [x, y]) : [x, y],
+        ]);
       }
       return;
     }
@@ -1873,6 +1896,18 @@ export function App() {
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
+    // Shift squares off whatever box is being dragged out — a circle
+    // rather than an ellipse, a square page rather than a wide one.
+    // There is no shape yet to keep the proportions of, so shift is the
+    // only way to ask for the one shape worth naming.
+    if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
+      const side = Math.max(
+        Math.abs(drag.lastX - drag.startX),
+        Math.abs(drag.lastY - drag.startY),
+      );
+      drag.lastX = drag.startX + Math.sign(drag.lastX - drag.startX) * side;
+      drag.lastY = drag.startY + Math.sign(drag.lastY - drag.startY) * side;
+    }
     if (drag.stroke) {
       // Only keep points that add something: a stroke sampled at screen
       // resolution carries hundreds of anchors nobody can edit.
@@ -5915,6 +5950,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Drag", "Move; the edges snap to the page and to other layers"],
       ["Drag a corner", "Resize, keeping the shape's proportions"],
       ["Shift-drag a corner", "Resize free of them"],
+      ["Shift while drawing", "A square, a circle, a square page"],
+      ["Shift-click with the pen", "Hold the segment to 45°"],
       ["Ctrl while dragging", "Ignore the snapping"],
       ["Alt-drag", "Leave the original and carry a copy"],
       ["Arrow keys", "Nudge a pixel; shift for ten"],
