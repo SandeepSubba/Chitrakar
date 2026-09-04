@@ -3735,6 +3735,113 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
     }
 
+    /// What masks a layer and what a layer casts are written in the space
+    /// the layer is placed in, not in the layer's own — so neither
+    /// travels with the layer's transform, and a page operation has to
+    /// take them along by hand. Left behind, a mask goes on hiding the
+    /// part of the page it used to cover, which for a page that moved
+    /// out from under it is the whole layer.
+    #[test]
+    fn what_masks_a_layer_and_what_it_casts_travel_with_the_page() {
+        let masked = |session: &mut Session, id| {
+            session
+                .apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            // The left half of a forty-square layer.
+                            shape: chitrakar_doc::VectorShape::Rect {
+                                width: 20.0,
+                                height: 40.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::default(),
+                        },
+                        invert: false,
+                    })),
+                })
+                .unwrap();
+        };
+
+        // Cropping: the page keeps its size and the artwork moves right.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 40.0);
+        masked(&mut session, id);
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(5, 20).a, 1.0, "the mask shows the left half");
+        assert_eq!(before.get(30, 20).a, 0.0, "and hides the right");
+
+        session.resize_canvas(80, 40, 40.0, 0.0).unwrap();
+        let (moved, _) = session.render_cached().unwrap();
+        assert_eq!(
+            moved.get(45, 20).a,
+            1.0,
+            "the mask went with the layer, so the same half still shows"
+        );
+        assert_eq!(moved.get(70, 20).a, 0.0, "and the same half is hidden");
+        assert_cache_matches_fresh(&mut session);
+        assert!(session.undo().unwrap());
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 20).a, 1.0, "and it comes back with it");
+
+        // Turning: the layer stands on its end and its mask with it, so
+        // the half that showed is still the half that shows.
+        session.turn_canvas(1).unwrap();
+        let (turned, _) = session.render_cached().unwrap();
+        assert_eq!((turned.width, turned.height), (40, 80), "the page stood up");
+        // The layer's left half was doc x 0..20, which a quarter turn to
+        // the right puts along the top of the standing page.
+        assert_eq!(turned.get(20, 10).a, 1.0, "the shown half turned with it");
+        assert_eq!(turned.get(20, 30).a, 0.0, "and so did the hidden half");
+        assert_cache_matches_fresh(&mut session);
+
+        // A shadow is cast in that same space. Turned a quarter round
+        // with the light left where it was, every layer on the page
+        // would be lit from a new direction.
+        let mut lit = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut lit, "r", 20.0, 20.0);
+        lit.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(30.0, 10.0),
+        })
+        .unwrap();
+        lit.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 6.0,
+                dy: 0.0,
+                blur: 0.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        let (flat, _) = lit.render_cached().unwrap();
+        assert!(
+            flat.get(54, 20).a > 0.5 && flat.get(24, 20).a == 0.0,
+            "the shadow falls to the right of the layer"
+        );
+        lit.turn_canvas(1).unwrap();
+        let (stood, _) = lit.render_cached().unwrap();
+        // Turned right, the layer's right-hand side faces down the page,
+        // so what fell to its right now falls below it.
+        assert!(
+            stood.get(20, 54).a > 0.5,
+            "the shadow turned with what casts it"
+        );
+        assert_eq!(
+            stood.get(20, 24).a,
+            0.0,
+            "and is not still pointing the old way"
+        );
+        assert_cache_matches_fresh(&mut lit);
+    }
+
     #[test]
     fn cropping_carries_the_guides_with_the_artwork() {
         use chitrakar_doc::Guide;
@@ -4593,6 +4700,88 @@ mod tests {
         let profiled = session.render().unwrap().get(0, 0).to_srgb8();
         assert_ne!(naive, profiled, "profile must change CMYK rendering");
         // Real presses can't print #00FFFF; profiled cyan is darker/bluer.
+        assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A gradient map's stops are authored ink like any other colour in a
+    /// CMYK document, so they resolve through the press profile too — the
+    /// map is what decides what the page is made of, and it would be an
+    /// odd thing for it alone to ignore the press.
+    ///
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn a_gradient_map_resolves_its_stops_through_the_press() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let cyan = chitrakar_color::AuthoredColor::Cmyk {
+            c: 1.0,
+            m: 0.0,
+            y: 0.0,
+            k: 0.0,
+            a: 1.0,
+        };
+        let mut session = Session::new(4, 4, ColorMode::Cmyk);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "grey",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        // A ramp that is that one ink from end to end, so every tone
+        // comes out it and the profile is the only thing that can change
+        // what shows.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "map",
+                    chitrakar_doc::Adjustment::GradientMap {
+                        stops: vec![
+                            chitrakar_doc::GradientStop {
+                                offset: 0.0,
+                                color: cyan,
+                            },
+                            chitrakar_doc::GradientStop {
+                                offset: 1.0,
+                                color: cyan,
+                            },
+                        ],
+                    },
+                )),
+            })
+            .unwrap();
+        let naive = session.render().unwrap().get(0, 0).to_srgb8();
+        session.set_cmyk_profile(icc).unwrap();
+        let profiled = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_ne!(
+            naive, profiled,
+            "the press has to reach the map's own stops"
+        );
+        // As for a fill: no press prints #00FFFF, so profiled cyan is the
+        // darker of the two.
         assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
         assert_cache_matches_fresh(&mut session);
     }

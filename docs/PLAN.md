@@ -80,9 +80,14 @@ without reading anything else.*
   so a portrait photograph opened into a landscape page is one menu item
   away from being the right way up; and it mirrors the page across
   either middle, which is a different thing from flipping a selection —
-  the guides cross with the artwork. Turning and mirroring are one
-  transform of the page's own space put through one function, so the
-  rule that says what becomes of a guide is written once.
+  the guides cross with the artwork. Turning, mirroring and
+  resizing are one transform of the page's own space put through one
+  function, so what travels with the page is decided once: the layers,
+  what masks them (a mask is written in the space its owner is placed
+  in, so it does not travel with the layer's own transform and has to be
+  taken along — left behind it goes on hiding the part of the page it
+  used to cover, which for a page that moved out from under it is the
+  whole layer), the offsets of what they cast, and the guides.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
@@ -335,6 +340,12 @@ without reading anything else.*
   the same page composited plainly. A blend does more work than
   source-over and always will; the interactive path renders a screenful
   rather than a page, so what is felt is a fraction of that.
+  An adjustment works out what it can before the pass rather than per
+  pixel (`chitrakar_render::prepare`): a curves adjustment's tables, and
+  a gradient map's ramp — resolved and sorted once instead of eight
+  million times, which took a full-page map from 1.48 s to 0.95 s.
+  Resolving it there is also where a CMYK document's stops meet its
+  press profile, which is the last place the document is to hand.
   A placed photo shown smaller than
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles
@@ -361,7 +372,7 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~286),
+- **Verify before committing:** `cargo test --workspace` (~288),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~543 browser
   assertions). Both suites self-skip CMYK-profile steps unless

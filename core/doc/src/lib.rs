@@ -304,10 +304,44 @@ impl Document {
     /// which falls out of where two of the guide's own points land
     /// rather than out of a table of which becomes which.
     fn map_page(&mut self, m: Transform) {
+        // A vector rather than a point: how far a thing reaches, not
+        // where it is, so the map's shift is no part of it.
+        let along = |dx: f32, dy: f32| (m.a * dx + m.c * dy, m.b * dx + m.d * dy);
         let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
         for id in top {
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.transform = m.compose(node.transform);
+            let Some(node) = self.nodes.get_mut(&id) else {
+                continue;
+            };
+            node.transform = m.compose(node.transform);
+            // A mask is written in the space its owner is placed in, so
+            // it does not travel with the layer's own transform and has
+            // to be taken along by hand. Left behind, it goes on hiding
+            // the part of the page it used to cover — which, for a page
+            // that moved out from under it, is the whole layer.
+            if let Some(mask) = &mut node.mask {
+                match &mut mask.kind {
+                    MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
+                        *transform = m.compose(*transform);
+                    }
+                    MaskKind::Painted { strokes } => {
+                        for stroke in strokes {
+                            for p in &mut stroke.points {
+                                *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+                            }
+                        }
+                    }
+                }
+            }
+            // An effect's offset is written in that same space. A page
+            // turned a quarter round with the light left where it was
+            // would light every layer from a new direction.
+            for effect in &mut node.effects {
+                match effect {
+                    Effect::DropShadow { dx, dy, .. } | Effect::InnerShadow { dx, dy, .. } => {
+                        (*dx, *dy) = along(*dx, *dy);
+                    }
+                    Effect::Outline { .. } => {}
+                }
             }
         }
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
@@ -571,25 +605,13 @@ impl Document {
                 let prev = (self.meta.width, self.meta.height);
                 self.meta.width = width;
                 self.meta.height = height;
-                // Top-level layers carry the shift, so cropping keeps the
-                // picture where it was rather than sliding it off the new
-                // page. Anything deeper moves with its group.
-                let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
-                for id in top {
-                    if let Some(node) = self.nodes.get_mut(&id) {
-                        node.transform.e += dx;
-                        node.transform.f += dy;
-                    }
-                }
-                // Guides were placed against the artwork, so they travel
-                // with it; a crop that left them behind would detach every
-                // one of them from what it was lining up.
-                for guide in &mut self.guides {
-                    *guide = match *guide {
-                        Guide::Vertical(v) => Guide::Vertical(v + dx),
-                        Guide::Horizontal(v) => Guide::Horizontal(v + dy),
-                    };
-                }
+                // The shift is a transform of the page's space like any
+                // other, so it goes through the one function that carries
+                // everything on the page along with it: the layers, what
+                // masks them, what they cast, and the guides. A crop that
+                // left any of those behind would detach it from the
+                // artwork it was placed against.
+                self.map_page(Transform::translation(dx, dy));
                 Ok(Command::ResizeCanvas {
                     width: prev.0,
                     height: prev.1,

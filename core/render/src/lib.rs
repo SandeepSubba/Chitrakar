@@ -1201,7 +1201,7 @@ fn render_child(
                 // An adjustment layer transforms everything composited below
                 // it, weighted by its opacity and mask coverage. A curve is
                 // tabulated once here rather than solved per pixel.
-                let luts = curve_luts(adj);
+                let ready = prepare(doc, adj);
                 for y in clip.y0..clip.y1 {
                     for x in clip.x0..clip.x1 {
                         let weight = node.opacity * coverage_at(doc, mask, x, y);
@@ -1209,7 +1209,7 @@ fn render_child(
                             continue;
                         }
                         let i = (y * dst.width + x) as usize;
-                        let adjusted = apply_adjustment(adj, luts.as_ref(), dst.pixels[i]);
+                        let adjusted = apply_adjustment(adj, ready.as_ref(), dst.pixels[i]);
                         dst.pixels[i] = lerp(dst.pixels[i], adjusted, weight);
                     }
                 }
@@ -4412,10 +4412,34 @@ pub struct CurveLuts {
     pub blue: Option<Vec<f32>>,
 }
 
-/// Tabulate a curves adjustment's tables, or nothing when the adjustment
-/// is not one. A channel with fewer than two points is left out: its
-/// curve would be the identity, and skipping it saves the lookup.
-pub fn curve_luts(adj: &Adjustment) -> Option<CurveLuts> {
+/// What an adjustment works out once for a whole pass rather than once
+/// for every pixel of it. A page is millions of pixels; anything with a
+/// shape to it belongs here.
+pub enum Prepared {
+    Curves(CurveLuts),
+    /// A gradient map's stops, resolved and put in order. Resolving is
+    /// also where a CMYK document's stops go through its press profile,
+    /// which is the one place the document is still to hand.
+    Ramp(Vec<(f32, LinearRgba)>),
+}
+
+/// Work out what the adjustment can work out ahead of the pass, or
+/// nothing when it has nothing to work out. A curve channel with fewer
+/// than two points is left out: it would be the identity, and skipping
+/// it saves the lookup.
+pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
+    match adj {
+        Adjustment::Curves { .. } => Some(Prepared::Curves(curve_lut_of(adj))),
+        Adjustment::GradientMap { stops } => Some(Prepared::Ramp(sorted_ramp(stops, |c| {
+            resolve_color(doc, c)
+        }))),
+        _ => None,
+    }
+}
+
+/// The tables for a curves adjustment on its own, for the paths that
+/// have no pass to prepare for.
+fn curve_lut_of(adj: &Adjustment) -> CurveLuts {
     let Adjustment::Curves {
         points,
         red,
@@ -4423,15 +4447,27 @@ pub fn curve_luts(adj: &Adjustment) -> Option<CurveLuts> {
         blue,
     } = adj
     else {
-        return None;
+        return CurveLuts::default();
     };
     let channel = |pts: &Vec<[f32; 2]>| (pts.len() >= 2).then(|| curve_lut(pts));
-    Some(CurveLuts {
+    CurveLuts {
         master: curve_lut(points),
         red: channel(red),
         green: channel(green),
         blue: channel(blue),
-    })
+    }
+}
+
+/// A gradient map's stops as the ramp walker wants them: resolved to the
+/// working space, and in order along the ramp.
+fn sorted_ramp(
+    stops: &[chitrakar_doc::GradientStop],
+    resolve: impl Fn(AuthoredColor) -> LinearRgba,
+) -> Vec<(f32, LinearRgba)> {
+    let mut ramp: Vec<(f32, LinearRgba)> =
+        stops.iter().map(|s| (s.offset, resolve(s.color))).collect();
+    ramp.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ramp
 }
 
 pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
@@ -4517,7 +4553,7 @@ fn curve_at(lut: &[f32], x: f32) -> f32 {
 /// `lut` is the tabulated curve when `adj` is one — built by the caller
 /// once per pass; built here when the caller has not, so the function
 /// stays total.
-fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) -> LinearRgba {
+fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) -> LinearRgba {
     if px.a <= 0.0 {
         return px;
     }
@@ -4632,14 +4668,20 @@ fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) 
             (grey, grey, grey)
         }
         Adjustment::GradientMap { stops } => {
-            if stops.len() < 2 {
+            let owned;
+            // Prepared for the pass where there is a pass; worked out
+            // here when there is not, so the function stays total. Only
+            // the prepared ramp knows a CMYK document's press profile.
+            let ramp = match ready {
+                Some(Prepared::Ramp(ramp)) => ramp,
+                _ => {
+                    owned = sorted_ramp(stops, to_working);
+                    &owned
+                }
+            };
+            if ramp.len() < 2 {
                 (r, g, b)
             } else {
-                let mut ramp: Vec<(f32, LinearRgba)> = stops
-                    .iter()
-                    .map(|s| (s.offset, to_working(s.color)))
-                    .collect();
-                ramp.sort_by(|a, b| a.0.total_cmp(&b.0));
                 // Where a tone sits along the ramp is its brightness as a
                 // device shows it: the middle of the ramp should land on
                 // the tones that look middling, and linear light's middle
@@ -4653,7 +4695,7 @@ fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) 
                 // The stops are premultiplied by their own alpha; the
                 // pixel keeps the alpha it already had, so the ramp's is
                 // divided back out.
-                let c = ramp_color(&ramp, lum);
+                let c = ramp_color(ramp, lum);
                 if c.a > 0.0 {
                     (c.r / c.a, c.g / c.a, c.b / c.a)
                 } else {
@@ -4674,10 +4716,10 @@ fn apply_adjustment(adj: &Adjustment, luts: Option<&CurveLuts>, px: LinearRgba) 
         }
         Adjustment::Curves { .. } => {
             let table;
-            let luts = match luts {
-                Some(luts) => luts,
-                None => {
-                    table = curve_luts(adj).unwrap_or_default();
+            let luts = match ready {
+                Some(Prepared::Curves(luts)) => luts,
+                _ => {
+                    table = curve_lut_of(adj);
                     &table
                 }
             };
@@ -4962,6 +5004,47 @@ mod tests {
             let _ = render(&doc).unwrap();
             println!("A4 at 300dpi, {mode:?} over a full page: {:?}", t.elapsed());
         }
+    }
+
+    /// What a gradient map costs over a full page. Its ramp is worked
+    /// out once for the pass rather than once for each of eight million
+    /// pixels, which is the difference this measures.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn gradient_map_timing_probe() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
+        add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey));
+        add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "map",
+                Adjustment::GradientMap {
+                    stops: vec![
+                        chitrakar_doc::GradientStop {
+                            offset: 0.0,
+                            color: BLUE,
+                        },
+                        chitrakar_doc::GradientStop {
+                            offset: 0.5,
+                            color: RED,
+                        },
+                        chitrakar_doc::GradientStop {
+                            offset: 1.0,
+                            color: grey,
+                        },
+                    ],
+                },
+            )),
+        );
+        let t = std::time::Instant::now();
+        let _ = render(&doc).unwrap();
+        println!("A4 at 300dpi, a gradient map over it: {:?}", t.elapsed());
     }
 
     /// The tabulated transfer curve stands in for the real one on every
