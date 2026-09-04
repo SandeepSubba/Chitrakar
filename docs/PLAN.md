@@ -137,11 +137,24 @@ without reading anything else.*
   them down as geometry — so neither can invent a corner of its own.
   It travels: SVG's stroke-linecap and stroke-linejoin, PDF's J and j,
   and a placed SVG comes in ending and turning the way its file says
-  rather than the way this engine defaults. A rect or ellipse wears its stroke as
-  a band inside its edge, so a thick border never grows the shape; SVG
-  centres a stroke on the outline instead, so export writes those two as
-  a fill at full size and a stroke on the same shape half a width in —
-  which lands the band exactly where the engine draws it.
+  rather than the way this engine defaults. A rect or an ellipse wears its stroke on
+  whichever side of its edge is asked for — inside, so a thick border
+  never grows the shape; across it, as SVG and PDF do by default; or
+  outside, so a border never eats into the fill. Its outline has a
+  distance of its own, so all three are exact, and the dashes that break
+  any of them up walk the middle of the band they belong to. A path is
+  stroked down the middle of its line whatever is asked, which is what a
+  line means and all an open one could mean: putting a band to one side
+  of a path wants its outline offset, and an offset outline is a guess
+  where a distance is not. Nothing asked for is a band inside the edge,
+  which is what a file written before there was an ask still gets.
+  Neither SVG nor PDF can say which side a stroke lies on, so export
+  writes both as a fill at full size and a stroke on the same shape
+  moved half a width that way — which lands the band exactly where the
+  engine draws it. Clipping to one side would say it too, but a clip's
+  own edge is antialiased against an edge the fill already antialiased
+  and the two do not add up: ghostscript drew a seam all the way round
+  an ellipse until the clip became a moved shape.
   Fills can be linear or radial gradients with any number of stops,
   authored in the shape's own box so they follow it, aimed by dragging their
   ends and stops on the canvas, and exported as live SVG gradients. The
@@ -406,9 +419,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~291),
+- **Verify before committing:** `cargo test --workspace` (~292),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~563 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~567 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
