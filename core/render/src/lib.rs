@@ -532,6 +532,11 @@ pub fn filter_reach(doc: &Document) -> u32 {
                     .fold(0.0f32, f32::max);
                 (far * scale).ceil() as u32 + 1
             }
+            // A block is the average of what it covers, so a change
+            // anywhere in one changes the whole of it.
+            NodeKind::Filter(Filter::Pixelate { size }) => {
+                (size * max_scale(ancestor_space(doc, *id))).ceil() as u32 + 1
+            }
             NodeKind::Filter(Filter::GaussianBlur { sigma })
             | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
                 // A filter's radius is written in the space it sits in, so
@@ -1217,15 +1222,9 @@ fn render_child(
             // A filter's radius is written in the space it lives in, so it
             // stretches with whatever scales that space — the view, or a
             // group the filter sits inside.
-            NodeKind::Filter(filter) => apply_filter(
-                doc,
-                filter,
-                node.opacity,
-                mask,
-                dst,
-                clip,
-                max_scale(parent),
-            ),
+            NodeKind::Filter(filter) => {
+                apply_filter(doc, filter, node.opacity, mask, dst, clip, parent)
+            }
             NodeKind::Text(spec) => draw_text(dst, doc, spec, t, node.opacity, blend, clip, mask),
             NodeKind::Paint { strokes } => {
                 draw_paint(dst, doc, strokes, t, node.opacity, blend, clip, mask)
@@ -3505,6 +3504,117 @@ fn apply_mask(doc: &Document, m: MaskRef<'_>, surface: &mut Surface, clip: ClipR
     }
 }
 
+/// One speck of grain: a number in 0..1 settled by where the speck is in
+/// the document and by the layer's seed, and by nothing else. No state
+/// runs from one pixel to the next, so the same page grains the same way
+/// however it is drawn — a region redrawn on its own has to come out the
+/// same as the whole page did, or every pan would leave a seam.
+fn speck(x: i32, y: i32, seed: u32) -> f32 {
+    // A cheap integer hash: multiply, mix the halves, repeat. Good enough
+    // that neighbouring cells look unrelated, which is all grain asks.
+    let mut h = (x as u32).wrapping_mul(0x8da6_b343) ^ (y as u32).wrapping_mul(0xd8163841) ^ seed;
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x2971_5aeb);
+    h ^= h >> 16;
+    h as f32 / u32::MAX as f32
+}
+
+/// The average colour of each block of a pixelate grid, indexed by device
+/// pixel.
+///
+/// The grid is laid out in the document, not on the surface: the block a
+/// pixel belongs to is decided by where that pixel is on the page, so
+/// panning the view slides the picture under a grid that stays put on it
+/// rather than dragging the grid along.
+struct Blocks {
+    /// Sums and counts per block, over a rectangle of block indices.
+    cells: Vec<(LinearRgba, u32)>,
+    /// Which block each device pixel of `read` falls in, as an index
+    /// into `cells`.
+    of_pixel: Vec<usize>,
+    read: ClipRect,
+}
+
+impl Blocks {
+    fn at(&self, x: u32, y: u32) -> LinearRgba {
+        let w = (self.read.x1 - self.read.x0) as usize;
+        let i = self.of_pixel[(y - self.read.y0) as usize * w + (x - self.read.x0) as usize];
+        let (sum, n) = self.cells[i];
+        if n == 0 {
+            return LinearRgba::TRANSPARENT;
+        }
+        let k = 1.0 / n as f32;
+        LinearRgba {
+            r: sum.r * k,
+            g: sum.g * k,
+            b: sum.b * k,
+            a: sum.a * k,
+        }
+    }
+}
+
+/// Average each block over `read`, which is wider than the region being
+/// written.
+///
+/// A block whose square hangs over the edge of the region would
+/// otherwise be averaged from the part inside it alone, and come out a
+/// different colour from the one a whole-page render gives it — a seam
+/// along every region boundary. Reading a block's width past the edge is
+/// what makes a region render and a page render agree.
+fn block_averages(original: &[LinearRgba], read: ClipRect, size: f32, view: Transform) -> Blocks {
+    let (w, h) = ((read.x1 - read.x0) as usize, (read.y1 - read.y0) as usize);
+    // A block smaller than a device pixel is not a block anyone asked
+    // for, and would make more of them than there are pixels.
+    let scale = max_scale(view).max(1e-6);
+    let side = size.max(1.0 / scale);
+    let inv = Inverse::of(view);
+    let cell = |x: u32, y: u32| -> (i32, i32) {
+        match &inv {
+            Some(inv) => {
+                let (dx, dy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
+                ((dx / side).floor() as i32, (dy / side).floor() as i32)
+            }
+            None => (0, 0),
+        }
+    };
+    let mut lo = (i32::MAX, i32::MAX);
+    let mut hi = (i32::MIN, i32::MIN);
+    let mut of_pixel = Vec::with_capacity(w * h);
+    for y in read.y0..read.y1 {
+        for x in read.x0..read.x1 {
+            let c = cell(x, y);
+            lo = (lo.0.min(c.0), lo.1.min(c.1));
+            hi = (hi.0.max(c.0), hi.1.max(c.1));
+            // Stashed as the raw cell for now; turned into an index once
+            // the range is known.
+            of_pixel.push(c);
+        }
+    }
+    let across = (hi.0.saturating_sub(lo.0) + 1).max(1) as usize;
+    let down = (hi.1.saturating_sub(lo.1) + 1).max(1) as usize;
+    let mut cells = vec![(LinearRgba::TRANSPARENT, 0u32); across * down];
+    let index = |c: (i32, i32)| (c.1 - lo.1) as usize * across + (c.0 - lo.0) as usize;
+    let of_pixel: Vec<usize> = of_pixel.into_iter().map(index).collect();
+    for (i, c) in of_pixel.iter().enumerate() {
+        let px = original[i];
+        let slot = &mut cells[*c];
+        slot.0 = LinearRgba {
+            r: slot.0.r + px.r,
+            g: slot.0.g + px.g,
+            b: slot.0.b + px.b,
+            a: slot.0.a + px.a,
+        };
+        slot.1 += 1;
+    }
+    Blocks {
+        cells,
+        of_pixel,
+        read,
+    }
+}
+
 /// Run a filter layer over the accumulated composite below it, weighted by
 /// the layer's opacity and mask coverage.
 #[allow(clippy::too_many_arguments)]
@@ -3515,8 +3625,14 @@ fn apply_filter(
     mask: MaskRef<'_>,
     dst: &mut Surface,
     clip: ClipRect,
-    scale: f32,
+    // How the document is mapped onto the surface. A filter written in
+    // document units needs the scale of it; one that has to line up with
+    // the document — a grid of squares, a field of grain — needs the
+    // whole thing, or it would be anchored to the window and crawl under
+    // a pan.
+    view: Transform,
 ) {
+    let scale = max_scale(view);
     match filter {
         Filter::GaussianBlur { sigma } => {
             let needs_mix = opacity < 1.0 || mask.mask.is_some();
@@ -3527,6 +3643,59 @@ fn apply_filter(
                     lerp(o, f, opacity * coverage_at(doc, mask, x, y))
                 });
             }
+        }
+        Filter::Pixelate { size } => {
+            // Averaged over exactly what is being drawn. A block that
+            // hangs over the edge of a region would be averaged from the
+            // part inside it alone — which is why a block's width is
+            // part of [`filter_reach`], and why the caller renders that
+            // much extra and keeps only the middle.
+            let original = blur::snapshot(dst, clip);
+            let blocks = block_averages(&original, clip, *size, view);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let w = opacity * coverage_at(doc, mask, x, y);
+                lerp(o, blocks.at(x, y), w)
+            });
+        }
+        Filter::Noise {
+            amount,
+            grain,
+            mono,
+            seed,
+        } => {
+            let original = blur::snapshot(dst, clip);
+            let Some(inv) = Inverse::of(view) else {
+                return;
+            };
+            // One speck is `grain` document pixels across, so grain grows
+            // with the picture rather than staying the size of a screen
+            // pixel — which is what film grain does and what keeps a
+            // zoomed page looking like the page.
+            let step = grain.max(1e-3);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let w = amount * opacity * coverage_at(doc, mask, x, y);
+                if w <= 0.0 || o.a <= 0.0 {
+                    return o;
+                }
+                let (dx, dy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
+                let cell = ((dx / step).floor() as i32, (dy / step).floor() as i32);
+                let shift = |c: u32| (speck(cell.0, cell.1, seed.wrapping_add(c)) - 0.5) * w;
+                let (sr, sg, sb) = if *mono {
+                    let one = shift(0);
+                    (one, one, one)
+                } else {
+                    (shift(0), shift(1), shift(2))
+                };
+                // Premultiplied, so a shift is a share of the pixel's own
+                // alpha and a clear pixel stays clear.
+                let put = |v: f32, s: f32| (v + s * o.a).clamp(0.0, o.a);
+                LinearRgba {
+                    r: put(o.r, sr),
+                    g: put(o.g, sg),
+                    b: put(o.b, sb),
+                    a: o.a,
+                }
+            });
         }
         Filter::Sharpen { sigma, amount } => {
             let original = blur::snapshot(dst, clip);

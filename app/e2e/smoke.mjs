@@ -4894,6 +4894,105 @@ assert(
   );
 }
 
+// 9j7. Two filters that have to be functions of the page rather than of
+// the window: a grid of squares anchored in the document, and grain
+// settled by where a speck sits on it.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  // Two halves, so a block over the join has an average neither has.
+  for (const [x0, x1, hex] of [
+    [20, 210, "#ff0000"],
+    [210, 380, "#0000ff"],
+  ]) {
+    // The colour is set before the drag, so each rect is drawn in it
+    // rather than having to be picked again afterwards.
+    await page.fill('input[aria-label="Fill colour"]', hex);
+    await page.waitForTimeout(150);
+    await page.click('button[aria-label="Rect"]');
+    await page.mouse.move(...at(x0, 40));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, 260), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+    await page.click('button[aria-label="Move"]');
+  }
+  const px = (x, y) => canvasPixel(x, y);
+  const flat = await px(100, 150);
+  assert(flat[0] > 200 && flat[2] < 60, `the left half is red (${flat})`);
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "pixelate");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Pixelate" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Block size", 40);
+  await page.waitForTimeout(300);
+  // The grid starts at the page's own origin, so a block runs 200..240
+  // while the two halves meet at 210: that block straddles the join and
+  // comes out neither red nor blue.
+  const joined = await px(210, 150);
+  assert(
+    joined[0] > 40 && joined[2] > 40,
+    `the block over the join carries both halves (${joined})`,
+  );
+  // And one block is one colour throughout.
+  const [a1, a2] = [await px(84, 150), await px(110, 150)];
+  assert(
+    Math.abs(a1[0] - a2[0]) < 4 && Math.abs(a1[2] - a2[2]) < 4,
+    `one block is flat (${a1} vs ${a2})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Pixelate" }).count()) === 0,
+    "and it undoes",
+  );
+
+  // Grain: a flat colour stops being flat, and the same page grains the
+  // same way twice — which a redraw between the two readings would show.
+  await page.selectOption('[aria-label="Add adjustment layer"]', "noise");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Noise" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Noise amount", 0.6);
+  await page.waitForTimeout(300);
+  // Read along a row of the page by its own coordinates, whatever the
+  // view is doing, so the same document points are read each time.
+  const along = () =>
+    page.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      const s = Number(c.dataset.frameScale) || 1;
+      const ox = Number(c.dataset.originX) || 0;
+      const oy = Number(c.dataset.originY) || 0;
+      const row = [];
+      for (let x = 150; x < 205; x++) {
+        const dx = Math.round(ox + (x + 0.5) * s);
+        const dy = Math.round(oy + (150 + 0.5) * s);
+        row.push(d[(dy * c.width + dx) * 4]);
+      }
+      return row;
+    });
+  const grained = await along();
+  const mean = grained.reduce((a, v) => a + v, 0) / grained.length;
+  const varies =
+    grained.reduce((a, v) => a + Math.abs(v - mean), 0) / grained.length;
+  assert(varies > 3, `a flat colour comes out grained (spread ${varies})`);
+  // Zoom in and read the same document points again. Grain settled by
+  // where a speck sits on the page comes back the same; grain settled by
+  // the screen would be a fresh sprinkling at every zoom.
+  await menuClick("View", "Zoom in");
+  await page.waitForTimeout(500);
+  const closer = await along();
+  const same = grained.filter((v, i) => Math.abs(v - closer[i]) <= 3).length;
+  assert(
+    same > grained.length * 0.85,
+    `the page grains by the page, not by the view (${same} of ${grained.length} unchanged)`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

@@ -2440,6 +2440,25 @@ export function App() {
       name: "Gaussian Blur",
       kind: { Filter: { GaussianBlur: { sigma: 4 } } },
     },
+    pixelate: {
+      name: "Pixelate",
+      kind: { Filter: { Pixelate: { size: 12 } } },
+    },
+    noise: {
+      name: "Noise",
+      kind: {
+        Filter: {
+          // A seed of its own, so two grain layers on one page do not
+          // land speck for speck on top of each other.
+          Noise: {
+            amount: 0.15,
+            grain: 1,
+            mono: true,
+            seed: Math.floor(Math.random() * 0xffffffff),
+          },
+        },
+      },
+    },
     sharpen: {
       name: "Sharpen",
       kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
@@ -7101,6 +7120,38 @@ function KindProps({
         (v) => ({
           Filter: { GaussianBlur: { sigma: v } },
         }),
+      );
+    }
+    if ("Pixelate" in filter) {
+      return slider("Block size", filter.Pixelate.size, 2, 100, 1, (v) => ({
+        Filter: { Pixelate: { size: v } },
+      }));
+    }
+    if ("Noise" in filter) {
+      const p = filter.Noise;
+      return (
+        <>
+          {slider("Noise amount", p.amount, 0, 1, 0.01, (v) => ({
+            Filter: { Noise: { ...p, amount: v } },
+          }))}
+          {slider("Grain size", p.grain, 0.5, 20, 0.5, (v) => ({
+            Filter: { Noise: { ...p, grain: v } },
+          }))}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.mono}
+              onChange={(e) =>
+                onEdit(
+                  { Filter: { Noise: { ...p, mono: e.target.checked } } },
+                  false,
+                )
+              }
+              aria-label="Grain in one colour"
+            />
+            One colour
+          </label>
+        </>
       );
     }
     if ("Sharpen" in filter) {

@@ -370,6 +370,28 @@ pub enum Filter {
     GaussianBlur { sigma: f32 },
     /// Unsharp mask: original + amount × (original − blur(sigma)).
     Sharpen { sigma: f32, amount: f32 },
+    /// Squares of one colour each, the average of what they covered:
+    /// what a face or a number is taken out of a picture with. `size` is
+    /// the square's side in document pixels, and the grid is anchored in
+    /// the document, so a block stays the same block when the page is
+    /// panned or zoomed rather than crawling under the view.
+    Pixelate { size: f32 },
+    /// Grain. `amount` is how far a pixel can be moved, 0..=1; `grain`
+    /// is how many document pixels across one speck is, so grain gets
+    /// bigger with the picture rather than staying the size of a screen
+    /// pixel; `mono` moves every channel together, which is film grain,
+    /// against moving each on its own, which is sensor noise.
+    ///
+    /// It is a function of where a speck is in the document and of
+    /// `seed`, not of any state carried between pixels, so the same page
+    /// grains the same way every time it is drawn — which is what lets a
+    /// filter be a live layer rather than something baked once.
+    Noise {
+        amount: f32,
+        grain: f32,
+        mono: bool,
+        seed: u32,
+    },
 }
 
 /// A straight line the user placed to lay work out against. Not artwork —

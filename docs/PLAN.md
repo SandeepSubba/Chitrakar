@@ -54,7 +54,10 @@ without reading anything else.*
   lands the middle of the ramp on the tones that look middling; and
   invert, taken on the shown values too, since light inverted is not
   what anyone means by a negative) and
-  filter layers (gaussian blur, sharpen) — over everything below, or
+  filter layers (gaussian blur, sharpen, pixelate — squares of one
+  colour each, the average of what they covered, which is what a face or
+  a number is taken out of a picture with — and noise, which is grain)
+  — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
   inscribed ellipse or rectangle, any shape handed down to the layer
@@ -363,6 +366,14 @@ without reading anything else.*
   the same page composited plainly. A blend does more work than
   source-over and always will; the interactive path renders a screenful
   rather than a page, so what is felt is a fraction of that.
+  A filter is a function of the document, not of the window it is seen
+  through: a pixelate grid is laid out on the page, so panning slides
+  the picture under a grid that stays put on it, and grain is settled by
+  where a speck sits on the page and by the layer's seed and by nothing
+  else, so the same page grains the same way however it is drawn. That
+  second part is what lets a region be redrawn on its own without a
+  seam, and a block's own width is part of `filter_reach` so a block
+  hanging over the edge of a redrawn region is still averaged whole.
   An adjustment works out what it can before the pass rather than per
   pixel (`chitrakar_render::prepare`): a curves adjustment's tables, and
   a gradient map's ramp — resolved and sorted once instead of eight
@@ -395,9 +406,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~289),
+- **Verify before committing:** `cargo test --workspace` (~291),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~557 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~563 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

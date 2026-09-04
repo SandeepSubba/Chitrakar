@@ -3842,6 +3842,128 @@ mod tests {
         assert_cache_matches_fresh(&mut lit);
     }
 
+    /// A pixelate block is the average of what it covers, and its grid is
+    /// laid out on the document rather than on the window — so a region
+    /// redrawn on its own has to come out what the whole page came out,
+    /// down to the blocks that hang over the region's edge.
+    #[test]
+    fn pixelate_blocks_are_the_document_s_own() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        // A half-and-half page, so a block that straddles the line has an
+        // average of its own that neither half has.
+        let left = add_rect(&mut session, "left", 40.0, 80.0);
+        let right = add_rect(&mut session, "right", 40.0, 80.0);
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        let mut blue = session.document().node(right).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, .. } = &mut blue {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::SetKind {
+                id: right,
+                kind: Box::new(blue),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: session.document().root(),
+                index: 2,
+                node: Box::new(Node::filter(
+                    "blocks",
+                    chitrakar_doc::Filter::Pixelate { size: 16.0 },
+                )),
+            })
+            .unwrap();
+
+        let (page, _) = session.render_cached().unwrap();
+        // A block is sixteen across and the grid starts at the page's own
+        // origin, so the third block runs 32..48 and straddles the line
+        // between the two halves: half of one colour and half the other.
+        let straddling = page.get(40, 40);
+        assert!(
+            straddling.r > 0.1 && straddling.b > 0.1,
+            "the block over the join is the average of both sides: {straddling:?}"
+        );
+        // And a block well inside one half is that half, flat.
+        let (a, b) = (page.get(4, 40), page.get(12, 40));
+        assert!(
+            (a.r - b.r).abs() < 1e-5 && (a.b - b.b).abs() < 1e-5,
+            "one block is one colour throughout: {a:?} vs {b:?}"
+        );
+        assert!(a.b < 0.01, "and it is the colour of its own half: {a:?}");
+        // The whole point: redrawn a region at a time it comes out the
+        // same, blocks over the edges included.
+        assert_cache_matches_fresh(&mut session);
+        session
+            .apply(Command::SetTransform {
+                id: left,
+                transform: Transform::translation(0.0, 4.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Grain is a function of where a speck sits in the document and of
+    /// nothing else, so the same page grains the same way however it is
+    /// drawn — and a region redrawn on its own leaves no seam.
+    #[test]
+    fn grain_is_settled_by_the_page_not_by_the_window() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let id = add_rect(&mut session, "flat", 80.0, 80.0);
+        session
+            .apply(Command::AddNode {
+                parent: session.document().root(),
+                index: 1,
+                node: Box::new(Node::filter(
+                    "grain",
+                    chitrakar_doc::Filter::Noise {
+                        amount: 0.5,
+                        grain: 1.0,
+                        mono: true,
+                        seed: 7,
+                    },
+                )),
+            })
+            .unwrap();
+        // Kept as its own pixels, since the next line asks the document
+        // to be drawn again and the cache is borrowed from the session.
+        let grained: Vec<chitrakar_color::LinearRgba> = {
+            let (s, _) = session.render_cached().unwrap();
+            s.pixels.clone()
+        };
+        let at = |px: &[chitrakar_color::LinearRgba], x: u32, y: u32| px[(y * 80 + x) as usize];
+        let vals: Vec<f32> = (0..40).map(|i| at(&grained, i, 20).r).collect();
+        let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+        let varies = vals.iter().map(|v| (v - mean).abs()).sum::<f32>() / vals.len() as f32;
+        assert!(varies > 0.01, "a flat colour comes out grained ({varies})");
+        // Drawn again it is the same grain, not a fresh sprinkling.
+        let again = chitrakar_render::render(session.document()).unwrap();
+        for x in 0..80 {
+            assert!(
+                (at(&grained, x, 20).r - again.get(x, 20).r).abs() < 1e-6,
+                "the same page grains the same way at x={x}"
+            );
+        }
+        assert_cache_matches_fresh(&mut session);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 2.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
     #[test]
     fn cropping_carries_the_guides_with_the_artwork() {
         use chitrakar_doc::Guide;

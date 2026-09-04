@@ -131,7 +131,14 @@ export type StrokeJoin = "Miter" | "Round" | "Bevel";
 
 export type Filter =
   | { GaussianBlur: { sigma: number } }
-  | { Sharpen: { sigma: number; amount: number } };
+  | { Sharpen: { sigma: number; amount: number } }
+  /** Squares of one colour each, the average of what they covered. The
+   * grid is anchored in the document, so a block stays the same block
+   * when the page is panned or zoomed. */
+  | { Pixelate: { size: number } }
+  /** Grain: a function of where a speck sits in the document and of the
+   * seed, so the same page grains the same way every time it is drawn. */
+  | { Noise: { amount: number; grain: number; mono: boolean; seed: number } };
 
 export type MaskKind =
   | { Vector: { shape: VectorShape; transform: Transform } }
