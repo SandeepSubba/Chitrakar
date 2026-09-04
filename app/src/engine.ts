@@ -161,6 +161,21 @@ export function effectBody(e: Effect): Record<string, number | AuthoredColor> {
 
 export type TextAlign = "Left" | "Center" | "Right";
 
+/** A stretch of a block set differently from the rest: the same choices
+ * the block itself makes, made again over a range of its text, with
+ * `null` meaning "however the block does it". Offsets are into the
+ * text's UTF-8 bytes, which is how the engine counts. */
+export interface StyleRun {
+  start: number;
+  end: number;
+  fill?: AuthoredColor | null;
+  bold?: boolean | null;
+  italic?: boolean | null;
+  underline?: boolean | null;
+  strike?: boolean | null;
+  font?: string | null;
+}
+
 export interface TextSpec {
   text: string;
   size: number;
@@ -184,6 +199,8 @@ export interface TextSpec {
   /** A line under each line of text, and one through it. */
   underline: boolean;
   strike: boolean;
+  /** Stretches of the text set differently from the rest of it. */
+  runs: StyleRun[];
   /** A guide in the block's own space to set the text along, and how far
    * along it the text starts. */
   along: VectorShape | null;

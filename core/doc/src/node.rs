@@ -415,6 +415,66 @@ pub struct TextSpec {
     /// How far along the guide, in document pixels, the text starts.
     #[serde(default)]
     pub along_offset: f32,
+    /// Stretches of the text set differently from the rest of it.
+    /// Additive: a block written before runs existed has none, and is
+    /// set the way it always was.
+    #[serde(default)]
+    pub runs: Vec<StyleRun>,
+}
+
+/// A stretch of a block set differently from the rest: the same choices
+/// the block itself makes, made again over a range of its text, with
+/// `None` meaning "however the block does it".
+///
+/// A run's size is the block's — one line of text is one line tall here,
+/// and mixing sizes inside a block is a different feature — so a run
+/// changes how its letters are drawn, never where the lines sit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StyleRun {
+    /// Byte offsets into the block's text. Ranges are clipped to the
+    /// text and to each other when the block is set, so text can be
+    /// deleted without the runs having to be repaired first.
+    pub start: usize,
+    pub end: usize,
+    #[serde(default)]
+    pub fill: Option<AuthoredColor>,
+    #[serde(default)]
+    pub bold: Option<bool>,
+    #[serde(default)]
+    pub italic: Option<bool>,
+    #[serde(default)]
+    pub underline: Option<bool>,
+    #[serde(default)]
+    pub strike: Option<bool>,
+    #[serde(default)]
+    pub font: Option<String>,
+}
+
+impl StyleRun {
+    /// A run over `start..end` that changes nothing yet.
+    pub fn over(start: usize, end: usize) -> Self {
+        Self {
+            start,
+            end,
+            fill: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            strike: None,
+            font: None,
+        }
+    }
+
+    /// Whether the run asks for anything at all. One that does not is
+    /// dropped rather than kept as a range that changes nothing.
+    pub fn says_anything(&self) -> bool {
+        self.fill.is_some()
+            || self.bold.is_some()
+            || self.italic.is_some()
+            || self.underline.is_some()
+            || self.strike.is_some()
+            || self.font.is_some()
+    }
 }
 
 fn one() -> f32 {
@@ -440,6 +500,7 @@ impl TextSpec {
             strike: false,
             along: None,
             along_offset: 0.0,
+            runs: Vec::new(),
         }
     }
 
@@ -447,6 +508,87 @@ impl TextSpec {
     /// multiple that would collapse every line onto one.
     pub fn line_scale(&self) -> f32 {
         self.line_height.max(0.05)
+    }
+
+    /// The block's text as a sequence of pieces, each with the index of
+    /// the run that governs it or `None` where the block's own styling
+    /// stands. Pieces are in order, cover the whole text exactly once,
+    /// and always begin and end on a character boundary.
+    ///
+    /// This is the one place that decides which run a byte belongs to, so
+    /// every part of the pipeline — measuring, shaping, rasterizing and
+    /// both exporters — cuts the text the same way. Ranges are sorted,
+    /// clipped to the text, and trimmed against whatever came before, so
+    /// runs left overlapping or hanging past the end by an edit are read
+    /// sensibly rather than refused.
+    pub fn pieces(&self) -> Vec<(usize, usize, Option<usize>)> {
+        let len = self.text.len();
+        let mut order: Vec<usize> = (0..self.runs.len()).collect();
+        order.sort_by_key(|&i| (self.runs[i].start, self.runs[i].end));
+        let mut out: Vec<(usize, usize, Option<usize>)> = Vec::new();
+        let mut at = 0usize;
+        for i in order {
+            let run = &self.runs[i];
+            let start = self.boundary(run.start.max(at).min(len));
+            let end = self.boundary(run.end.min(len)).max(start);
+            if start >= end {
+                continue;
+            }
+            if start > at {
+                out.push((at, start, None));
+            }
+            out.push((start, end, Some(i)));
+            at = end;
+        }
+        if at < len || out.is_empty() {
+            out.push((at, len, None));
+        }
+        out
+    }
+
+    /// The nearest character boundary at or before `at`: a run whose end
+    /// an edit left in the middle of a character still cuts the text
+    /// somewhere it can be cut.
+    fn boundary(&self, at: usize) -> usize {
+        let mut at = at.min(self.text.len());
+        while at > 0 && !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
+    /// This block's styling with `run`'s choices laid over it: how one
+    /// piece of the text is actually set.
+    ///
+    /// The text itself is left empty — the piece it applies to is named
+    /// separately, and copying the whole block's text once per piece is
+    /// the sort of thing that makes wrapping a long block slow.
+    pub fn styling_under(&self, run: Option<&StyleRun>) -> TextSpec {
+        let mut spec = self.clone();
+        spec.text = String::new();
+        spec.runs = Vec::new();
+        let Some(run) = run else {
+            return spec;
+        };
+        if let Some(fill) = run.fill {
+            spec.fill = fill;
+        }
+        if let Some(bold) = run.bold {
+            spec.bold = bold;
+        }
+        if let Some(italic) = run.italic {
+            spec.italic = italic;
+        }
+        if let Some(underline) = run.underline {
+            spec.underline = underline;
+        }
+        if let Some(strike) = run.strike {
+            spec.strike = strike;
+        }
+        if let Some(font) = &run.font {
+            spec.font = font.clone();
+        }
+        spec
     }
 }
 
@@ -805,5 +947,116 @@ impl Node {
 
     pub fn adjustment(name: &str, adjustment: Adjustment) -> Self {
         Self::base(name, NodeKind::Adjustment(adjustment))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(text: &str, runs: Vec<StyleRun>) -> TextSpec {
+        let mut spec = TextSpec::new(
+            text,
+            12.0,
+            AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        spec.runs = runs;
+        spec
+    }
+
+    /// The pieces cover the text once, in order, whatever the runs do:
+    /// none at all, one in the middle, two that overlap, one hanging
+    /// past the end, and one that starts where the last one stopped.
+    #[test]
+    fn the_pieces_cover_the_text_once_however_the_runs_lie() {
+        let cover = |spec: &TextSpec| {
+            let pieces = spec.pieces();
+            let mut at = 0;
+            for (start, end, _) in &pieces {
+                assert_eq!(*start, at, "pieces run on from each other: {pieces:?}");
+                assert!(end >= start, "and never backwards: {pieces:?}");
+                at = *end;
+            }
+            assert_eq!(at, spec.text.len(), "to the end: {pieces:?}");
+            pieces
+        };
+
+        assert_eq!(cover(&block("hello", vec![])), [(0, 5, None)]);
+        assert_eq!(
+            cover(&block("hello", vec![StyleRun::over(1, 3)])),
+            [(0, 1, None), (1, 3, Some(0)), (3, 5, None)]
+        );
+        // Overlapping: the one that starts first keeps what it has and
+        // the other picks up where that left off.
+        assert_eq!(
+            cover(&block(
+                "hello",
+                vec![StyleRun::over(0, 3), StyleRun::over(2, 5)]
+            )),
+            [(0, 3, Some(0)), (3, 5, Some(1))]
+        );
+        // Hanging past the end, which an edit that shortened the text
+        // would leave behind.
+        assert_eq!(
+            cover(&block("hi", vec![StyleRun::over(1, 900)])),
+            [(0, 1, None), (1, 2, Some(0))]
+        );
+        // Given out of order, and abutting.
+        assert_eq!(
+            cover(&block(
+                "abcd",
+                vec![StyleRun::over(2, 4), StyleRun::over(0, 2)]
+            )),
+            [(0, 2, Some(1)), (2, 4, Some(0))]
+        );
+        // Empty text still has one piece to hand back.
+        assert_eq!(
+            cover(&block("", vec![StyleRun::over(0, 4)])),
+            [(0, 0, None)]
+        );
+    }
+
+    /// A range that an edit left in the middle of a character is cut
+    /// where the character starts, not through it.
+    #[test]
+    fn a_piece_never_cuts_a_character_in_half() {
+        // "é" is two bytes, "😀" is four.
+        let spec = block("aé😀b", vec![StyleRun::over(2, 6)]);
+        for (start, end, _) in spec.pieces() {
+            assert!(
+                spec.text.is_char_boundary(start) && spec.text.is_char_boundary(end),
+                "{start}..{end} of {:?}",
+                spec.text
+            );
+        }
+        let mut inside = block("aé😀b", vec![StyleRun::over(2, 5)]);
+        inside.runs[0].start = 2;
+        let cut: Vec<_> = inside.pieces().iter().map(|p| (p.0, p.1)).collect();
+        assert_eq!(cut, [(0, 1), (1, 3), (3, 8)], "clipped back to a boundary");
+    }
+
+    /// A run says only what it changes; everything else is the block's.
+    #[test]
+    fn a_run_lays_its_choices_over_the_block_and_no_more() {
+        let mut spec = block("hi", vec![]);
+        spec.italic = true;
+        spec.font = "Some Face".into();
+        let mut run = StyleRun::over(0, 1);
+        run.bold = Some(true);
+        run.italic = Some(false);
+        let under = spec.styling_under(Some(&run));
+        assert!(under.bold && !under.italic, "what the run asked for");
+        assert_eq!(under.font, "Some Face", "and the block's for the rest");
+        assert_eq!(under.size, spec.size);
+        assert!(under.runs.is_empty(), "the piece is not styled again");
+        assert!(
+            spec.styling_under(None).italic,
+            "no run is the block itself"
+        );
     }
 }

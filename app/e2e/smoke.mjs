@@ -1881,6 +1881,119 @@ assert(
     Math.abs((await outline())[0] - unfolded[0]) < 2,
     "and again takes it off",
   );
+  // Style runs: with part of the text selected, a style button applies
+  // to that part rather than to the block.
+  {
+    await setText("aaaa aaaa");
+    await page.waitForTimeout(300);
+    const plain = await outline();
+    const select = (a, b) =>
+      page
+        .locator('textarea[aria-label="Text content"]')
+        .evaluate(
+          (el, [i, j]) => {
+            el.focus();
+            el.setSelectionRange(i, j);
+          },
+          [a, b],
+        );
+    await select(0, 4);
+    await page.click('button[aria-label="Bold"]');
+    await page.waitForTimeout(300);
+    const half = await outline();
+    await select(0, 9);
+    await page.click('button[aria-label="Bold"]');
+    await page.waitForTimeout(300);
+    const whole = await outline();
+    assert(
+      plain[0] < half[0] && half[0] < whole[0],
+      `bolding half a block sits between plain and all of it (${plain} / ${half} / ${whole})`,
+    );
+    // And pressing it again over the whole selection takes it back off,
+    // leaving no run behind to have bent the block.
+    await select(0, 9);
+    await page.click('button[aria-label="Bold"]');
+    await page.waitForTimeout(300);
+    assert(
+      Math.abs((await outline())[0] - plain[0]) < 2,
+      `and takes it all off again (${await outline()} vs ${plain})`,
+    );
+    // A colour over a selection paints only there. Where the block sits
+    // on the canvas is not this test's business, so it is checked by
+    // moving the selection: colour the first word and then the second,
+    // and the red ink has to move along with it.
+    // Red per column of the canvas, so the page's own red can be
+    // subtracted off and only the text's counted.
+    const redColumns = () =>
+      page.evaluate(() => {
+        const el = document.getElementById("engine-canvas");
+        const d = el.getContext("2d").getImageData(0, 0, el.width, el.height).data;
+        const cols = new Array(el.width).fill(0);
+        for (let i = 0; i < d.length; i += 4)
+          if (d[i] > 128 && d[i + 1] < 100 && d[i + 2] < 100 && d[i + 3] > 128)
+            cols[(i >> 2) % el.width]++;
+        return cols;
+      });
+    // How much red a state added over the baseline, and where its
+    // middle sits.
+    const addedRed = (cols, base) => {
+      let n = 0;
+      let sum = 0;
+      for (let x = 0; x < cols.length; x++) {
+        const d = cols[x] - base[x];
+        if (d > 0) {
+          n += d;
+          sum += d * x;
+        }
+      }
+      return [n, n ? sum / n : 0];
+    };
+    const paintRed = async (a, b) => {
+      await select(a, b);
+      await page.locator('input[aria-label="Text color"]').evaluate((el) => {
+        const set = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          "value",
+        ).set;
+        set.call(el, "#ff0000");
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      });
+      await page.waitForTimeout(400);
+      return redColumns();
+    };
+    const none = await redColumns();
+    const first = addedRed(await paintRed(0, 4), none);
+    assert(
+      first[0] > 20,
+      `colouring a selection puts red on the page (${first})`,
+    );
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    const second = addedRed(await paintRed(5, 9), none);
+    assert(
+      Math.abs(second[0] - first[0]) < first[0] * 0.4 && second[1] > first[1] + 10,
+      `and colouring the other word puts the same ink further along (${first} -> ${second})`,
+    );
+    // And the styling follows the text it was put on. Cutting two
+    // letters off the front leaves the same four letters red: had the
+    // run stayed where it was, it would have run off the shortened end
+    // and coloured two of them.
+    const third = addedRed(await paintRed(5, 9), none);
+    await setText("aa aaaa");
+    await page.waitForTimeout(400);
+    const moved = addedRed(await redColumns(), none);
+    assert(
+      moved[0] > third[0] * 0.8,
+      `the red is still on all four letters (${third} -> ${moved})`,
+    );
+    // Leave the block plain and nothing selected, so what follows is
+    // testing the block's own styling and not a leftover run.
+    await select(0, 0);
+    await setText("HHHH");
+    await page.waitForTimeout(300);
+  }
+
   // A family with no bold cut registered gets one anyway: the toggle is
   // never disabled, and the rasterizer thickens the upright it has.
   await page.selectOption('select[aria-label="Font"]', "DejaVu Serif");

@@ -440,14 +440,28 @@ fn write_node(
                     );
                     let _ = writeln!(out, "</text>");
                 } else {
-                    for (i, (line, _)) in block.lines.iter().enumerate() {
-                        let _ = writeln!(
-                            out,
-                            r#"<tspan x="{:.2}" y="{:.2}">{}</tspan>"#,
-                            x,
-                            block.ascent + i as f32 * block.step,
-                            escape_xml(line)
-                        );
+                    for (i, set) in block.lines.iter().enumerate() {
+                        let y = block.ascent + i as f32 * block.step;
+                        // A line no style run touches is one tspan, as it
+                        // always was. One a run crosses is cut where the
+                        // run starts and stops, each piece carrying only
+                        // what its run changes — SVG inherits the rest
+                        // from the text element around them, and the x is
+                        // given once so the pieces run on from each other.
+                        let cuts = line_pieces(spec, set);
+                        for (n, (piece, run)) in cuts.iter().enumerate() {
+                            let at = if n == 0 {
+                                format!(r#" x="{x:.2}" y="{y:.2}""#)
+                            } else {
+                                String::new()
+                            };
+                            let _ = writeln!(
+                                out,
+                                "<tspan{at}{}>{}</tspan>",
+                                run_attrs(doc, spec, *run),
+                                escape_xml(piece)
+                            );
+                        }
                     }
                     let _ = writeln!(out, "</text>");
                 }
@@ -687,6 +701,62 @@ fn color_alpha(color: AuthoredColor) -> f32 {
     match color {
         AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
     }
+}
+
+/// One set line cut where its style runs start and stop: each piece of
+/// the line with the run that governs it.
+fn line_pieces<'a>(
+    spec: &chitrakar_doc::TextSpec,
+    line: &'a chitrakar_render::text::SetLine,
+) -> Vec<(&'a str, Option<usize>)> {
+    if spec.runs.is_empty() {
+        return vec![(line.text.as_str(), None)];
+    }
+    let (at, len) = (line.at, line.text.len());
+    spec.pieces()
+        .into_iter()
+        .filter_map(|(s, e, run)| {
+            let (s, e) = (s.max(at), e.min(at + len));
+            (s < e).then(|| (&line.text[s - at..e - at], run))
+        })
+        .collect()
+}
+
+/// What a tspan has to say for its run: only what the run changes, since
+/// SVG inherits the rest from the text element the tspans sit in.
+fn run_attrs(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>) -> String {
+    let Some(run) = run.and_then(|i| spec.runs.get(i)) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    if let Some(fill) = run.fill {
+        let _ = write!(out, r#" fill="{}""#, color_hex(doc, fill));
+    }
+    if let Some(bold) = run.bold {
+        let _ = write!(
+            out,
+            r#" font-weight="{}""#,
+            if bold { "bold" } else { "normal" }
+        );
+    }
+    if let Some(italic) = run.italic {
+        let _ = write!(
+            out,
+            r#" font-style="{}""#,
+            if italic { "italic" } else { "normal" }
+        );
+    }
+    if let Some(font) = &run.font {
+        let _ = write!(out, r#" font-family="{}, sans-serif""#, escape_xml(font));
+    }
+    match (run.underline, run.strike) {
+        (Some(true), Some(true)) => out.push_str(r#" text-decoration="underline line-through""#),
+        (Some(true), _) => out.push_str(r#" text-decoration="underline""#),
+        (_, Some(true)) => out.push_str(r#" text-decoration="line-through""#),
+        (Some(false), _) | (_, Some(false)) => out.push_str(r#" text-decoration="none""#),
+        (None, None) => {}
+    }
+    out
 }
 
 fn escape_xml(s: &str) -> String {
@@ -1407,6 +1477,52 @@ mod tests {
         );
     }
 
+    /// A block with style runs is cut into tspans where the runs start
+    /// and stop, each saying only what its run changes; the text element
+    /// around them carries the rest, which is what SVG inheritance is
+    /// for. A block with no runs is still one tspan a line.
+    #[test]
+    fn style_runs_travel_as_tspans_saying_only_what_they_change() {
+        let mut doc = Document::new(200, 60, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::text("t", chitrakar_doc::TextSpec::new("one two", 16.0, RED));
+        let chitrakar_doc::NodeKind::Text(spec) = &mut node.kind else {
+            unreachable!()
+        };
+        let mut run = chitrakar_doc::StyleRun::over(4, 7);
+        run.bold = Some(true);
+        run.fill = Some(AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        });
+        spec.runs = vec![run];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+
+        // Two pieces, the first carrying the position and nothing else.
+        assert!(
+            svg.contains(r#"<tspan x="0.00" y="#) && svg.contains(">one </tspan>"),
+            "the block's own stretch: {svg}"
+        );
+        assert!(
+            svg.contains(r##"<tspan fill="#0000ff" font-weight="bold">two</tspan>"##),
+            "and the run's, saying only what it changes: {svg}"
+        );
+        // Not repeated on the text element, which is the block's own.
+        let head = &svg[..svg.find("<tspan").unwrap()];
+        assert!(
+            head.contains(r##"fill="#ff0000""##) && !head.contains("font-weight"),
+            "the block is still the block: {head}"
+        );
+    }
+
     #[test]
     fn svg_notes_omitted_layers_and_paths_roundtrip_geometry() {
         let mut doc = Document::new(100, 100, ColorMode::Rgb);
@@ -1610,11 +1726,13 @@ mod tests {
         })
         .unwrap();
 
-        place(
-            &mut doc,
-            Node::text("t", chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE)),
-            [46.0, 66.0],
-        );
+        let mut lettering = chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE);
+        // The second letter is set apart: another colour, so the page
+        // exercises a block that is not all one ink.
+        let mut run = chitrakar_doc::StyleRun::over(1, 2);
+        run.fill = Some(RED);
+        lettering.runs = vec![run];
+        place(&mut doc, Node::text("t", lettering), [46.0, 66.0]);
         doc
     }
 
@@ -1729,6 +1847,35 @@ mod tests {
             }
             (lo, hi)
         };
+        // The letter set apart by a style run is red on both sides: a
+        // mean over a two-letter word would forgive one of them being
+        // the wrong colour, and that is the thing being checked.
+        let reddest = |ink: &dyn Fn(usize, usize) -> [i32; 3]| {
+            (66..80)
+                .flat_map(|y| (40..120).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = ink(x, y);
+                    p[0] > 128 && p[2] < 128
+                })
+                .count()
+        };
+        let theirs_red = reddest(&|x, y| {
+            let p = at(x, y);
+            [p[0] as i32, p[1] as i32, p[2] as i32]
+        });
+        let ours_red = reddest(&|x, y| {
+            let px = ours.pixels[y * 120 + x];
+            let over = |v: f32| chitrakar_color::linear_to_srgb((v + 1.0 - px.a).clamp(0.0, 1.0));
+            [over(px.r), over(px.g), over(px.b)].map(|v| (v * 255.0).round() as i32)
+        });
+        // How many pixels count is a matter of how each rasterizer
+        // antialiases a small letter, so what is held is that both drew
+        // the letter red at all — the block's blue would give neither.
+        assert!(
+            ours_red >= 4 && theirs_red >= 4,
+            "the run's letter is red in both: {ours_red} here, {theirs_red} there"
+        );
+
         let theirs = box_of(&|x, y| at(x, y)[0] < 200);
         assert!(
             theirs.1[0] > theirs.0[0],

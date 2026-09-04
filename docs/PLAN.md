@@ -222,7 +222,21 @@ without reading anything else.*
   SVG's font-weight and, on a page, as glyphs filled and then stroked,
   which is a page's own way of putting weight on an upright;
   underline and strike-through toggles draw their bands per line (and
-  travel into SVG as text-decoration and PDF as rectangles), a
+  travel into SVG as text-decoration and PDF as rectangles). All four,
+  and the colour, apply to a selection when there is one: select a word
+  in either text box and Bold, Italic, Underline, Strike or the colour
+  well styles that word rather than the block, as a style run. Runs are
+  byte ranges over the text saying only what they change, so a block is
+  cut into pieces where they start and stop and each piece is shaped and
+  drawn in its own cut of the face — shaping stops at a boundary, which
+  is right, since a font has nothing to say about how its letters sit
+  against another's. A run's size is the block's: mixing sizes in one
+  block would change where the lines sit, and is a separate thing. They
+  follow the text they were put on through an edit, they travel as SVG
+  tspans saying only what they change and as one PDF text object a
+  stretch — still selectable, still searchable — and a run that would
+  only repeat what the block already says is dropped rather than kept as
+  a run that silently overrides it later. a
   double-click on a block types into it on the canvas (the engine draws
   the letters under a transparent textarea placed by the block's own
   matrix; Escape cancels, Ctrl+Enter or a click away keeps, one history
@@ -309,9 +323,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~265),
+- **Verify before committing:** `cargo test --workspace` (~275),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~494 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~499 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

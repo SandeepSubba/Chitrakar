@@ -753,51 +753,59 @@ impl<'a> Page<'a> {
                     let _ = writeln!(self.content, "/{gs} gs");
                 }
                 let typeset = chitrakar_render::text::placed(spec);
-                let font = self.font_resource(typeset.face, &typeset.glyphs);
-                // A bold no face could supply is drawn the way a page
-                // does it: the glyphs filled and then stroked in the same
-                // colour, which puts the weight on that the raster puts
-                // on by laying the outline down again beside itself.
-                let heavy = if typeset.thicken > 0.0 {
-                    format!(
-                        "\n{}\n{} w\n2 Tr",
-                        self.color_op(spec.fill, true)?,
-                        num(typeset.thicken)
-                    )
-                } else {
-                    String::new()
-                };
-                let _ = writeln!(
-                    self.content,
-                    "BT\n/{font} {} Tf\n{}{heavy}",
-                    num(typeset.em),
-                    self.color_op(spec.fill, false)?
-                );
-                // Each glyph on its own matrix: the shaper's position,
-                // turned the way its baseline runs, y turned back up for
-                // the glyph, and the lean a synthesized italic would
-                // draw with.
-                for g in &typeset.glyphs {
-                    let (sin, cos) = g.angle.sin_cos();
-                    let lean = typeset.lean;
+                // One text object per stretch set in one way: a face, a
+                // colour and a weight are chosen once and the glyphs
+                // shown, rather than switched per letter.
+                for run in &typeset.runs {
+                    let font = self.font_resource(run.face.clone(), &run.glyphs);
+                    // A bold no face could supply is drawn the way a page
+                    // does it: the glyphs filled and then stroked in the
+                    // same colour, which puts the weight on that the
+                    // raster puts on by laying the outline down again
+                    // beside itself.
+                    let heavy = if run.thicken > 0.0 {
+                        format!(
+                            "\n{}\n{} w\n2 Tr",
+                            self.color_op(run.fill, true)?,
+                            num(run.thicken)
+                        )
+                    } else {
+                        String::new()
+                    };
                     let _ = writeln!(
                         self.content,
-                        "{} {} {} {} {} {} Tm <{:04X}> Tj",
-                        num(cos),
-                        num(sin),
-                        num(lean * cos + sin),
-                        num(lean * sin - cos),
-                        num(g.x),
-                        num(g.y),
-                        g.id
+                        "BT\n/{font} {} Tf\n{}{heavy}",
+                        num(run.em),
+                        self.color_op(run.fill, false)?
                     );
+                    // Each glyph on its own matrix: the shaper's position,
+                    // turned the way its baseline runs, y turned back up for
+                    // the glyph, and the lean a synthesized italic would
+                    // draw with.
+                    for g in &run.glyphs {
+                        let (sin, cos) = g.angle.sin_cos();
+                        let lean = run.lean;
+                        let _ = writeln!(
+                            self.content,
+                            "{} {} {} {} {} {} Tm <{:04X}> Tj",
+                            num(cos),
+                            num(sin),
+                            num(lean * cos + sin),
+                            num(lean * sin - cos),
+                            num(g.x),
+                            num(g.y),
+                            g.id
+                        );
+                    }
+                    self.content.push_str("ET\n");
                 }
-                self.content.push_str("ET\n");
-                // Underline and strike-through: bands in the same colour.
-                for [x0, y0, x1, y1] in &typeset.decorations {
+                // Underline and strike-through: bands in the colour of
+                // whichever stretch each belongs to.
+                for ([x0, y0, x1, y1], fill) in &typeset.decorations {
                     let _ = writeln!(
                         self.content,
-                        "{} {} {} {} re f",
+                        "{}\n{} {} {} {} re f",
+                        self.color_op(*fill, false)?,
                         num(*x0),
                         num(*y0),
                         num(x1 - x0),
@@ -1812,6 +1820,31 @@ mod tests {
     }
 
     /// A reader can find the words: Ghostscript's text extractor reads
+    /// A block with style runs reaches the page as one text object per
+    /// stretch, each choosing its own colour and face — still text, not
+    /// a picture of it, so a reader can still select and search it.
+    #[test]
+    fn style_runs_reach_the_page_as_stretches_of_their_own() {
+        let mut doc = Document::new(200, 60, chitrakar_color::ColorMode::Rgb);
+        let mut spec = chitrakar_doc::TextSpec::new("one two", 20.0, BLUE);
+        let mut run = chitrakar_doc::StyleRun::over(4, 7);
+        run.fill = Some(RED);
+        spec.runs = vec![run];
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        assert_eq!(
+            content.matches("BT\n").count(),
+            2,
+            "one text object a stretch: {content}"
+        );
+        assert!(
+            content.contains("0 0 1 rg") && content.contains("1 0 0 rg"),
+            "each in its own colour: {content}"
+        );
+        // Seven letters shown across the two, none twice.
+        assert_eq!(content.matches("> Tj").count(), 7, "{content}");
+    }
+
     /// A bold no face can supply is drawn on the page the way the raster
     /// draws it: the glyphs filled and then stroked in the same colour,
     /// which is a page's own way of putting weight on an upright. A face
@@ -1903,7 +1936,7 @@ mod tests {
             spec.italic = true;
             spec
         });
-        let ligature = typeset
+        let ligature = typeset.runs[0]
             .glyphs
             .iter()
             .find(|g| g.text == "ffi")

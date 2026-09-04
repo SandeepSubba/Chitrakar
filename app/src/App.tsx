@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, IconName } from "./icons";
+import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import {
   Adjustment,
   BlendMode,
@@ -1701,6 +1702,7 @@ export function App() {
                 strike: false,
                 along: null,
                 along_offset: 0,
+                runs: [],
               },
             },
             x,
@@ -2538,10 +2540,17 @@ export function App() {
     )
       return;
     setInlineText({ ...inlineText, value });
+    const was = selectedKind.Text;
     preview({
       SetKind: {
         id: inlineText.id,
-        kind: { Text: { ...selectedKind.Text, text: value } },
+        kind: {
+          Text: {
+            ...was,
+            text: value,
+            runs: shiftRuns(was.text, value, was.runs ?? []),
+          },
+        },
       },
     });
   };
@@ -6601,6 +6610,58 @@ function KindProps({
 
   if ("Text" in kind) {
     const t = kind.Text;
+    // Where the caret is in whichever text box was last used. A style
+    // button applies to the selection when there is one and to the whole
+    // block when there is not, which is what every editor does — and the
+    // offsets survive the button taking focus away from the box.
+    const selection = (): [number, number] | null => {
+      for (const label of ["Text on canvas", "Text content"]) {
+        const el = document.querySelector<HTMLTextAreaElement>(
+          `textarea[aria-label="${label}"]`,
+        );
+        if (el && el.selectionStart !== el.selectionEnd) {
+          const [a, b] = [
+            Math.min(el.selectionStart, el.selectionEnd),
+            Math.max(el.selectionStart, el.selectionEnd),
+          ];
+          return [byteAt(el.value, a), byteAt(el.value, b)];
+        }
+      }
+      return null;
+    };
+    // Apply one styling choice: over the selection as a run, or over the
+    // block itself when nothing is selected.
+    const styled = (change: Styling): NodeKind => {
+      const range = selection();
+      if (!range) {
+        const block: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(change)) {
+          block[k] = v ?? (k === "font" ? "" : false);
+        }
+        return { Text: { ...t, ...block } } as NodeKind;
+      }
+      return {
+        Text: {
+          ...t,
+          runs: styleRange(t.text, t.runs ?? [], range[0], range[1], change, {
+            fill: t.fill,
+            bold: !!t.bold,
+            italic: !!t.italic,
+            underline: !!t.underline,
+            strike: !!t.strike,
+            font: t.font ?? "",
+          }),
+        },
+      };
+    };
+    // Whether a toggle reads as on: what the selection says where there
+    // is one, and what the block says where there is not.
+    const isOn = (key: "bold" | "italic" | "underline" | "strike"): boolean => {
+      const range = selection();
+      const block = !!t[key];
+      if (!range) return block;
+      return !!rangeSays(t.text, t.runs ?? [], range[0], range[1], key, block);
+    };
     return (
       <>
         <label>
@@ -6609,7 +6670,16 @@ function KindProps({
             value={t.text}
             rows={2}
             onChange={(e) =>
-              onEdit({ Text: { ...t, text: e.target.value } }, true)
+              onEdit(
+                {
+                  Text: {
+                    ...t,
+                    text: e.target.value,
+                    runs: shiftRuns(t.text, e.target.value, t.runs ?? []),
+                  },
+                },
+                true,
+              )
             }
             onBlur={onGestureEnd}
             aria-label="Text content"
@@ -6662,7 +6732,7 @@ function KindProps({
             // by naming the bold face, so that still reads as bold here
             // and un-bolds back to the face it was a twin of.
             const named = (t.font ?? "").endsWith(" Bold");
-            const on = !!t.bold || named;
+            const on = isOn("bold") || named;
             return (
               <button
                 className={on ? "active" : undefined}
@@ -6671,15 +6741,15 @@ function KindProps({
                 aria-pressed={on}
                 onClick={() =>
                   onEdit(
-                    {
-                      Text: on
-                        ? {
+                    on && named
+                      ? {
+                          Text: {
                             ...t,
                             bold: false,
-                            font: named ? t.font.slice(0, -" Bold".length) : t.font,
-                          }
-                        : { ...t, bold: true },
-                    },
+                            font: t.font.slice(0, -" Bold".length),
+                          },
+                        }
+                      : styled({ bold: !on }),
                     false,
                   )
                 }
@@ -6691,31 +6761,29 @@ function KindProps({
           {/* Italic always works: the face's oblique twin when there is
               one, a lean the rasterizer synthesizes when there is not. */}
           <button
-            className={t.italic ? "active" : undefined}
+            className={isOn("italic") ? "active" : undefined}
             title="Italic"
             aria-label="Italic"
-            aria-pressed={!!t.italic}
-            onClick={() => onEdit({ Text: { ...t, italic: !t.italic } }, false)}
+            aria-pressed={isOn("italic")}
+            onClick={() => onEdit(styled({ italic: !isOn("italic") }), false)}
           >
             <em>I</em>
           </button>
           <button
-            className={t.underline ? "active" : undefined}
+            className={isOn("underline") ? "active" : undefined}
             title="Underline"
             aria-label="Underline"
-            aria-pressed={!!t.underline}
-            onClick={() =>
-              onEdit({ Text: { ...t, underline: !t.underline } }, false)
-            }
+            aria-pressed={isOn("underline")}
+            onClick={() => onEdit(styled({ underline: !isOn("underline") }), false)}
           >
             <u>U</u>
           </button>
           <button
-            className={t.strike ? "active" : undefined}
+            className={isOn("strike") ? "active" : undefined}
             title="Strike-through"
             aria-label="Strike-through"
-            aria-pressed={!!t.strike}
-            onClick={() => onEdit({ Text: { ...t, strike: !t.strike } }, false)}
+            aria-pressed={isOn("strike")}
+            onClick={() => onEdit(styled({ strike: !isOn("strike") }), false)}
           >
             <s>S</s>
           </button>
@@ -6769,7 +6837,7 @@ function KindProps({
             type="color"
             value={colorToHex(t.fill)}
             onChange={(e) =>
-              onEdit({ Text: { ...t, fill: hexColor(e.target.value) } }, true)
+              onEdit(styled({ fill: hexColor(e.target.value) }), true)
             }
             onBlur={onGestureEnd}
             aria-label="Text color"

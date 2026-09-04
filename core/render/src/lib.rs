@@ -4127,6 +4127,14 @@ fn draw_text(
     let [bx0, by0, bx1, by1] = text::bounds(spec);
     let (raster, scale) = text_raster(spec, t);
     let color = resolve_color(doc, spec.fill);
+    // A block whose style runs ask for more than one colour says per
+    // pixel which is which; one that does not leaves this empty and is
+    // painted in the block's own fill throughout.
+    let palette: Vec<LinearRgba> = raster
+        .colors
+        .iter()
+        .map(|c| resolve_color(doc, *c))
+        .collect();
     // The box is the block's natural size, not the raster's: those agree
     // only while the raster is at natural scale, and a minified one would
     // otherwise clip its own right and bottom edges away.
@@ -4151,8 +4159,12 @@ fn draw_text(
             if cov <= 0.0 {
                 continue;
             }
+            let ink = raster
+                .tint_at(lx * scale, ly * scale)
+                .and_then(|i| palette.get(i).copied())
+                .unwrap_or(color);
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(color, c * opacity * cov), dst.pixels[i], mode);
+            dst.pixels[i] = blend_pixel(scale_alpha(ink, c * opacity * cov), dst.pixels[i], mode);
         }
     }
 }

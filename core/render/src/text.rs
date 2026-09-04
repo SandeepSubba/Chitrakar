@@ -8,6 +8,7 @@
 //! given a width wraps words to it.
 
 use ab_glyph::{Font, FontRef, ScaleFont};
+use chitrakar_color::AuthoredColor;
 use chitrakar_doc::{TextSpec, VectorShape};
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
@@ -206,12 +207,18 @@ fn upright_for(spec: &TextSpec) -> &'static Fonts {
 /// a file has to carry for the block to read the same elsewhere.
 pub fn faces_used(spec: &TextSpec) -> Vec<String> {
     let mut names = Vec::new();
-    if !spec.font.is_empty() {
-        names.push(spec.font.clone());
-    }
-    if let Some(twin) = setting(spec).twin {
-        if !names.contains(&twin) {
-            names.push(twin);
+    // The block's own face and twin, then each style run's — a run can
+    // name a face of its own, and it has to travel with the file too.
+    for run in std::iter::once(None).chain(spec.runs.iter().map(Some)) {
+        let styling = spec.styling_under(run);
+        let mut add = |name: String| {
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
+        };
+        add(styling.font.clone());
+        if let Some(twin) = setting(&styling).twin {
+            add(twin);
         }
     }
     names
@@ -320,6 +327,8 @@ struct Shaped {
     advance: f32,
     /// Byte offset into the line of the text this glyph came from.
     cluster: usize,
+    /// Which of the block's style runs set this glyph, if any.
+    run: Option<usize>,
 }
 
 /// Shape one line: the font decides which glyphs the text becomes and where
@@ -327,7 +336,72 @@ struct Shaped {
 /// puts an accent over its base. Tracking is added after each glyph, the
 /// way a typesetter letter-spaces: between the glyphs, never inside a
 /// ligature's own shape.
-fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
+fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
+    let track = tracking(spec, scale);
+    let mut glyphs = Vec::new();
+    let mut pen = 0f32;
+    // A block with no runs is one piece: the common case pays nothing
+    // for the machinery and shapes exactly as it always did.
+    for (from, to, run) in pieces_in(spec, at, line.len()) {
+        let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+        shape_piece(
+            &line[from..to],
+            from,
+            &styling,
+            scale,
+            run,
+            &mut pen,
+            &mut glyphs,
+        );
+    }
+    // The last glyph's tracking is not part of the line's width: nothing
+    // follows it to be spaced from.
+    if !glyphs.is_empty() {
+        pen -= track;
+    }
+    (glyphs, pen.max(0.0))
+}
+
+/// The block's pieces that fall inside the `len` bytes at `at`, as
+/// offsets into that stretch rather than into the block.
+///
+/// Every string shaped here is a byte slice of the block's own text —
+/// a line the wrapping cut, a word it is measuring, or the text with
+/// its newlines turned to spaces, which is the same length — so where
+/// a stretch sits in the block is all that is needed to know which runs
+/// govern it.
+fn pieces_in(spec: &TextSpec, at: usize, len: usize) -> Vec<(usize, usize, Option<usize>)> {
+    if spec.runs.is_empty() {
+        return vec![(0, len, None)];
+    }
+    spec.pieces()
+        .into_iter()
+        .filter_map(|(s, e, r)| {
+            let (s, e) = (s.max(at), e.min(at + len));
+            // Lazily: a piece that ends before this stretch begins would
+            // subtract its way past zero on the way to being discarded.
+            (s < e).then(|| (s - at, e - at, r))
+        })
+        .collect()
+}
+
+/// Shape one stretch set in one styling, carrying the pen on from
+/// wherever the stretch before it left off.
+///
+/// Shaping stops at a style boundary, so a ligature or a kern never
+/// crosses one — which is right: the two halves are set in different
+/// faces, and a font has nothing to say about how its letters sit
+/// against another's.
+#[allow(clippy::too_many_arguments)]
+fn shape_piece(
+    piece: &str,
+    from: usize,
+    spec: &TextSpec,
+    scale: f32,
+    run: Option<usize>,
+    pen: &mut f32,
+    glyphs: &mut Vec<Shaped>,
+) {
     let fonts = fonts_for(spec);
     let face = &fonts.face;
     let px = spec.size.max(0.1) * scale;
@@ -342,26 +416,20 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
     // than the upright it is made from.
     let heavier = smear(spec, scale);
     let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(line);
+    buffer.push_str(piece);
     let out = rustybuzz::shape(face, &[], buffer);
-    let mut glyphs = Vec::with_capacity(out.len());
-    let mut pen = 0f32;
+    glyphs.reserve(out.len());
     for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
         glyphs.push(Shaped {
             id: ab_glyph::GlyphId(info.glyph_id as u16),
-            x: pen + pos.x_offset as f32 * unit,
+            x: *pen + pos.x_offset as f32 * unit,
             y: -(pos.y_offset as f32) * unit,
             advance: pos.x_advance as f32 * unit + heavier,
-            cluster: info.cluster as usize,
+            cluster: from + info.cluster as usize,
+            run,
         });
-        pen += pos.x_advance as f32 * unit + heavier + track;
+        *pen += pos.x_advance as f32 * unit + heavier + track;
     }
-    // The last glyph's tracking is not part of the line's width: nothing
-    // follows it to be spaced from.
-    if !glyphs.is_empty() {
-        pen -= track;
-    }
-    (glyphs, pen.max(0.0))
 }
 
 /// Where a line's start sits, given the block's alignment and the room a
@@ -380,8 +448,14 @@ fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
 /// in raster pixels at `scale`: one per line of text that has any
 /// width, under its baseline or through its x-height, as thick as a
 /// twentieth of the em and never thinner than a pixel.
-fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<[f32; 4]> {
-    if !spec.underline && !spec.strike {
+fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], Option<usize>)> {
+    let anywhere = spec.underline
+        || spec.strike
+        || spec
+            .runs
+            .iter()
+            .any(|r| r.underline.unwrap_or(false) || r.strike.unwrap_or(false));
+    if !anywhere {
         return Vec::new();
     }
     let fonts = fonts_for(spec);
@@ -391,23 +465,55 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<[f32; 4]> {
     let thickness = (em * 0.05).max(1.0);
     let step = line_step(&font, spec);
     let mut bands = Vec::new();
-    for (line_no, width) in l.widths.iter().enumerate() {
-        if *width <= 0.0 {
+    for (line_no, (line, at)) in l.lines.iter().enumerate() {
+        let width = l.widths[line_no];
+        if width <= 0.0 {
             continue;
         }
         let baseline = line_no as f32 * step + font.ascent();
-        let x0 = line_start(spec, l, line_no);
-        let x1 = x0 + width;
-        if spec.underline {
-            let y0 = baseline + em * 0.1;
-            bands.push([x0, y0, x1, y0 + thickness]);
-        }
-        if spec.strike {
-            let y0 = baseline - em * 0.3;
-            bands.push([x0, y0, x1, y0 + thickness]);
+        let left = line_start(spec, l, line_no);
+        // A line with no runs on it is one stretch, the whole of it: the
+        // width the layout already measured, rather than one summed back
+        // up out of advances.
+        for (x0, x1, run) in stretches(spec, line, *at, left, width, scale) {
+            let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+            if styling.underline {
+                let y0 = baseline + em * 0.1;
+                bands.push(([x0, y0, x1, y0 + thickness], run));
+            }
+            if styling.strike {
+                let y0 = baseline - em * 0.3;
+                bands.push(([x0, y0, x1, y0 + thickness], run));
+            }
         }
     }
     bands
+}
+
+/// How far along a line each style run reaches: `(x0, x1, run)` for each
+/// stretch of it, in the raster's own pixels. A line no run touches is
+/// one stretch as wide as the layout measured it.
+fn stretches(
+    spec: &TextSpec,
+    line: &str,
+    at: usize,
+    left: f32,
+    width: f32,
+    scale: f32,
+) -> Vec<(f32, f32, Option<usize>)> {
+    if spec.runs.is_empty() {
+        return vec![(left, left + width, None)];
+    }
+    let (glyphs, _) = shape_line(line, at, spec, scale);
+    let mut out: Vec<(f32, f32, Option<usize>)> = Vec::new();
+    for g in &glyphs {
+        let (x0, x1) = (left + g.x, left + g.x + g.advance);
+        match out.last_mut() {
+            Some(last) if last.2 == g.run => last.1 = last.1.max(x1),
+            _ => out.push((x0, x1, g.run)),
+        }
+    }
+    out
 }
 
 /// A guide flattened to the polyline the text walks: the points and
@@ -488,6 +594,8 @@ impl Guide {
 /// One glyph placed along a guide: where its origin lands, which way
 /// its baseline runs, and the text it stands for.
 struct AlongGlyph {
+    /// Which of the block's style runs set this glyph, if any.
+    run: Option<usize>,
     id: ab_glyph::GlyphId,
     origin: [f32; 2],
     angle: f32,
@@ -504,7 +612,9 @@ fn along_glyphs(spec: &TextSpec, scale: f32) -> (Vec<AlongGlyph>, String) {
         return (Vec::new(), line);
     };
     let guide = Guide::new(points, closed, scale);
-    let (shaped, _) = shape_line(&line, spec, scale);
+    // Turning newlines into spaces keeps every byte offset, so the runs
+    // still fall where they were written.
+    let (shaped, _) = shape_line(&line, 0, spec, scale);
     let mut out = Vec::with_capacity(shaped.len());
     for g in shaped {
         let s = spec.along_offset * scale + g.x + g.advance / 2.0;
@@ -523,6 +633,7 @@ fn along_glyphs(spec: &TextSpec, scale: f32) -> (Vec<AlongGlyph>, String) {
             ],
             angle: t[1].atan2(t[0]),
             cluster: g.cluster,
+            run: g.run,
         });
     }
     (out, line)
@@ -585,25 +696,26 @@ fn turned(
 
 /// The glyphs of a block along its guide as outlines ready to draw, at
 /// `scale`, with the box they cover: `(outlines, [x0, y0, x1, y1])`.
-fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<ab_glyph::OutlinedGlyph>, [f32; 4]) {
-    let fonts = fonts_for(spec);
+fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<(ab_glyph::OutlinedGlyph, u8)>, [f32; 4]) {
     let px = spec.size.max(0.1) * scale;
-    let font = fonts.font.as_scaled(px);
-    let slant = if synthesized_lean(spec) { SLANT } else { 0.0 };
+    let cuts = Palette::of(spec, scale);
     let (glyphs, _) = along_glyphs(spec, scale);
     let mut out = Vec::with_capacity(glyphs.len());
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    let passes = smear_passes(smear(spec, scale));
     for g in glyphs {
+        let cut = cuts.cut(g.run);
+        let font = cut.fonts.font.as_scaled(px);
         // A glyph on a guide is turned to follow it, so the thickening
         // runs along its own baseline rather than along the page's.
         let (cos, sin) = (g.angle.cos(), g.angle.sin());
-        for shift in &passes {
+        for shift in &cut.passes {
             let glyph = g.id.with_scale_and_position(
                 px,
                 ab_glyph::point(g.origin[0] + shift * cos, g.origin[1] + shift * sin),
             );
-            if let Some(outlined) = turned(font.font, glyph, slant, g.angle, font.scale_factor()) {
+            if let Some(outlined) =
+                turned(font.font, glyph, cut.slant, g.angle, font.scale_factor())
+            {
                 let b = outlined.px_bounds();
                 bounds = [
                     bounds[0].min(b.min.x),
@@ -611,7 +723,7 @@ fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<ab_glyph::OutlinedGlyph>,
                     bounds[2].max(b.max.x),
                     bounds[3].max(b.max.y),
                 ];
-                out.push(outlined);
+                out.push((outlined, cut.tint));
             }
         }
     }
@@ -643,6 +755,7 @@ pub fn bounds(spec: &TextSpec) -> [f32; 4] {
 /// embeds it, and what an embedder needs to know: the name the face was
 /// registered under, its units per em, the ascent-to-descent height in
 /// those units — what `size` scales — and the ascent and descent.
+#[derive(Clone)]
 pub struct FaceFile {
     pub name: String,
     pub bytes: &'static [u8],
@@ -678,13 +791,16 @@ pub struct PlacedGlyph {
     pub text: String,
 }
 
-/// A block as glyphs, for an exporter that sets type itself: the face,
-/// the em it is scaled to, the lean the rasterizer would add (zero when
-/// the face leans by itself), and every glyph placed as the raster
-/// places it.
-pub struct PlacedText {
+/// One stretch of a block set in one way, for an exporter that sets type
+/// itself: the face, the em it is scaled to, the colour it is drawn in,
+/// the lean and the thickening the rasterizer would add (zero when the
+/// face carries its own), and the glyphs placed as the raster places
+/// them.
+pub struct PlacedRun {
     pub face: FaceFile,
     pub em: f32,
+    pub fill: AuthoredColor,
+    /// Zero when the face leans by itself.
     pub lean: f32,
     /// How much a bold the face cannot supply thickens the outlines, in
     /// document pixels — a stroke of this width around each glyph does
@@ -692,9 +808,15 @@ pub struct PlacedText {
     /// carries its own bold.
     pub thicken: f32,
     pub glyphs: Vec<PlacedGlyph>,
+}
+
+/// A block as glyphs: one entry per stretch set in one way, in the order
+/// they are drawn. A block with no style runs has exactly one.
+pub struct PlacedText {
+    pub runs: Vec<PlacedRun>,
     /// Underline and strike-through bands, `[x0, y0, x1, y1]` in document
-    /// pixels, to draw in the block's colour.
-    pub decorations: Vec<[f32; 4]>,
+    /// pixels, each with the colour to draw it in.
+    pub decorations: Vec<([f32; 4], AuthoredColor)>,
 }
 
 /// The name of the face a block draws with.
@@ -744,63 +866,93 @@ fn cluster_texts(line: &str, clusters: &[usize]) -> Vec<String> {
 
 pub fn placed(spec: &TextSpec) -> PlacedText {
     let l = layout(spec, 1.0);
-    let fonts = fonts_for(spec);
     let px = spec.size.max(0.1);
-    let font = fonts.font.as_scaled(px);
+    let font = fonts_for(spec).font.as_scaled(px);
     let step = line_step(&font, spec);
-    let mut glyphs = Vec::new();
+    // Glyphs are gathered per run and handed over in the order the runs
+    // are drawn, so an exporter switches face and colour once a stretch
+    // rather than once a letter.
+    let mut by_run: Vec<Vec<PlacedGlyph>> = (0..spec.runs.len() + 1).map(|_| Vec::new()).collect();
+    let mut push = |run: Option<usize>, glyph: PlacedGlyph| {
+        let at = run.map_or(0, |i| i + 1).min(by_run.len() - 1);
+        by_run[at].push(glyph);
+    };
     if spec.along.is_some() {
         let (along, line) = along_glyphs(spec, 1.0);
         let clusters: Vec<usize> = along.iter().map(|g| g.cluster).collect();
         for (g, text) in along.iter().zip(cluster_texts(&line, &clusters)) {
-            glyphs.push(PlacedGlyph {
-                id: g.id.0,
-                x: g.origin[0],
-                y: g.origin[1],
-                angle: g.angle,
-                text,
-            });
+            push(
+                g.run,
+                PlacedGlyph {
+                    id: g.id.0,
+                    x: g.origin[0],
+                    y: g.origin[1],
+                    angle: g.angle,
+                    text,
+                },
+            );
+        }
+    } else {
+        for (line_no, (line, at)) in l.lines.iter().enumerate() {
+            let baseline = line_no as f32 * step + font.ascent();
+            let (shaped, _) = shape_line(line, *at, spec, 1.0);
+            let start = line_start(spec, &l, line_no);
+            let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
+            for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
+                push(
+                    g.run,
+                    PlacedGlyph {
+                        id: g.id.0,
+                        x: start + g.x,
+                        y: baseline + g.y,
+                        angle: 0.0,
+                        text,
+                    },
+                );
+            }
         }
     }
-    for (line_no, line) in l.lines.iter().enumerate() {
-        if spec.along.is_some() {
-            break;
+
+    let mut runs = Vec::new();
+    for (at, glyphs) in by_run.into_iter().enumerate() {
+        if glyphs.is_empty() {
+            continue;
         }
-        let baseline = line_no as f32 * step + font.ascent();
-        let (shaped, _) = shape_line(line, spec, 1.0);
-        let start = line_start(spec, &l, line_no);
-        let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
-        for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
-            glyphs.push(PlacedGlyph {
-                id: g.id.0,
-                x: start + g.x,
-                y: baseline + g.y,
-                angle: 0.0,
-                text,
-            });
-        }
+        let which = (at > 0).then(|| &spec.runs[at - 1]);
+        let styling = spec.styling_under(which);
+        let fonts = fonts_for(&styling);
+        let upem = fonts.font.units_per_em().unwrap_or(1000.0);
+        runs.push(PlacedRun {
+            face: FaceFile {
+                bytes: fonts.bytes,
+                units_per_em: upem,
+                height: fonts.font.height_unscaled(),
+                ascent: fonts.font.ascent_unscaled(),
+                descent: fonts.font.descent_unscaled(),
+                glyph_count: fonts.font.glyph_count(),
+                name: face_name(&styling),
+            },
+            em: px * upem / fonts.font.height_unscaled(),
+            fill: styling.fill,
+            lean: if synthesized_lean(&styling) {
+                SLANT
+            } else {
+                0.0
+            },
+            thicken: smear(&styling, 1.0),
+            glyphs,
+        });
     }
-    let name = face_name(spec);
-    let upem = fonts.font.units_per_em().unwrap_or(1000.0);
     PlacedText {
-        face: FaceFile {
-            bytes: fonts.bytes,
-            units_per_em: upem,
-            height: fonts.font.height_unscaled(),
-            ascent: fonts.font.ascent_unscaled(),
-            descent: fonts.font.descent_unscaled(),
-            glyph_count: fonts.font.glyph_count(),
-            name,
-        },
-        em: px * upem / fonts.font.height_unscaled(),
-        lean: if synthesized_lean(spec) { SLANT } else { 0.0 },
-        thicken: smear(spec, 1.0),
         decorations: if spec.along.is_some() {
             Vec::new()
         } else {
             decoration_bands(spec, &l, 1.0)
+                .into_iter()
+                .map(|(band, run)| (band, spec.styling_under(run.map(|i| &spec.runs[i])).fill))
+                .collect()
         },
-        glyphs,
+        runs,
     }
 }
 
@@ -809,6 +961,13 @@ pub struct TextRaster {
     pub width: u32,
     pub height: u32,
     pub coverage: Vec<f32>,
+    /// The colours the block's style runs ask for, when they ask for
+    /// more than one. Empty for a block set in a single colour, which
+    /// is every block that has no runs — the painter then uses the
+    /// block's own fill and never looks here.
+    pub colors: Vec<AuthoredColor>,
+    /// Which of `colors` inked each pixel. Empty alongside `colors`.
+    pub tint: Vec<u8>,
     /// Where the raster's top-left sits in the block's own space, in
     /// natural (unscaled) pixels: the origin for text in lines, and the
     /// glyphs' extent for text along a guide, which can run anywhere.
@@ -841,6 +1000,22 @@ impl TextRaster {
         let bottom = at(u0, v0 + 1.0) * (1.0 - fx) + at(u0 + 1.0, v0 + 1.0) * fx;
         top * (1.0 - fy) + bottom * fy
     }
+
+    /// Which of `colors` inked the pixel `x, y` falls in, or nothing when
+    /// the block is all one colour. Nearest rather than mixed: a colour
+    /// is a choice, not a quantity, and blending two of them across the
+    /// pixel where a red word meets a black one would put a colour on
+    /// the page that nothing asked for.
+    pub fn tint_at(&self, x: f32, y: f32) -> Option<usize> {
+        if self.tint.is_empty() {
+            return None;
+        }
+        let (i, j) = (x.floor(), y.floor());
+        if i < 0.0 || j < 0.0 || i >= self.width as f32 || j >= self.height as f32 {
+            return None;
+        }
+        Some(self.tint[(j as u32 * self.width + i as u32) as usize] as usize)
+    }
 }
 
 /// A block as it is set, for an exporter that places text itself: each
@@ -849,8 +1024,17 @@ impl TextRaster {
 /// below it; the block's size, the width lines are aligned within and
 /// where that starts (a synthesized lean takes room on the left); and the
 /// em size the face is scaled to — all in document pixels.
+pub struct SetLine {
+    pub text: String,
+    /// Where the line starts in the block's own text, so an exporter can
+    /// ask which style runs govern it.
+    pub at: usize,
+    /// The width the line shaped to.
+    pub width: f32,
+}
+
 pub struct SetBlock {
-    pub lines: Vec<(String, f32)>,
+    pub lines: Vec<SetLine>,
     pub width: f32,
     pub height: f32,
     pub ascent: f32,
@@ -868,7 +1052,12 @@ pub fn set(spec: &TextSpec) -> SetBlock {
     SetBlock {
         inner: l.width - l.room.0 - l.room.1,
         inset: l.room.0,
-        lines: l.lines.into_iter().zip(l.widths).collect(),
+        lines: l
+            .lines
+            .into_iter()
+            .zip(l.widths)
+            .map(|((text, at), width)| SetLine { text, at, width })
+            .collect(),
         width: l.width,
         height: l.height,
         ascent: font.ascent(),
@@ -896,7 +1085,9 @@ fn measure_at(spec: &TextSpec, scale: f32) -> (f32, f32) {
 /// and the block's size. Computed once and used by measure and raster
 /// alike, so a rasterize does not shape everything twice over.
 struct Layout {
-    lines: Vec<String>,
+    /// Each line as the wrapping left it, with where it starts in the
+    /// block's own text — which is what says who styles it.
+    lines: Vec<(String, usize)>,
     widths: Vec<f32>,
     width: f32,
     height: f32,
@@ -910,7 +1101,10 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
     let lines = lines_of(spec, scale);
-    let widths: Vec<f32> = lines.iter().map(|l| line_width(l, spec, scale)).collect();
+    let widths: Vec<f32> = lines
+        .iter()
+        .map(|(l, at)| line_width(l, *at, spec, scale))
+        .collect();
     let widest = widths.iter().cloned().fold(0f32, f32::max);
     // A wrapping block is as wide as it was told to be, so its right edge
     // holds still while the words inside it change; only a word too long
@@ -939,34 +1133,43 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
 /// kerning that shows is the font's. Lines are cut out of the paragraph as
 /// it was typed, so a run of spaces stays a run of spaces, an indent stays
 /// an indent, and only the single space at a cut is dropped.
-fn lines_of(spec: &TextSpec, scale: f32) -> Vec<String> {
+fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
     let limit = spec.width * scale;
     let mut out = Vec::new();
+    let mut para_at = 0usize; // where the paragraph begins in the block
     for paragraph in spec.text.split('\n') {
         if limit <= 0.0 {
-            out.push(paragraph.to_string());
+            out.push((paragraph.to_string(), para_at));
+            para_at += paragraph.len() + 1;
             continue;
         }
-        let space = line_width(" ", spec, scale);
         let mut start = 0usize; // where the current line begins, in bytes
         let mut used = 0f32; // its width so far
         let mut first = true;
         let mut pos = 0usize; // where the current word begins
         for word in paragraph.split(' ') {
-            let w = line_width(word, spec, scale);
+            let w = line_width(word, para_at + pos, spec, scale);
+            // A space is measured where it stands, since the styling
+            // there is what sets its width.
+            let space = if pos == 0 {
+                0.0
+            } else {
+                line_width(" ", para_at + pos - 1, spec, scale)
+            };
             if first {
                 used = w;
                 first = false;
             } else if used + space + w <= limit {
                 used += space + w;
             } else {
-                out.push(paragraph[start..pos - 1].to_string());
+                out.push((paragraph[start..pos - 1].to_string(), para_at + start));
                 start = pos;
                 used = w;
             }
             pos += word.len() + 1;
         }
-        out.push(paragraph[start..].to_string());
+        out.push((paragraph[start..].to_string(), para_at + start));
+        para_at += paragraph.len() + 1;
     }
     out
 }
@@ -982,8 +1185,77 @@ fn tracking(spec: &TextSpec, scale: f32) -> f32 {
     spec.letter_spacing * spec.size.max(0.1) * scale
 }
 
-fn line_width(line: &str, spec: &TextSpec, scale: f32) -> f32 {
-    shape_line(line, spec, scale).1
+fn line_width(line: &str, at: usize, spec: &TextSpec, scale: f32) -> f32 {
+    shape_line(line, at, spec, scale).1
+}
+
+/// Everything the rasterizer needs to know about one style run, worked
+/// out once rather than per glyph: the face it draws from, the lean and
+/// the thickening it has to add itself, and which colour its ink is.
+struct Cut {
+    fonts: &'static Fonts,
+    slant: f32,
+    passes: Vec<f32>,
+    tint: u8,
+}
+
+/// The cuts a block is set in, indexed by run — entry zero is the
+/// block's own styling, which is what a piece under no run uses.
+struct Palette {
+    cuts: Vec<Cut>,
+    /// The colour each cut inks in, in the same order.
+    colors: Vec<AuthoredColor>,
+}
+
+impl Palette {
+    fn of(spec: &TextSpec, scale: f32) -> Palette {
+        let mut cuts = Vec::with_capacity(spec.runs.len() + 1);
+        let mut colors: Vec<AuthoredColor> = Vec::new();
+        for run in std::iter::once(None).chain(spec.runs.iter().map(Some)) {
+            let styling = spec.styling_under(run);
+            // Colours are pooled: two runs asking for the same red share
+            // one entry, so a block coloured in two shades keeps two.
+            let tint = colors
+                .iter()
+                .position(|c| *c == styling.fill)
+                .unwrap_or_else(|| {
+                    colors.push(styling.fill);
+                    colors.len() - 1
+                });
+            cuts.push(Cut {
+                fonts: fonts_for(&styling),
+                slant: if synthesized_lean(&styling) {
+                    SLANT
+                } else {
+                    0.0
+                },
+                passes: smear_passes(smear(&styling, scale)),
+                tint: tint as u8,
+            });
+        }
+        Palette { cuts, colors }
+    }
+
+    fn cut(&self, run: Option<usize>) -> &Cut {
+        // A run index past the end cannot happen — the pieces come from
+        // the block's own runs — but reading the block's styling is the
+        // right answer if it ever did.
+        &self.cuts[run.map_or(0, |i| i + 1).min(self.cuts.len() - 1)]
+    }
+
+    /// Whether the block is set in more than one colour, and so needs
+    /// the raster to say which is which.
+    fn many(&self) -> bool {
+        self.colors.len() > 1
+    }
+
+    fn colors(&self) -> Vec<AuthoredColor> {
+        if self.many() {
+            self.colors.clone()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// Rasterize the block at natural size.
@@ -1011,35 +1283,51 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     // and line height are all in raster pixels already.
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
-    let slant = if synthesized_lean(spec) { SLANT } else { 0.0 };
-    let passes = smear_passes(smear(spec, scale));
+    let cuts = Palette::of(spec, scale);
+    let mut tint = vec![0u8; if cuts.many() { coverage.len() } else { 0 }];
+    // Lay ink down and remember whose it is: where two pieces overlap —
+    // a leaned glyph reaching over its neighbour — the one that covers
+    // the pixel more is the one whose colour shows.
+    let mut ink = |x: i32, y: i32, c: f32, whose: u8| {
+        if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
+            let i = (y as u32 * width + x as u32) as usize;
+            if c > coverage[i] {
+                coverage[i] = c;
+                if !tint.is_empty() {
+                    tint[i] = whose;
+                }
+            }
+        }
+    };
 
-    for (line_no, line) in l.lines.iter().enumerate() {
+    for (line_no, (line, at)) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
-        let (glyphs, _) = shape_line(line, spec, scale);
+        let (glyphs, _) = shape_line(line, *at, spec, scale);
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let start = line_start(spec, &l, line_no);
         for g in glyphs {
-            for shift in &passes {
+            let cut = cuts.cut(g.run);
+            let face = cut.fonts.font.as_scaled(spec.size.max(0.1) * scale);
+            for shift in &cut.passes {
                 let glyph = g.id.with_scale_and_position(
                     spec.size.max(0.1) * scale,
                     ab_glyph::point(start + g.x + shift, baseline + g.y),
                 );
-                let outlined = if slant > 0.0 {
-                    leaned(font.font, glyph, slant, font.scale_factor())
+                let outlined = if cut.slant > 0.0 {
+                    leaned(face.font, glyph, cut.slant, face.scale_factor())
                 } else {
-                    font.font.outline_glyph(glyph)
+                    face.font.outline_glyph(glyph)
                 };
                 if let Some(outlined) = outlined {
                     let bounds = outlined.px_bounds();
                     outlined.draw(|gx, gy, c| {
-                        let x = bounds.min.x as i32 + gx as i32;
-                        let y = bounds.min.y as i32 + gy as i32;
-                        if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
-                            let i = (y as u32 * width + x as u32) as usize;
-                            coverage[i] = coverage[i].max(c);
-                        }
+                        ink(
+                            bounds.min.x as i32 + gx as i32,
+                            bounds.min.y as i32 + gy as i32,
+                            c,
+                            cut.tint,
+                        )
                     });
                 }
             }
@@ -1047,7 +1335,8 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     }
     // Underline and strike-through: solid bands, clipped to the raster,
     // that also draw the space a line is spaced with.
-    for [x0, y0, x1, y1] in decoration_bands(spec, &l, scale) {
+    for (band, whose) in decoration_bands(spec, &l, scale) {
+        let [x0, y0, x1, y1] = band;
         let (cx0, cx1) = (
             (x0.round().max(0.0)) as u32,
             (x1.round().max(0.0) as u32).min(width),
@@ -1058,14 +1347,17 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         );
         for y in cy0..cy1 {
             for x in cx0..cx1 {
-                coverage[(y * width + x) as usize] = 1.0;
+                ink(x as i32, y as i32, 1.0, cuts.cut(whose).tint);
             }
         }
     }
+    let colors = cuts.colors();
     TextRaster {
         width,
         height,
         coverage,
+        colors,
+        tint,
         origin: (0.0, 0.0),
     }
 }
@@ -1080,14 +1372,21 @@ fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
         (b[3].ceil() - y0).max(1.0) as u32,
     );
     let mut coverage = vec![0f32; (width * height) as usize];
-    for outlined in outlines {
+    let colors = Palette::of(spec, scale).colors();
+    let mut tint = vec![0u8; if colors.is_empty() { 0 } else { coverage.len() }];
+    for (outlined, whose) in outlines {
         let bounds = outlined.px_bounds();
         outlined.draw(|gx, gy, c| {
             let x = (bounds.min.x - x0) as i32 + gx as i32;
             let y = (bounds.min.y - y0) as i32 + gy as i32;
             if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
                 let i = (y as u32 * width + x as u32) as usize;
-                coverage[i] = coverage[i].max(c);
+                if c > coverage[i] {
+                    coverage[i] = c;
+                    if !tint.is_empty() {
+                        tint[i] = whose;
+                    }
+                }
             }
         });
     }
@@ -1095,6 +1394,8 @@ fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
         width,
         height,
         coverage,
+        colors,
+        tint,
         origin: (x0 / scale, y0 / scale),
     }
 }
@@ -1102,6 +1403,12 @@ fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lines a block wraps to, without the offsets that say which
+    /// style runs govern each — what most of these tests are about.
+    fn lines_only(spec: &TextSpec, scale: f32) -> Vec<String> {
+        lines_of(spec, scale).into_iter().map(|(l, _)| l).collect()
+    }
     use chitrakar_color::AuthoredColor;
 
     fn spec(text: &str, size: f32) -> TextSpec {
@@ -1231,7 +1538,7 @@ mod tests {
         // advances add up to, and a base plus a combining mark is the same
         // as the precomposed letter. None of that falls out of walking
         // characters one at a time.
-        let at = |t: &str| shape_line(t, &spec(t, 40.0), 1.0);
+        let at = |t: &str| shape_line(t, 0, &spec(t, 40.0), 1.0);
         assert_eq!(at("fi").0.len(), 1, "fi is a ligature in DejaVu Sans");
         assert_eq!(at("office").0.len(), 4, "and so is ffi");
         let (_, av) = at("AV");
@@ -1248,7 +1555,7 @@ mod tests {
         // ligature still counts as one.
         let mut tracked = spec("fi", 40.0);
         tracked.letter_spacing = 0.5;
-        assert_eq!(shape_line("fi", &tracked, 1.0).0.len(), 1);
+        assert_eq!(shape_line("fi", 0, &tracked, 1.0).0.len(), 1);
     }
 
     #[test]
@@ -1260,7 +1567,7 @@ mod tests {
         let s = spec("", 40.0);
         let scaled = bundled().font.as_scaled(40.0);
         for ch in ['H', 'i', 'W', '.'] {
-            let (glyphs, w) = shape_line(&ch.to_string(), &s, 1.0);
+            let (glyphs, w) = shape_line(&ch.to_string(), 0, &s, 1.0);
             assert_eq!(glyphs.len(), 1);
             let expected = scaled.h_advance(scaled.glyph_id(ch));
             assert!(
@@ -1276,14 +1583,14 @@ mod tests {
         // run of spaces inside a line, is what was typed and stays.
         let mut s = spec("    indented start", 20.0);
         s.width = 1000.0;
-        assert_eq!(lines_of(&s, 1.0), vec!["    indented start"]);
+        assert_eq!(lines_only(&s, 1.0), vec!["    indented start"]);
         let mut runs = spec("a  b c", 20.0);
         runs.width = 1000.0;
-        assert_eq!(lines_of(&runs, 1.0), vec!["a  b c"]);
+        assert_eq!(lines_only(&runs, 1.0), vec!["a  b c"]);
         // At a cut, exactly the one separating space goes.
         let mut cut = spec("aa bb", 20.0);
-        cut.width = line_width("aa", &cut, 1.0) + 1.0;
-        assert_eq!(lines_of(&cut, 1.0), vec!["aa", "bb"]);
+        cut.width = line_width("aa", 0, &cut, 1.0) + 1.0;
+        assert_eq!(lines_only(&cut, 1.0), vec!["aa", "bb"]);
     }
 
     #[test]
@@ -1302,30 +1609,30 @@ mod tests {
             h1 >= h0 * 3.0,
             "and three times as tall, or more: {h0} -> {h1}"
         );
-        assert_eq!(lines_of(&wrapped, 1.0).len() as f32 * h0, h1);
+        assert_eq!(lines_only(&wrapped, 1.0).len() as f32 * h0, h1);
         // Every wrapped line fits, and no word was cut in half.
-        for line in lines_of(&wrapped, 1.0) {
+        for line in lines_only(&wrapped, 1.0) {
             assert!(
-                line_width(&line, &wrapped, 1.0) <= w1 + 0.01,
+                line_width(&line, 0, &wrapped, 1.0) <= w1 + 0.01,
                 "{line:?} overflows"
             );
             assert!(!line.starts_with(' ') && !line.ends_with(' '));
         }
         assert_eq!(
-            lines_of(&wrapped, 1.0).join(" "),
+            lines_only(&wrapped, 1.0).join(" "),
             loose.text,
             "the words are all still there, in order"
         );
         // A word longer than the width stands alone and overhangs.
         let mut narrow = spec("antidisestablishmentarianism ok", 20.0);
         narrow.width = 30.0;
-        let lines = lines_of(&narrow, 1.0);
+        let lines = lines_only(&narrow, 1.0);
         assert_eq!(lines, vec!["antidisestablishmentarianism", "ok"]);
         assert!(measure(&narrow).0 > 30.0, "the block overhangs for it");
         // Explicit newlines still break, inside a wrapping block too.
         let mut both = spec("a b\nc", 20.0);
         both.width = 1000.0;
-        assert_eq!(lines_of(&both, 1.0), vec!["a b", "c"]);
+        assert_eq!(lines_only(&both, 1.0), vec!["a b", "c"]);
         // And ink lands on the later lines.
         let r = rasterize(&wrapped);
         let lower: f32 = (r.height * 2 / 3..r.height)
@@ -1606,6 +1913,148 @@ mod tests {
         );
     }
 
+    const RED: AuthoredColor = AuthoredColor::Srgb {
+        r: 1.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    fn coloured(spec: &TextSpec, start: usize, end: usize) -> TextSpec {
+        let mut out = spec.clone();
+        let mut run = chitrakar_doc::StyleRun::over(start, end);
+        run.fill = Some(RED);
+        out.runs = vec![run];
+        out
+    }
+
+    /// A run that only changes colour changes nothing about where the
+    /// letters go: the same glyphs in the same places, with the raster
+    /// saying per pixel which of the two colours inked it.
+    #[test]
+    fn a_run_can_colour_part_of_a_block() {
+        let plain = spec("abcdef", 40.0);
+        let split = coloured(&plain, 3, 6);
+        let (one, two) = (rasterize(&plain), rasterize(&split));
+        assert_eq!((one.width, one.height), (two.width, two.height));
+        assert_eq!(one.coverage, two.coverage, "the letters have not moved");
+
+        assert!(one.colors.is_empty() && one.tint.is_empty(), "one colour");
+        assert_eq!(two.colors.len(), 2, "two: the block's and the run's");
+        let black = two.colors.iter().position(|c| *c != RED).unwrap();
+        let red = 1 - black;
+        // The left half is inked in the block's colour and the right in
+        // the run's, so the rightmost inked pixel of each is on its side.
+        let last = |want: usize| {
+            (0..two.width)
+                .rev()
+                .find(|&x| {
+                    (0..two.height).any(|y| {
+                        let i = (y * two.width + x) as usize;
+                        two.coverage[i] > 0.5 && two.tint[i] as usize == want
+                    })
+                })
+                .unwrap()
+        };
+        assert!(
+            last(black) < last(red),
+            "the run's colour is the one further along: {} vs {}",
+            last(black),
+            last(red)
+        );
+        assert!(
+            last(black) < two.width * 3 / 5,
+            "and the block's stops around where the run starts"
+        );
+    }
+
+    /// A run that asks for weight or a lean does move the letters, and
+    /// only its own: the block is wider, and wider by what the run added.
+    #[test]
+    fn a_run_can_set_part_of_a_block_in_another_cut() {
+        let plain = spec("aaaa aaaa", 40.0);
+        let mut half = plain.clone();
+        let mut run = chitrakar_doc::StyleRun::over(0, 4);
+        run.bold = Some(true);
+        half.runs = vec![run];
+        let mut all = plain.clone();
+        all.bold = true;
+
+        let (w_plain, w_half, w_all) = (measure(&plain).0, measure(&half).0, measure(&all).0);
+        assert!(
+            w_plain < w_half && w_half < w_all,
+            "half bold sits between: {w_plain} < {w_half} < {w_all}"
+        );
+        // Four of the nine characters are bold, and the weight goes on
+        // per glyph, so the block grows by about four glyphs' worth.
+        let per_glyph = (w_all - w_plain) / 9.0;
+        assert!(
+            ((w_half - w_plain) / per_glyph - 4.0).abs() < 0.5,
+            "grew by {} glyphs' worth",
+            (w_half - w_plain) / per_glyph
+        );
+    }
+
+    /// An underline asked for by a run runs under that run and no
+    /// further, while one asked for by the block runs under the lot.
+    #[test]
+    fn a_run_underlines_only_its_own_stretch() {
+        let plain = spec("aaaaaaaa", 40.0);
+        let mut part = plain.clone();
+        let mut run = chitrakar_doc::StyleRun::over(0, 4);
+        run.underline = Some(true);
+        part.runs = vec![run];
+        let mut whole = plain.clone();
+        whole.underline = true;
+
+        let band = |s: &TextSpec| {
+            let bands = decoration_bands(s, &layout(s, 1.0), 1.0);
+            assert_eq!(bands.len(), 1, "one line, one band");
+            let [x0, _, x1, _] = bands[0].0;
+            x1 - x0
+        };
+        let (short, long) = (band(&part), band(&whole));
+        assert!(
+            (short / long - 0.5).abs() < 0.05,
+            "half the letters, half the line: {short} of {long}"
+        );
+    }
+
+    /// A run that spans a line break underlines both halves — the pieces
+    /// are cut per line, so a style crossing a wrap is not lost with it.
+    #[test]
+    fn a_run_survives_the_line_it_is_wrapped_onto() {
+        let mut block = spec("aaaa bbbb", 40.0);
+        block.width = line_width("aaaa", 0, &block, 1.0) + 1.0;
+        assert_eq!(lines_only(&block, 1.0), ["aaaa", "bbbb"]);
+        let mut run = chitrakar_doc::StyleRun::over(2, 7);
+        run.underline = Some(true);
+        block.runs = vec![run];
+        let bands = decoration_bands(&block, &layout(&block, 1.0), 1.0);
+        assert_eq!(bands.len(), 2, "a band on each line: {bands:?}");
+        assert!(
+            bands[0].0[1] < bands[1].0[1],
+            "one under each of the two lines"
+        );
+    }
+
+    /// What an exporter is handed: one stretch per run, each with the
+    /// face and colour it is set in, and every glyph accounted for once.
+    #[test]
+    fn placed_hands_over_one_stretch_per_run() {
+        let plain = spec("abcdef", 20.0);
+        assert_eq!(placed(&plain).runs.len(), 1, "no runs is one stretch");
+
+        let split = coloured(&plain, 2, 4);
+        let out = placed(&split);
+        assert_eq!(out.runs.len(), 2, "the block's letters and the run's");
+        let total: usize = out.runs.iter().map(|r| r.glyphs.len()).sum();
+        assert_eq!(total, 6, "every letter placed once");
+        let reds: Vec<_> = out.runs.iter().filter(|r| r.fill == RED).collect();
+        assert_eq!(reds.len(), 1);
+        assert_eq!(reds[0].glyphs.len(), 2, "the two the run covers");
+    }
+
     #[test]
     fn the_bundled_face_keeps_its_name() {
         let before = font_names();
@@ -1652,10 +2101,13 @@ mod tests {
         block.align = chitrakar_doc::TextAlign::Center;
         let laid = set(&block);
         assert_eq!(laid.lines.len(), 2);
-        assert_eq!(laid.lines[0].0, "Hello there!");
-        assert!(laid.lines[0].1 > laid.lines[1].1, "the long line is wider");
+        assert_eq!(laid.lines[0].text, "Hello there!");
         assert!(
-            (laid.width - laid.lines[0].1).abs() < 1e-3,
+            laid.lines[0].width > laid.lines[1].width,
+            "the long line is wider"
+        );
+        assert!(
+            (laid.width - laid.lines[0].width).abs() < 1e-3,
             "the block is as wide as its widest line"
         );
         assert_eq!(laid.inset, 0.0);
@@ -1683,13 +2135,17 @@ mod tests {
         let mut block = spec("fi AV\nhi", 24.0);
         block.align = chitrakar_doc::TextAlign::Right;
         let typeset = placed(&block);
-        assert_eq!(typeset.face.name, DEFAULT_FONT);
+        assert_eq!(typeset.runs[0].face.name, DEFAULT_FONT);
         assert!(
-            typeset.face.bytes.len() > 100_000,
+            typeset.runs[0].face.bytes.len() > 100_000,
             "the whole file, to embed"
         );
-        assert!(typeset.lean == 0.0);
-        let text: String = typeset.glyphs.iter().map(|g| g.text.as_str()).collect();
+        assert!(typeset.runs[0].lean == 0.0);
+        let text: String = typeset.runs[0]
+            .glyphs
+            .iter()
+            .map(|g| g.text.as_str())
+            .collect();
         assert_eq!(
             text, "fi AVhi",
             "every character is accounted for, ligature or not"
@@ -1698,7 +2154,7 @@ mod tests {
         // right-aligned the short line starts further right than the long.
         let laid = set(&block);
         let (first, second): (Vec<_>, Vec<_>) =
-            typeset.glyphs.iter().partition(|g| g.y < laid.step);
+            typeset.runs[0].glyphs.iter().partition(|g| g.y < laid.step);
         assert!(!first.is_empty() && !second.is_empty());
         assert!((first[0].y - laid.ascent).abs() < 1e-3);
         assert!((second[0].y - laid.ascent - laid.step).abs() < 1e-3);
@@ -1710,12 +2166,12 @@ mod tests {
         );
         // Widths are in thousandths of an em and an em is what the block
         // is scaled to.
-        let h = typeset.face.advance(typeset.glyphs[3].id);
+        let h = typeset.runs[0].face.advance(typeset.runs[0].glyphs[3].id);
         assert!(h > 400.0 && h < 900.0, "advance of 'A' in 1/1000 em: {h}");
-        assert!((typeset.em - laid.em).abs() < 1e-3);
+        assert!((typeset.runs[0].em - laid.em).abs() < 1e-3);
         // A synthesized italic reports its lean; an oblique face does not.
         block.italic = true;
-        assert_eq!(placed(&block).lean, SLANT);
+        assert_eq!(placed(&block).runs[0].lean, SLANT);
     }
 
     #[test]
@@ -1736,7 +2192,7 @@ mod tests {
         let laid = set(&plain);
         let y = (laid.ascent + laid.em * 0.1 + 0.5) as u32;
         let inked = |r: &TextRaster, y: u32| (0..r.width).filter(|&x| r.sample(x, y) > 0.5).count();
-        let (first_w, second_w) = (laid.lines[0].1, laid.lines[1].1);
+        let (first_w, second_w) = (laid.lines[0].width, laid.lines[1].width);
         assert!(
             inked(&base, y) < (first_w * 0.2) as usize,
             "little ink there before"
@@ -1766,7 +2222,7 @@ mod tests {
         // Exporters get the same bands.
         let typeset = placed(&lined);
         assert_eq!(typeset.decorations.len(), 2);
-        assert!((typeset.decorations[0][2] - typeset.decorations[0][0] - first_w).abs() < 1e-3);
+        assert!((typeset.decorations[0].0[2] - typeset.decorations[0].0[0] - first_w).abs() < 1e-3);
     }
 
     #[test]
@@ -1796,13 +2252,13 @@ mod tests {
         let ink: f32 = r.coverage.iter().sum();
         assert!(ink > 50.0);
         let typeset = placed(&down);
-        assert_eq!(typeset.glyphs.len(), 5);
+        assert_eq!(typeset.runs[0].glyphs.len(), 5);
         assert!(
-            (typeset.glyphs[0].angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            (typeset.runs[0].glyphs[0].angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
             "turned down"
         );
         assert!(
-            typeset.glyphs[1].y > typeset.glyphs[0].y,
+            typeset.runs[0].glyphs[1].y > typeset.runs[0].glyphs[0].y,
             "each glyph further down"
         );
         assert!(typeset.decorations.is_empty());
@@ -1816,13 +2272,16 @@ mod tests {
             handles: Vec::new(),
             subpaths: Vec::new(),
         });
-        assert!(placed(&short).glyphs.len() < 5, "the rest runs off the end");
+        assert!(
+            placed(&short).runs[0].glyphs.len() < 5,
+            "the rest runs off the end"
+        );
         let mut ring = down.clone();
         ring.along = Some(VectorShape::Ellipse { rx: 30.0, ry: 30.0 });
         ring.text = "Round and round and round".into();
         let on_ring = placed(&ring);
         assert_eq!(
-            on_ring.glyphs.len(),
+            on_ring.runs[0].glyphs.len(),
             ring.text.chars().count(),
             "wrapping keeps every glyph"
         );
@@ -1834,7 +2293,9 @@ mod tests {
         // An offset slides the text along.
         let mut slid = down.clone();
         slid.along_offset = 40.0;
-        assert!((placed(&slid).glyphs[0].y - typeset.glyphs[0].y - 40.0).abs() < 1e-3);
+        assert!(
+            (placed(&slid).runs[0].glyphs[0].y - typeset.runs[0].glyphs[0].y - 40.0).abs() < 1e-3
+        );
         // The guide reads back flattened for exporters.
         let (pts, closed) = guide_points(&ring).unwrap();
         assert!(closed && pts.len() >= 16);
