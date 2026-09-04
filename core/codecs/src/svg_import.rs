@@ -332,6 +332,10 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
                 // come in as the paths they are, alongside the line.
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                // SVG has no notion of which side of the outline a
+                // stroke lies on: it always straddles it. So a file
+                // says "centred" by saying nothing.
+                align: Some(chitrakar_doc::StrokeAlign::Centre),
             })
         });
     }

@@ -6124,6 +6124,7 @@ mod save_probe {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         session

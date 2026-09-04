@@ -1078,6 +1078,7 @@ export function App() {
                         join: "Round",
                         start_marker: "None",
                         end_marker: "None",
+                        align: null,
                       },
                   gradient: null,
                 },
@@ -2095,6 +2096,7 @@ export function App() {
                   join: "Round",
                   start_marker: "None",
                   end_marker: "None",
+                  align: null,
                 },
                 gradient: null,
               },
@@ -7656,6 +7658,7 @@ function KindProps({
                         join: "Round",
                         start_marker: "None",
                         end_marker: "None",
+                        align: null,
                       }
                     : null,
                 }),
@@ -7714,6 +7717,31 @@ function KindProps({
               <option value={-1} disabled>
                 Custom
               </option>
+            </select>
+          </label>
+        )}
+        {/* Which side of the edge the border lies on. A rect's and an
+            ellipse's outline has a distance of its own, so a band to
+            either side of it is exact; a path is stroked down the middle
+            of its line, which is what a line means. */}
+        {v.stroke && !("Path" in v.shape) && (
+          <label className="row">
+            Border
+            <select
+              value={v.stroke.align ?? "Inside"}
+              onChange={(e) =>
+                onEdit(
+                  patch({
+                    stroke: { ...v.stroke!, align: e.target.value as never },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Border side"
+            >
+              <option value="Inside">Inside the edge</option>
+              <option value="Centre">Across the edge</option>
+              <option value="Outside">Outside the edge</option>
             </select>
           </label>
         )}

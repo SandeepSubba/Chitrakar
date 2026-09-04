@@ -157,12 +157,21 @@ fn write_node(
                 // shape with its fill, and the same shape drawn half a
                 // width smaller carrying the stroke, whose centred band
                 // then lands exactly where the inner one was.
-                let inner = stroke.as_ref().filter(|_| {
-                    matches!(
-                        shape,
-                        VectorShape::Rect { .. } | VectorShape::Ellipse { .. }
-                    )
-                });
+                // SVG straddles an outline with a stroke and has no way
+                // to say otherwise, so a band lying to one side is drawn
+                // as a stroke on a shape moved half a width that way —
+                // which lands the band exactly where the engine puts it.
+                // How far to move it, towards the middle of the shape:
+                let offset =
+                    stroke
+                        .as_ref()
+                        .and_then(|s| match chitrakar_doc::stroke_align(shape, s) {
+                            chitrakar_doc::StrokeAlign::Inside => Some(s.width / 2.0),
+                            chitrakar_doc::StrokeAlign::Outside => Some(-s.width / 2.0),
+                            chitrakar_doc::StrokeAlign::Centre => None,
+                        });
+                let inner = stroke.as_ref().filter(|_| offset.is_some());
+                let offset = offset.unwrap_or(0.0);
                 let paint = paint_attrs(
                     doc,
                     fill.as_ref(),
@@ -204,8 +213,7 @@ fn write_node(
                                 );
                             }
                             Some(band) => {
-                                let half = band.width / 2.0;
-                                let (iw, ih) = (width - band.width, height - band.width);
+                                let (iw, ih) = (width - offset * 2.0, height - offset * 2.0);
                                 let line =
                                     paint_attrs(doc, None, Some(band), None, child, defs, false);
                                 let _ = writeln!(out, "{pad}<g{common}>");
@@ -217,8 +225,8 @@ fn write_node(
                                 if iw > 0.0 && ih > 0.0 {
                                     let _ = writeln!(
                                         out,
-                                        r#"{pad}  <rect x="{half}" y="{half}" width="{iw}" height="{ih}"{}{line}/>"#,
-                                        round(clamp(r - half, iw, ih))
+                                        r#"{pad}  <rect x="{offset}" y="{offset}" width="{iw}" height="{ih}"{}{line}/>"#,
+                                        round(clamp(r - offset, iw, ih))
                                     );
                                 }
                                 let _ = writeln!(out, "{pad}</g>");
@@ -233,8 +241,7 @@ fn write_node(
                             );
                         }
                         Some(band) => {
-                            let half = band.width / 2.0;
-                            let (ix, iy) = (rx - half, ry - half);
+                            let (ix, iy) = (rx - offset, ry - offset);
                             let line = paint_attrs(doc, None, Some(band), None, child, defs, false);
                             let _ = writeln!(out, "{pad}<g{common}>");
                             let _ = writeln!(
@@ -968,6 +975,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             }))),
         })
         .unwrap();
@@ -1005,6 +1013,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             }),
             gradient: None,
         };
@@ -1055,6 +1064,7 @@ mod tests {
                 join,
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             }),
             gradient: None,
         };
@@ -1118,6 +1128,7 @@ mod tests {
                     join: chitrakar_doc::StrokeJoin::Round,
                     start_marker: Default::default(),
                     end_marker: Default::default(),
+                    align: None,
                 }),
                 gradient: None,
             }),
@@ -1839,6 +1850,10 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                // A band lying outside the edge, which SVG and a page
+                // can only say by moving the shape or by clipping — so
+                // it is worth a witness watching them say it.
+                align: Some(chitrakar_doc::StrokeAlign::Outside),
             });
         }
         place(&mut doc, ring, [60.0, 10.0]);
@@ -1965,6 +1980,7 @@ mod tests {
                 // what most arrows are.
                 start_marker: chitrakar_doc::Marker::None,
                 end_marker: chitrakar_doc::Marker::Arrow,
+                align: None,
             });
         }
         place(&mut doc, elbow, [98.0, 6.0]);
@@ -2051,9 +2067,9 @@ mod tests {
         let at = |x: usize, y: usize| &drawn.data()[(y * 120 + x) * 4..(y * 120 + x) * 4 + 3];
         assert_eq!(at(30, 25), &[255, 0, 0], "rect");
         assert!(
-            at(75, 12)[0] > 200 && at(75, 12)[2] < 60,
-            "the ellipse's band is the stroke {:?}",
-            at(75, 12)
+            at(75, 8)[0] > 200 && at(75, 8)[2] < 60,
+            "the ellipse's band lies outside its edge {:?}",
+            at(75, 8)
         );
         assert!(
             at(75, 20)[2] > 200 && at(75, 20)[0] < 60,

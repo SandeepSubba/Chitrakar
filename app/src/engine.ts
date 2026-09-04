@@ -118,6 +118,11 @@ export interface Stroke {
   cap: StrokeCap;
   /** How the line turns a corner. Paths only, for the same reason. */
   join: StrokeJoin;
+  /** Which side of the outline the band lies on, for a rect or an
+   * ellipse. `null` is what the shape has always been stroked as, which
+   * is a band inside the edge. A path is stroked down the middle of its
+   * line whatever this says. */
+  align: StrokeAlign | null;
   /** What sits at the line's first point, and at its last. An open path
    * only, and where the line stops rather than where each dash does. */
   start_marker: Marker;
@@ -126,6 +131,7 @@ export interface Stroke {
 
 export type Marker = "None" | "Arrow" | "Bar" | "Dot";
 
+export type StrokeAlign = "Inside" | "Centre" | "Outside";
 export type StrokeCap = "Butt" | "Round" | "Square";
 export type StrokeJoin = "Miter" | "Round" | "Bevel";
 

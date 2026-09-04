@@ -764,6 +764,12 @@ pub struct Stroke {
     /// How the stroke turns a corner. Paths only, for the same reason.
     #[serde(default)]
     pub join: StrokeJoin,
+    /// Which side of the outline the stroke lies on. `None` is whatever
+    /// this shape has always been stroked as — see [`stroke_align`] —
+    /// which is what keeps a file written before there was a choice
+    /// drawing the way it did.
+    #[serde(default)]
+    pub align: Option<StrokeAlign>,
     /// What sits at the line's first point, and at its last. A line has
     /// two ends and they are asked separately, since an arrow at one end
     /// and nothing at the other is what most arrows are.
@@ -800,6 +806,48 @@ pub enum Marker {
 /// a bar reaches to either side, both as multiples of the stroke's width.
 pub const MARKER_LENGTH: f32 = 3.0;
 pub const MARKER_REACH: f32 = 1.5;
+
+/// Which side of the outline a stroke lies on.
+///
+/// Asked of a rect and an ellipse, whose outlines have a distance of
+/// their own. A path is stroked down the middle of its line whatever it
+/// asks for — see [`stroke_align`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrokeAlign {
+    /// The band lies inside the outline, so thickening a border never
+    /// grows the shape.
+    Inside,
+    /// Half in and half out, which is what SVG and PDF do by default.
+    Centre,
+    /// The band lies outside the outline, so a border never eats into
+    /// the fill.
+    Outside,
+}
+
+/// Which side of the outline this stroke actually lies on.
+///
+/// Where nothing was asked for, the answer is what the engine did before
+/// there could be an ask: a rect's and an ellipse's stroke was a band
+/// inside the edge, so thickening a border never grew the shape, and a
+/// path's ran down the middle of its line. That is an inconsistency —
+/// the same shape drawn two ways stroked two ways — which is the reason
+/// for the ask, but a file written then still has to draw as it did.
+pub fn stroke_align(shape: &VectorShape, stroke: &Stroke) -> StrokeAlign {
+    match shape {
+        // A rect's and an ellipse's outline has a distance of its own,
+        // so a band to either side of it is exact — a band inside, one
+        // straddling, one outside, and the dashes that break any of them
+        // up walk the middle of the band they belong to.
+        VectorShape::Rect { .. } | VectorShape::Ellipse { .. } => {
+            stroke.align.unwrap_or(StrokeAlign::Inside)
+        }
+        // A path is stroked down the middle of its line, which is what a
+        // line means and what an open one can only mean. Putting a band
+        // to one side of a closed path asks for its outline offset, and
+        // an offset outline is a guess where a distance is not.
+        VectorShape::Path { .. } => StrokeAlign::Centre,
+    }
+}
 
 /// How a stroke ends where its line stops.
 ///

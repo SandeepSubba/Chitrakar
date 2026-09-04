@@ -21,8 +21,8 @@ pub mod tiles;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
-    Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Marker, Mask, MaskKind,
-    NodeId, NodeKind, Transform, VectorShape,
+    stroke_align, Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Marker,
+    Mask, MaskKind, NodeId, NodeKind, StrokeAlign, Transform, VectorShape,
 };
 
 /// A linear-light, premultiplied float pixel buffer.
@@ -409,10 +409,10 @@ fn bounds_in_parent_space_inner(
         NodeKind::Vector { shape, stroke, .. } => {
             let flat = flatten_shape(shape);
             let mut bounds = transformed_local_bounds(node.transform, local_bounds(flat.as_ref()));
-            // Path strokes are centered on the line, so they overhang the
-            // anchor bounds (rect/ellipse strokes are inner bands and don't).
-            if let (VectorShape::Path { .. }, Some(stroke)) = (shape, stroke) {
-                let pad = stroke_pad(stroke) * max_scale(node.transform);
+            // A stroke reaches past the shape's own box unless its band
+            // lies inside the outline, which `stroke_pad` answers for.
+            if let Some(stroke) = stroke {
+                let pad = stroke_pad(shape, stroke) * max_scale(node.transform);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
                 }
@@ -1188,7 +1188,8 @@ fn render_child(
                         clip,
                         Some(&StrokeGeom {
                             width: stroke.width,
-                            pad: stroke_pad(stroke),
+                            align: stroke_align(shape, stroke),
+                            pad: stroke_pad(shape, stroke),
                             pieces: &pieces,
                         }),
                         mask,
@@ -2042,7 +2043,11 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
 /// The same shape drawn `by` smaller on every side, for walking the
 /// middle of a band that lies inside an edge. `None` when there would be
 /// nothing left of it.
-fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
+/// The same shape with its outline moved `by` towards its middle, or
+/// nothing when there is not that much shape to move. A negative `by`
+/// moves it outward. Paths have no such answer — an offset outline is a
+/// guess where a distance is not — so they get nothing.
+pub fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
     match shape {
         VectorShape::Rect {
             width,
@@ -2075,7 +2080,7 @@ fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
 /// Empty when there is nothing to break up — no pattern, or a pattern
 /// with nothing on in it, which would leave no stroke at all and so is
 /// read as a solid one.
-pub fn dashed_rings(shape: &VectorShape, dash: &[f32], width: f32) -> Vec<Vec<[f32; 2]>> {
+pub fn dashed_rings(shape: &VectorShape, dash: &[f32], inward: f32) -> Vec<Vec<[f32; 2]>> {
     let pattern: Vec<f32> = dash.iter().map(|d| d.max(0.0)).collect();
     if pattern.is_empty() || pattern.iter().all(|d| *d <= 0.0) {
         return Vec::new();
@@ -2097,18 +2102,17 @@ pub fn dashed_rings(shape: &VectorShape, dash: &[f32], width: f32) -> Vec<Vec<[f
         } => std::iter::once((points.clone(), *closed))
             .chain(subpaths.iter().map(|r| (r.clone(), true)))
             .collect(),
-        // A rect's or an ellipse's stroke is a band lying inside its
-        // edge, not straddling it. Walking the outline itself would put
-        // the dashes half outside, so walk the line half a width in —
-        // where the solid band's own middle is — and the pieces land
-        // exactly in it.
-        other => match inset(other, width / 2.0) {
+        // A rect's or an ellipse's band need not straddle its edge, so
+        // the dashes walk down the middle of whichever band they are
+        // breaking up — `inward` says where that is, and walking the
+        // outline itself would put them half in the wrong place.
+        other => match inset(other, inward) {
             Some(inner) => shape_rings(&inner)
                 .into_iter()
                 .map(|ring| {
                     (
                         ring.iter()
-                            .map(|p| [p[0] + width / 2.0, p[1] + width / 2.0])
+                            .map(|p| [p[0] + inward, p[1] + inward])
                             .collect(),
                         true,
                     )
@@ -2493,7 +2497,16 @@ pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec
     // which is what makes a dashed rule end square instead of round.
     // A pattern with nothing on in it leaves no pieces, and is read as a
     // solid stroke rather than as no stroke at all.
-    let runs = dashed_rings(shape, &stroke.dash, stroke.width);
+    // Each dash is a piece of the band it breaks up, so the walk goes
+    // down that band's own middle: half a width inside the outline for a
+    // band that lies inside, on the outline for one that straddles it,
+    // half a width out for one that lies outside.
+    let inward = match stroke_align(shape, stroke) {
+        StrokeAlign::Inside => stroke.width / 2.0,
+        StrokeAlign::Centre => 0.0,
+        StrokeAlign::Outside => -stroke.width / 2.0,
+    };
+    let runs = dashed_rings(shape, &stroke.dash, inward);
     if !runs.is_empty() {
         let half = stroke.width / 2.0;
         for run in runs {
@@ -2798,12 +2811,20 @@ pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<S
 /// the shape's own space. A round or square cap reaches half a width
 /// (a square cap's corner a little further, but not past a whole one),
 /// and a mitred corner as far as the limit allows.
-pub fn stroke_pad(stroke: &chitrakar_doc::Stroke) -> f32 {
+pub fn stroke_pad(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> f32 {
+    // A band lying inside the outline reaches nothing past the shape's
+    // own box; one straddling it reaches half a width, one outside it a
+    // whole one — before corners and heads, which reach further still.
+    let out = match stroke_align(shape, stroke) {
+        StrokeAlign::Inside => return 0.0,
+        StrokeAlign::Centre => 1.0,
+        StrokeAlign::Outside => 2.0,
+    };
     let corner = if stroke.join == chitrakar_doc::StrokeJoin::Miter {
         stroke.width * chitrakar_doc::MITER_LIMIT / 2.0
     } else {
         stroke.width
-    };
+    } * out;
     // A head reaches past the last point rather than around it, and
     // further than any corner does.
     let marked = stroke.start_marker != Marker::None || stroke.end_marker != Marker::None;
@@ -2819,6 +2840,8 @@ pub fn stroke_pad(stroke: &chitrakar_doc::Stroke) -> f32 {
 /// and how far past the line it can reach.
 struct StrokeGeom<'a> {
     width: f32,
+    /// Which side of the outline the band lies on, resolved once.
+    align: StrokeAlign,
     /// How far, in the shape's own space, the stroke can land beyond the
     /// box its anchors make.
     pad: f32,
@@ -2833,28 +2856,48 @@ struct StrokeGeom<'a> {
 /// A rect's or an ellipse's is a band of the given width lying inside its
 /// edge, so thickening a border never grows the shape; that is the signed
 /// distance to the outline, and needs no pieces.
-fn stroke_covers(shape: &VectorShape, width: f32, pieces: &[StrokePiece], x: f32, y: f32) -> bool {
+fn stroke_covers(
+    shape: &VectorShape,
+    width: f32,
+    align: StrokeAlign,
+    pieces: &[StrokePiece],
+    x: f32,
+    y: f32,
+) -> bool {
     if !pieces.is_empty() || matches!(shape, VectorShape::Path { .. }) {
+        // Dashes are already laid along the middle of the band they
+        // break up, so they need no clipping to land in it.
         return pieces.iter().any(|p| p.covers(x, y));
     }
-    if !shape_covers(shape, x, y) {
-        return false;
-    }
+    // A rect's and an ellipse's outline has a signed distance of its own,
+    // so their bands need no clipping: the band is a range of distances.
+    let (lo, hi) = match align {
+        StrokeAlign::Inside => (-width, 0.0),
+        StrokeAlign::Centre => (-width / 2.0, width / 2.0),
+        StrokeAlign::Outside => (0.0, width),
+    };
     match shape {
-        // Inside already; the band is the outermost `width` of that, which
-        // the signed distance gives directly however round the corners are.
         VectorShape::Rect {
             width: w,
             height: h,
             radius,
-        } => rounded_rect_distance(*w, *h, *radius, x, y) > -width,
+        } => {
+            let d = rounded_rect_distance(*w, *h, *radius, x, y);
+            d > lo && d <= hi
+        }
         VectorShape::Ellipse { rx, ry } => {
-            let (irx, iry) = ((rx - width).max(0.0), (ry - width).max(0.0));
-            if irx <= 0.0 || iry <= 0.0 {
-                return true;
-            }
-            let (nx, ny) = ((x - rx) / irx, (y - ry) / iry);
-            nx * nx + ny * ny > 1.0
+            // No true signed distance to an ellipse in closed form, so
+            // the band is read as being inside one ellipse and outside
+            // another — which is what its two rims are.
+            let within = |grow: f32| {
+                let (a, b) = ((rx + grow).max(0.0), (ry + grow).max(0.0));
+                if a <= 0.0 || b <= 0.0 {
+                    return false;
+                }
+                let (nx, ny) = ((x - rx) / a, (y - ry) / b);
+                nx * nx + ny * ny <= 1.0
+            };
+            within(hi) && !within(lo)
         }
         VectorShape::Path { .. } => unreachable!(),
     }
@@ -3090,7 +3133,7 @@ fn pixel_coverage(
         let (x, y) = inv.at(sx, sy);
         match stroke {
             None => shape_covers(shape, x, y),
-            Some(s) => stroke_covers(shape, s.width, s.pieces, x, y),
+            Some(s) => stroke_covers(shape, s.width, s.align, s.pieces, x, y),
         }
     };
     let (fx, fy) = (px as f32, py as f32);
@@ -3236,9 +3279,11 @@ fn paint_shape(
             Some(b) => b.intersect(clip),
             None => return,
         };
-    // A stroke reaches past the anchors it runs between — a path's is
-    // centred on the line, and a mitred corner runs out further still.
-    if let (Some(s), VectorShape::Path { .. }) = (stroke, shape) {
+    // A stroke reaches past the box its outline lies in — down the middle
+    // of a line, outside a shape's edge, further still at a mitred corner
+    // or a head. Whatever it is, `pad` says how far in the shape's own
+    // units, and nothing at all for a band lying inside the outline.
+    if let Some(s) = stroke.filter(|s| s.pad > 0.0) {
         let pad = (s.pad * max_scale(t)).ceil() as u32 + 1;
         bbox = ClipRect {
             x0: bbox.x0.saturating_sub(pad),
@@ -5092,7 +5137,14 @@ fn hit_in_group(
                             dash: Vec::new(),
                             ..s.clone()
                         };
-                        stroke_covers(shape, s.width, &stroke_pieces(shape, &solid), lx, ly)
+                        stroke_covers(
+                            shape,
+                            s.width,
+                            stroke_align(shape, s),
+                            &stroke_pieces(shape, &solid),
+                            lx,
+                            ly,
+                        )
                     } else {
                         false
                     };
@@ -5459,6 +5511,7 @@ mod tests {
                 dash,
                 cap: Default::default(),
                 join: Default::default(),
+                align: None,
                 start_marker: Default::default(),
                 end_marker: Default::default(),
             }),
@@ -5531,6 +5584,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -5578,6 +5632,139 @@ mod tests {
         assert!(the_corner(&square), "a square end has a corner");
     }
 
+    /// A border can lie inside the edge, straddle it, or lie outside it.
+    /// Inside is what the engine always did — a thicker border never
+    /// grows the shape — and outside is the other thing a designer wants,
+    /// a border that never eats into the fill.
+    #[test]
+    fn a_border_lies_on_the_side_it_is_asked_to() {
+        use chitrakar_doc::StrokeAlign;
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "box",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 8.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(20.0, 20.0),
+        })
+        .unwrap();
+        // The rect's edge runs down x = 20. A band eight wide lies in
+        // 20..28 inside, 16..24 straddling, 12..20 outside.
+        let aligned = |doc: &mut Document, align: Option<StrokeAlign>| {
+            let mut kind = doc.node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                if let Some(s) = stroke.take() {
+                    *stroke = Some(chitrakar_doc::Stroke { align, ..s });
+                }
+            }
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            render(doc).unwrap()
+        };
+        let inked = |s: &Surface, x: u32| s.get(x, 40).a > 0.5;
+
+        // Nothing asked: the band a file written before the ask would get.
+        let old = aligned(&mut doc, None);
+        assert!(
+            inked(&old, 22) && !inked(&old, 18),
+            "unasked, it lies inside"
+        );
+
+        let inside = aligned(&mut doc, Some(StrokeAlign::Inside));
+        assert!(inked(&inside, 22), "inside: within the edge");
+        assert!(!inked(&inside, 18), "and nothing beyond it");
+        assert!(!inked(&inside, 30), "and it is eight wide, not more");
+
+        let centred = aligned(&mut doc, Some(StrokeAlign::Centre));
+        assert!(
+            inked(&centred, 18) && inked(&centred, 22),
+            "centred: both sides"
+        );
+        assert!(
+            !inked(&centred, 14) && !inked(&centred, 26),
+            "half either way"
+        );
+
+        let outside = aligned(&mut doc, Some(StrokeAlign::Outside));
+        assert!(inked(&outside, 18), "outside: beyond the edge");
+        assert!(!inked(&outside, 22), "and nothing within it");
+        assert!(!inked(&outside, 10), "and eight wide there too");
+
+        // A band outside the edge reaches past the shape's own box, so
+        // the box the renderer works in has to know.
+        let far = local_bounds_of(&doc, id).unwrap().unwrap();
+        assert!(far[0] <= 12.0, "the box allows for it: {far:?}");
+
+        // Dashed, the pieces land in the band they belong to rather than
+        // where a centred stroke would have put them.
+        let dashed = |doc: &mut Document, align: Option<StrokeAlign>| {
+            let mut kind = doc.node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                if let Some(s) = stroke.take() {
+                    *stroke = Some(chitrakar_doc::Stroke {
+                        align,
+                        // A gap wide enough to survive the round caps
+                        // at either end of each dash, which reach half a
+                        // width along the line.
+                        dash: vec![10.0, 20.0],
+                        ..s
+                    });
+                }
+            }
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            render(doc).unwrap()
+        };
+        for (align, within, beyond) in [
+            (StrokeAlign::Inside, 22, 18),
+            (StrokeAlign::Outside, 18, 22),
+        ] {
+            let s = dashed(&mut doc, Some(align));
+            let along: Vec<bool> = (24..56).map(|y| s.get(within, y).a > 0.5).collect();
+            assert!(
+                along.iter().any(|on| *on) && along.iter().any(|on| !*on),
+                "{align:?}: dashed, the band is on in places and off in others"
+            );
+            assert!(
+                (24..56).all(|y| s.get(beyond, y).a < 0.5),
+                "{align:?}: and none of it on the other side of the edge"
+            );
+        }
+    }
+
     /// A line can point at something. What sits at an end is sized from
     /// the line's own width, so a thicker line carries a bigger head
     /// rather than the same head looking lost on it.
@@ -5610,6 +5797,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Marker::None,
                 end_marker: Marker::None,
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -5726,6 +5914,7 @@ mod tests {
                 join: StrokeJoin::Round,
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -5827,6 +6016,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -5863,6 +6053,7 @@ mod tests {
                         join: Default::default(),
                         start_marker: Default::default(),
                         end_marker: Default::default(),
+                        align: None,
                     }),
                     gradient: None,
                 }),
@@ -5916,6 +6107,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -8467,6 +8659,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -8978,6 +9171,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -9929,6 +10123,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {
@@ -9997,6 +10192,7 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                align: None,
             });
         }
         doc.apply(Command::AddNode {

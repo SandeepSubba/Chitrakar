@@ -1054,6 +1054,44 @@ await page.waitForTimeout(200);
 px = await canvasPixel(302, 400); // 2px inside the rect's left edge
 assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
 
+// 8k0. And it can lie on either side of the edge, which is the
+// difference between a border that eats into the fill and one that does
+// not. Read three points across the rect's left edge: how far out and
+// how far in the band reaches tells the three apart, without either of
+// us having to know exactly where the edge fell after the resizes above.
+{
+  // Dark and opaque: bare canvas is transparent, and a transparent pixel
+  // reads zero on every channel, which "dark" alone would take for ink.
+  const band = async (x) => {
+    const px = await canvasPixel(x, 400);
+    return px[3] > 200 && px[0] < 80;
+  };
+  const across = async () => [await band(296), await band(298), await band(302)];
+  const side = async (which) => {
+    if (which) {
+      await page.selectOption('select[aria-label="Border side"]', which);
+      await page.waitForTimeout(300);
+    }
+    return across();
+  };
+  assert(
+    (await side(null)).join() === "false,false,true",
+    `unasked, the band lies inside the edge (${await across()})`,
+  );
+  assert(
+    (await side("Outside")).join() === "true,true,false",
+    `outside, it lies beyond the edge and not within it (${await across()})`,
+  );
+  assert(
+    (await side("Centre")).join() === "false,true,false",
+    `across, it straddles the edge (${await across()})`,
+  );
+  assert(
+    (await side("Inside")).join() === "false,false,true",
+    "and back inside where it began",
+  );
+}
+
 // 8k1. That stroke can be broken up: the picker's patterns leave gaps
 // along the line, and Solid puts it back. Read along the top band of the
 // same rect, two pixels in from its edge.

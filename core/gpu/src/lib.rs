@@ -1109,16 +1109,23 @@ fn vector(
         out.draws.push(Draw::Shape { quad, ramp });
     }
     if let Some((color, s)) = ink {
-        // A rect's or an ellipse's stroke is the innermost `width` of
-        // it, so stroking one never grows its bounds; the fragment
-        // measures both rims and takes the band between them.
+        // A band between two outlines: the shape shrunk by one figure
+        // and grown by the other. Which side of its edge the band lies
+        // on is which of those two carries the width.
+        let (shrink, grow) = match chitrakar_doc::stroke_align(shape, s) {
+            chitrakar_doc::StrokeAlign::Inside => (s.width, 0.0),
+            chitrakar_doc::StrokeAlign::Centre => (s.width / 2.0, s.width / 2.0),
+            chitrakar_doc::StrokeAlign::Outside => (0.0, s.width),
+        };
         let quad = out.push(quad(
             t,
             size,
             [size[0], size[1], radius, kind + 2.0],
             color,
-            [s.width, 0.0, 0.0, 0.0],
-            1.5,
+            [shrink, grow, 0.0, 0.0],
+            // The quad has to reach whatever the band grows to, plus the
+            // pixel every edge is softened over.
+            1.5 + grow * device_scale(t),
         ));
         out.draws.push(Draw::Shape { quad, ramp: None });
     }
@@ -2032,6 +2039,7 @@ mod tests {
                 dash: Vec::new(),
                 cap: Default::default(),
                 join: Default::default(),
+                align: None,
                 start_marker: Default::default(),
                 end_marker: Default::default(),
             });
@@ -2063,16 +2071,21 @@ mod tests {
             ),
             Transform::translation(8.0, 8.0),
         );
-        add(
-            &mut doc,
-            stroked(
-                "ellipse",
-                VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
-                5.0,
-                Vec::new(),
-            ),
-            Transform::translation(56.0, 8.0),
+        // A band lying outside its edge, which the fragment reads as a
+        // shape grown rather than a shape shrunk.
+        let mut ring = stroked(
+            "ellipse",
+            VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+            5.0,
+            Vec::new(),
         );
+        if let NodeKind::Vector {
+            stroke: Some(s), ..
+        } = &mut ring.kind
+        {
+            s.align = Some(chitrakar_doc::StrokeAlign::Outside);
+        }
+        add(&mut doc, ring, Transform::translation(56.0, 14.0));
         // An open path: three segments, so two round joins and two caps.
         add(
             &mut doc,
@@ -2121,13 +2134,13 @@ mod tests {
         );
         // The band is inside the shape: its middle is hollow and its
         // outside is bare, on both.
-        for (x, y, what) in [(25, 21, "the rect's middle"), (74, 20, "the ellipse's")] {
+        for (x, y, what) in [(25, 21, "the rect's middle"), (74, 26, "the ellipse's")] {
             assert_eq!(drawn.get(x, y).a, 0.0, "{what} is hollow");
             assert_eq!(reference.get(x, y).a, 0.0, "{what} is hollow on the CPU");
         }
         assert_eq!(drawn.get(4, 4).a, 0.0, "and nothing outside it");
         // The rim itself is painted, and to the reference's own weight.
-        for (x, y) in [(9, 21), (25, 9), (56, 20), (18, 62), (101, 61)] {
+        for (x, y) in [(9, 21), (25, 9), (54, 26), (18, 62), (101, 61)] {
             let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
             assert!(g > 0.5, "the band at ({x}, {y}) is painted: {g}");
             assert!((g - c).abs() < 0.2, "at ({x}, {y}): {g} vs {c}");
@@ -2383,6 +2396,7 @@ mod tests {
                         dash: Vec::new(),
                         cap: Default::default(),
                         join: Default::default(),
+                        align: None,
                         start_marker: Default::default(),
                         end_marker: Default::default(),
                     }),

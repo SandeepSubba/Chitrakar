@@ -703,15 +703,34 @@ impl<'a> Page<'a> {
                             }
                         );
                         match shape {
-                            // An inner band: clip to the shape and stroke
-                            // twice the width down its edge, so the half
-                            // that shows is the inside half.
+                            // A band to one side of the edge is a
+                            // straddling band on a shape moved half a
+                            // width that way — which is how SVG is given
+                            // it too. Clipping to one side would do it as
+                            // well, but a clip's own edge is antialiased
+                            // against an edge the fill already
+                            // antialiased, and the two do not add up: a
+                            // seam all the way round.
                             VectorShape::Rect { .. } | VectorShape::Ellipse { .. } => {
-                                let _ = writeln!(
-                                    self.content,
-                                    "q\n{path}W n\n{path}{} w S\nQ",
-                                    num(stroke.width * 2.0)
-                                );
+                                let off = match chitrakar_doc::stroke_align(shape, stroke) {
+                                    chitrakar_doc::StrokeAlign::Inside => stroke.width / 2.0,
+                                    chitrakar_doc::StrokeAlign::Centre => 0.0,
+                                    chitrakar_doc::StrokeAlign::Outside => -stroke.width / 2.0,
+                                };
+                                let w = num(stroke.width);
+                                if off == 0.0 {
+                                    let _ = writeln!(self.content, "{w} w\n{path}S");
+                                } else if let Some(moved) = chitrakar_render::inset(shape, off) {
+                                    let _ = writeln!(
+                                        self.content,
+                                        "q\n1 0 0 1 {} {} cm\n{}{w} w S\nQ",
+                                        num(off),
+                                        num(off),
+                                        path_ops(&moved)
+                                    );
+                                }
+                                // A band as thick as the shape leaves no
+                                // shape to move, and nothing to draw.
                             }
                             // A centred line, ending and turning the way
                             // the renderer draws it. PDF numbers the same
@@ -1518,6 +1537,10 @@ mod tests {
                 join: Default::default(),
                 start_marker: Default::default(),
                 end_marker: Default::default(),
+                // A band lying outside the edge, which SVG and a page
+                // can only say by moving the shape or by clipping — so
+                // it is worth a witness watching them say it.
+                align: Some(chitrakar_doc::StrokeAlign::Outside),
             });
         }
         add(&mut doc, ring, [60.0, 10.0]);
@@ -1580,6 +1603,7 @@ mod tests {
                 join: chitrakar_doc::StrokeJoin::Bevel,
                 start_marker: chitrakar_doc::Marker::None,
                 end_marker: chitrakar_doc::Marker::Arrow,
+                align: None,
             });
         }
         add(&mut doc, elbow, [98.0, 6.0]);
@@ -1653,11 +1677,12 @@ mod tests {
             content.contains("1 0 0 1 10 10 cm\n1 0 0 rg\n0 0 40 30 re\nf\n"),
             "{content}"
         );
-        // The ellipse: four beziers filled, then the inner stroke as a
-        // clip and a double-width stroke.
+        // The ellipse: four beziers filled, then its band — which lies
+        // outside the edge, so it is a stroke down a shape moved half a
+        // width out, under a translation that puts it back.
         assert!(content.contains("15 20 c\n") && content.contains("0 0 1 rg\n"));
         assert!(
-            content.contains("W n\n") && content.contains("8 w S\nQ"),
+            content.contains("1 0 0 1 -2 -2 cm\n") && content.contains("4 w S\nQ"),
             "{content}"
         );
         // The compound path: cubic segments, a second ring, even-odd.
@@ -1919,9 +1944,9 @@ mod tests {
         let at = |x: usize, y: usize| &drawn.rgba8[(y * 120 + x) * 4..(y * 120 + x) * 4 + 3];
         assert_eq!(at(30, 25), &[255, 0, 0], "rect");
         assert!(
-            at(75, 12)[0] > 200 && at(75, 12)[2] < 60,
-            "ellipse band is the stroke {:?}",
-            at(75, 12)
+            at(75, 8)[0] > 200 && at(75, 8)[2] < 60,
+            "ellipse band lies outside its edge {:?}",
+            at(75, 8)
         );
         assert!(
             at(75, 20)[2] > 200 && at(75, 20)[0] < 60,

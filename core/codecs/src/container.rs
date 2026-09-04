@@ -360,6 +360,7 @@ mod tests {
                 dash: Vec::new(),
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
+                align: None,
                 start_marker: Default::default(),
                 end_marker: Default::default(),
             });

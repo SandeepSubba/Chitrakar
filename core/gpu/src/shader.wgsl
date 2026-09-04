@@ -67,32 +67,40 @@ fn edge(d: f32) -> f32 {
 
 // How much of this pixel the shape covers. `params.w` says which shape
 // it is — 0 a rounded rectangle, 1 an ellipse, and 2 or 3 the same two
-// as a stroke: the innermost `grad.x` of the shape, which is where the
-// CPU renderer puts a rect's or an ellipse's stroke so that stroking
-// one never grows its bounds.
+// as a stroke, whose band lies between two outlines: the shape grown by
+// `grad.y` and the shape shrunk by `grad.x`. Which side of its own edge
+// a band lies on is the difference between those two, so all three
+// answers are the same arithmetic.
 fn coverage(in: VsOut) -> f32 {
     let size = in.params.xy;
     let r = size * 0.5;
     let band = in.params.w >= 2.0;
     let ellipse = in.params.w - select(0.0, 2.0, band) > 0.5;
-    let width = in.grad.x;
+    let shrink = in.grad.x;
+    let grow = in.grad.y;
 
-    let outer = select(
+    let plain = select(
         rect_distance(in.local, size, in.params.z),
         ellipse_distance(in.local, r, r),
         ellipse,
     );
-    // The inside edge of a band. A rounded rect's is its own distance
-    // pushed in by the width; an ellipse's is the ellipse shrunk by the
-    // width on each axis, which is a different curve — and once that has
-    // shrunk to nothing the band is the whole inside.
-    let shrunk = r - vec2f(width, width);
+    // A rounded rect's grown and shrunk outlines are its own distance
+    // moved; an ellipse's are ellipses of other radii, which are
+    // different curves — and once one has shrunk to nothing the band
+    // reaches all the way in.
+    let grown = r + vec2f(grow, grow);
+    let outer = select(
+        plain - grow,
+        ellipse_distance(in.local, r, grown),
+        ellipse,
+    );
+    let shrunk = r - vec2f(shrink, shrink);
     let inner = select(
-        outer + width,
+        plain + shrink,
         select(ellipse_distance(in.local, r, max(shrunk, vec2f(1e-6, 1e-6))), 1e9, shrunk.x <= 0.0 || shrunk.y <= 0.0),
         ellipse,
     );
-    let cov = edge(outer);
+    let cov = edge(select(plain, outer, band));
     return select(cov, clamp(cov - edge(inner), 0.0, 1.0), band);
 }
 
