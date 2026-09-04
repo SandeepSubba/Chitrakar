@@ -2055,6 +2055,7 @@ mod tests {
                 color: BLUE,
                 width,
                 widths,
+                dash: Vec::new(),
             });
         }
         Box::new(node)
@@ -2327,6 +2328,7 @@ mod tests {
                         color: BLUE,
                         width: 2.0,
                         widths: Vec::new(),
+                        dash: Vec::new(),
                     }),
                     gradient: None,
                 }),

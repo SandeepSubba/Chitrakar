@@ -98,6 +98,9 @@ export interface Stroke {
   /** Per-anchor multipliers in 0..1 scaling `width` along the path. Empty
    * means a constant width. */
   widths: number[];
+  /** Lengths on and off in turn, repeating, in the shape's own units.
+   * Empty is a solid line. */
+  dash: number[];
 }
 
 export type Filter =

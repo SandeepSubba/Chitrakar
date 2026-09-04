@@ -517,9 +517,10 @@ fn paint_attrs(
             if let Some(stroke) = stroke {
                 let _ = write!(
                     s,
-                    r#" stroke="{}" stroke-width="{}""#,
+                    r#" stroke="{}" stroke-width="{}"{}"#,
                     color_hex(doc, stroke.color),
-                    stroke.width
+                    stroke.width,
+                    dash_attr(stroke)
                 );
             }
             return s;
@@ -538,12 +539,23 @@ fn paint_attrs(
     if let Some(stroke) = stroke {
         let _ = write!(
             s,
-            r#" stroke="{}" stroke-width="{}""#,
+            r#" stroke="{}" stroke-width="{}"{}"#,
             color_hex(doc, stroke.color),
-            stroke.width
+            stroke.width,
+            dash_attr(stroke)
         );
     }
     s
+}
+
+/// A dash pattern as SVG says it, which is the same list of lengths on
+/// and off the document keeps. Empty for a solid stroke.
+fn dash_attr(stroke: &chitrakar_doc::Stroke) -> String {
+    if stroke.dash.is_empty() || stroke.dash.iter().all(|d| *d <= 0.0) {
+        return String::new();
+    }
+    let lengths: Vec<String> = stroke.dash.iter().map(|d| d.to_string()).collect();
+    format!(r#" stroke-dasharray="{}""#, lengths.join(" "))
 }
 
 fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut String) {
@@ -674,6 +686,49 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// A dash pattern travels as the same lengths SVG names, and a solid
+    /// stroke says nothing about dashes at all.
+    #[test]
+    fn a_dashed_stroke_travels_as_its_pattern() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let id = filled(&mut doc, "line", 40.0, 40.0);
+        let stroked = |dash: Vec<f32>| chitrakar_doc::NodeKind::Vector {
+            shape: VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+            fill: None,
+            stroke: Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 2.0,
+                widths: Vec::new(),
+                dash,
+            }),
+            gradient: None,
+        };
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(stroked(Vec::new())),
+        })
+        .unwrap();
+        assert!(
+            !export_svg(&doc).unwrap().contains("dasharray"),
+            "a solid stroke says nothing about dashes"
+        );
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(stroked(vec![6.0, 3.0])),
+        })
+        .unwrap();
+        assert!(
+            export_svg(&doc)
+                .unwrap()
+                .contains(r#"stroke-dasharray="6 3""#),
+            "and a dashed one carries its pattern"
+        );
     }
 
     /// A blend travels under the name the spec gives it, which is what

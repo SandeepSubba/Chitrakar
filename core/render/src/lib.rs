@@ -1168,10 +1168,32 @@ fn render_child(
                     }
                 };
                 if let Some(paint) = fill_paint {
-                    paint_shape(dst, doc, shape, t, &paint, blend, clip, None, &[], mask);
+                    paint_shape(
+                        dst,
+                        doc,
+                        shape,
+                        t,
+                        &paint,
+                        blend,
+                        clip,
+                        None,
+                        &[],
+                        &[],
+                        mask,
+                    );
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
+                    // A dashed stroke is drawn at one width: the pieces
+                    // the pattern leaves are what is stroked, and a width
+                    // that swells along the line has nothing to swell
+                    // along any more.
+                    let dashes = dashed_rings(shape, &stroke.dash, stroke.width);
+                    let widths = if dashes.is_empty() {
+                        flatten_widths(shape, &stroke.widths)
+                    } else {
+                        Vec::new()
+                    };
                     paint_shape(
                         dst,
                         doc,
@@ -1181,7 +1203,8 @@ fn render_child(
                         blend,
                         clip,
                         Some(stroke.width),
-                        &flatten_widths(shape, &stroke.widths),
+                        &widths,
+                        &dashes,
                         mask,
                     );
                 }
@@ -2036,6 +2059,136 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     })
 }
 
+/// The same shape drawn `by` smaller on every side, for walking the
+/// middle of a band that lies inside an edge. `None` when there would be
+/// nothing left of it.
+fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
+    match shape {
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        } => {
+            let (w, h) = (width - by * 2.0, height - by * 2.0);
+            (w > 0.0 && h > 0.0).then(|| VectorShape::Rect {
+                width: w,
+                height: h,
+                radius: (radius - by).max(0.0),
+            })
+        }
+        VectorShape::Ellipse { rx, ry } => {
+            let (a, b) = (rx - by, ry - by);
+            (a > 0.0 && b > 0.0).then_some(VectorShape::Ellipse { rx: a, ry: b })
+        }
+        VectorShape::Path { .. } => None,
+    }
+}
+
+/// The outline broken into the pieces a dash pattern leaves, as open
+/// polylines in the shape's own space.
+///
+/// The pattern is lengths on and off in turn, repeating; one length alone
+/// is that much of each. Walking is by arc length along the flattened
+/// outline, so a dash crosses a corner the way it would along a wire
+/// rather than restarting at every anchor.
+///
+/// Empty when there is nothing to break up — no pattern, or a pattern
+/// with nothing on in it, which would leave no stroke at all and so is
+/// read as a solid one.
+pub fn dashed_rings(shape: &VectorShape, dash: &[f32], width: f32) -> Vec<Vec<[f32; 2]>> {
+    let pattern: Vec<f32> = dash.iter().map(|d| d.max(0.0)).collect();
+    if pattern.is_empty() || pattern.iter().all(|d| *d <= 0.0) {
+        return Vec::new();
+    }
+    // One length is that much on and the same off, the way every other
+    // editor reads it.
+    let pattern = if pattern.len() == 1 {
+        vec![pattern[0], pattern[0]]
+    } else {
+        pattern
+    };
+    let flat = flatten_shape(shape);
+    let rings: Vec<(Vec<[f32; 2]>, bool)> = match flat.as_ref() {
+        VectorShape::Path {
+            points,
+            closed,
+            subpaths,
+            ..
+        } => std::iter::once((points.clone(), *closed))
+            .chain(subpaths.iter().map(|r| (r.clone(), true)))
+            .collect(),
+        // A rect's or an ellipse's stroke is a band lying inside its
+        // edge, not straddling it. Walking the outline itself would put
+        // the dashes half outside, so walk the line half a width in —
+        // where the solid band's own middle is — and the pieces land
+        // exactly in it.
+        other => match inset(other, width / 2.0) {
+            Some(inner) => shape_rings(&inner)
+                .into_iter()
+                .map(|ring| {
+                    (
+                        ring.iter()
+                            .map(|p| [p[0] + width / 2.0, p[1] + width / 2.0])
+                            .collect(),
+                        true,
+                    )
+                })
+                .collect(),
+            // A stroke as thick as the shape leaves nothing to walk.
+            None => return Vec::new(),
+        },
+    };
+    let mut out = Vec::new();
+    for (points, closed) in rings {
+        if points.len() < 2 {
+            continue;
+        }
+        let mut step = 0usize;
+        let mut left = pattern[0];
+        let mut on = true;
+        let mut run: Vec<[f32; 2]> = vec![points[0]];
+        let segments = if closed {
+            points.len()
+        } else {
+            points.len() - 1
+        };
+        for i in 0..segments {
+            let (a, b) = (points[i], points[(i + 1) % points.len()]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len <= 0.0 {
+                continue;
+            }
+            let mut at = 0.0f32;
+            while len - at > left {
+                at += left;
+                let p = [a[0] + dx * (at / len), a[1] + dy * (at / len)];
+                if on {
+                    run.push(p);
+                    if run.len() >= 2 {
+                        out.push(std::mem::take(&mut run));
+                    } else {
+                        run.clear();
+                    }
+                } else {
+                    run = vec![p];
+                }
+                on = !on;
+                step = (step + 1) % pattern.len();
+                left = pattern[step].max(1e-4);
+            }
+            left -= len - at;
+            if on {
+                run.push(b);
+            }
+        }
+        if on && run.len() >= 2 {
+            out.push(run);
+        }
+    }
+    out
+}
+
 /// A shape as closed rings of straight segments, in its own local space.
 ///
 /// Booleans, and anything else that needs an outline rather than a
@@ -2302,7 +2455,29 @@ pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<S
 /// Stroke coverage. Rects and ellipses use an inner band of the given width
 /// (bounds stay stable); paths use a stroke centered on the line so open
 /// paths render as line art.
-fn stroke_covers(shape: &VectorShape, width: f32, widths: &[f32], x: f32, y: f32) -> bool {
+fn stroke_covers(
+    shape: &VectorShape,
+    width: f32,
+    widths: &[f32],
+    dashes: &[Vec<[f32; 2]>],
+    x: f32,
+    y: f32,
+) -> bool {
+    // A broken-up stroke is the same distance test against the pieces the
+    // pattern left, which are open polylines however the shape was closed.
+    //
+    // Where it sits has to be where the solid stroke sat: a path's is
+    // centred on the line, and a rect's or an ellipse's is a band lying
+    // inside its edge. Measuring the full width from the outline and
+    // keeping only what is inside gives that same band, so dashing a
+    // shape breaks its stroke up without moving it.
+    if !dashes.is_empty() {
+        let half = width / 2.0;
+        return dashes.iter().any(|run| {
+            (0..run.len().saturating_sub(1))
+                .any(|i| segment_distance(x, y, run[i], run[i + 1]) <= half)
+        });
+    }
     if let VectorShape::Path {
         points,
         closed,
@@ -2529,10 +2704,12 @@ fn rect_coverage(width: f32, height: f32, t: Transform, inv: Inverse, px: u32, p
 /// Detail finer than that first five-point probe can still slip through and
 /// drop out — the same blind spot the old centre-only test had, now confined
 /// to sub-pixel features.
+#[allow(clippy::too_many_arguments)]
 fn pixel_coverage(
     shape: &VectorShape,
     stroke_width: Option<f32>,
     stroke_widths: &[f32],
+    dashes: &[Vec<[f32; 2]>],
     t: Transform,
     inv: Inverse,
     px: u32,
@@ -2561,7 +2738,7 @@ fn pixel_coverage(
         let (x, y) = inv.at(sx, sy);
         match stroke_width {
             None => shape_covers(shape, x, y),
-            Some(sw) => stroke_covers(shape, sw, stroke_widths, x, y),
+            Some(sw) => stroke_covers(shape, sw, stroke_widths, dashes, x, y),
         }
     };
     let (fx, fy) = (px as f32, py as f32);
@@ -2698,6 +2875,7 @@ fn paint_shape(
     clip: ClipRect,
     stroke_width: Option<f32>,
     stroke_widths: &[f32],
+    dashes: &[Vec<[f32; 2]>],
     mask: MaskRef<'_>,
 ) {
     // Smooth paths render as their flattened spline polyline.
@@ -2741,7 +2919,7 @@ fn paint_shape(
     }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let a = pixel_coverage(shape, stroke_width, stroke_widths, t, inv, px, py);
+            let a = pixel_coverage(shape, stroke_width, stroke_widths, dashes, t, inv, px, py);
             if a <= 0.0 {
                 continue;
             }
@@ -2928,7 +3106,7 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
         MaskKind::Vector { shape, .. } => match m.inv {
-            Some(inv) => pixel_coverage(shape, None, &[], m.t, inv, x, y),
+            Some(inv) => pixel_coverage(shape, None, &[], &[], m.t, inv, x, y),
             None => 0.0,
         },
         // Read off the plane it was worked out into; without one there
@@ -4279,7 +4457,16 @@ fn hit_in_group(
                     let hit = if fill.is_some() || gradient.is_some() {
                         shape_covers(shape, lx, ly)
                     } else if let Some(s) = stroke {
-                        stroke_covers(shape, s.width, &flatten_widths(shape, &s.widths), lx, ly)
+                        // A dashed outline is picked along the whole of
+                        // it: clicking a gap should still catch the line.
+                        stroke_covers(
+                            shape,
+                            s.width,
+                            &flatten_widths(shape, &s.widths),
+                            &[],
+                            lx,
+                            ly,
+                        )
                     } else {
                         false
                     };
@@ -4582,6 +4769,184 @@ mod tests {
         // is no hue under it to make vivid.
         let sat = paint(BlendMode::Saturation);
         assert!(sat[0] == sat[1] && sat[1] == sat[2], "{sat:?}");
+    }
+
+    /// Dashing a shape breaks its stroke up without moving it: a rect's
+    /// stroke is a band inside its edge, and the pieces the pattern
+    /// leaves lie in that same band rather than straddling the outline.
+    #[test]
+    fn a_dashed_rect_keeps_its_stroke_inside_the_edge() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let root = doc.root();
+        let kind = |dash: Vec<f32>| NodeKind::Vector {
+            shape: VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+            fill: None,
+            stroke: Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash,
+            }),
+            gradient: None,
+        };
+        let mut node = Node::vector(
+            "r",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+        );
+        node.kind = kind(Vec::new());
+        node.transform = Transform::translation(10.0, 10.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        // The solid band lies from the edge inward, not outward.
+        let s = render(&doc).unwrap();
+        assert!(s.get(20, 12).a > 0.9, "inside the top edge");
+        assert_eq!(s.get(20, 8).a, 0.0, "and nothing outside it");
+
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(kind(vec![6.0, 6.0])),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        let inside: Vec<f32> = (12..40).map(|x| s.get(x, 12).a).collect();
+        assert!(
+            inside.iter().any(|a| *a > 0.9) && inside.iter().any(|a| *a < 0.1),
+            "dashed, the band is on in places and off in others: {inside:?}"
+        );
+        assert!(
+            (12..40).all(|x| s.get(x, 8).a == 0.0),
+            "and still none of it outside the edge"
+        );
+    }
+
+    /// A dashed stroke is the line with pieces missing: on where the
+    /// pattern says on, bare where it says off, and the same line when
+    /// the pattern is taken away again.
+    #[test]
+    fn a_dashed_stroke_leaves_gaps_along_the_line() {
+        let mut doc = Document::new(80, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[0.0, 10.0], [80.0, 10.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let along = |doc: &Document| {
+            let s = render(doc).unwrap();
+            (0..80).map(|x| s.get(x, 10).a > 0.5).collect::<Vec<_>>()
+        };
+        assert!(along(&doc).iter().all(|on| *on), "solid to begin with");
+
+        let dashed = |doc: &mut Document, dash: Vec<f32>| {
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Path {
+                        points: vec![[0.0, 10.0], [80.0, 10.0]],
+                        closed: false,
+                        smooth: false,
+                        handles: Vec::new(),
+                        subpaths: Vec::new(),
+                    },
+                    fill: None,
+                    stroke: Some(chitrakar_doc::Stroke {
+                        color: RED,
+                        width: 4.0,
+                        widths: Vec::new(),
+                        dash,
+                    }),
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        };
+        dashed(&mut doc, vec![8.0, 8.0]);
+        let row = along(&doc);
+        assert!(row[2], "the line starts on");
+        assert!(!row[12], "and is off by the middle of the first gap");
+        assert!(row[20], "on again after it");
+        let gaps = row.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(gaps >= 8, "eight on-off changes along eighty ({gaps})");
+
+        // One length alone is that much on and the same off.
+        dashed(&mut doc, vec![8.0]);
+        assert_eq!(along(&doc), row, "one length is the same as two of it");
+
+        // A pattern with nothing on in it would leave no line at all, so
+        // it is read as a solid one rather than as nothing.
+        dashed(&mut doc, vec![0.0, 0.0]);
+        assert!(along(&doc).iter().all(|on| *on), "no pattern, no gaps");
+        dashed(&mut doc, Vec::new());
+        assert!(along(&doc).iter().all(|on| *on), "and solid again");
+    }
+
+    /// A dashed outline is still picked along the whole of it: clicking
+    /// where a gap happens to be should catch the line, not fall through.
+    #[test]
+    fn a_gap_in_a_dashed_outline_is_still_part_of_it() {
+        let mut doc = Document::new(80, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[0.0, 10.0], [80.0, 10.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: vec![8.0, 8.0],
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        assert_eq!(hit_test(&doc, 12.0, 10.0).unwrap(), Some(id));
     }
 
     /// A copy draws what the original draws, where the copy is; changing
@@ -6897,6 +7262,7 @@ mod tests {
                 color: RED,
                 width: 3.0,
                 widths: Vec::new(),
+                dash: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {
@@ -7403,6 +7769,7 @@ mod tests {
                 color: RED,
                 width: 12.0,
                 widths: vec![1.0, 0.15],
+                dash: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8349,6 +8716,7 @@ mod tests {
                 },
                 width: 4.0,
                 widths: Vec::new(),
+                dash: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8412,6 +8780,7 @@ mod tests {
                 },
                 width: 2.0,
                 widths: Vec::new(),
+                dash: Vec::new(),
             });
         }
         doc.apply(Command::AddNode {

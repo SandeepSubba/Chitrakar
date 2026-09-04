@@ -172,6 +172,18 @@ const PINS: Record<"x" | "y", [Pin, string][]> = {
   ],
 };
 
+/** The line patterns the panel offers, as the lengths on and off that
+ * the document keeps. Scaled by the stroke's own width would make them
+ * follow it; fixed lengths are what every editor's presets are, and the
+ * numbers are in the shape's own units. */
+const DASHES: [string, number[]][] = [
+  ["Solid", []],
+  ["Dashed", [12, 8]],
+  ["Dotted", [1, 5]],
+  ["Long dash", [24, 10]],
+  ["Dash-dot", [16, 6, 2, 6]],
+];
+
 /** A glyph per layer kind, so the stack is scannable without reading the
  * type label at the end of every row. */
 /** The layer kinds that hold other layers — what a row can be dropped
@@ -1036,7 +1048,7 @@ export function App() {
                     : null,
                   stroke: closed
                     ? null
-                    : { color: hexColor(fill), width: 4, widths: [] },
+                    : { color: hexColor(fill), width: 4, widths: [], dash: [] },
                   gradient: null,
                 },
               },
@@ -2028,6 +2040,7 @@ export function App() {
                   color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
                   width: brushSize,
                   widths,
+                  dash: [],
                 },
                 gradient: null,
               },
@@ -7072,7 +7085,12 @@ function KindProps({
               onEdit(
                 patch({
                   stroke: e.target.checked
-                    ? { color: hexColor("#1a1a1e"), width: 4, widths: [] }
+                    ? {
+                        color: hexColor("#1a1a1e"),
+                        width: 4,
+                        widths: [],
+                        dash: [],
+                      }
                     : null,
                 }),
                 false,
@@ -7102,6 +7120,37 @@ function KindProps({
           slider("Stroke width", v.stroke.width, 1, 50, 1, (w) =>
             patch({ stroke: { ...v.stroke!, width: w } }),
           )}
+        {v.stroke && (
+          <label className="row">
+            Line
+            <select
+              value={DASHES.findIndex(
+                ([, pattern]) => pattern.join() === (v.stroke!.dash ?? []).join(),
+              )}
+              onChange={(e) => {
+                const at = Number(e.target.value);
+                if (DASHES[at]) {
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, dash: DASHES[at][1] } }),
+                    false,
+                  );
+                }
+              }}
+              aria-label="Line pattern"
+            >
+              {DASHES.map(([name], i) => (
+                <option key={name} value={i}>
+                  {name}
+                </option>
+              ))}
+              {/* A pattern typed into a file that is none of these still
+                  shows as something rather than as the first one. */}
+              <option value={-1} disabled>
+                Custom
+              </option>
+            </select>
+          </label>
+        )}
         {"Rect" in v.shape &&
           (() => {
             const rect = v.shape.Rect;

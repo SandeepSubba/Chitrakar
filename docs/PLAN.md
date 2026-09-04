@@ -63,6 +63,12 @@ without reading anything else.*
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
   premultiplied linear space, with the image outline antialiased too.
+  A stroke can be broken up: a pattern of lengths on and off, walked by
+  arc length along the outline so a dash crosses a corner the way it
+  would along a wire rather than restarting at every anchor, with the
+  usual patterns in the panel and the same lengths carried into SVG and
+  PDF. A dashed outline is still picked along the whole of it, so
+  clicking a gap catches the line.
   Fills can be linear or radial gradients with any number of stops,
   authored in the shape's own box so they follow it, aimed by dragging their
   ends and stops on the canvas, and exported as live SVG gradients. Paths carry bezier
@@ -270,9 +276,9 @@ without reading anything else.*
   at sixteen bytes a pixel): a file claiming more is refused on the way
   in, where it can be said, and `Session::new` gives back the largest
   page there is rather than one nothing could render.
-- **Verify before committing:** `cargo test --workspace` (~252),
+- **Verify before committing:** `cargo test --workspace` (~256),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~488 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~491 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

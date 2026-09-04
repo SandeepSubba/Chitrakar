@@ -308,6 +308,7 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
                 color: solid_of(s.paint(), s.opacity().get() * opacity)?,
                 width: s.width().get() * ((sx.abs() + sy.abs()) / 2.0),
                 widths: Vec::new(),
+                dash: Vec::new(),
             })
         });
     }

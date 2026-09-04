@@ -690,6 +690,18 @@ impl<'a> Page<'a> {
                 if let Some(stroke) = stroke {
                     if stroke.width > 0.0 {
                         let _ = writeln!(self.content, "{}", self.color_op(stroke.color, true)?);
+                        // PDF's own dash: the same lengths on and off,
+                        // starting at the beginning of the line.
+                        let dash: Vec<String> = stroke.dash.iter().map(|d| num(*d)).collect();
+                        let _ = writeln!(
+                            self.content,
+                            "[{}] 0 d",
+                            if dash.is_empty() {
+                                String::new()
+                            } else {
+                                dash.join(" ")
+                            }
+                        );
                         match shape {
                             // An inner band: clip to the shape and stroke
                             // twice the width down its edge, so the half
@@ -1392,6 +1404,7 @@ mod tests {
                 color: RED,
                 width: 4.0,
                 widths: Vec::new(),
+                dash: Vec::new(),
             });
         }
         add(&mut doc, ring, [60.0, 10.0]);

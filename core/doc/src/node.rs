@@ -535,6 +535,15 @@ pub struct Stroke {
     /// it, and the renderer interpolates between them.
     #[serde(default)]
     pub widths: Vec<f32>,
+    /// A dash pattern along the outline: lengths in the shape's own
+    /// units, on and off in turn and repeating, so `[6.0, 3.0]` is six
+    /// on and three off. One length alone is that much on and the same
+    /// off. Empty is a solid stroke, which is why older files still
+    /// load. A dashed stroke is drawn at one width — a stroke that
+    /// swells and one that is broken up are two different ideas about
+    /// the same line, and the dashes win.
+    #[serde(default)]
+    pub dash: Vec<f32>,
 }
 
 /// A non-destructive mask attachable to any node: it modulates the node's

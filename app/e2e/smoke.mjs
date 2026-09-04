@@ -966,6 +966,39 @@ await page.waitForTimeout(200);
 px = await canvasPixel(302, 400); // 2px inside the rect's left edge
 assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
 
+// 8k1. That stroke can be broken up: the picker's patterns leave gaps
+// along the line, and Solid puts it back. Read along the top band of the
+// same rect, two pixels in from its edge.
+{
+  const alongEdge = async () => {
+    const row = [];
+    for (let x = 320; x < 380; x += 3) row.push((await canvasPixel(x, 302))[0]);
+    return row;
+  };
+  const solid = await alongEdge();
+  assert(
+    solid.every((r) => r < 80),
+    `the stroke runs the whole edge (${solid})`,
+  );
+  await page.selectOption('select[aria-label="Line pattern"]', {
+    label: "Dashed",
+  });
+  await page.waitForTimeout(300);
+  const dashed = await alongEdge();
+  assert(
+    dashed.some((r) => r > 150) && dashed.some((r) => r < 80),
+    `dashed, it is on in places and off in others (${dashed})`,
+  );
+  await page.selectOption('select[aria-label="Line pattern"]', {
+    label: "Solid",
+  });
+  await page.waitForTimeout(300);
+  assert(
+    (await alongEdge()).every((r) => r < 80),
+    "and Solid puts the whole line back",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor3.png") });
 // 8k2. Duplicate and delete: the copy lands above the original, offset so
 // it is visible, and Delete removes a layer from the keyboard.

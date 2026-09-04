@@ -357,6 +357,7 @@ mod tests {
                 color: blue,
                 width: 3.0,
                 widths: Vec::new(),
+                dash: Vec::new(),
             });
             *gradient = Some(chitrakar_doc::Gradient::Linear {
                 from: [0.0, 0.0],
