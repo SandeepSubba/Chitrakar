@@ -149,10 +149,28 @@ fn write_node(
                 stroke,
                 gradient,
             } => {
+                // A rect's or an ellipse's stroke is a band lying inside
+                // its edge, where SVG's own stroke straddles it — an
+                // eight-wide border would come out four in and four out,
+                // and the shape four wider all round than the engine
+                // drew it. So the two are written as two elements: the
+                // shape with its fill, and the same shape drawn half a
+                // width smaller carrying the stroke, whose centred band
+                // then lands exactly where the inner one was.
+                let inner = stroke.as_ref().filter(|_| {
+                    matches!(
+                        shape,
+                        VectorShape::Rect { .. } | VectorShape::Ellipse { .. }
+                    )
+                });
                 let paint = paint_attrs(
                     doc,
                     fill.as_ref(),
-                    stroke.as_ref(),
+                    if inner.is_some() {
+                        None
+                    } else {
+                        stroke.as_ref()
+                    },
                     gradient.as_ref(),
                     child,
                     defs,
@@ -165,25 +183,71 @@ fn write_node(
                     } => {
                         // SVG rounds corners with rx, clamped the same way
                         // the renderer clamps its own radius.
-                        let r = radius
-                            .max(0.0)
-                            .min((width / 2.0).min(height / 2.0).max(0.0));
-                        let round = if r > 0.0 {
-                            format!(r#" rx="{r}""#)
-                        } else {
-                            String::new()
+                        let clamp = |r: f32, w: f32, h: f32| {
+                            r.max(0.0).min((w / 2.0).min(h / 2.0).max(0.0))
                         };
-                        let _ = writeln!(
-                            out,
-                            r#"{pad}<rect width="{width}" height="{height}"{round}{common}{paint}/>"#
-                        );
+                        let round = |r: f32| {
+                            if r > 0.0 {
+                                format!(r#" rx="{r}""#)
+                            } else {
+                                String::new()
+                            }
+                        };
+                        let r = clamp(*radius, *width, *height);
+                        match inner {
+                            None => {
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}<rect width="{width}" height="{height}"{}{common}{paint}/>"#,
+                                    round(r)
+                                );
+                            }
+                            Some(band) => {
+                                let half = band.width / 2.0;
+                                let (iw, ih) = (width - band.width, height - band.width);
+                                let line = paint_attrs(doc, None, Some(band), None, child, defs);
+                                let _ = writeln!(out, "{pad}<g{common}>");
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <rect width="{width}" height="{height}"{}{paint}/>"#,
+                                    round(r)
+                                );
+                                if iw > 0.0 && ih > 0.0 {
+                                    let _ = writeln!(
+                                        out,
+                                        r#"{pad}  <rect x="{half}" y="{half}" width="{iw}" height="{ih}"{}{line}/>"#,
+                                        round(clamp(r - half, iw, ih))
+                                    );
+                                }
+                                let _ = writeln!(out, "{pad}</g>");
+                            }
+                        }
                     }
-                    VectorShape::Ellipse { rx, ry } => {
-                        let _ = writeln!(
-                            out,
-                            r#"{pad}<ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}"{common}{paint}/>"#
-                        );
-                    }
+                    VectorShape::Ellipse { rx, ry } => match inner {
+                        None => {
+                            let _ = writeln!(
+                                out,
+                                r#"{pad}<ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}"{common}{paint}/>"#
+                            );
+                        }
+                        Some(band) => {
+                            let half = band.width / 2.0;
+                            let (ix, iy) = (rx - half, ry - half);
+                            let line = paint_attrs(doc, None, Some(band), None, child, defs);
+                            let _ = writeln!(out, "{pad}<g{common}>");
+                            let _ = writeln!(
+                                out,
+                                r#"{pad}  <ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}"{paint}/>"#
+                            );
+                            if ix > 0.0 && iy > 0.0 {
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <ellipse cx="{rx}" cy="{ry}" rx="{ix}" ry="{iy}"{line}/>"#
+                                );
+                            }
+                            let _ = writeln!(out, "{pad}</g>");
+                        }
+                    },
                     VectorShape::Path {
                         points,
                         closed,
@@ -686,6 +750,59 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// The engine draws a rect's or an ellipse's stroke as a band lying
+    /// inside its edge; SVG's own stroke straddles it. So the two are
+    /// written apart — the shape with its fill, and the same shape half a
+    /// width smaller carrying the stroke — which puts the band back where
+    /// the engine had it instead of four units wider all round.
+    #[test]
+    fn an_inner_stroke_is_written_where_the_engine_draws_it() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let id = filled(&mut doc, "r", 40.0, 40.0);
+        let kind = |stroke: Option<chitrakar_doc::Stroke>| chitrakar_doc::NodeKind::Vector {
+            shape: VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+            fill: Some(RED),
+            stroke,
+            gradient: None,
+        };
+        // With no stroke it stays one element, as it always was.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(kind(None)),
+        })
+        .unwrap();
+        let plain = export_svg(&doc).unwrap();
+        assert!(
+            plain.contains(r#"<rect width="40" height="40""#) && !plain.contains("stroke="),
+            "{plain}"
+        );
+
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(kind(Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 8.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+            }))),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r##"<rect width="40" height="40" fill="#ff0000"/>"##),
+            "the fill still covers the whole shape: {svg}"
+        );
+        assert!(
+            svg.contains(r#"<rect x="4" y="4" width="32" height="32""#)
+                && svg.contains(r#"stroke-width="8""#),
+            "and the band's own middle is half a width in: {svg}"
+        );
     }
 
     /// A dash pattern travels as the same lengths SVG names, and a solid

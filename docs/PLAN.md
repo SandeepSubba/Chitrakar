@@ -68,7 +68,11 @@ without reading anything else.*
   would along a wire rather than restarting at every anchor, with the
   usual patterns in the panel and the same lengths carried into SVG and
   PDF. A dashed outline is still picked along the whole of it, so
-  clicking a gap catches the line.
+  clicking a gap catches the line. A rect or ellipse wears its stroke as
+  a band inside its edge, so a thick border never grows the shape; SVG
+  centres a stroke on the outline instead, so export writes those two as
+  a fill at full size and a stroke on the same shape half a width in —
+  which lands the band exactly where the engine draws it.
   Fills can be linear or radial gradients with any number of stops,
   authored in the shape's own box so they follow it, aimed by dragging their
   ends and stops on the canvas, and exported as live SVG gradients. Paths carry bezier
@@ -276,7 +280,7 @@ without reading anything else.*
   at sixteen bytes a pixel): a file claiming more is refused on the way
   in, where it can be said, and `Session::new` gives back the largest
   page there is rather than one nothing could render.
-- **Verify before committing:** `cargo test --workspace` (~256),
+- **Verify before committing:** `cargo test --workspace` (~257),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~491 browser
   assertions). Both suites self-skip CMYK-profile steps unless
