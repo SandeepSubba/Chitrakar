@@ -1339,7 +1339,7 @@ fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
     stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut texels = Vec::with_capacity(RAMP as usize * 4);
     for i in 0..RAMP {
-        let c = ramp_at(&stops, i as f32 / (RAMP - 1) as f32);
+        let c = chitrakar_render::ramp_color(&stops, i as f32 / (RAMP - 1) as f32);
         texels.extend_from_slice(&[
             f32_to_f16(c.r),
             f32_to_f16(c.g),
@@ -1365,36 +1365,6 @@ fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
         geom,
         radial,
     ))
-}
-
-/// Colour at `t` along a sorted ramp, clamped past either end: the same
-/// walk the CPU renderer does per pixel, done once per texel here.
-fn ramp_at(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
-    let (first, last) = (stops[0], stops[stops.len() - 1]);
-    if t <= first.0 {
-        return first.1;
-    }
-    if t >= last.0 {
-        return last.1;
-    }
-    for w in stops.windows(2) {
-        if t <= w[1].0 {
-            let span = w[1].0 - w[0].0;
-            let k = if span.abs() < 1e-6 {
-                0.0
-            } else {
-                (t - w[0].0) / span
-            };
-            let mix = |a: f32, b: f32| a + (b - a) * k;
-            return LinearRgba {
-                r: mix(w[0].1.r, w[1].1.r),
-                g: mix(w[0].1.g, w[1].1.g),
-                b: mix(w[0].1.b, w[1].1.b),
-                a: mix(w[0].1.a, w[1].1.a),
-            };
-        }
-    }
-    last.1
 }
 
 /// A resource's pixels as the compositor wants them: linear light,

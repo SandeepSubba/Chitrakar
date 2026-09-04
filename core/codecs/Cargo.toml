@@ -25,3 +25,4 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 
 [dev-dependencies]
 ab_glyph = "0.2"
+resvg = { version = "0.45", default-features = false, features = ["raster-images", "text"] }

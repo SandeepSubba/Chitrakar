@@ -2643,6 +2643,14 @@ impl Paint {
 }
 
 /// Colour at `t` along a sorted ramp, clamped past either end.
+///
+/// Public because the GPU backend bakes the same ramp into a texture:
+/// stated once, the two renderers cannot draw different gradients.
+pub fn ramp_color(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
+    ramp(stops, t)
+}
+
+/// Colour at `t` along a sorted ramp, clamped past either end.
 fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
     let (first, last) = (stops[0], stops[stops.len() - 1]);
     if t <= first.0 {
@@ -2659,10 +2667,40 @@ fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
             } else {
                 (t - w[0].0) / span
             };
-            return lerp(w[0].1, w[1].1, k);
+            return mix_shown(w[0].1, w[1].1, k);
         }
     }
     last.1
+}
+
+/// Mix two premultiplied colours where a gradient is read: on the values
+/// a device shows, not on linear light.
+///
+/// Every consumer of an exported page mixes a gradient this way — SVG,
+/// PDF and browsers alike — and blending already reads the same space
+/// for the same reason. Red to blue through linear light passes a
+/// magenta a good deal brighter than the one an editor draws, so a
+/// gradient mixed in linear light is a gradient that changes on the way
+/// out of the door.
+fn mix_shown(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
+    let tr = transfer();
+    let (to, from) = (&tr.to_shown, &tr.to_linear);
+    let alpha = a.a + (b.a - a.a) * t;
+    if alpha <= 0.0 {
+        return LinearRgba::TRANSPARENT;
+    }
+    // Unpremultiplied on the way in, premultiplied again on the way out,
+    // so a stop's colour mixes as the colour it was authored as.
+    let mix = |x: f32, y: f32| {
+        let (s, d) = (shown(to, x, a.a), shown(to, y, b.a));
+        on_curve(from, s + (d - s) * t) * alpha
+    };
+    LinearRgba {
+        r: mix(a.r, b.r),
+        g: mix(a.g, b.g),
+        b: mix(a.b, b.b),
+        a: alpha,
+    }
 }
 
 /// Exact coverage of an axis-aligned local-space rect over one device pixel:
@@ -6446,11 +6484,14 @@ mod tests {
             },
         );
 
-        // Read linear values: the ramp interpolates in linear light like the
-        // rest of the pipeline, so sRGB-encoded numbers are not the midpoints
-        // you would expect them to be.
+        // Read the values a device shows, because that is where the ramp
+        // is mixed: halfway across a black-to-white gradient is the middle
+        // grey an editor draws, not the much darker one linear light
+        // would put there.
         let s = render(&doc).unwrap();
-        let row: Vec<f32> = (0..32).map(|x| s.get(x, 16).r).collect();
+        let row: Vec<f32> = (0..32)
+            .map(|x| chitrakar_color::linear_to_srgb(s.get(x, 16).r))
+            .collect();
         assert!(row[0] < 0.05, "starts at the first stop, got {}", row[0]);
         assert!(row[31] > 0.95, "ends at the last stop, got {}", row[31]);
         assert!(
@@ -6466,6 +6507,36 @@ mod tests {
         assert_eq!(s.get(8, 2).to_srgb8(), s.get(8, 29).to_srgb8());
     }
 
+    /// The middle of a red-to-blue ramp is the one a designer drew and
+    /// the one SVG, PDF and every browser will draw from the exported
+    /// file: the stops mix on the values a device shows. Mixed in linear
+    /// light the same midpoint comes out a magenta half a stop brighter.
+    #[test]
+    fn a_ramp_mixes_where_it_is_seen() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        gradient_rect(
+            &mut doc,
+            Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![stop(0.0, 1.0, 0.0, 0.0), stop(1.0, 0.0, 0.0, 1.0)],
+            },
+        );
+        let s = render(&doc).unwrap();
+        // Pixel centres sit at x + 0.5, so 15 and 16 straddle the middle
+        // and their mean is the midpoint of the ramp.
+        let mid = |c: fn(&chitrakar_color::LinearRgba) -> f32| {
+            (chitrakar_color::linear_to_srgb(c(&s.get(15, 16)))
+                + chitrakar_color::linear_to_srgb(c(&s.get(16, 16))))
+                / 2.0
+        };
+        let (r, b) = (mid(|p| p.r), mid(|p| p.b));
+        assert!(
+            (r - 0.5).abs() < 0.02 && (b - 0.5).abs() < 0.02,
+            "the midpoint is half of each end as shown, got r {r} b {b}"
+        );
+    }
+
     #[test]
     fn radial_gradient_ramps_outward_from_its_centre() {
         let mut doc = Document::new(32, 32, ColorMode::Rgb);
@@ -6479,9 +6550,8 @@ mod tests {
         );
 
         let s = render(&doc).unwrap();
-        let centre = s.get(16, 16).r;
-        let mid = s.get(24, 16).r;
-        let edge = s.get(31, 16).r;
+        let shown = |x: u32, y: u32| chitrakar_color::linear_to_srgb(s.get(x, y).r);
+        let (centre, mid, edge) = (shown(16, 16), shown(24, 16), shown(31, 16));
         assert!(centre > 0.95, "centre takes the first stop, got {centre}");
         assert!(edge < 0.05, "the rim takes the last stop, got {edge}");
         assert!(

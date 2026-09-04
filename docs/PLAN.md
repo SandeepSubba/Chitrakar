@@ -75,7 +75,13 @@ without reading anything else.*
   which lands the band exactly where the engine draws it.
   Fills can be linear or radial gradients with any number of stops,
   authored in the shape's own box so they follow it, aimed by dragging their
-  ends and stops on the canvas, and exported as live SVG gradients. Paths carry bezier
+  ends and stops on the canvas, and exported as live SVG gradients. The
+  stops mix on the values a device shows, not in linear light, because
+  that is where SVG, PDF and every browser mix a gradient — red to blue
+  through linear light passes a magenta a good deal brighter than the one
+  an editor draws, so a ramp mixed there would change on the way out of
+  the door. The CPU and GPU renderers walk the one ramp
+  (`chitrakar_render::ramp_color`), so they cannot drift. Paths carry bezier
   handles you drag on canvas — alt-drag breaks a pair to make a corner —
   and converting from straight or smooth preserves the shape; they export
   as real cubic segments. Anchors go on and come off after the fact:
@@ -280,7 +286,21 @@ without reading anything else.*
   at sixteen bytes a pixel): a file claiming more is refused on the way
   in, where it can be said, and `Session::new` gives back the largest
   page there is rather than one nothing could render.
-- **Verify before committing:** `cargo test --workspace` (~257),
+- **Export fidelity has a witness:** `resvg_draws_the_same_page_the_engine_does`
+  exports a page of one-of-everything to SVG, has resvg draw it, and holds
+  the result against the engine's own render — mean channel difference, a
+  count of badly-different pixels, spot checks on every element, and the
+  box the text's ink sits in. It found the stroke bug it now guards, and
+  the PDF exporter has the same witness in ghostscript. What the two
+  cannot agree on is partial alpha: the engine composites in linear light
+  and every SVG consumer composites in the encoding a device shows, so a
+  half-opaque red over paper is 255,188,188 here and 255,128,128 there.
+  Gradients and blend modes were moved to the shown encoding because each
+  is a self-contained mix; moving *all* compositing there would change
+  every antialiased edge and every resampled image, and cost a transfer
+  crossing per channel per pixel on the hot path. It is a real divergence,
+  left open deliberately.
+- **Verify before committing:** `cargo test --workspace` (~259),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~491 browser
   assertions). Both suites self-skip CMYK-profile steps unless

@@ -31,10 +31,11 @@ import {
 
 /** The colour a ramp shows partway between two stops.
  *
- * The engine blends stops in linear light like every other blend, so this
- * has to as well: interpolating the encoded sRGB values instead lands a
- * visibly different colour at the midpoint, and inserting a stop there
- * would bend a ramp that should have been left alone. CMYK stops resolve
+ * The engine mixes stops on the values a device shows — the space SVG,
+ * PDF and every browser mix a gradient in — so this has to as well:
+ * interpolating in linear light instead lands a visibly different colour
+ * at the midpoint, and inserting a stop there would bend a ramp that
+ * should have been left alone. CMYK stops resolve
  * through the press profile in the engine, which the UI cannot reproduce
  * without it, so those interpolate by ink — close enough to place a stop,
  * and it is the same ink the flat-fill editor authors. */
@@ -45,16 +46,11 @@ function mixAuthored(
 ): AuthoredColor {
   const at = (x: number, y: number) => x + (y - x) * t;
   if ("Srgb" in a && "Srgb" in b) {
-    const lin = (v: number) =>
-      v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-    const enc = (v: number) =>
-      v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
-    const mix = (x: number, y: number) => enc(at(lin(x), lin(y)));
     return {
       Srgb: {
-        r: mix(a.Srgb.r, b.Srgb.r),
-        g: mix(a.Srgb.g, b.Srgb.g),
-        b: mix(a.Srgb.b, b.Srgb.b),
+        r: at(a.Srgb.r, b.Srgb.r),
+        g: at(a.Srgb.g, b.Srgb.g),
+        b: at(a.Srgb.b, b.Srgb.b),
         a: at(a.Srgb.a, b.Srgb.a),
       },
     };
@@ -6936,9 +6932,9 @@ function KindProps({
     };
     const removeStop = (i: number): NodeKind =>
       withStops(gradStops.filter((_, j) => j !== i));
-    // A preview of the ramp itself, so the stop list is readable as a whole.
-    // sRGB interpolation here against the engine's linear-light blend: this
-    // is a locator strip, not a proof of the render.
+    // A preview of the ramp itself, so the stop list is readable as a
+    // whole. CSS mixes a gradient on the values a device shows, which is
+    // where the engine mixes one too, so the strip is the ramp.
     const rampCss = `linear-gradient(90deg, ${gradStops
       .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
       .join(", ")})`;

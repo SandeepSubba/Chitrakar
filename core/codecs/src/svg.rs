@@ -1407,4 +1407,304 @@ mod tests {
             "path geometry: {svg}"
         );
     }
+
+    const BLUE: AuthoredColor = AuthoredColor::Srgb {
+        r: 0.0,
+        g: 0.0,
+        b: 1.0,
+        a: 1.0,
+    };
+
+    fn place(doc: &mut Document, node: Node, at: [f32; 2]) -> NodeId {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[index];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                e: at[0],
+                f: at[1],
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        id
+    }
+
+    fn painted(name: &str, shape: VectorShape, fill: AuthoredColor) -> Node {
+        let mut n = Node::vector(name, shape);
+        if let NodeKind::Vector { fill: f, .. } = &mut n.kind {
+            *f = Some(fill);
+        }
+        n
+    }
+
+    /// A page holding one of everything SVG is meant to carry live: a
+    /// plain rect, a rounded one inside a half-opaque group, an ellipse
+    /// wearing an inner stroke, a curved compound path with a hole, a
+    /// gradient, a placed raster and a line of text.
+    fn everything() -> Document {
+        let mut doc = Document::new(120, 80, ColorMode::Rgb);
+        place(
+            &mut doc,
+            painted(
+                "rect",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            [10.0, 10.0],
+        );
+
+        let mut ring = painted("ring", VectorShape::Ellipse { rx: 15.0, ry: 10.0 }, BLUE);
+        if let NodeKind::Vector { stroke, .. } = &mut ring.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+            });
+        }
+        place(&mut doc, ring, [60.0, 10.0]);
+
+        place(
+            &mut doc,
+            painted(
+                "curve",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 30.0], [0.0, 30.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: vec![
+                        [0.0, 0.0, 10.0, -8.0],
+                        [-10.0, -8.0, 0.0, 0.0],
+                        [0.0; 4],
+                        [0.0; 4],
+                    ],
+                    subpaths: vec![vec![[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]]],
+                },
+                BLUE,
+            ),
+            [8.0, 45.0],
+        );
+
+        let group = place(&mut doc, Node::group("g"), [50.0, 45.0]);
+        doc.apply(Command::SetOpacity {
+            id: group,
+            opacity: 0.5,
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: Box::new(painted(
+                "round",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 6.0,
+                },
+                RED,
+            )),
+        })
+        .unwrap();
+
+        let mut ramp = painted(
+            "ramp",
+            VectorShape::Rect {
+                width: 24.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+            RED,
+        );
+        if let NodeKind::Vector { gradient, .. } = &mut ramp.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: RED,
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: BLUE,
+                    },
+                ],
+            });
+        }
+        place(&mut doc, ramp, [80.0, 45.0]);
+
+        let res = doc.add_resource(2, 1, vec![0, 255, 0, 255, 0, 0, 0, 0]);
+        let img = place(
+            &mut doc,
+            Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: res,
+                    width: 2,
+                    height: 1,
+                },
+            ),
+            [0.0, 0.0],
+        );
+        doc.apply(Command::SetTransform {
+            id: img,
+            transform: Transform {
+                a: 10.0,
+                d: 10.0,
+                e: 4.0,
+                f: 4.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+
+        place(
+            &mut doc,
+            Node::text("t", chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE)),
+            [46.0, 66.0],
+        );
+        doc
+    }
+
+    /// The last word on export fidelity: an SVG consumer that is not us
+    /// draws the page, and it has to come out the page the engine drew.
+    /// This is the test that would have caught a stroke written where the
+    /// engine does not put it, so it is worth more than any amount of
+    /// reading the markup back.
+    #[test]
+    fn resvg_draws_the_same_page_the_engine_does() {
+        let doc = everything();
+        let svg = export_svg(&doc).unwrap();
+
+        let mut opt = usvg::Options::default();
+        opt.fontdb_mut()
+            .load_font_data(include_bytes!("../../render/assets/DejaVuSans.ttf").to_vec());
+        opt.font_family = "DejaVu Sans".to_string();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap();
+        assert_eq!((tree.size().width(), tree.size().height()), (120.0, 80.0));
+
+        // Onto paper, so what is compared is what a reader would see.
+        let mut drawn = resvg::tiny_skia::Pixmap::new(120, 80).unwrap();
+        drawn.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let mut total = 0u64;
+        let mut worst = (0u32, 0usize);
+        let mut bad = 0usize;
+        for (i, px) in ours.pixels.iter().enumerate() {
+            let over = |v: f32| chitrakar_color::linear_to_srgb((v + 1.0 - px.a).clamp(0.0, 1.0));
+            let want = [over(px.r), over(px.g), over(px.b)].map(|v| (v * 255.0).round() as i32);
+            let got = &drawn.data()[i * 4..i * 4 + 3];
+            let mut here = 0u32;
+            for (c, w) in want.iter().enumerate() {
+                here += (got[c] as i32 - w).unsigned_abs();
+            }
+            total += here as u64;
+            if here > worst.0 {
+                worst = (here, i);
+            }
+            if here > 120 {
+                bad += 1;
+            }
+        }
+        let mean = total as f64 / (ours.pixels.len() * 3) as f64;
+        assert!(
+            mean < 3.0,
+            "mean channel difference {mean:.2}; worst pixel {},{} off by {}",
+            worst.1 % 120,
+            worst.1 / 120,
+            worst.0
+        );
+        // What is left over is edges: the glyph outlines each rasterizer
+        // antialiases its own way, and the pixels where a half-opaque
+        // layer meets paper, which the engine mixes in linear light and
+        // every SVG consumer mixes in the encoding a device shows. A
+        // shape drawn in the wrong place would put hundreds of pixels
+        // here, not dozens, which is what this number is guarding.
+        assert!(bad < 200, "{bad} pixels differ badly; worst {}", worst.0);
+
+        // Spot checks, where a mean would hide a shape in the wrong place:
+        // inside the rect, the ellipse's band and its middle, the hole in
+        // the compound path, the half-opaque group, the image's two pixels.
+        let at = |x: usize, y: usize| &drawn.data()[(y * 120 + x) * 4..(y * 120 + x) * 4 + 3];
+        assert_eq!(at(30, 25), &[255, 0, 0], "rect");
+        assert!(
+            at(75, 12)[0] > 200 && at(75, 12)[2] < 60,
+            "the ellipse's band is the stroke {:?}",
+            at(75, 12)
+        );
+        assert!(
+            at(75, 20)[2] > 200 && at(75, 20)[0] < 60,
+            "and its middle the fill {:?}",
+            at(75, 20)
+        );
+        assert_eq!(at(23, 60), &[255, 255, 255], "the hole shows paper");
+        assert!(
+            at(60, 55)[0] > 200 && at(60, 55)[1] > 100,
+            "the group is half opaque over paper {:?}",
+            at(60, 55)
+        );
+        assert!(
+            at(6, 6)[1] > 200 && at(6, 6)[0] < 60,
+            "image pixel {:?}",
+            at(6, 6)
+        );
+        assert!(
+            at(18, 6)[0] > 200 && at(18, 6)[2] > 200,
+            "and its clear half shows paper, not the pixel beside it {:?}",
+            at(18, 6)
+        );
+
+        // Text is the one thing a mean would forgive being a line off:
+        // the glyphs are small and their edges differ anyway. So the ink
+        // in the corner the word sits in is boxed in both pictures, and
+        // the boxes have to be the same to within a pixel — which is
+        // what says the baseline travelled.
+        let box_of = |ink: &dyn Fn(usize, usize) -> bool| {
+            let (mut lo, mut hi) = ([usize::MAX; 2], [0usize; 2]);
+            for y in 66..80 {
+                for x in 40..120 {
+                    if ink(x, y) {
+                        lo = [lo[0].min(x), lo[1].min(y)];
+                        hi = [hi[0].max(x), hi[1].max(y)];
+                    }
+                }
+            }
+            (lo, hi)
+        };
+        let theirs = box_of(&|x, y| at(x, y)[0] < 200);
+        assert!(
+            theirs.1[0] > theirs.0[0],
+            "there is a word to box: {theirs:?}"
+        );
+        let ours_ink = box_of(&|x, y| {
+            let px = ours.pixels[y * 120 + x];
+            let over = |v: f32| chitrakar_color::linear_to_srgb((v + 1.0 - px.a).clamp(0.0, 1.0));
+            over(px.r) * 255.0 < 200.0
+        });
+        for k in 0..2 {
+            assert!(
+                theirs.0[k].abs_diff(ours_ink.0[k]) <= 1
+                    && theirs.1[k].abs_diff(ours_ink.1[k]) <= 1,
+                "the word sits in {ours_ink:?} here and {theirs:?} there"
+            );
+        }
+    }
 }
