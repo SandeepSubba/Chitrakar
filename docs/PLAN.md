@@ -266,7 +266,17 @@ without reading anything else.*
   frame.
   Dragging a layer snaps its edges and centre to the page's and to the
   other layers', showing a guide on the line it caught; ctrl/cmd drags
-  free of it — and the same lines catch a resize handle. A
+  free of it — and the same lines catch a resize handle, the corner a
+  shape is being drawn out to, and a pen's anchor as it is put down. A
+  shape has no box to align yet, so what catches is the corner under the
+  cursor, at both ends of the drag: a rect laid against the page's edge
+  starts on it. Shift wins over the lines outright — it asks for an
+  exact shape, and a square nudged onto a line would be neither square
+  nor on it — so a guide never says a corner is somewhere it is not. The
+  handles belong to the move tool alone: with anything else up the
+  pointer is there to draw, paint or crop, and a handle over the corner
+  a rect was about to start at would resize what is picked instead of
+  drawing. A
   multi-selection — dragged out as a band over empty canvas, or built
   ctrl-click by ctrl-click — moves as one (alt-dragging takes a copy and
   leaves the original), by drag or by
@@ -447,7 +457,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~605 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~613 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

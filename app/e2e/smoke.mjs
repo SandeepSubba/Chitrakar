@@ -5249,6 +5249,101 @@ assert(
   await drag(60, 60, 340, 240);
 }
 
+// 9k. A shape being drawn catches the same lines a shape being moved
+// does — here the box of the rect drawn before it. Ctrl draws free of
+// them and shift, which asks for an exact shape, wins over them.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  // Four screen pixels in document units: inside the six the snap
+  // reaches, so a drag aimed this far off a line still lands on it.
+  const near = (4 * 400) / b.width;
+  const drawRect = async (x0, y0, x1, y1, mod, mid) => {
+    await pickTool("Rect");
+    if (mod) await page.keyboard.down(mod);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    if (mid) await mid();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    if (mod) await page.keyboard.up(mod);
+    await page.waitForTimeout(300);
+  };
+  // Where the newest layer starts, which is the top row of the panel.
+  const startsAt = async () => {
+    await pickTool("Move");
+    await page.locator(".panel ul li").first().click();
+    await page.waitForTimeout(200);
+    return Number(
+      await page.locator('input[aria-label="X position"]').inputValue(),
+    );
+  };
+
+  await drawRect(100, 100, 160, 200);
+  assert(Math.abs((await startsAt()) - 100) < 1.5, "a rect to catch on");
+
+  // The handles are the move tool's own: with a shape tool up, a drag
+  // from the picked layer's corner draws rather than resizes it.
+  assert(
+    (await page.locator("[data-handle]").count()) === 5,
+    "the move tool offers four corners and a knob to turn by",
+  );
+  await pickTool("Rect");
+  assert(
+    (await page.locator("[data-handle]").count()) === 0,
+    "and a shape tool puts them away",
+  );
+
+  // Aimed a few pixels shy of that rect's right edge, the next one
+  // starts exactly on it — and says so while it is being dragged.
+  let sawGuide = 0;
+  await drawRect(160 + near, 120, 300, 260, null, async () => {
+    // Pass a few pixels off the page's own middle on the way: the corner
+    // being drawn catches both of its lines and says so.
+    await page.mouse.move(...at(200 + near, 150 + near), { steps: 4 });
+    await page.waitForTimeout(150);
+    sawGuide = await page.locator(".snap-overlay line").count();
+  });
+  assert(
+    sawGuide === 2,
+    `a guide on each line the corner being drawn caught (${sawGuide})`,
+  );
+  assert(
+    (await page.locator(".snap-overlay line").count()) === 0,
+    "and clears when the drag ends",
+  );
+  const caught = await startsAt();
+  assert(
+    Math.abs(caught - 160) < 1.5,
+    `the drawn corner caught the edge beside it (${caught})`,
+  );
+
+  // Ctrl draws free of the lines: the same drag stays where it was
+  // aimed.
+  await drawRect(160 + near, 120, 300, 260, "Control");
+  const free = await startsAt();
+  assert(
+    free > 160 + near - 1.5 && free < 160 + near + 1.5,
+    `ctrl drew free of the edge (${free} against ${(160 + near).toFixed(2)})`,
+  );
+
+  // Shift squares the box off, and wins over the lines: the corner it
+  // is dragged to would have caught the rect beside it, and comes out on
+  // the square instead. Where the drag began is not in question, so it
+  // still catches its own lines.
+  await drawRect(110, 30, 160 + near, 220, "Shift");
+  const left = await startsAt();
+  const [w, h] = [
+    Number(await page.locator('input[aria-label="W size"]').inputValue()),
+    Number(await page.locator('input[aria-label="H size"]').inputValue()),
+  ];
+  assert(
+    Math.abs(left - 110) < 1.5 && Math.abs(w - h) < 1.5 && Math.abs(w - 190) < 2,
+    `shift squared the box rather than catching the edge (${left}, ${w}x${h})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

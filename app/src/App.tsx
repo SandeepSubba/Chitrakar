@@ -661,6 +661,9 @@ const guideIsVertical = (g: DocGuide) => "Vertical" in g;
  * same however far you are zoomed in. */
 const SNAP_PX = 6;
 
+/** What `snapAxis` answers when nothing is being snapped to. */
+const NO_SNAP = { delta: 0, guide: null as number | null };
+
 /** The three lines a box offers on each axis: its edges and its middle. */
 const snapLines = (lo: number, hi: number) => [lo, (lo + hi) / 2, hi];
 
@@ -1527,6 +1530,29 @@ export function App() {
     return [xs, ys];
   };
 
+  /** Nudge a point being drawn onto the nearest of the lines it can
+   * catch, and show the ones it landed on. A shape has no box yet, so
+   * what snaps is the corner under the cursor rather than three lines an
+   * axis; ctrl (or cmd) draws free of them. */
+  const snapPoint = (
+    x: number,
+    y: number,
+    xs: number[],
+    ys: number[],
+    free: boolean,
+  ): [number, number] => {
+    const tol = SNAP_PX / view.zoom;
+    const sx = free ? NO_SNAP : snapAxis([x], xs, tol);
+    const sy = free ? NO_SNAP : snapAxis([y], ys, tol);
+    const next: Guides = { x: [], y: [] };
+    if (sx.guide !== null) next.x.push(sx.guide);
+    if (sy.guide !== null) next.y.push(sy.guide);
+    // Only re-render when the guides actually change: this runs on every
+    // pointer sample.
+    setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
+    return [x + sx.delta, y + sy.delta];
+  };
+
   /** The document-space box around a set of layers, as two corners.
    * `bounds_of` answers [x, y, w, h]; everything here works in corners. */
   const unionBounds = (
@@ -1926,12 +1952,14 @@ export function App() {
         finishPath(true);
       } else {
         // Shift holds the segment to eighths of a turn, which is what
-        // draws a level rule or a true diagonal by hand.
+        // draws a level rule or a true diagonal by hand; without it, an
+        // anchor catches the same lines a shape's corner does.
         const last = penPoints[penPoints.length - 1];
-        setPenPoints((pts) => [
-          ...pts,
-          e.shiftKey && last ? onEighths(last, [x, y]) : [x, y],
-        ]);
+        const [ax, ay] =
+          e.shiftKey && last
+            ? onEighths(last, [x, y])
+            : snapPoint(x, y, ...snapTargets([]), e.ctrlKey || e.metaKey);
+        setPenPoints((pts) => [...pts, [ax, ay]]);
       }
       return;
     }
@@ -2021,6 +2049,21 @@ export function App() {
       }
       setSelected(target);
     }
+    if (BOX_TOOLS.has(tool) || tool === "Line") {
+      // Nothing is moving yet, so every layer is a line to catch on —
+      // and where a shape starts is worth catching as much as where it
+      // ends: a rect laid against the page's edge is drawn from that
+      // edge.
+      [drag.snapX, drag.snapY] = snapTargets([]);
+      [drag.startX, drag.startY] = snapPoint(
+        x,
+        y,
+        drag.snapX,
+        drag.snapY,
+        e.ctrlKey || e.metaKey,
+      );
+      [drag.lastX, drag.lastY] = [drag.startX, drag.startY];
+    }
     toolDragRef.current = drag;
     (e.target as Element).setPointerCapture(e.pointerId);
   };
@@ -2066,6 +2109,19 @@ export function App() {
     const drag = toolDragRef.current;
     if (!drag) return;
     [drag.lastX, drag.lastY] = docPoint(e);
+    // A shape being drawn catches the same lines a layer being moved
+    // does. Shift wins over them outright: it asks for an exact shape,
+    // and a square nudged onto a line would be neither square nor on
+    // it — so the guide never says a corner is somewhere it is not.
+    if (drag.snapX && drag.snapY && drag.tool !== "Move" && !e.shiftKey) {
+      [drag.lastX, drag.lastY] = snapPoint(
+        drag.lastX,
+        drag.lastY,
+        drag.snapX,
+        drag.snapY,
+        e.ctrlKey || e.metaKey,
+      );
+    }
     // Shift squares off whatever box is being dragged out — a circle
     // rather than an ellipse, a square page rather than a wide one.
     // There is no shape yet to keep the proportions of, so shift is the
@@ -3715,7 +3771,11 @@ export function App() {
   /** Handles sit over the layer they belong to, which is exactly where a
    * brush wants to paint, so the brush takes them off the canvas while it
    * is the tool in hand. The outline stays: it still says what is picked. */
-  const grabbable = movable && tool !== "Paint" && tool !== "Clone";
+  /** Whether the picked layer offers its resize handles. Only the move
+   * tool does: with any other up, the pointer is there to draw, paint or
+   * crop, and a handle sitting over the corner where a rect was about to
+   * start would resize what is picked instead of drawing anything. */
+  const grabbable = movable && tool === "Move";
   const selBounds =
     session && selected !== null && resizable
       ? session.bounds_of(selected)
