@@ -105,12 +105,89 @@ const SLANT: f32 = 0.2;
 /// italic block gets that face's oblique twin when one is registered;
 /// otherwise the upright face, which the rasterizer leans itself.
 fn fonts_for(spec: &TextSpec) -> &'static Fonts {
-    if spec.italic {
-        if let Some(oblique) = oblique_for(spec) {
-            return oblique;
+    setting(spec).fonts
+}
+
+/// How a block is actually set: the face it is drawn from, the name that
+/// face is registered under when it is not the block's own, and what the
+/// rasterizer has to supply itself because no registered face does.
+///
+/// A face family is looked up by the suffixes type has always used —
+/// "… Bold", "… Italic", "… Bold Italic" — and whatever the family does
+/// not answer for is synthesized: a lean for an italic with no oblique
+/// cut, a thickening for a bold with no bold cut. Asking for bold italic
+/// when only the italic is registered gets the italic face thickened,
+/// which is nearer the request than either giving up or falling back to
+/// the upright.
+struct Setting {
+    fonts: &'static Fonts,
+    /// The registered name of the twin used, if a twin was used.
+    twin: Option<String>,
+    /// The rasterizer leans the outlines itself.
+    lean: bool,
+    /// The rasterizer thickens them itself.
+    thicken: bool,
+}
+
+fn setting(spec: &TextSpec) -> Setting {
+    let (want_bold, want_italic) = (spec.bold, spec.italic);
+    if !want_bold && !want_italic {
+        return Setting {
+            fonts: upright_for(spec),
+            twin: None,
+            lean: false,
+            thicken: false,
+        };
+    }
+    // Most specific first: a family that has the cut asked for supplies
+    // both, one that has only half of it supplies that half.
+    let candidates: &[(&[&str], bool, bool)] = match (want_bold, want_italic) {
+        (true, true) => &[
+            (&["Bold Italic", "Bold Oblique"], false, false),
+            (&["Italic", "Oblique"], true, false),
+            (&["Bold"], false, true),
+        ],
+        (true, false) => &[(&["Bold"], false, false)],
+        (false, true) => &[(&["Italic", "Oblique"], false, false)],
+        (false, false) => &[],
+    };
+    for (suffixes, thicken, lean) in candidates {
+        if let Some(name) = twin_name(spec, suffixes) {
+            if let Some(fonts) = registry().read().ok().and_then(|r| r.get(&name).copied()) {
+                return Setting {
+                    fonts,
+                    twin: Some(name),
+                    lean: *lean,
+                    thicken: *thicken,
+                };
+            }
         }
     }
-    upright_for(spec)
+    Setting {
+        fonts: upright_for(spec),
+        twin: None,
+        lean: want_italic,
+        thicken: want_bold,
+    }
+}
+
+/// The registered name of the block family's twin carrying one of
+/// `suffixes` — or the block's own face when it already is that twin, so
+/// a bold set directly in a bold face is not thickened a second time.
+fn twin_name(spec: &TextSpec, suffixes: &[&str]) -> Option<String> {
+    let base = if spec.font.is_empty() {
+        DEFAULT_FONT
+    } else {
+        spec.font.as_str()
+    };
+    let registry = registry().read().ok()?;
+    if suffixes.iter().any(|s| base.ends_with(&format!(" {s}"))) {
+        return registry.contains_key(base).then(|| base.to_string());
+    }
+    suffixes
+        .iter()
+        .map(|suffix| format!("{base} {suffix}"))
+        .find(|name| registry.contains_key(name))
 }
 
 fn upright_for(spec: &TextSpec) -> &'static Fonts {
@@ -124,31 +201,6 @@ fn upright_for(spec: &TextSpec) -> &'static Fonts {
         .unwrap_or_else(bundled)
 }
 
-/// The registered oblique twin of the block's face — "… Oblique" or
-/// "… Italic" — or the face itself when it already is one, so an italic
-/// set directly in an oblique face is not leaned a second time.
-fn oblique_for(spec: &TextSpec) -> Option<&'static Fonts> {
-    let name = oblique_name(spec)?;
-    registry().read().ok()?.get(&name).copied()
-}
-
-/// The registered name of the block's oblique twin, if there is one.
-fn oblique_name(spec: &TextSpec) -> Option<String> {
-    let base = if spec.font.is_empty() {
-        DEFAULT_FONT
-    } else {
-        spec.font.as_str()
-    };
-    let registry = registry().read().ok()?;
-    if base.ends_with(" Oblique") || base.ends_with(" Italic") {
-        return registry.contains_key(base).then(|| base.to_string());
-    }
-    ["Oblique", "Italic"]
-        .iter()
-        .map(|suffix| format!("{base} {suffix}"))
-        .find(|name| registry.contains_key(name))
-}
-
 /// The registered names a block draws with: the face it names, and the
 /// oblique twin an italic block is set in when one is registered — what
 /// a file has to carry for the block to read the same elsewhere.
@@ -157,11 +209,9 @@ pub fn faces_used(spec: &TextSpec) -> Vec<String> {
     if !spec.font.is_empty() {
         names.push(spec.font.clone());
     }
-    if spec.italic {
-        if let Some(twin) = oblique_name(spec) {
-            if !names.contains(&twin) {
-                names.push(twin);
-            }
+    if let Some(twin) = setting(spec).twin {
+        if !names.contains(&twin) {
+            names.push(twin);
         }
     }
     names
@@ -169,7 +219,40 @@ pub fn faces_used(spec: &TextSpec) -> Vec<String> {
 
 /// Whether the block leans by the rasterizer's hand rather than the font's.
 fn synthesized_lean(spec: &TextSpec) -> bool {
-    spec.italic && oblique_for(spec).is_none()
+    setting(spec).lean
+}
+
+/// How far a bold the face cannot supply is smeared, as a fraction of
+/// the block's height: the same outline laid down again a little to the
+/// right, and again, until the stems have thickened by this much.
+///
+/// Calibrated against a real cut rather than guessed. "Hamburgefonstiv"
+/// at 40 measures 296.6 in DejaVu Sans and 335.7 in DejaVu Sans Bold, a
+/// line 13% longer; this is the smear that sets a synthesized bold to
+/// the same length, and it puts on about 60% more ink where the real cut
+/// puts on 75%. Heavier than this and the smear starts filling in the
+/// counters of small type, which is the failure mode a faux bold has.
+const WEIGHT: f32 = 0.065;
+
+/// Where to lay an outline down to thicken it by `width` pixels: at its
+/// own place, then again in steps small enough that the copies overlap
+/// rather than printing a comb, and last exactly `width` along so the
+/// thickening is the amount asked for and not a step's worth less.
+fn smear_passes(width: f32) -> Vec<f32> {
+    if width <= 0.0 {
+        return vec![0.0];
+    }
+    // A third of a pixel: the outlines still overlap once antialiased.
+    let n = (width / 0.33).ceil().max(1.0);
+    (0..=n as usize).map(|i| width * i as f32 / n).collect()
+}
+
+fn smear(spec: &TextSpec, scale: f32) -> f32 {
+    if setting(spec).thicken {
+        WEIGHT * spec.size.max(0.1) * scale
+    } else {
+        0.0
+    }
 }
 
 /// How far a synthesized lean pushes ink past the block's edges: the
@@ -254,6 +337,10 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
     // adrift of the outlines they position in DejaVu Sans.
     let unit = px / fonts.font.height_unscaled();
     let track = tracking(spec, scale);
+    // A thickened glyph is wider than the face says, so the pen has to
+    // move that much further or a synthesized bold would set tighter
+    // than the upright it is made from.
+    let heavier = smear(spec, scale);
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(line);
     let out = rustybuzz::shape(face, &[], buffer);
@@ -264,10 +351,10 @@ fn shape_line(line: &str, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
             id: ab_glyph::GlyphId(info.glyph_id as u16),
             x: pen + pos.x_offset as f32 * unit,
             y: -(pos.y_offset as f32) * unit,
-            advance: pos.x_advance as f32 * unit,
+            advance: pos.x_advance as f32 * unit + heavier,
             cluster: info.cluster as usize,
         });
-        pen += pos.x_advance as f32 * unit + track;
+        pen += pos.x_advance as f32 * unit + heavier + track;
     }
     // The last glyph's tracking is not part of the line's width: nothing
     // follows it to be spaced from.
@@ -506,18 +593,26 @@ fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<ab_glyph::OutlinedGlyph>,
     let (glyphs, _) = along_glyphs(spec, scale);
     let mut out = Vec::with_capacity(glyphs.len());
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    let passes = smear_passes(smear(spec, scale));
     for g in glyphs {
-        let glyph =
-            g.id.with_scale_and_position(px, ab_glyph::point(g.origin[0], g.origin[1]));
-        if let Some(outlined) = turned(font.font, glyph, slant, g.angle, font.scale_factor()) {
-            let b = outlined.px_bounds();
-            bounds = [
-                bounds[0].min(b.min.x),
-                bounds[1].min(b.min.y),
-                bounds[2].max(b.max.x),
-                bounds[3].max(b.max.y),
-            ];
-            out.push(outlined);
+        // A glyph on a guide is turned to follow it, so the thickening
+        // runs along its own baseline rather than along the page's.
+        let (cos, sin) = (g.angle.cos(), g.angle.sin());
+        for shift in &passes {
+            let glyph = g.id.with_scale_and_position(
+                px,
+                ab_glyph::point(g.origin[0] + shift * cos, g.origin[1] + shift * sin),
+            );
+            if let Some(outlined) = turned(font.font, glyph, slant, g.angle, font.scale_factor()) {
+                let b = outlined.px_bounds();
+                bounds = [
+                    bounds[0].min(b.min.x),
+                    bounds[1].min(b.min.y),
+                    bounds[2].max(b.max.x),
+                    bounds[3].max(b.max.y),
+                ];
+                out.push(outlined);
+            }
         }
     }
     if out.is_empty() {
@@ -591,6 +686,11 @@ pub struct PlacedText {
     pub face: FaceFile,
     pub em: f32,
     pub lean: f32,
+    /// How much a bold the face cannot supply thickens the outlines, in
+    /// document pixels — a stroke of this width around each glyph does
+    /// on a page what the smear does in the raster. Zero when the face
+    /// carries its own bold.
+    pub thicken: f32,
     pub glyphs: Vec<PlacedGlyph>,
     /// Underline and strike-through bands, `[x0, y0, x1, y1]` in document
     /// pixels, to draw in the block's colour.
@@ -599,10 +699,8 @@ pub struct PlacedText {
 
 /// The name of the face a block draws with.
 fn face_name(spec: &TextSpec) -> String {
-    if spec.italic {
-        if let Some(twin) = oblique_name(spec) {
-            return twin;
-        }
+    if let Some(twin) = setting(spec).twin {
+        return twin;
     }
     if !spec.font.is_empty() && spec.font != DEFAULT_FONT && has_font(&spec.font) {
         spec.font.clone()
@@ -696,6 +794,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         },
         em: px * upem / fonts.font.height_unscaled(),
         lean: if synthesized_lean(spec) { SLANT } else { 0.0 },
+        thicken: smear(spec, 1.0),
         decorations: if spec.along.is_some() {
             Vec::new()
         } else {
@@ -913,6 +1012,7 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
     let slant = if synthesized_lean(spec) { SLANT } else { 0.0 };
+    let passes = smear_passes(smear(spec, scale));
 
     for (line_no, line) in l.lines.iter().enumerate() {
         let baseline = line_no as f32 * step + font.ascent();
@@ -921,25 +1021,27 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         // line: a short line is pushed right by the slack it leaves.
         let start = line_start(spec, &l, line_no);
         for g in glyphs {
-            let glyph = g.id.with_scale_and_position(
-                spec.size.max(0.1) * scale,
-                ab_glyph::point(start + g.x, baseline + g.y),
-            );
-            let outlined = if slant > 0.0 {
-                leaned(font.font, glyph, slant, font.scale_factor())
-            } else {
-                font.font.outline_glyph(glyph)
-            };
-            if let Some(outlined) = outlined {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|gx, gy, c| {
-                    let x = bounds.min.x as i32 + gx as i32;
-                    let y = bounds.min.y as i32 + gy as i32;
-                    if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
-                        let i = (y as u32 * width + x as u32) as usize;
-                        coverage[i] = coverage[i].max(c);
-                    }
-                });
+            for shift in &passes {
+                let glyph = g.id.with_scale_and_position(
+                    spec.size.max(0.1) * scale,
+                    ab_glyph::point(start + g.x + shift, baseline + g.y),
+                );
+                let outlined = if slant > 0.0 {
+                    leaned(font.font, glyph, slant, font.scale_factor())
+                } else {
+                    font.font.outline_glyph(glyph)
+                };
+                if let Some(outlined) = outlined {
+                    let bounds = outlined.px_bounds();
+                    outlined.draw(|gx, gy, c| {
+                        let x = bounds.min.x as i32 + gx as i32;
+                        let y = bounds.min.y as i32 + gy as i32;
+                        if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
+                            let i = (y as u32 * width + x as u32) as usize;
+                            coverage[i] = coverage[i].max(c);
+                        }
+                    });
+                }
             }
         }
     }
@@ -1347,6 +1449,160 @@ mod tests {
             measure(&upright).0.ceil(),
             measure(&oblique).0.ceil(),
             "and a real oblique needs no room past the glyphs' own advances"
+        );
+    }
+
+    /// Nothing answers to "DejaVu Sans Bold" in this crate's tests, so a
+    /// bold block is thickened by the rasterizer: the same letter, wider,
+    /// with more ink in it, and measuring as wide as it draws.
+    #[test]
+    fn bold_thickens_the_glyphs_when_no_bold_face_exists() {
+        let plain = spec("lll", 48.0);
+        let mut bold = plain.clone();
+        bold.bold = true;
+        let (light, heavy) = (rasterize(&plain), rasterize(&bold));
+        assert!(
+            heavy.width > light.width,
+            "the block makes room for the weight ({} > {})",
+            heavy.width,
+            light.width
+        );
+        assert_eq!(
+            measure(&bold).0.ceil() as u32,
+            heavy.width,
+            "and measures as wide as it rasterizes"
+        );
+        assert_eq!(
+            ink_rows(&light),
+            ink_rows(&heavy),
+            "a bold is no taller: the weight goes on sideways"
+        );
+        let ink = |r: &TextRaster| r.coverage.iter().sum::<f32>();
+        assert!(
+            ink(&heavy) > ink(&light) * 1.2,
+            "and there is a good deal more of it ({} vs {})",
+            ink(&heavy),
+            ink(&light)
+        );
+        // The stems are wider, not just further apart: the widest run of
+        // inked pixels across the middle row grows.
+        let stem = |r: &TextRaster| {
+            let y = r.height / 2;
+            let (mut best, mut run) = (0u32, 0u32);
+            for x in 0..r.width {
+                run = if r.sample(x, y) > 0.5 { run + 1 } else { 0 };
+                best = best.max(run);
+            }
+            best
+        };
+        assert!(
+            stem(&heavy) > stem(&light),
+            "stem {} vs {}",
+            stem(&heavy),
+            stem(&light)
+        );
+    }
+
+    /// A registered bold cut is used as it is rather than smeared, and a
+    /// bold set directly in one is not thickened a second time.
+    #[test]
+    fn bold_takes_a_registered_bold_face_over_a_thickening() {
+        const SANS: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        const BOLD: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        register_font("Weight Test", SANS.to_vec()).unwrap();
+        register_font("Weight Test Bold", BOLD.to_vec()).unwrap();
+
+        let mut asked = spec("Heavy", 32.0);
+        asked.font = "Weight Test".into();
+        asked.bold = true;
+        let mut cut = asked.clone();
+        cut.font = "Weight Test Bold".into();
+        cut.bold = false;
+        let drawn = rasterize(&cut);
+        assert_eq!(
+            rasterize(&asked).coverage,
+            drawn.coverage,
+            "the bold cut is used as it is"
+        );
+        let mut twice = cut.clone();
+        twice.bold = true;
+        assert_eq!(
+            rasterize(&twice).coverage,
+            drawn.coverage,
+            "and a bold set in the bold face itself is not thickened again"
+        );
+        assert_eq!(
+            faces_used(&asked),
+            ["Weight Test", "Weight Test Bold"],
+            "the twin has to travel with the file"
+        );
+    }
+
+    /// Asked for both when the family has only the italic, the italic cut
+    /// is used and the weight is added on top — nearer the request than
+    /// falling back to the upright.
+    #[test]
+    fn bold_italic_takes_what_the_family_has_and_supplies_the_rest() {
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
+        register_font("Both Test", MONO.to_vec()).unwrap();
+        register_font("Both Test Oblique", OBLIQUE.to_vec()).unwrap();
+
+        let mut both = spec("Wide", 32.0);
+        both.font = "Both Test".into();
+        both.bold = true;
+        both.italic = true;
+        assert_eq!(
+            faces_used(&both),
+            ["Both Test", "Both Test Oblique"],
+            "the oblique cut carries the lean"
+        );
+        let mut italic = both.clone();
+        italic.bold = false;
+        assert!(
+            measure(&both).0 > measure(&italic).0,
+            "and the weight is put on over it"
+        );
+        // Nothing was leaned twice: the oblique face's own lean is all
+        // there is, so the block is no wider than the room a real
+        // oblique needs plus the weight.
+        let mut plain = italic.clone();
+        plain.italic = false;
+        plain.font = "Both Test Oblique".into();
+        assert!(
+            (measure(&italic).0 - measure(&plain).0).abs() < 0.01,
+            "no synthesized lean on top of a real one"
+        );
+    }
+
+    /// The weight a synthesized bold puts on is calibrated against a real
+    /// cut, not guessed: set beside DejaVu Sans Bold, the thickened
+    /// upright sets to the same length and carries most of the extra ink.
+    /// A faux bold that is too light reads as a smudge and one that is
+    /// too heavy fills in the counters, so this is worth holding.
+    #[test]
+    fn a_synthesized_bold_is_set_to_the_weight_of_a_real_one() {
+        const BOLD: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        register_font("Weigh Against", BOLD.to_vec()).unwrap();
+        let plain = spec("Hamburgefonstiv", 40.0);
+        let mut synth = plain.clone();
+        synth.bold = true;
+        let mut real = plain.clone();
+        real.font = "Weigh Against".into();
+
+        let (w_plain, w_synth, w_real) = (measure(&plain).0, measure(&synth).0, measure(&real).0);
+        assert!(
+            (w_synth - w_real).abs() < w_real * 0.03,
+            "sets to the same length: plain {w_plain:.1}, synthesized {w_synth:.1}, real {w_real:.1}"
+        );
+        let ink = |s: &TextSpec| rasterize(s).coverage.iter().sum::<f32>();
+        let (i_plain, i_synth, i_real) = (ink(&plain), ink(&synth), ink(&real));
+        let put_on = (i_synth - i_plain) / (i_real - i_plain);
+        assert!(
+            (0.5..1.0).contains(&put_on),
+            "and puts on most of the weight, not all of it and not a hint: \
+             {put_on:.2} of it ({i_plain:.0} -> {i_synth:.0} against {i_real:.0})"
         );
     }
 

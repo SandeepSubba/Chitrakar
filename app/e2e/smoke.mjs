@@ -1857,20 +1857,45 @@ assert(
     Math.abs((await outline())[0] - unfolded[0]) < 2,
     "and back to the bundled face it is its old width",
   );
-  // The bold toggle swaps a face for its "… Bold" twin.
-  await page.click('button[aria-label="Bold"]');
-  await page.waitForTimeout(300);
-  assert(
-    (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVu Sans Bold" &&
-      Math.abs((await outline())[0] - bold[0]) < 2,
-    "the bold toggle set the bold face",
-  );
+  // The bold toggle asks for weight rather than naming a face: the block
+  // stays set in DejaVu Sans and the engine finds the family's registered
+  // bold cut, so it comes out the width choosing that face by hand did.
   await page.click('button[aria-label="Bold"]');
   await page.waitForTimeout(300);
   assert(
     (await page.locator('select[aria-label="Font"]').inputValue()) === "DejaVu Sans",
+    "the face is still the one that was chosen",
+  );
+  assert(
+    Math.abs((await outline())[0] - bold[0]) < 2,
+    `and the bold cut is what set it (${await outline()} vs ${bold})`,
+  );
+  assert(
+    (await page.locator('button[aria-label="Bold"]').getAttribute("aria-pressed")) ===
+      "true",
+    "the toggle reads as on",
+  );
+  await page.click('button[aria-label="Bold"]');
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await outline())[0] - unfolded[0]) < 2,
     "and again takes it off",
   );
+  // A family with no bold cut registered gets one anyway: the toggle is
+  // never disabled, and the rasterizer thickens the upright it has.
+  await page.selectOption('select[aria-label="Font"]', "DejaVu Serif");
+  await page.waitForTimeout(300);
+  const serif = await outline();
+  await page.click('button[aria-label="Bold"]');
+  await page.waitForTimeout(300);
+  const serifBold = await outline();
+  assert(
+    serifBold[0] > serif[0] && Math.abs(serifBold[1] - serif[1]) < 2,
+    `a face with no bold twin is thickened, not left alone (${serif} -> ${serifBold})`,
+  );
+  await page.click('button[aria-label="Bold"]');
+  await page.selectOption('select[aria-label="Font"]', "DejaVu Sans");
+  await page.waitForTimeout(300);
   // Italic leans the block: with straight stems on the page, the ink's
   // centre over the top rows moves right of its centre over the bottom
   // rows, and the block widens to make room for the lean.

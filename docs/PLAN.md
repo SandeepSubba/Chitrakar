@@ -209,9 +209,18 @@ without reading anything else.*
   the wasm, the rest are fetched from `app/public/fonts` at startup and
   registered with the engine, so adding a face is dropping a file there;
   File › Load font… registers any TrueType/OpenType file for the page's
-  lifetime, a Bold toggle swaps a face for its "… Bold" twin, an Italic
-  toggle sets it in its "… Oblique"/"… Italic" twin when one is registered
-  (Sans Mono's is shipped) and leans the outlines itself when none is,
+  lifetime; Bold and Italic ask for a weight and a lean rather than
+  naming a face — the family's "… Bold", "… Italic"/"… Oblique" or
+  "… Bold Italic" cut is used when one is registered (Sans Bold and Sans
+  Mono Oblique are shipped), and whatever the family cannot answer for
+  the rasterizer supplies itself: a lean by shearing the outlines, a
+  weight by laying each one down again beside itself until the stems
+  have thickened. Asked for bold italic when only the italic cut exists,
+  the italic is set and the weight put on over it. The thickening is
+  calibrated against a real cut — a line of DejaVu Sans thickened this
+  way sets to the length DejaVu Sans Bold sets it to — and travels as
+  SVG's font-weight and, on a page, as glyphs filled and then stroked,
+  which is a page's own way of putting weight on an upright;
   underline and strike-through toggles draw their bands per line (and
   travel into SVG as text-decoration and PDF as rectangles), a
   double-click on a block types into it on the canvas (the engine draws
@@ -300,9 +309,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~259),
+- **Verify before committing:** `cargo test --workspace` (~265),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~491 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~494 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -623,7 +632,8 @@ chitrakar/
   soft masks, opacity and blend as graphics states, text as text (each
   face embedded once as a CID font addressed by glyph id, glyphs where
   the shaper put them so kerning and ligatures survive, a synthesized
-  italic as a text-matrix skew, and a ToUnicode map so the words can be
+  italic as a text-matrix skew, a synthesized bold as a stroke around the
+  filled glyphs, and a ToUnicode map so the words can be
   found and copied — checked by reading them back through Ghostscript;
   the face travels as a TrueType subset of the glyphs used, ids kept),
   and the engine's pixels — oversampled towards 300 dpi and trimmed to

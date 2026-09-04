@@ -1696,6 +1696,7 @@ export function App() {
                 width: 0,
                 font: "",
                 italic: false,
+                bold: false,
                 underline: false,
                 strike: false,
                 along: null,
@@ -4764,6 +4765,7 @@ export function App() {
                           : "left",
                     whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
                     fontStyle: spec.italic ? "italic" : "normal",
+                    fontWeight: spec.bold ? "bold" : "normal",
                     caretColor: caret,
                   }}
                   onChange={(e) => typeInlineText(e.target.value)}
@@ -6654,22 +6656,32 @@ function KindProps({
         <div className="row">
           <label htmlFor="text-font">Font</label>
           {(() => {
-            // A face and its "… Bold" twin, when the registry has both:
-            // the toggle just swaps the name, which is all bold is here.
-            const current = t.font || fonts[0];
-            const base = current.replace(/ Bold$/, "");
-            const heavy = `${base} Bold`;
-            const isBold = current.endsWith(" Bold");
-            const available = fonts.includes(heavy) && fonts.includes(base);
+            // Bold always works: the family's "… Bold" cut when one is
+            // registered, a thickening the rasterizer synthesizes when
+            // none is. A block set bold before the flag existed said so
+            // by naming the bold face, so that still reads as bold here
+            // and un-bolds back to the face it was a twin of.
+            const named = (t.font ?? "").endsWith(" Bold");
+            const on = !!t.bold || named;
             return (
               <button
-                className={isBold ? "active" : undefined}
-                disabled={!available}
-                title={available ? "Bold" : "No bold face for this font"}
+                className={on ? "active" : undefined}
+                title="Bold"
                 aria-label="Bold"
-                aria-pressed={isBold}
+                aria-pressed={on}
                 onClick={() =>
-                  onEdit({ Text: { ...t, font: isBold ? base : heavy } }, false)
+                  onEdit(
+                    {
+                      Text: on
+                        ? {
+                            ...t,
+                            bold: false,
+                            font: named ? t.font.slice(0, -" Bold".length) : t.font,
+                          }
+                        : { ...t, bold: true },
+                    },
+                    false,
+                  )
                 }
               >
                 <strong>B</strong>

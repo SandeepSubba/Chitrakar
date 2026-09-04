@@ -396,6 +396,10 @@ pub struct TextSpec {
     /// is registered, and leaned by the rasterizer when none is.
     #[serde(default)]
     pub italic: bool,
+    /// Bold: set in the face's "… Bold" twin when one is registered, and
+    /// thickened by the rasterizer when none is. Additive.
+    #[serde(default)]
+    pub bold: bool,
     /// A line under each line of text, and one through it, drawn by the
     /// rasterizer in the block's colour at sizes relative to the em.
     #[serde(default)]
@@ -431,6 +435,7 @@ impl TextSpec {
             width: 0.0,
             font: String::new(),
             italic: false,
+            bold: false,
             underline: false,
             strike: false,
             along: None,

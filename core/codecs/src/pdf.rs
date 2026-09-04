@@ -754,9 +754,22 @@ impl<'a> Page<'a> {
                 }
                 let typeset = chitrakar_render::text::placed(spec);
                 let font = self.font_resource(typeset.face, &typeset.glyphs);
+                // A bold no face could supply is drawn the way a page
+                // does it: the glyphs filled and then stroked in the same
+                // colour, which puts the weight on that the raster puts
+                // on by laying the outline down again beside itself.
+                let heavy = if typeset.thicken > 0.0 {
+                    format!(
+                        "\n{}\n{} w\n2 Tr",
+                        self.color_op(spec.fill, true)?,
+                        num(typeset.thicken)
+                    )
+                } else {
+                    String::new()
+                };
                 let _ = writeln!(
                     self.content,
-                    "BT\n/{font} {} Tf\n{}",
+                    "BT\n/{font} {} Tf\n{}{heavy}",
                     num(typeset.em),
                     self.color_op(spec.fill, false)?
                 );
@@ -1799,6 +1812,49 @@ mod tests {
     }
 
     /// A reader can find the words: Ghostscript's text extractor reads
+    /// A bold no face can supply is drawn on the page the way the raster
+    /// draws it: the glyphs filled and then stroked in the same colour,
+    /// which is a page's own way of putting weight on an upright. A face
+    /// that carries its own bold is just set in it.
+    #[test]
+    fn a_synthesized_bold_is_stroked_rather_than_faked_with_pixels() {
+        let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
+        let mut spec = chitrakar_doc::TextSpec::new("Heavy", 20.0, BLUE);
+        spec.bold = true;
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        assert!(
+            content.contains("2 Tr") && content.contains(" w\n2 Tr"),
+            "filled and stroked, with a width: {content}"
+        );
+        // Still text, not a picture of text: the glyphs are shown.
+        assert!(
+            content.contains(" Tm <") && content.contains("> Tj"),
+            "{content}"
+        );
+
+        let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
+        chitrakar_render::text::register_font(
+            "Press Test Bold",
+            include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf").to_vec(),
+        )
+        .unwrap();
+        chitrakar_render::text::register_font(
+            "Press Test",
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf").to_vec(),
+        )
+        .unwrap();
+        let mut spec = chitrakar_doc::TextSpec::new("Heavy", 20.0, BLUE);
+        spec.font = "Press Test".into();
+        spec.bold = true;
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        assert!(
+            !content.contains("2 Tr"),
+            "a real bold cut needs no stroking: {content}"
+        );
+    }
+
     /// them back through the ToUnicode map. Self-skips without `gs`.
     #[test]
     fn the_text_in_the_pdf_can_be_read_back() {

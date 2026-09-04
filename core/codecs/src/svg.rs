@@ -379,6 +379,11 @@ fn write_node(
                 } else {
                     ""
                 };
+                let weight = if spec.bold {
+                    r#" font-weight="bold""#
+                } else {
+                    ""
+                };
                 let decoration = match (spec.underline, spec.strike) {
                     (true, true) => r#" text-decoration="underline line-through""#,
                     (true, false) => r#" text-decoration="underline""#,
@@ -396,7 +401,7 @@ fn write_node(
                 };
                 let _ = writeln!(
                     out,
-                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{decoration}{anchor}{common} fill="{}" xml:space="preserve">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{weight}{decoration}{anchor}{common} fill="{}" xml:space="preserve">"#,
                     if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {
@@ -1364,6 +1369,41 @@ mod tests {
         assert!(
             svg.find("<defs>") < svg.find("<rect"),
             "defs must precede the shape that references them:\n{svg}"
+        );
+    }
+
+    /// Bold travels as SVG's own word for it, so a reader that has the
+    /// family's bold cut sets the block in it and one that does not
+    /// thickens the upright — which is what the engine does either way.
+    #[test]
+    fn bold_travels_as_a_font_weight() {
+        let mut doc = Document::new(80, 40, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::text("t", chitrakar_doc::TextSpec::new("Hi", 16.0, RED));
+        let chitrakar_doc::NodeKind::Text(spec) = &mut node.kind else {
+            unreachable!()
+        };
+        spec.bold = true;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(svg.contains(r#"font-weight="bold""#), "{svg}");
+
+        let id = doc.children_of(root).unwrap()[0];
+        let mut plain = chitrakar_doc::TextSpec::new("Hi", 16.0, RED);
+        plain.bold = false;
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(chitrakar_doc::NodeKind::Text(plain)),
+        })
+        .unwrap();
+        assert!(
+            !export_svg(&doc).unwrap().contains("font-weight"),
+            "and a block that is not bold says nothing about weight"
         );
     }
 
