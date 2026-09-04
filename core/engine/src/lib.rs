@@ -2510,6 +2510,15 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// Export the document's frames as the pages of one PDF, in the order
+    /// they sit on it: each page its frame's own size, showing that frame
+    /// and nothing of the document around it. A document with no frames
+    /// exports as the one page it always did.
+    pub fn export_pdf_frames(&self) -> Result<Vec<u8>, EngineError> {
+        chitrakar_codecs::export_pdf_frames(&self.doc)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Export vector layers (and embedded rasters/text) as SVG.
     pub fn export_svg(&self) -> Result<String, EngineError> {
         Ok(chitrakar_codecs::export_svg(&self.doc)?)

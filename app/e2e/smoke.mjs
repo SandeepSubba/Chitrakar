@@ -5082,6 +5082,46 @@ assert(
   );
 }
 
+// 9j8. Frames become the pages of one PDF: each page its frame's own
+// size, in the order the frames sit on the document. It is offered only
+// when there are frames to make pages of.
+{
+  await newDocument(400, 300, "rgb");
+  assert(
+    !(await (await menuItem("File", "Export PDF of the frames")).count()),
+    "with no frames there are no pages to offer",
+  );
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  for (const [x0, x1] of [
+    [20, 140],
+    [200, 380],
+  ]) {
+    await page.click('button[aria-label="Frame"]');
+    await page.mouse.move(...at(x0, 40));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, 200), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  }
+  await page.click('button[aria-label="Move"]');
+  const [dl] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export PDF of the frames")).click(),
+  ]);
+  const pdf = await readFile(await dl.path(), "latin1");
+  assert(pdf.startsWith("%PDF-1.7"), "a PDF came out");
+  assert(pdf.includes("/Count 2"), "two frames, two pages");
+  // The first frame is 120 by 160 document pixels, the second 180 by
+  // 160; at 72 dpi a document pixel is a point.
+  assert(
+    pdf.includes("/MediaBox [0 0 120.000 160.000]") &&
+      pdf.includes("/MediaBox [0 0 180.000 160.000]"),
+    "each page is its own frame's size",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

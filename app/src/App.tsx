@@ -3953,6 +3953,21 @@ export function App() {
     }
   };
 
+  /** Every frame as a page of one PDF, in the order they sit on the
+   * document — a brochure laid out as artboards comes out a brochure. */
+  const exportPdfFrames = () => {
+    if (!session) return;
+    try {
+      download(
+        session.export_pdf_frames(),
+        `${fileName()}-pages.pdf`,
+        "application/pdf",
+      );
+    } catch (err) {
+      alert(`PDF export: ${err}`);
+    }
+  };
+
   const exportTiff = () => {
     if (!session) return;
     try {
@@ -4247,6 +4262,15 @@ export function App() {
             >
               Export PDF
             </MenuItem>
+            {layers.some((l) => l.kind === "artboard") && (
+              <MenuItem
+                icon="frame"
+                onClick={exportPdfFrames}
+                hint="a page each"
+              >
+                Export PDF of the frames
+              </MenuItem>
+            )}
             {hasIcc && (
               <MenuItem icon="export" onClick={exportTiff} hint="CMYK">
                 Export TIFF

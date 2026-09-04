@@ -196,21 +196,23 @@ const KAPPA: f32 = 0.552_284_8;
 pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
     let icc = doc.cmyk_profile_bytes();
     let mut page = Page {
-        doc,
+        doc: doc.clone(),
         separate: icc
             .map(chitrakar_color::cms::RgbToCmyk::new)
             .transpose()
             .map_err(PdfError::Color)?,
         objects: Vec::new(),
+        pages: Vec::new(),
         xobjects: Vec::new(),
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
         fonts: Vec::new(),
     };
-    // 1 catalog, 2 pages, 3 page, 4 contents: reserved, written last,
-    // once everything they refer to has a number.
-    for _ in 0..4 {
+    // 1 catalog and 2 pages: reserved, written last, once every page
+    // they list has a number. The pages themselves are pushed at the
+    // end, after everything they refer to.
+    for _ in 0..2 {
         page.objects.push(Vec::new());
     }
     if let Some(icc) = icc {
@@ -222,6 +224,86 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         page.icc_objects = Some((profile, space));
     }
     page.draw_page()?;
+    let meta = &page.doc.meta;
+    let whole = [0.0, 0.0, meta.width as f32, meta.height as f32];
+    let body = std::mem::take(&mut page.content);
+    page.pages.push((body, whole));
+    page.finish()
+}
+
+/// The document's frames as the pages of one file, in the order they sit
+/// on the page — a brochure laid out as artboards comes out a brochure.
+///
+/// Each page shows one frame and is that frame's own size; what lies
+/// outside it is off the page rather than drawn, which is what a frame
+/// means. A document with no frames has one page, as before.
+pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
+    let root = doc.root();
+    let frames: Vec<NodeId> = doc
+        .children_of(root)
+        .map(|kids| {
+            kids.iter()
+                .copied()
+                .filter(|id| {
+                    doc.node(*id)
+                        .is_ok_and(|n| n.visible && matches!(n.kind, NodeKind::Artboard { .. }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if frames.is_empty() {
+        return export_pdf_document(doc);
+    }
+    let icc = doc.cmyk_profile_bytes();
+    let mut page = Page {
+        doc: doc.clone(),
+        separate: icc
+            .map(chitrakar_color::cms::RgbToCmyk::new)
+            .transpose()
+            .map_err(PdfError::Color)?,
+        objects: Vec::new(),
+        pages: Vec::new(),
+        xobjects: Vec::new(),
+        gstates: Vec::new(),
+        content: String::new(),
+        icc_objects: None,
+        fonts: Vec::new(),
+    };
+    for _ in 0..2 {
+        page.objects.push(Vec::new());
+    }
+    if let Some(icc) = icc {
+        let profile = page.push(&stream_object(
+            "<< /N 4 /Filter /FlateDecode",
+            &deflate(icc)?,
+        ));
+        let space = page.push(format!("[/ICCBased {profile} 0 R]").as_bytes());
+        page.icc_objects = Some((profile, space));
+    }
+    for frame in frames {
+        // One frame at a time, with the rest of the page hidden: the
+        // drawing is the drawing it always was, and the page's own box
+        // is what says which part of it is this page.
+        let mut alone = doc.clone();
+        for id in alone.children_of(root)?.to_vec() {
+            if id != frame {
+                alone.apply(Command::SetVisible { id, visible: false })?;
+            }
+        }
+        // The frame's own box, not what it can touch: a frame cuts what
+        // goes into it to its box, so that box is the page.
+        let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) =
+            chitrakar_render::node_visual_bounds(doc, frame)?
+        else {
+            continue;
+        };
+        let box_ = [x0, y0, x1, y1];
+        page.doc = alone;
+        page.content.clear();
+        page.draw_page()?;
+        let body = std::mem::take(&mut page.content);
+        page.pages.push((body, box_));
+    }
     page.finish()
 }
 
@@ -229,12 +311,19 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
 /// object number), the resources the content stream names, and the
 /// content itself, in document pixels — the page's own transform maps
 /// those to points and turns y downwards.
-struct Page<'a> {
-    doc: &'a Document,
+struct Page {
+    /// The document this page draws. Owned, because exporting the
+    /// frames as pages draws a differently-hidden copy of it per page
+    /// while keeping one pool of objects for the file.
+    doc: Document,
     /// The press separation, when the document has a profile: the file
     /// is then written in ink.
     separate: Option<chitrakar_color::cms::RgbToCmyk>,
     objects: Vec<Vec<u8>>,
+    /// The pages written so far: each a finished content stream and the
+    /// document-space box it shows. One page for the whole document,
+    /// or one per frame.
+    pages: Vec<(String, [f32; 4])>,
     xobjects: Vec<(String, usize)>,
     gstates: Vec<(String, usize)>,
     content: String,
@@ -259,7 +348,7 @@ fn stream_object(dict_head: &str, data: &[u8]) -> Vec<u8> {
     body
 }
 
-impl<'a> Page<'a> {
+impl Page {
     fn push(&mut self, body: &[u8]) -> usize {
         self.objects.push(body.to_vec());
         self.objects.len()
@@ -273,7 +362,7 @@ impl<'a> Page<'a> {
         // picture, so long as each lands with the default blend.
         let mut pending: Vec<NodeId> = Vec::new();
         for (i, &child) in children.iter().enumerate() {
-            let node = self.doc.node(child)?;
+            let node = self.doc.node(child)?.clone();
             if !node.visible || node.opacity <= 0.0 {
                 continue;
             }
@@ -337,7 +426,7 @@ impl<'a> Page<'a> {
                 if node.opacity < 1.0 || node.blend != BlendMode::Normal {
                     return Ok(false);
                 }
-                for &child in self.doc.children_of(id)? {
+                for &child in &self.doc.children_of(id)?.to_vec() {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 && !self.is_live(child)? {
                         return Ok(false);
@@ -611,7 +700,7 @@ impl<'a> Page<'a> {
             NodeKind::Group => {
                 // Full opacity and the default blend by construction (see
                 // is_live): nothing to set, just the children in order.
-                for &child in self.doc.children_of(id)? {
+                for &child in &self.doc.children_of(id)?.to_vec() {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 {
                         self.draw_node(child)?;
@@ -651,7 +740,7 @@ impl<'a> Page<'a> {
                     let _ = writeln!(self.content, "{rect}f");
                 }
                 let _ = writeln!(self.content, "{rect}W n");
-                for &child in self.doc.children_of(id)? {
+                for &child in &self.doc.children_of(id)?.to_vec() {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 {
                         self.draw_node(child)?;
@@ -771,7 +860,7 @@ impl<'a> Page<'a> {
                 }
             }
             NodeKind::Raster(raster) => {
-                if let Some(res) = self.doc.resource(&raster.resource_id) {
+                if let Some(res) = self.doc.resource(&raster.resource_id).cloned() {
                     if !res.rgba8.is_empty() {
                         if let Some(gs) = self.gstate(node.opacity, node.opacity, node.blend) {
                             let _ = writeln!(self.content, "/{gs} gs");
@@ -996,17 +1085,7 @@ impl<'a> Page<'a> {
         for at in 0..self.fonts.len() {
             font_objects.push((self.fonts[at].resource.clone(), self.write_font(at)?));
         }
-        let meta = &self.doc.meta;
-        let pt = 72.0 / meta.dpi.max(1.0);
-        let (page_w, page_h) = (meta.width as f32 * pt, meta.height as f32 * pt);
-        // Document pixels to points, y downwards from the top-left.
-        let content = format!(
-            "q\n{} 0 0 {} 0 {page_h:.3} cm\n{}Q\n",
-            num(pt),
-            num(-pt),
-            self.content
-        );
-        self.objects[3] = stream_object("<<", content.as_bytes());
+        let pt = 72.0 / self.doc.meta.dpi.max(1.0);
 
         let mut resources = String::new();
         if !self.xobjects.is_empty() {
@@ -1033,12 +1112,34 @@ impl<'a> Page<'a> {
             }
             resources.push_str(" >>");
         }
-        self.objects[2] = format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
-             /Resources <<{resources} >> /Contents 4 0 R >>"
-        )
-        .into_bytes();
-        self.objects[1] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec();
+        // Each page: its content in points with y downwards from its own
+        // top-left corner, and a box the size of what it shows. A page
+        // showing the whole document sits at the document's origin; one
+        // showing a frame is the same content moved so that frame's own
+        // corner is the corner of the page.
+        let mut kids = String::new();
+        let pages = std::mem::take(&mut self.pages);
+        for (body, box_) in &pages {
+            let (page_w, page_h) = ((box_[2] - box_[0]) * pt, (box_[3] - box_[1]) * pt);
+            let content = format!(
+                "q\n{} 0 0 {} {} {} cm\n{body}Q\n",
+                num(pt),
+                num(-pt),
+                num(-box_[0] * pt),
+                num(box_[3] * pt)
+            );
+            let stream = self.push(&stream_object("<<", content.as_bytes()));
+            let page = self.push(
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
+                     /Resources <<{resources} >> /Contents {stream} 0 R >>"
+                )
+                .as_bytes(),
+            );
+            let _ = write!(kids, "{}{page} 0 R", if kids.is_empty() { "" } else { " " });
+        }
+        self.objects[1] =
+            format!("<< /Type /Pages /Kids [{kids}] /Count {} >>", pages.len()).into_bytes();
         // In ink, the profile is the page's output intent as well as its
         // colour space, which is what tells a RIP the ink is meant for it.
         let intent = match self.icc_objects {
@@ -1426,10 +1527,25 @@ mod tests {
     /// The page's content stream, inflated when it is compressed (it is
     /// not; the vector writer keeps it readable).
     fn content_of(pdf: &[u8]) -> String {
+        page_content(pdf, 0)
+    }
+
+    /// The content stream of page `nth`, found by following the page's
+    /// own `/Contents` reference rather than by guessing an object
+    /// number — the pages are written last, so their numbers depend on
+    /// how much the file holds.
+    fn page_content(pdf: &[u8], nth: usize) -> String {
         let text = String::from_utf8_lossy(pdf);
-        let at = text.find("/Contents 4 0 R").expect("page");
-        let _ = at;
-        let obj = text.find("4 0 obj").expect("content object");
+        let refs: Vec<usize> = text
+            .match_indices("/Contents ")
+            .map(|(at, _)| {
+                let rest = &text[at + "/Contents ".len()..];
+                rest[..rest.find(' ').unwrap()].parse::<usize>().unwrap()
+            })
+            .collect();
+        let obj = text
+            .find(&format!("\n{} 0 obj", refs[nth]))
+            .expect("content object");
         let start = text[obj..].find("stream\n").unwrap() + obj + 7;
         let end = text[start..].find("endstream").unwrap() + start;
         text[start..end].to_string()
@@ -1668,10 +1784,7 @@ mod tests {
         let content = content_of(&pdf);
 
         // The page maps document pixels to points with y downwards.
-        assert!(
-            content.starts_with("q\n1 0 0 -1 0 80.000 cm\n"),
-            "{content}"
-        );
+        assert!(content.starts_with("q\n1 0 0 -1 0 80 cm\n"), "{content}");
         // The rect: a translation, a red fill, a `re`.
         assert!(
             content.contains("1 0 0 1 10 10 cm\n1 0 0 rg\n0 0 40 30 re\nf\n"),
@@ -1885,6 +1998,158 @@ mod tests {
             !content.contains("6 0 m\n14 0 l"),
             "the rounded rect is no longer a path"
         );
+    }
+
+    /// Frames become the pages of one file: each page its frame's own
+    /// size, showing that frame and nothing else, in the order the
+    /// frames sit on the document.
+    #[test]
+    fn frames_become_the_pages_of_one_file() {
+        let mut doc = Document::new(300, 200, chitrakar_color::ColorMode::Rgb);
+        // Two frames of different sizes, each with a mark of its own, and
+        // a loose shape outside both that belongs to no page.
+        for (i, (x, w, h, color)) in [(10.0, 80.0, 60.0, RED), (140.0, 120.0, 40.0, BLUE)]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = add(
+                &mut doc,
+                chitrakar_doc::Node::artboard(&format!("sheet {i}"), w, h, None),
+                [x, 20.0],
+            );
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: Box::new(shape(
+                    "mark",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    Some(color),
+                )),
+            })
+            .unwrap();
+        }
+        add(
+            &mut doc,
+            shape(
+                "loose",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Some(RED),
+            ),
+            [280.0, 180.0],
+        );
+
+        let pdf = export_pdf_frames(&doc).unwrap();
+        assert_xref_is_sound(&pdf);
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Count 2"), "two frames, two pages");
+        // Each page is its own frame's size, in points at 72 dpi.
+        assert!(
+            text.contains("/MediaBox [0 0 80.000 60.000]")
+                && text.contains("/MediaBox [0 0 120.000 40.000]"),
+            "each page is its frame's own size: {text}"
+        );
+        // And each is the frame moved to its own corner: the second
+        // frame sits 140 across the document and 20 down, so its page
+        // starts 140 back and 60 down from the document's top.
+        assert!(
+            page_content(&pdf, 1).starts_with("q\n1 0 0 -1 -140 60 cm\n"),
+            "{}",
+            page_content(&pdf, 1)
+        );
+        // A document with no frames is the one page it always was.
+        let plain = Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+        let one = export_pdf_frames(&plain).unwrap();
+        assert!(String::from_utf8_lossy(&one).contains("/Count 1"));
+    }
+
+    /// The frames of a file, drawn: each page is its frame and what is on
+    /// it, and nothing of the document around it. Self-skips without `gs`.
+    #[test]
+    fn ghostscript_draws_each_frame_as_its_own_page() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no ghostscript");
+            return;
+        }
+        let mut doc = Document::new(300, 200, chitrakar_color::ColorMode::Rgb);
+        for (i, (x, color)) in [(10.0, RED), (140.0, BLUE)].into_iter().enumerate() {
+            let frame = add(
+                &mut doc,
+                chitrakar_doc::Node::artboard(
+                    &format!("sheet {i}"),
+                    100.0,
+                    80.0,
+                    Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
+                ),
+                [x, 20.0],
+            );
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: Box::new(shape(
+                    "mark",
+                    VectorShape::Rect {
+                        width: 40.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    Some(color),
+                )),
+            })
+            .unwrap();
+        }
+        let pdf = export_pdf_frames(&doc).unwrap();
+        let dir = std::env::temp_dir().join(format!("chitrakar-frames-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf_path = dir.join("book.pdf");
+        std::fs::write(&pdf_path, &pdf).unwrap();
+        let status = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=png16m",
+                "-r72",
+            ])
+            .arg(format!("-sOutputFile={}", dir.join("page%d.png").display()))
+            .arg(&pdf_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ghostscript accepted the file");
+        for (n, want) in [(1, [255u8, 0, 0]), (2, [0, 0, 255])] {
+            let drawn =
+                crate::decode(&std::fs::read(dir.join(format!("page{n}.png"))).unwrap()).unwrap();
+            assert_eq!(
+                (drawn.width, drawn.height),
+                (100, 80),
+                "page {n} is the frame's own size"
+            );
+            let at = |x: usize, y: usize| &drawn.rgba8[(y * 100 + x) * 4..(y * 100 + x) * 4 + 3];
+            assert_eq!(at(20, 20), &want, "page {n} carries its own mark");
+            assert_eq!(
+                at(80, 60),
+                &[255, 255, 255],
+                "and the frame's ground where it has none"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Ghostscript, when it is installed, rasterizes the file; the page it

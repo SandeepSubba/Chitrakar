@@ -725,6 +725,12 @@ impl WasmSession {
         self.inner.export_pdf().map_err(to_js)
     }
 
+    /// The document's frames as the pages of one PDF, each page its
+    /// frame's own size.
+    pub fn export_pdf_frames(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_pdf_frames().map_err(to_js)
+    }
+
     /// Export as SVG markup.
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)

@@ -206,7 +206,12 @@ without reading anything else.*
   new parent's space is taken back out of its transform, which fixes
   dropping into an off-origin group too); and File › Export every
   artboard writes one PNG per frame, at the frame's own size, named
-  after it, with nothing of the page around it. Frames carry into SVG as
+  after it, with nothing of the page around it; File › Export PDF of the
+  frames writes them as the pages of one file instead, in the order they
+  sit on the document, each page its frame's own size and live where PDF
+  has the words — a brochure laid out as artboards comes out a brochure.
+  Both are offered only when there are frames to make pages of.
+  Frames carry into SVG as
   a clipped group and into PDF as a rectangle clip, so both stay live
   vectors. A frame is resized rather than scaled: dragging a corner
   changes how many pixels it is and leaves what is in it the size it
@@ -422,9 +427,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~292),
+- **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~571 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~575 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
