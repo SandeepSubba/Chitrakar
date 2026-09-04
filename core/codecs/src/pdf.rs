@@ -2482,9 +2482,29 @@ mod tests {
             ink[1] > 0.4 && ink[2] > 0.4 && ink[0] < 0.35,
             "red as ink: {ink:?}"
         );
-        assert!(text.contains("[/ICCBased 5 0 R]") && text.contains("/N 4"));
-        assert!(text.contains("/OutputIntents") && text.contains("/DestOutputProfile 5 0 R"));
-        assert!(text.contains("/ColorSpace << /CS0 6 0 R >>"));
+        // One profile, referred to by number from both the output intent
+        // and the colour space — read rather than named, since which
+        // number it takes is the writer's business and moves as objects
+        // are added.
+        let after = |key: &str| -> String {
+            text.split(key)
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .unwrap_or_else(|| panic!("no {key} in the PDF"))
+                .to_string()
+        };
+        assert!(text.contains("/OutputIntents"));
+        let profile = after("/DestOutputProfile ");
+        assert!(
+            text.contains(&format!("[/ICCBased {profile} 0 R]")) && text.contains("/N 4"),
+            "the colour space is the intent's own profile, four inks deep"
+        );
+        let space = after("/ColorSpace << /CS0 ");
+        assert_ne!(space, profile, "the colour space is an object of its own");
+        assert!(
+            text.contains(&format!("\n{space} 0 obj")),
+            "and the page's colour space is written out"
+        );
     }
 
     #[test]

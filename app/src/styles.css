@@ -1024,6 +1024,78 @@ body {
   border-right: 1px solid var(--border);
 }
 
+/* Carried off its edge: the same rail, floating over the canvas, with a
+   shadow to say it is above rather than beside. */
+.toolbar.floating {
+  position: fixed;
+  z-index: 40;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.tool.grip {
+  height: 1.5rem;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.tool.grip:active {
+  cursor: grabbing;
+}
+
+/* The shape tools share one slot: the one in hand sits in it, and a
+   corner opens the rest beside the rail. */
+.tool-group {
+  position: relative;
+  display: grid;
+}
+
+.tool-more {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 0;
+  height: 0;
+  padding: 0;
+  border: none;
+  border-left: 5px solid transparent;
+  border-bottom: 5px solid var(--muted);
+  background: none;
+  cursor: pointer;
+}
+
+.tool-group:hover .tool-more {
+  border-bottom-color: var(--text);
+}
+
+.tool-flyout {
+  position: absolute;
+  left: calc(100% + 0.35rem);
+  top: 0;
+  z-index: 45;
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px rgb(0 0 0 / 0.45);
+}
+
+.tool-number {
+  width: 2.4rem;
+  padding: 0.2rem 0;
+  text-align: center;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+
 .tool {
   display: grid;
   place-items: center;
@@ -1070,10 +1142,27 @@ body {
 }
 
 .panel {
-  width: 240px;
+  position: relative;
+  flex: none;
   padding: 0.6rem;
   background: var(--panel);
   border-left: 1px solid var(--border);
+}
+
+/* A hand's width of grab on the panel's own edge, sitting over the
+   border rather than taking room from the panel. */
+.panel-edge {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 5;
+}
+
+.panel-edge:hover {
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
 .panel h2 {

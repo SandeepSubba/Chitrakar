@@ -21,7 +21,9 @@ without reading anything else.*
 
 - **Branch:** `claude/multiplatform-photo-vector-editor-enghs5`.
 - **Working today:** a real editor. Draw rects (square or round-cornered),
-  ellipses and pen paths (straight
+  ellipses, regular polygons and stars of three sides to a couple of
+  dozen, straight
+  lines and pen paths (straight
   or smooth), brush freehand strokes that land as editable paths and swell
   with pressure or slow strokes, place images, add live text; move/scale with handles and live
   drag preview — a dragged corner keeps the shape's proportions and
@@ -346,6 +348,22 @@ without reading anything else.*
   so a closed tab or a crash loses nothing. The document has a name —
   typed in the bar, taken from the file it was opened from, restored
   with the draft — and every save and export is named after it.
+  The shapes share one slot in the rail — the one last used sits in it
+  and the rest are a click away, which keeps a rail of a dozen tools
+  from becoming a rail of twenty; the slot follows the keyboard too, so
+  a shape taken up by its letter is the shape the rail shows. A polygon
+  and a star are inscribed in the box they are dragged out of — a point
+  at the top, the rest around — and come out as paths, so every anchor
+  is draggable the moment it is drawn and every exporter already knows
+  what they are; the number of sides is typed beside the slot. A line is
+  the drag itself, end to end, stroked rather than filled, since an open
+  line has no inside — and it is the one shape whose box may be nothing
+  on one side, so it is held to a length rather than to two sides.
+  The rail can be carried off the edge by its grip and put down anywhere
+  over the canvas (double-clicking the grip, or dropping it back at the
+  left, docks it again), and the layer panel is as wide as its edge is
+  dragged to be. Both are remembered between visits, so a workspace
+  arranged once stays arranged.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
   soft proofing + gamut warning. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
   the selection — rendered at that size, not upsampled), JPEG, SVG,
@@ -429,7 +447,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~575 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~605 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

@@ -89,6 +89,26 @@ const newDocument = async (w, h, mode, dpi) => {
   await page.waitForTimeout(400);
 };
 
+/** Pick a tool. The shape tools share one slot in the rail — the one
+ * last used sits in it — so anything else in that group is reached by
+ * opening the group first, which is what a person does too. */
+const pickTool = async (name) => {
+  const direct = page.locator(`.toolbar > button[aria-label="${name}"]`);
+  if (await direct.count()) {
+    await direct.click();
+  } else {
+    const slot = page.locator('.tool-group > button[aria-label="' + name + '"]');
+    if (await slot.count()) {
+      await slot.click();
+    } else {
+      await page.click('button[aria-label="More shapes"]');
+      await page.waitForTimeout(80);
+      await page.click(`.tool-flyout button[aria-label="${name}"]`);
+    }
+  }
+  await page.waitForTimeout(60);
+};
+
 const menuClick = async (menu, item) => {
   (await menuItem(menu, item)).click();
   await page.waitForTimeout(200);
@@ -150,7 +170,7 @@ assert(
 );
 
 // 2. Draw a rect with the Rect tool.
-await page.click('button[aria-label="Rect"]');
+await pickTool("Rect");
 const box = await page.locator("#engine-page").boundingBox();
 const sx = box.width / 1280, sy = box.height / 720;
 const drag = async (x0, y0, x1, y1) => {
@@ -304,7 +324,7 @@ assert(
 // step grows.
 
 // 3. Draw an ellipse overlapping it.
-await page.click('button[aria-label="Ellipse"]');
+await pickTool("Ellipse");
 await drag(300, 150, 700, 500);
 assert(await page.isVisible("text=Ellipse 2"), "second layer row");
 
@@ -392,7 +412,7 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   // The colour to draw with is shared with every later block, so put it
   // back before leaving.
   const wasFill = await page.inputValue('input[aria-label="Fill colour"]');
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(80, 560));
   await page.mouse.down();
   await page.mouse.move(...at(280, 680), { steps: 6 });
@@ -400,7 +420,7 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   await page.waitForTimeout(250);
   await page.fill('input[aria-label="Fill colour"]', "#22cc55");
   await page.waitForTimeout(200);
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(340, 560));
   await page.mouse.down();
   await page.mouse.move(...at(540, 680), { steps: 6 });
@@ -419,7 +439,7 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
   // Copy that look, pick the first rect, and give it the look.
   await page.keyboard.press("Control+Alt+c");
   await page.waitForTimeout(150);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.mouse.click(...at(180, 620));
   await page.waitForTimeout(200);
   const wasFirst = await canvasPixel(180, 620);
@@ -726,7 +746,7 @@ await page.waitForTimeout(200);
 assert((await page.locator(".panel ul li", { hasText: "Ellipse 2" }).count()) === 1, "redo restored ellipse");
 
 // 7. Move tool: drag the rect, top-left corner vacates.
-await page.click('button[aria-label="Move"]');
+await pickTool("Move");
 await drag(150, 150, 350, 350); // grabs rect (ellipse doesn't cover 150,150)
 px = await canvasPixel(101, 101);
 assert(px[3] === 0, "moved rect vacated original corner");
@@ -858,7 +878,7 @@ await page.waitForTimeout(150);
 // 8h. Live move preview: pixels move BEFORE mouseup; Escape cancels.
 // State: opaque rect on top spans (300,300)-(600,500). Probe (310,480) is
 // inside the rect but outside the ellipse.
-await page.click('button[aria-label="Move"]');
+await pickTool("Move");
 const box2 = await page.locator("#engine-page").boundingBox();
 const sx2 = box2.width / 1280, sy2 = box2.height / 720;
 const toScreen = (x, y) => [box2.x + x * sx2, box2.y + y * sy2];
@@ -1259,7 +1279,7 @@ px = await canvasPixel(605, 505);
 assert(px[3] === 0, "undo removed the blur layer");
 
 // 8n. Pen tool: click a triangle closed -> filled path object.
-await page.click('button[aria-label="Pen"]');
+await pickTool("Pen");
 const penClick = async (x, y) => {
   await page.mouse.click(box.x + x * sx, box.y + y * sy);
   await page.waitForTimeout(80);
@@ -1298,7 +1318,7 @@ await penClick(700, 40);
 await penClick(760, 100);
 await page.keyboard.press("Escape");
 await page.waitForTimeout(150);
-await page.click('button[aria-label="Move"]');
+await pickTool("Move");
 assert(
   (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
   "escape discarded the in-progress path",
@@ -1698,7 +1718,7 @@ assert(
 
 // 8u3. Brush: a freehand drag becomes a stroked path — editable anchors,
 // not baked pixels — simplified down from the raw samples.
-await page.click('button[aria-label="Brush"]');
+await pickTool("Brush");
 await page.locator('input[aria-label="Brush width"]').fill("10");
 await page.waitForTimeout(150);
 const strokeAt = [420, 640];
@@ -1765,7 +1785,7 @@ assert(
     (await canvasPixel(...strokeAt))[3] === 0,
   "and the whole stroke undoes as one step",
 );
-await page.click('button[aria-label="Move"]');
+await pickTool("Move");
 
 // 8v. Text tool: click to add a live text object, edit it via the panel.
 const inkCount = (x0, y0, x1, y1) =>
@@ -1783,7 +1803,7 @@ const inkCount = (x0, y0, x1, y1) =>
   }, [x0, y0, x1, y1]);
 
 assert((await inkCount(740, 590, 1100, 710)) === 0, "text target area empty");
-await page.click('button[aria-label="Text"]');
+await pickTool("Text");
 await page.mouse.click(box.x + 750 * sx, box.y + 600 * sy);
 await page.waitForTimeout(300);
 assert(
@@ -2337,7 +2357,7 @@ assert(
   // the middle of the canvas must paint in the middle of the document.
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(100, 100));
   await page.mouse.down();
   await page.mouse.move(...at(500, 300), { steps: 6 });
@@ -2473,7 +2493,7 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   for (const [x0, y0, x1, y1] of [
     [60, 60, 180, 160],
     [300, 60, 420, 160],
@@ -2484,7 +2504,7 @@ assert(
     await page.mouse.up();
     await page.waitForTimeout(200);
   }
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
   await page.waitForTimeout(200);
@@ -2517,7 +2537,7 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   const drawRect = async (x0, y0, x1, y1) => {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
@@ -2525,7 +2545,7 @@ assert(
     await page.waitForTimeout(200);
   };
   await drawRect(100, 100, 500, 300);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   // An ellipse mask cuts the corners; a rectangle one does not.
@@ -2546,7 +2566,7 @@ assert(
 
   // Draw a second shape over it and make it the mask of the one below.
   await drawRect(150, 150, 250, 250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   assert(
@@ -2586,14 +2606,14 @@ assert(
     [60, 60, 160, 160],
     [400, 250, 500, 350],
   ]) {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
     await page.mouse.up();
     await page.waitForTimeout(200);
   }
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.waitForTimeout(150);
   for (const item of ["Cut", "Copy", "Paste", "Duplicate", "Delete", "Select all"]) {
     const found = await menuItem("Edit", item);
@@ -2673,13 +2693,13 @@ assert(
     "dragging out of a ruler placed a guide",
   );
   // A layer dropped near it is pulled onto it.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(80, 80));
   await page.mouse.down();
   await page.mouse.move(...at(180, 180), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   const leftField = page.locator('input[aria-label="X position"]');
@@ -2723,13 +2743,13 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(100, 100));
   await page.mouse.down();
   await page.mouse.move(...at(200, 180), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   const field = (label) => page.locator(`input[aria-label="${label}"]`);
@@ -2775,7 +2795,7 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   const drawRect = async (x0, y0, x1, y1) => {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
@@ -2784,7 +2804,7 @@ assert(
   };
   await drawRect(100, 100, 300, 300);
   await drawRect(200, 200, 400, 340);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
   await page.waitForTimeout(200);
@@ -2812,7 +2832,7 @@ assert(
   await newDocument(600, 400, "rgb");
   await drawRect(100, 100, 500, 300);
   await drawRect(250, 170, 350, 230);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
   await page.waitForTimeout(200);
@@ -2833,7 +2853,7 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(200, 150));
   await page.mouse.down();
   await page.mouse.move(...at(400, 250), { steps: 6 });
@@ -2841,7 +2861,7 @@ assert(
   await page.waitForTimeout(250);
   assert((await canvasPixel(300, 200))[3] === 255, "a rect in the middle");
 
-  await page.click('button[aria-label="Crop"]');
+  await pickTool("Crop");
   await page.mouse.move(...at(100, 100));
   await page.mouse.down();
   await page.mouse.move(...at(500, 300), { steps: 8 });
@@ -2876,7 +2896,7 @@ assert(
   await menuClick("View", "Fit document to window");
   await page.waitForTimeout(250);
   const cropped = await page.locator("#engine-page").boundingBox();
-  await page.click('button[aria-label="Crop"]');
+  await pickTool("Crop");
   // Just left of the page but still over the canvas, clear of the ruler.
   await page.mouse.move(cropped.x - 20, cropped.y + (100 / 400) * cropped.height);
   await page.mouse.down();
@@ -2964,14 +2984,14 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   for (const [x0, y0, x1, y1] of [[50, 50, 250, 250], [350, 50, 550, 250]]) {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
     await page.mouse.up();
     await page.waitForTimeout(200);
   }
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click(); // the right-hand rect, drawn last
   await page.waitForTimeout(200);
   const leftBefore = await canvasPixel(150, 150);
@@ -3017,7 +3037,7 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   const draw = async (x0, y0, x1, y1) => {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
@@ -3026,7 +3046,7 @@ assert(
   };
   await draw(100, 100, 300, 300);
   await draw(50, 50, 550, 350);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   assert(
     (await canvasPixel(450, 200))[3] === 255,
     "the upper rect covers the page on its own",
@@ -3083,14 +3103,14 @@ assert(
     [50, 50, 250, 250],
     [350, 50, 550, 250],
   ]) {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at(x1, y1), { steps: 6 });
     await page.mouse.up();
     await page.waitForTimeout(200);
   }
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   const leftBefore = await canvasPixel(150, 150);
   const rightBefore = await canvasPixel(450, 150);
   await page.selectOption(
@@ -3135,7 +3155,7 @@ assert(
     await page.mouse.up();
     await page.waitForTimeout(250);
   };
-  await page.click('button[aria-label="Frame"]');
+  await pickTool("Frame");
   await drag(100, 100, 300, 300);
   assert(
     (await page.locator(".panel ul li").count()) === 1,
@@ -3152,7 +3172,7 @@ assert(
   );
 
   // A shape drawn inside the frame goes into the frame, where it was drawn.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await drag(150, 150, 250, 250);
   const rows = await page.locator(".panel ul li").count();
   assert(rows === 2, `the rect is a layer too (${rows})`);
@@ -3202,7 +3222,7 @@ assert(
   // Dragged out past the frame's edge, the rect is cut at the edge. The
   // panel runs top-first and the frame owns the rect, so the frame is
   // the first row and the rect the second.
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").nth(1).click();
   await page.waitForTimeout(200);
   await page.mouse.move(...at(200, 200));
@@ -3236,11 +3256,11 @@ assert(
     await page.mouse.up();
     await page.waitForTimeout(250);
   };
-  await page.click('button[aria-label="Frame"]');
+  await pickTool("Frame");
   await drag(100, 100, 300, 300);
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await drag(120, 120, 180, 180);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(250);
   const size = () => page.locator('input[aria-label="W size"]').inputValue();
@@ -3381,13 +3401,13 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(60, 60));
   await page.mouse.down();
   await page.mouse.move(...at(160, 160), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   // Drawing does not pick; the copy button acts on what is picked.
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
@@ -3456,7 +3476,7 @@ assert(
     b2.y + (y / 400) * b2.height,
   ];
   const box = async (x0, y0, x1, y1) => {
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at2(x0, y0));
     await page.mouse.down();
     await page.mouse.move(...at2(x1, y1), { steps: 6 });
@@ -3465,7 +3485,7 @@ assert(
   };
   await box(40, 40, 100, 100);
   await box(120, 40, 180, 100);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await menuClick("Edit", "Select all");
   await page.waitForTimeout(150);
   await page.click('button[aria-label="Group selected layers (ctrl-click to select several)"]');
@@ -3526,7 +3546,7 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(100, 100));
   await page.mouse.down();
   await page.mouse.move(...at(300, 250), { steps: 6 });
@@ -3541,7 +3561,7 @@ assert(
     (await menuItem("File", "Export PNG at 2×")).click(),
   ]);
   assert((await pngSize(twoX)).join("x") === "1200x800", "2x export is twice the page");
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   // Units: the geometry fields and rulers can read in millimetres or
   // inches through the document's resolution (72 dpi here), and a value
@@ -3600,13 +3620,13 @@ assert(
 
   // 8x8. Flip: a pair mirrors about the box the two of them span, so
   // they trade sides; vertical trades top for bottom; undo puts it back.
-  await page.click('button[aria-label="Ellipse"]');
+  await pickTool("Ellipse");
   await page.mouse.move(...at(400, 300));
   await page.mouse.down();
   await page.mouse.move(...at(500, 380), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await menuClick("Edit", "Select all");
   await page.waitForTimeout(150);
   const filled = async (x, y) => (await canvasPixel(x, y))[3] === 255;
@@ -3634,16 +3654,16 @@ assert(
 
   // 8x9. Text on a path: a block set along the ellipse's outline leaves
   // its own spot and rings the ellipse; undo takes it off again.
-  await page.click('button[aria-label="Ellipse"]');
+  await pickTool("Ellipse");
   await page.mouse.move(...at(400, 300));
   await page.mouse.down();
   await page.mouse.move(...at(500, 380), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Text"]');
+  await pickTool("Text");
   await page.mouse.click(...at(60, 350));
   await page.waitForTimeout(300);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.mouse.click(...at(75, 365));
   await page.waitForTimeout(200);
   assert((await inkCount(40, 340, 260, 420)) > 50, "the block sits where it was placed");
@@ -3673,7 +3693,7 @@ assert(
 
   // 8x10. Reordering by drag: carry the top row below the one under it
   // and the stack turns over; one undo turns it back.
-  await page.click('button[aria-label="Ellipse"]');
+  await pickTool("Ellipse");
   await page.mouse.move(...at(400, 300));
   await page.mouse.down();
   await page.mouse.move(...at(500, 380), { steps: 6 });
@@ -3733,7 +3753,7 @@ assert(
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.mouse.click(...at(200, 175));
   await page.waitForTimeout(200);
   assert((await page.locator(".handle").count()) > 0, "the rect is picked and handled to begin with");
@@ -3769,13 +3789,13 @@ assert(
 
   // 8x13. A band dragged over empty canvas picks everything it touches;
   // a locked layer stays out of it, and shift adds to what is picked.
-  await page.click('button[aria-label="Ellipse"]');
+  await pickTool("Ellipse");
   await page.mouse.move(...at(380, 60));
   await page.mouse.down();
   await page.mouse.move(...at(500, 160), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
   // From a bare corner across both shapes.
@@ -3844,14 +3864,14 @@ assert(
       el.dispatchEvent(new Event("change", { bubbles: true }));
     }, hex);
   await setSwatch("#00cc44");
-  await page.click('button[aria-label="Ellipse"]');
+  await pickTool("Ellipse");
   await page.mouse.move(...at(380, 60));
   await page.mouse.down();
   await page.mouse.move(...at(520, 170), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
   await setSwatch("#1122cc");
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(80, 260));
   await page.mouse.down();
   await page.mouse.move(...at(240, 380), { steps: 6 });
@@ -3859,7 +3879,7 @@ assert(
   await page.waitForTimeout(250);
   const blue = await canvasPixel(160, 320);
   assert(blue[2] > 150 && blue[1] < 80, `the new rect is blue (${blue})`);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.mouse.click(...at(160, 320)); // pick the blue rect
   await page.waitForTimeout(200);
   await page.keyboard.press("i");
@@ -4000,7 +4020,7 @@ assert(
 
 // 9. CMYK doc smoke: new doc, draw, still renders.
 await newDocument(1280, 720, "cmyk");
-await page.click('button[aria-label="Rect"]');
+await pickTool("Rect");
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
 assert(px[3] === 255, "CMYK document renders shapes");
@@ -4028,7 +4048,7 @@ assert(
 );
 
 // 9c. CMYK fills expose ink sliders; cranking K darkens the shape.
-await page.click('button[aria-label="Move"]');
+await pickTool("Move");
 await page.mouse.click(box.x + 100 * sx, box.y + 100 * sy);
 await page.waitForTimeout(150);
 assert(
@@ -4059,7 +4079,7 @@ await page.locator(".fill-swatch").evaluate((el) => {
   setter.call(el, "#0000ff");
   el.dispatchEvent(new Event("input", { bubbles: true }));
 });
-await page.click('button[aria-label="Rect"]');
+await pickTool("Rect");
 await drag(50, 50, 200, 200);
 px = await canvasPixel(100, 100);
 assert(px[2] === 255 && px[0] === 0, "pure blue before proofing");
@@ -4114,7 +4134,7 @@ assert(
 {
   await newDocument(600, 400, "rgb", 300);
   assert((await page.locator(".topbar").innerText()).includes("300 dpi"), "the status line carries the dpi");
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   const b = await page.locator("#engine-page").boundingBox();
   await page.mouse.move(b.x + b.width * 0.2, b.y + b.height * 0.2);
   await page.mouse.down();
@@ -4165,7 +4185,7 @@ assert(
     "and a new document starts over",
   );
   // Leave something on the page for the recovery step that follows.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   const nameBox = await page.locator("#engine-page").boundingBox();
   await page.mouse.move(nameBox.x + nameBox.width * 0.2, nameBox.y + nameBox.height * 0.2);
   await page.mouse.down();
@@ -4203,7 +4223,7 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Paint"]');
+  await pickTool("Paint");
   await page.waitForTimeout(150);
   await page.fill('input[aria-label="Paint width"]', "40");
   await page.waitForTimeout(100);
@@ -4335,7 +4355,7 @@ assert(
     (await page.locator(".brush-ring circle").first().getAttribute("cx")) !== moved,
     "and the ring follows the pointer",
   );
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.waitForTimeout(150);
   assert(
     (await page.locator(".brush-ring").count()) === 0,
@@ -4344,7 +4364,7 @@ assert(
 
   // Rubbing at a layer that is not a paint layer takes a piece out of it
   // through a mask, and the brush puts the piece back.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(60, 300));
   await page.mouse.down();
   await page.mouse.move(...at(540, 380), { steps: 6 });
@@ -4355,7 +4375,7 @@ assert(
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   const beforeRub = await page.locator(".panel ul li").count();
-  await page.click('button[aria-label="Paint"]');
+  await pickTool("Paint");
   await page.click('button[aria-label="Erase"]');
   await page.waitForTimeout(150);
   await page.mouse.move(...at(300, 340));
@@ -4400,7 +4420,7 @@ assert(
   // The clone brush paints with what is already on the page: alt-click
   // says where to read from, and a stroke lifts that colour to where it
   // is drawn — following the source rather than keeping a copy of it.
-  await page.click('button[aria-label="Clone"]');
+  await pickTool("Clone");
   await page.waitForTimeout(150);
   const cloneRows = await page.locator(".panel ul li").count();
   await page.keyboard.down("Alt");
@@ -4442,7 +4462,7 @@ assert(
   // source, and the same stroke comes out differently with it on and off.
   const beforeHeal = await page.inputValue('input[aria-label="Fill colour"]');
   const rowsBeforeHeal = await page.locator(".panel ul li").count();
-  await page.click('button[aria-label="Paint"]');
+  await pickTool("Paint");
   await page.fill('input[aria-label="Fill colour"]', "#dddddd");
   await page.waitForTimeout(150);
   await page.mouse.move(...at(100, 100));
@@ -4453,7 +4473,7 @@ assert(
   const pale = await canvasPixel(300, 100);
   assert(pale[0] > 180 && pale[3] > 200, `a pale stroke to land on (${pale})`);
 
-  await page.click('button[aria-label="Clone"]');
+  await pickTool("Clone");
   await page.waitForTimeout(150);
   await page.keyboard.down("Alt");
   await page.mouse.move(...at(160, 200));
@@ -4461,6 +4481,10 @@ assert(
   await page.mouse.up();
   await page.keyboard.up("Alt");
   await page.waitForTimeout(200);
+  // What the source holds, rather than a colour assumed from earlier
+  // steps: the colour carried this far depends on which optional blocks
+  // ran, so the test reads it instead of naming it.
+  const source = await canvasPixel(160, 200);
   const dab = async () => {
     await page.mouse.move(...at(300, 100));
     await page.mouse.down();
@@ -4481,8 +4505,9 @@ assert(
     `healing kept the colour it landed in (${pale} -> ${healed})`,
   );
   assert(
-    stamped[1] > stamped[0] + 30,
-    `and with it off the source comes over as it is (${stamped})`,
+    stamped.slice(0, 3).every((v, i) => Math.abs(v - source[i]) < 40) &&
+      stamped.slice(0, 3).some((v, i) => Math.abs(v - pale[i]) > 30),
+    `and with it off the source comes over as it is (${source} -> ${stamped})`,
   );
   await page.click('button[aria-label="Heal"]');
   // Take the whole trial back — the strokes and the layers they made —
@@ -4503,7 +4528,7 @@ assert(
     "and the whole trial undoes away",
   );
   await page.fill('input[aria-label="Fill colour"]', beforeHeal);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.waitForTimeout(150);
 
   // The panel shows what each layer holds, not only what it is called.
@@ -4558,13 +4583,13 @@ assert(
   );
 
   // Draw something, then give it a palette colour.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(100, 100));
   await page.mouse.down();
   await page.mouse.move(...at(300, 250), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await setColor("Fill colour", "#00aaff");
   await page.click('button[aria-label="Add to the palette"]');
   await page.waitForTimeout(250);
@@ -4608,13 +4633,13 @@ assert(
   };
   // An elbow: right along the top, then down. Twenty-four wide, so an
   // end and a corner are a dozen pixels of ink rather than two.
-  await page.click('button[aria-label="Pen"]');
+  await pickTool("Pen");
   await click(150, 120);
   await click(330, 120);
   await click(330, 280);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li", { hasText: "Path" }).first().click();
   await page.waitForTimeout(200);
   const width = page.locator('input[aria-label="Stroke width"]');
@@ -4668,13 +4693,13 @@ assert(
 
   // A rect's stroke is a band inside a closed outline: it never stops
   // and its corners are its own, so neither question is asked of it.
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(page_.x + 400 * ux, page_.y + 300 * uy);
   await page.mouse.down();
   await page.mouse.move(page_.x + 550 * ux, page_.y + 380 * uy, { steps: 5 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
   await page.waitForTimeout(200);
   await page.check('input[aria-label="Stroke enabled"]');
@@ -4692,7 +4717,7 @@ assert(
   await newDocument(600, 300, "rgb");
   const at = await page.locator("#engine-page").boundingBox();
   const [ux, uy] = [at.width / 600, at.height / 300];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(at.x + 20 * ux, at.y + 20 * uy);
   await page.mouse.down();
   await page.mouse.move(at.x + 80 * ux, at.y + 60 * uy, { steps: 5 });
@@ -4744,7 +4769,7 @@ assert(
   await newDocument(400, 300, "rgb");
   const at = await page.locator("#engine-page").boundingBox();
   const [ux, uy] = [at.width / 400, at.height / 300];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(at.x + 20 * ux, at.y + 20 * uy);
   await page.mouse.down();
   await page.mouse.move(at.x + 80 * ux, at.y + 80 * uy, { steps: 5 });
@@ -4801,13 +4826,13 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
-  await page.click('button[aria-label="Rect"]');
+  await pickTool("Rect");
   await page.mouse.move(...at(50, 50));
   await page.mouse.down();
   await page.mouse.move(...at(250, 150), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(300);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(250);
   const size = async () => [
@@ -4896,7 +4921,7 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   const drawn = async (tool, x0, y0, x1, y1, shift, alt) => {
-    await page.click(`button[aria-label="${tool}"]`);
+    await pickTool(tool);
     if (shift) await page.keyboard.down("Shift");
     if (alt) await page.keyboard.down("Alt");
     await page.mouse.move(...at(x0, y0));
@@ -4906,7 +4931,7 @@ assert(
     if (shift) await page.keyboard.up("Shift");
     if (alt) await page.keyboard.up("Alt");
     await page.waitForTimeout(300);
-    await page.click('button[aria-label="Move"]');
+    await pickTool("Move");
     await page.locator(".panel ul li").first().click();
     await page.waitForTimeout(250);
     return [
@@ -4958,7 +4983,7 @@ assert(
   // A pen segment held to 45°: clicked well off the diagonal, the anchor
   // lands on it. The path is two anchors, finished with Enter, so its
   // box is the segment's own.
-  await page.click('button[aria-label="Pen"]');
+  await pickTool("Pen");
   await page.mouse.click(...at(100, 300));
   await page.waitForTimeout(120);
   await page.keyboard.down("Shift");
@@ -4967,7 +4992,7 @@ assert(
   await page.waitForTimeout(120);
   await page.keyboard.press("Enter");
   await page.waitForTimeout(300);
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(250);
   const [pw, ph] = [
@@ -4999,13 +5024,13 @@ assert(
     // rather than having to be picked again afterwards.
     await page.fill('input[aria-label="Fill colour"]', hex);
     await page.waitForTimeout(150);
-    await page.click('button[aria-label="Rect"]');
+    await pickTool("Rect");
     await page.mouse.move(...at(x0, 40));
     await page.mouse.down();
     await page.mouse.move(...at(x1, 260), { steps: 6 });
     await page.mouse.up();
     await page.waitForTimeout(250);
-    await page.click('button[aria-label="Move"]');
+    await pickTool("Move");
   }
   const px = (x, y) => canvasPixel(x, y);
   const flat = await px(100, 150);
@@ -5098,14 +5123,14 @@ assert(
     [20, 140],
     [200, 380],
   ]) {
-    await page.click('button[aria-label="Frame"]');
+    await pickTool("Frame");
     await page.mouse.move(...at(x0, 40));
     await page.mouse.down();
     await page.mouse.move(...at(x1, 200), { steps: 6 });
     await page.mouse.up();
     await page.waitForTimeout(300);
   }
-  await page.click('button[aria-label="Move"]');
+  await pickTool("Move");
   const [dl] = await Promise.all([
     page.waitForEvent("download"),
     (await menuItem("File", "Export PDF of the frames")).click(),
@@ -5120,6 +5145,108 @@ assert(
       pdf.includes("/MediaBox [0 0 180.000 160.000]"),
     "each page is its own frame's size",
   );
+}
+
+// 9j9. The shape tools share a slot, a polygon and a star are drawn from
+// it, the toolbar can be carried off its edge, and the panel is as wide
+// as it is dragged to be.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const drag = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  const ink = (x, y) => canvasPixel(x, y).then((px) => px[3] > 128);
+
+  // The rail holds one shape at a time, and taking another out of the
+  // group puts that one in the slot.
+  assert(
+    (await page.locator('.toolbar .tool-group > button[aria-label="Rect"]').count()) === 1,
+    "the rail's shape slot starts on the rect",
+  );
+  await pickTool("Polygon");
+  assert(
+    (await page.locator('.toolbar .tool-group > button[aria-label="Polygon"]').count()) === 1,
+    "and holds whichever shape was taken out of the group",
+  );
+
+  // A polygon of five sides, inscribed in the box that was dragged: its
+  // top point is on the middle of the top edge, so the box's own top
+  // corners are bare.
+  await page.locator('input[aria-label="Sides"]').fill("5");
+  await page.waitForTimeout(150);
+  await drag(100, 60, 300, 260);
+  assert(await ink(200, 70), "the polygon's top point is on the middle");
+  assert(!(await ink(110, 70)), "and its box's corner is bare");
+  assert(await ink(200, 180), "with a filled middle");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
+  // A star of the same count reaches the same points but is cut in
+  // between them, so the middle of an edge is bare where a polygon's is
+  // not.
+  await pickTool("Star");
+  await drag(100, 60, 300, 260);
+  assert(await ink(200, 70), "the star's top point reaches as far");
+  assert(await ink(200, 180), "and it is filled at the middle");
+  assert(!(await ink(120, 120)), "but cut away between its points");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
+  // A line is the drag itself, stroked, from end to end.
+  await pickTool("Line");
+  await drag(80, 240, 320, 240);
+  assert(await ink(200, 240), "the line is drawn along the drag");
+  assert(!(await ink(200, 200)), "and is a line, not the box around it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
+  // The toolbar is carried off its edge by its grip, and put back.
+  const railAt = async () => (await page.locator(".toolbar").boundingBox()).x;
+  const home = await railAt();
+  const grip = await page.locator('button[aria-label="Move the toolbar"]').boundingBox();
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + 320, grip.y + 140, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert((await railAt()) > home + 200, "the toolbar went where it was carried");
+  assert(
+    await page.locator(".toolbar").evaluate((el) => el.classList.contains("floating")),
+    "and floats rather than sitting in the row",
+  );
+  await page.dblclick('button[aria-label="Move the toolbar"]');
+  await page.waitForTimeout(250);
+  assert(
+    Math.abs((await railAt()) - home) < 2,
+    "double-clicking the grip docks it again",
+  );
+
+  // The panel's own edge sets how wide it is.
+  const panelWidth = async () =>
+    (await page.locator(".panel").boundingBox()).width;
+  const was = await panelWidth();
+  const edge = await page.locator('[aria-label="Panel width"]').boundingBox();
+  await page.mouse.move(edge.x + edge.width / 2, edge.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(edge.x - 90, edge.y + 100, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const now = await panelWidth();
+  assert(
+    now > was + 60,
+    `the panel is as wide as its edge was dragged (${was} to ${now})`,
+  );
+
+  // Leave a layer behind: the recovery block that follows needs a
+  // document with something in it to lose.
+  await pickTool("Rect");
+  await drag(60, 60, 340, 240);
 }
 
 // 10. Recovery: a draft of the document is kept as it changes, and a

@@ -15,6 +15,7 @@ import {
   NodeId,
   NodeKind,
   Pin,
+  Stroke,
   Swatch,
   Transform,
   VectorShape,
@@ -127,6 +128,9 @@ const TOOLS = [
   "Frame",
   "Rect",
   "Ellipse",
+  "Line",
+  "Polygon",
+  "Star",
   "Pen",
   "Brush",
   "Paint",
@@ -135,6 +139,11 @@ const TOOLS = [
   "Crop",
   "Eyedropper",
 ] as const;
+
+/** The tools that draw a shape, which share one slot in the rail: the
+ * one last used sits in it and the rest are a press away, the way a
+ * rail with more tools than room has always done it. */
+const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star"] as const;
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
  * called Move here. */
@@ -144,6 +153,9 @@ const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   f: "Frame",
   r: "Rect",
   e: "Ellipse",
+  l: "Line",
+  y: "Polygon",
+  k: "Star",
   p: "Pen",
   b: "Brush",
   n: "Paint",
@@ -206,6 +218,9 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Frame: "F",
   Rect: "R",
   Ellipse: "E",
+  Line: "L",
+  Polygon: "Y",
+  Star: "K",
   Pen: "P",
   Brush: "B",
   Paint: "N",
@@ -220,6 +235,9 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Frame: "frame",
   Rect: "rect",
   Ellipse: "ellipse",
+  Line: "line",
+  Polygon: "polygon",
+  Star: "star",
   Pen: "pen",
   Brush: "brush",
   Paint: "paint",
@@ -415,7 +433,46 @@ function isTextEntry(target: EventTarget | null): boolean {
 }
 
 /** The tools that drag a box out of nothing, which shift squares off. */
-const BOX_TOOLS = new Set<string>(["Rect", "Ellipse", "Frame", "Crop"]);
+const BOX_TOOLS = new Set<string>([
+  "Rect",
+  "Ellipse",
+  "Polygon",
+  "Star",
+  "Frame",
+  "Crop",
+]);
+
+/** The points of a regular polygon, or of a star of the same count,
+ * inscribed in a `w` by `h` box with its first point at the top.
+ *
+ * A star's inner radius is the one that puts its inner points on the
+ * lines its outer points make — which is what makes a five-pointed star
+ * look like a five-pointed star rather than a cog — kept within reach of
+ * that for counts where the arithmetic runs away. */
+function polygonPoints(
+  n: number,
+  w: number,
+  h: number,
+  star: boolean,
+): [number, number][] {
+  const sides = Math.max(3, Math.min(24, Math.round(n)));
+  const [cx, cy] = [w / 2, h / 2];
+  const inner = star
+    ? Math.min(
+        0.8,
+        Math.max(0.2, Math.cos((2 * Math.PI) / sides) / Math.cos(Math.PI / sides)),
+      )
+    : 1;
+  const count = star ? sides * 2 : sides;
+  return Array.from({ length: count }, (_, i) => {
+    const a = -Math.PI / 2 + (i * 2 * Math.PI) / count;
+    const r = star && i % 2 === 1 ? inner : 1;
+    return [cx + cx * r * Math.cos(a), cy + cy * r * Math.sin(a)] as [
+      number,
+      number,
+    ];
+  });
+}
 
 /** The box a drag out of nothing describes: from the point it began to
  * the point it is at, or about that first point when it is the middle
@@ -668,6 +725,86 @@ export function App() {
    * width its edge fades over, and whether it is rubbing paint out
    * instead of laying it down. */
   const [paintSize, setPaintSize] = useState(24);
+  /** How many sides a polygon has, or points a star. One number for the
+   * two, since a five-sided thing and a five-pointed one are the same
+   * ask made twice. */
+  const [sides, setSides] = useState(5);
+  /** Which of the shape tools sits in the rail's one shape slot, and
+   * whether the rest are showing. */
+  const [shapeTool, setShapeTool] = useState<Tool>("Rect");
+  const [shapesOpen, setShapesOpen] = useState(false);
+  useEffect(() => {
+    // However a shape tool was taken up — off the rail, out of the
+    // group, or by its letter — it is the one the slot then holds.
+    if (SHAPE_TOOLS.includes(tool as never)) setShapeTool(tool);
+  }, [tool]);
+  /** Where the toolbar has been carried to, or `null` while it is still
+   * against the left edge. Remembered across visits, since where someone
+   * put their tools is a preference like any other. */
+  const [floating, setFloating] = useState<[number, number] | null>(() => {
+    try {
+      const at = localStorage.getItem("chitrakar:toolbar");
+      return at ? (JSON.parse(at) as [number, number]) : null;
+    } catch {
+      return null;
+    }
+  });
+  useEffect(() => {
+    try {
+      if (floating) localStorage.setItem("chitrakar:toolbar", JSON.stringify(floating));
+      else localStorage.removeItem("chitrakar:toolbar");
+    } catch {
+      /* a browser that keeps nothing still runs the editor */
+    }
+  }, [floating]);
+  /** How wide the layers panel is, dragged by its own edge. */
+  const [panelWidth, setPanelWidth] = useState(() => {
+    const kept = Number(localStorage.getItem("chitrakar:panel"));
+    return Number.isFinite(kept) && kept >= 180 ? Math.min(kept, 560) : 240;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("chitrakar:panel", String(panelWidth));
+    } catch {
+      /* as above */
+    }
+  }, [panelWidth]);
+
+  /** Carry the toolbar: it lifts off the edge as soon as it is dragged,
+   * and settles back against it when dropped within reach of home. */
+  const onGripDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const start = [e.clientX, e.clientY];
+    const from = floating ?? [8, 96];
+    const move = (m: PointerEvent) => {
+      const at: [number, number] = [
+        Math.max(0, from[0] + m.clientX - start[0]),
+        Math.max(0, from[1] + m.clientY - start[1]),
+      ];
+      setFloating(at[0] < 40 ? null : at);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  /** Drag the panel's own edge to give it more or less room. */
+  const onPanelEdge = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const from = panelWidth;
+    const move = (m: PointerEvent) =>
+      setPanelWidth(Math.max(180, Math.min(560, from + startX - m.clientX)));
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
   const [paintSoftness, setPaintSoftness] = useState(0.5);
   const [erasing, setErasing] = useState(false);
   /** Whether the clone brush heals: laying the source's texture down in
@@ -1938,6 +2075,12 @@ export function App() {
     // beside one. It is remembered on the drag, since the box is worked
     // out again on the way up, when no event says whether alt was held.
     drag.fromCentre = e.altKey && BOX_TOOLS.has(drag.tool);
+    if (e.shiftKey && drag.tool === "Line") {
+      [drag.lastX, drag.lastY] = onEighths(
+        [drag.startX, drag.startY],
+        [drag.lastX, drag.lastY],
+      );
+    }
     if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
       const side = Math.max(
         Math.abs(drag.lastX - drag.startX),
@@ -2142,7 +2285,14 @@ export function App() {
 
     // Shape tools: commit the dragged bounds as a new object.
     const [x0, y0, w, h] = dragBox(drag);
-    if (w < MIN_SIZE || h < MIN_SIZE) return;
+    // A box needs both its sides; a line only needs its length. A
+    // horizontal line's box is a side high, so asking every shape for
+    // both sides would throw the line away as it was drawn.
+    const enough =
+      drag.tool === "Line"
+        ? Math.hypot(w, h) >= MIN_SIZE
+        : w >= MIN_SIZE && h >= MIN_SIZE;
+    if (!enough) return;
     if (drag.tool === "Crop") {
       // Crop to the dragged rectangle, clamped to the page: the document
       // becomes that rectangle and every layer shifts with it, so what was
@@ -2203,10 +2353,60 @@ export function App() {
     const [lw, lh] = local
       ? [Math.abs(far[0] - inside[0]), Math.abs(far[1] - inside[1])]
       : [w, h];
-    const shape =
-      drag.tool === "Rect"
-        ? { Rect: { width: lw, height: lh, radius: 0 } }
-        : { Ellipse: { rx: lw / 2, ry: lh / 2 } };
+    // A polygon and a star come out as paths rather than as shapes of
+    // their own: every anchor is then draggable the moment it is drawn,
+    // and every exporter already knows what a path is.
+    const path = (points: [number, number][], closed: boolean) => ({
+      Path: { points, closed, smooth: false, handles: [], subpaths: [] },
+    });
+    const ink = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+    let shape;
+    let paint: { fill: AuthoredColor | null; stroke: Stroke | null } = {
+      fill: ink,
+      stroke: null,
+    };
+    switch (drag.tool) {
+      case "Rect":
+        shape = { Rect: { width: lw, height: lh, radius: 0 } };
+        break;
+      case "Ellipse":
+        shape = { Ellipse: { rx: lw / 2, ry: lh / 2 } };
+        break;
+      case "Polygon":
+        shape = path(polygonPoints(sides, lw, lh, false), true);
+        break;
+      case "Star":
+        shape = path(polygonPoints(sides, lw, lh, true), true);
+        break;
+      // A line is the drag itself, from end to end, rather than the box
+      // around it — and it is stroked, since an open line has no inside.
+      default: {
+        const [ax, ay] = [drag.startX - x0, drag.startY - y0];
+        const [bx, by] = [drag.lastX - x0, drag.lastY - y0];
+        shape = path(
+          [
+            [ax, ay],
+            [bx, by],
+          ],
+          false,
+        );
+        paint = {
+          fill: null,
+          stroke: {
+            color: ink,
+            width: 4,
+            widths: [],
+            dash: [],
+            cap: "Round",
+            join: "Round",
+            start_marker: "None",
+            end_marker: "None",
+            align: null,
+          },
+        };
+        break;
+      }
+    }
     run({
       AddNode: {
         parent: local ? board : session.root_id,
@@ -2218,8 +2418,7 @@ export function App() {
               shape,
               // CMYK documents author ink values so the press profile
               // (and later export) drives their rendering.
-              fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
-              stroke: null,
+              ...paint,
               gradient: null,
             },
           },
@@ -4549,21 +4748,102 @@ export function App() {
         />
       )}
       <div className="workspace">
-        <nav className="toolbar" aria-label="Tools">
-          {TOOLS.map((t) => (
-            <button
-              key={t}
-              className={t === tool ? "tool active" : "tool"}
-              onClick={() => {
-                setTool(t);
-                setPenPoints([]);
-              }}
-              title={`${t} (${TOOL_HINT[t]})`}
-              aria-label={t}
-            >
-              <Icon name={TOOL_ICONS[t]} size={20} />
-            </button>
-          ))}
+        <nav
+          className={floating ? "toolbar floating" : "toolbar"}
+          aria-label="Tools"
+          style={floating ? { left: floating[0], top: floating[1] } : undefined}
+        >
+          {/* Picked up by its grip and put down anywhere; dropped back
+              against the left edge, or double-clicked, it docks again. */}
+          <button
+            className="tool grip"
+            aria-label="Move the toolbar"
+            title="Drag to move the toolbar, double-click to dock it"
+            onPointerDown={onGripDown}
+            onDoubleClick={() => setFloating(null)}
+          >
+            <Icon name="grip" size={20} />
+          </button>
+          {/* Every tool but the shapes, which share the one slot that
+              Rect's place in the list marks out. */}
+          {TOOLS.filter((t) => t === "Rect" || !SHAPE_TOOLS.includes(t as never)).map((t) =>
+            t === "Rect" ? (
+              // The shape tools share this slot: the one last used sits
+              // in it, and the rest are behind the corner.
+              <div className="tool-group" key="shapes">
+                <button
+                  className={
+                    SHAPE_TOOLS.includes(tool as never) ? "tool active" : "tool"
+                  }
+                  onClick={() => {
+                    setTool(shapeTool);
+                    setPenPoints([]);
+                  }}
+                  title={`${shapeTool} (${TOOL_HINT[shapeTool]})`}
+                  aria-label={shapeTool}
+                >
+                  <Icon name={TOOL_ICONS[shapeTool]} size={20} />
+                </button>
+                <button
+                  className="tool-more"
+                  aria-label="More shapes"
+                  aria-expanded={shapesOpen}
+                  title="The other shapes"
+                  onClick={() => setShapesOpen((open) => !open)}
+                />
+                {shapesOpen && (
+                  <div className="tool-flyout" role="group" aria-label="Shapes">
+                    {SHAPE_TOOLS.map((s) => (
+                      <button
+                        key={s}
+                        className={s === tool ? "tool active" : "tool"}
+                        onClick={() => {
+                          setShapeTool(s);
+                          setTool(s);
+                          setPenPoints([]);
+                          setShapesOpen(false);
+                        }}
+                        title={`${s} (${TOOL_HINT[s]})`}
+                        aria-label={s}
+                      >
+                        <Icon name={TOOL_ICONS[s]} size={20} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <button
+                key={t}
+                className={t === tool ? "tool active" : "tool"}
+                onClick={() => {
+                  setTool(t);
+                  setPenPoints([]);
+                }}
+                title={`${t} (${TOOL_HINT[t]})`}
+                aria-label={t}
+              >
+                <Icon name={TOOL_ICONS[t]} size={20} />
+              </button>
+            ),
+          )}
+          {/* How many sides, or points, the next one has. Only while one
+              of the two tools that asks is in hand. */}
+          {(tool === "Polygon" || tool === "Star") && (
+            <input
+              type="number"
+              className="tool-number"
+              min={3}
+              max={24}
+              value={sides}
+              onChange={(e) =>
+                setSides(Math.max(3, Math.min(24, Number(e.target.value) || 3)))
+              }
+              onKeyDown={(e) => e.stopPropagation()}
+              title={tool === "Star" ? "Points" : "Sides"}
+              aria-label={tool === "Star" ? "Points" : "Sides"}
+            />
+          )}
           <input
             type="color"
             value={fill}
@@ -5274,7 +5554,21 @@ export function App() {
             </>
           )}
         </main>
-        <aside className="panel" aria-label="Layers">
+        <aside
+          className="panel"
+          aria-label="Layers"
+          style={{ width: panelWidth }}
+        >
+          {/* The panel's own edge, dragged to give it more or less room.
+              Its width is remembered, since how much of the screen the
+              layers deserve is a matter of what is being made. */}
+          <div
+            className="panel-edge"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Panel width"
+            onPointerDown={onPanelEdge}
+          />
           <div className="panel-head">
             <h2>Layers</h2>
             <select

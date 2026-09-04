@@ -36,6 +36,10 @@ export type IconName =
   | "duplicate"
   | "shadow"
   | "crop"
+  | "line"
+  | "polygon"
+  | "star"
+  | "grip"
   | "turnRight"
   | "turnLeft"
   | "copy"
@@ -118,6 +122,16 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   // Tools
+  line: <path d="M4 20L20 4" />,
+  polygon: <path d="M12 3l7.8 5.7-3 9.2H7.2l-3-9.2z" />,
+  star: <path d="M12 3l2.6 6.1 6.6.5-5 4.3 1.5 6.4L12 17l-5.7 3.3 1.5-6.4-5-4.3 6.6-.5z" />,
+  // Two short rows of dots: what a thing that can be picked up and
+  // carried has looked like for as long as there have been palettes.
+  grip: (
+    <>
+      <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" />
+    </>
+  ),
   turnRight: (
     <>
       <path d="M20 12a8 8 0 1 1-2.34-5.66" />
