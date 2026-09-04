@@ -309,6 +309,24 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
                 width: s.width().get() * ((sx.abs() + sy.abs()) / 2.0),
                 widths: Vec::new(),
                 dash: Vec::new(),
+                // What the file says, not what this engine happens to
+                // default to: SVG's own default is a flat end and a
+                // mitred corner, and a line imported round when it was
+                // drawn flat is a line that came in wrong.
+                cap: match s.linecap() {
+                    usvg::LineCap::Butt => chitrakar_doc::StrokeCap::Butt,
+                    usvg::LineCap::Round => chitrakar_doc::StrokeCap::Round,
+                    usvg::LineCap::Square => chitrakar_doc::StrokeCap::Square,
+                },
+                join: match s.linejoin() {
+                    usvg::LineJoin::Round => chitrakar_doc::StrokeJoin::Round,
+                    usvg::LineJoin::Bevel => chitrakar_doc::StrokeJoin::Bevel,
+                    // A miter that clips is a miter as far as this
+                    // engine is concerned; it has one limit, not two.
+                    usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => {
+                        chitrakar_doc::StrokeJoin::Miter
+                    }
+                },
             })
         });
     }
@@ -468,6 +486,43 @@ mod tests {
         assert!(
             (85..115).any(|x| (80..100).any(|y| px(x, y)[3] > 0)),
             "glyph ink"
+        );
+    }
+
+    /// A line comes in ending and turning the way the file says, not the
+    /// way this engine happens to default to. SVG's own defaults are a
+    /// flat end and a mitred corner; ours are round.
+    #[test]
+    fn a_line_comes_in_ending_the_way_the_file_says() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60">
+  <path d="M5 5 h30 v30" fill="none" stroke="#000000" stroke-width="6"/>
+  <path d="M5 45 h30" fill="none" stroke="#000000" stroke-width="6"
+        stroke-linecap="square" stroke-linejoin="bevel"/>
+</svg>"##;
+        let shapes = import_svg(svg.as_bytes()).unwrap().shapes;
+        let ends = |i: usize| {
+            let NodeKind::Vector {
+                stroke: Some(s), ..
+            } = &shapes[i].kind
+            else {
+                panic!("a stroked path")
+            };
+            (s.cap, s.join)
+        };
+        assert_eq!(
+            ends(0),
+            (
+                chitrakar_doc::StrokeCap::Butt,
+                chitrakar_doc::StrokeJoin::Miter
+            ),
+            "what the file leaves unsaid is SVG's own default, not ours"
+        );
+        assert_eq!(
+            ends(1),
+            (
+                chitrakar_doc::StrokeCap::Square,
+                chitrakar_doc::StrokeJoin::Bevel
+            ),
         );
     }
 

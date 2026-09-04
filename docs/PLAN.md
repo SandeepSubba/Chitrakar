@@ -68,7 +68,21 @@ without reading anything else.*
   would along a wire rather than restarting at every anchor, with the
   usual patterns in the panel and the same lengths carried into SVG and
   PDF. A dashed outline is still picked along the whole of it, so
-  clicking a gap catches the line. A rect or ellipse wears its stroke as
+  clicking a gap catches the line.
+  A line says where it stops and how it turns: flat on the last point,
+  rounded or squared off past it, and a corner carried out to where the
+  two outer edges cross (up to four half-widths, past which it is cut
+  off instead), rounded, or bevelled — asked of a path, which has ends
+  and corners, and not of a rect or an ellipse, whose stroke is a band
+  lying inside a closed outline. Every dash gets the same ends, which is
+  what makes a dashed rule end square rather than round. The region a
+  stroke covers is stated once, as a union of convex pieces
+  (`chitrakar_render::stroke_pieces`), and both renderers read that one
+  statement — the CPU tests a sample against the pieces, the GPU lays
+  them down as geometry — so neither can invent a corner of its own.
+  It travels: SVG's stroke-linecap and stroke-linejoin, PDF's J and j,
+  and a placed SVG comes in ending and turning the way its file says
+  rather than the way this engine defaults. A rect or ellipse wears its stroke as
   a band inside its edge, so a thick border never grows the shape; SVG
   centres a stroke on the outline instead, so export writes those two as
   a fill at full size and a stroke on the same shape half a width in —
@@ -323,9 +337,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~275),
+- **Verify before committing:** `cargo test --workspace` (~281),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~501 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~513 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -348,12 +362,14 @@ without reading anything else.*
   follows the shape the way the CPU's does, and the layer's opacity
   scales it in the fragment. A stroke is an inner band on a rect or an
   ellipse, measured from both rims so stroking one never grows its
-  bounds; on a path it is the union of the round-capped segments the CPU
-  tests a sample against, laid down as geometry — a trapezoid per
-  segment, a disc at every point — and unioned in the stencil, so joins,
-  caps and a width that swells and tapers all fall out of the one
-  region (`chitrakar_render::stroke_skeleton` states that region once,
-  so the two renderers cannot drift). Text is the whole block rasterized
+  bounds; on a path it is the very region the CPU tests a sample
+  against, laid down as geometry — a band per segment, a disc where an
+  end or a corner is round, a polygon where one is squared, bevelled or
+  mitred — and unioned in the stencil, so caps, joins and a width that
+  swells and tapers all fall out of the one region
+  (`chitrakar_render::stroke_pieces` states that region once, so the two
+  renderers cannot drift; a dashed stroke is its pieces, so the GPU
+  breaks a line up the way the CPU does). Text is the whole block rasterized
   to coverage at the size it is seen at — by `chitrakar_render::
   text_raster`, which the CPU path calls too, so both read the same
   bitmap — and drawn as a quad over the block's box. It declines

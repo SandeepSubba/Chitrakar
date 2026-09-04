@@ -713,12 +713,25 @@ impl<'a> Page<'a> {
                                     num(stroke.width * 2.0)
                                 );
                             }
-                            // A centred line with round caps and joins, as
-                            // the renderer draws it.
+                            // A centred line, ending and turning the way
+                            // the renderer draws it. PDF numbers the same
+                            // three of each: butt, round, square for a
+                            // cap; miter, round, bevel for a join.
                             VectorShape::Path { .. } => {
+                                let cap = match stroke.cap {
+                                    chitrakar_doc::StrokeCap::Butt => 0,
+                                    chitrakar_doc::StrokeCap::Round => 1,
+                                    chitrakar_doc::StrokeCap::Square => 2,
+                                };
+                                let join = match stroke.join {
+                                    chitrakar_doc::StrokeJoin::Miter => 0,
+                                    chitrakar_doc::StrokeJoin::Round => 1,
+                                    chitrakar_doc::StrokeJoin::Bevel => 2,
+                                };
                                 let _ = writeln!(
                                     self.content,
-                                    "1 J 1 j {} w\n{path}S",
+                                    "{cap} J {join} j {} M {} w\n{path}S",
+                                    num(chitrakar_doc::MITER_LIMIT),
                                     num(stroke.width)
                                 );
                             }
@@ -1426,6 +1439,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         add(&mut doc, ring, [60.0, 10.0]);
@@ -1464,6 +1479,31 @@ mod tests {
             )),
         })
         .unwrap();
+        // A line with ends and a corner of its own, so the page has to
+        // say how it ends and turns rather than taking PDF's own flat
+        // ends and mitred corners.
+        let mut elbow = shape(
+            "elbow",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [14.0, 0.0], [14.0, 20.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            None,
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut elbow.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Square,
+                join: chitrakar_doc::StrokeJoin::Bevel,
+            });
+        }
+        add(&mut doc, elbow, [98.0, 6.0]);
         let res = doc.add_resource(2, 1, vec![0, 255, 0, 255, 0, 0, 0, 0]);
         let img = add(
             &mut doc,
@@ -1816,6 +1856,17 @@ mod tests {
             at(85, 55)
         );
         assert_eq!(at(95, 55), &[255, 255, 255], "its clear pixel shows paper");
+        assert!(
+            at(112, 28)[2] > 200 && at(112, 28)[0] < 60,
+            "the line is squared off past its last point {:?}",
+            at(112, 28)
+        );
+        assert_eq!(at(112, 31), &[255, 255, 255], "and stops there");
+        assert_eq!(
+            at(114, 3),
+            &[255, 255, 255],
+            "its corner is cut across, not carried out to a point"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

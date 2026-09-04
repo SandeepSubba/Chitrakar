@@ -4466,6 +4466,81 @@ assert(
   );
 }
 
+// 9j2. Where a line stops and how it turns: the two pickers change the
+// shape of the ink at the end of a line and at its corner, not just the
+// markup. On a page of its own, so the probes have bare paper around them.
+{
+  await newDocument(600, 400, "rgb");
+  const page_ = await page.locator("#engine-page").boundingBox();
+  const [ux, uy] = [page_.width / 600, page_.height / 400];
+  const click = async (x, y) => {
+    await page.mouse.click(page_.x + x * ux, page_.y + y * uy);
+    await page.waitForTimeout(80);
+  };
+  // An elbow: right along the top, then down. Twenty-four wide, so an
+  // end and a corner are a dozen pixels of ink rather than two.
+  await page.click('button[aria-label="Pen"]');
+  await click(150, 120);
+  await click(330, 120);
+  await click(330, 280);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li", { hasText: "Path" }).first().click();
+  await page.waitForTimeout(200);
+  const width = page.locator('input[aria-label="Stroke width"]');
+  await width.fill("24");
+  await width.evaluate((el) => el.blur());
+  await page.waitForTimeout(250);
+
+  const ink = async (x, y) => (await canvasPixel(x, y))[3] > 128;
+  const pick = async (what, value) => {
+    await page.selectOption(`select[aria-label="Line ${what}"]`, value);
+    await page.waitForTimeout(250);
+  };
+  assert(await ink(240, 120), "the line itself is drawn");
+  // Six past the last point, down the middle of the line; and out at the
+  // corner a squared end would have, which is nine past and nine across.
+  const [pastEnd, endCorner] = [[330, 286], [339, 289]];
+  // Just outside the turn, and out where only a miter reaches.
+  const [byTheCorner, thePoint] = [[333, 117], [339, 111]];
+
+  assert(await ink(...pastEnd), "a round end reaches past the last point");
+  assert(!(await ink(...endCorner)), "but has no corner out at the side");
+  await pick("ends", "Butt");
+  assert(!(await ink(...pastEnd)), "a flat end stops on the last point");
+  await pick("ends", "Square");
+  assert(await ink(...pastEnd), "a square end reaches past it");
+  assert(await ink(...endCorner), "and has a corner");
+
+  assert(await ink(...byTheCorner), "the turn is filled");
+  assert(!(await ink(...thePoint)), "a round corner goes no further");
+  await pick("corners", "Miter");
+  assert(await ink(...thePoint), "a mitred one is carried out to a point");
+  await pick("corners", "Bevel");
+  assert(!(await ink(...thePoint)), "a bevelled one is cut across");
+  assert(await ink(...byTheCorner), "and still fills the turn");
+
+  // A rect's stroke is a band inside a closed outline: it never stops
+  // and its corners are its own, so neither question is asked of it.
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(page_.x + 400 * ux, page_.y + 300 * uy);
+  await page.mouse.down();
+  await page.mouse.move(page_.x + 550 * ux, page_.y + 380 * uy, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Move"]');
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.waitForTimeout(200);
+  await page.check('input[aria-label="Stroke enabled"]');
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('input[aria-label="Stroke width"]').count()) === 1 &&
+      (await page.locator('select[aria-label="Line ends"]').count()) === 0,
+    "a rect's stroke is asked neither question",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

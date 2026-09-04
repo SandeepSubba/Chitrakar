@@ -9,8 +9,8 @@ mod node;
 
 pub use node::{
     Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Guide, Mask, MaskKind, Node,
-    NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StyleRun, TextAlign, TextSpec,
-    Transform, VectorShape,
+    NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StrokeCap, StrokeJoin, StyleRun,
+    TextAlign, TextSpec, Transform, VectorShape, MITER_LIMIT,
 };
 
 use chitrakar_color::ColorMode;

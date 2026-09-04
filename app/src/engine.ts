@@ -101,7 +101,16 @@ export interface Stroke {
   /** Lengths on and off in turn, repeating, in the shape's own units.
    * Empty is a solid line. */
   dash: number[];
+  /** How the line ends where it stops, and at either end of every dash.
+   * Paths only: a rect's or an ellipse's stroke is a band inside a
+   * closed outline, which never stops. */
+  cap: StrokeCap;
+  /** How the line turns a corner. Paths only, for the same reason. */
+  join: StrokeJoin;
 }
+
+export type StrokeCap = "Butt" | "Round" | "Square";
+export type StrokeJoin = "Miter" | "Round" | "Bevel";
 
 export type Filter =
   | { GaussianBlur: { sigma: number } }

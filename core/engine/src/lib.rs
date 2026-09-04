@@ -5635,6 +5635,8 @@ mod save_probe {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         session

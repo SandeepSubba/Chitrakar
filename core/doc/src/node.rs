@@ -691,7 +691,50 @@ pub struct Stroke {
     /// the same line, and the dashes win.
     #[serde(default)]
     pub dash: Vec<f32>,
+    /// How the stroke ends where the line stops — including at either
+    /// end of every dash. Paths only: a rect's or an ellipse's stroke is
+    /// a band lying inside a closed outline, which never stops.
+    #[serde(default)]
+    pub cap: StrokeCap,
+    /// How the stroke turns a corner. Paths only, for the same reason.
+    #[serde(default)]
+    pub join: StrokeJoin,
 }
+
+/// How a stroke ends where its line stops.
+///
+/// Round is the default because it is what the engine drew before there
+/// was a choice — a stroke was a distance from the line, and a distance
+/// rounds every end — so a file written then still reads the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StrokeCap {
+    /// Flat on the last point: the line stops exactly where it ends,
+    /// which is what a rule, a tick and a dash want.
+    Butt,
+    #[default]
+    Round,
+    /// Flat half a width past the last point, so the line ends square.
+    Square,
+}
+
+/// How a stroke turns the corner at a point where two segments meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StrokeJoin {
+    /// Carried out to the point where the two outer edges cross, which
+    /// is what makes a drawn corner look drawn — falling back to a bevel
+    /// where that point would run away, past [`MITER_LIMIT`] widths.
+    Miter,
+    #[default]
+    Round,
+    /// Cut straight across the corner.
+    Bevel,
+}
+
+/// How far a miter may reach, as a multiple of the stroke's half-width,
+/// before the corner is cut off instead. Four is what SVG and PDF both
+/// take as read, and it is the angle (about 29°) below which a miter
+/// stops being a corner and becomes a spike.
+pub const MITER_LIMIT: f32 = 4.0;
 
 /// A non-destructive mask attachable to any node: it modulates the node's
 /// output (a group's composite, a shape's paint, an adjustment's or filter's
@@ -952,6 +995,20 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A stroke written before there was a choice says nothing about how
+    /// it ends or turns, and has to come back the way it was drawn then:
+    /// a distance from the line, which rounds every end and every corner.
+    #[test]
+    fn a_stroke_from_before_the_choice_reads_as_round() {
+        let old = r#"{"color":{"Srgb":{"r":1,"g":0,"b":0,"a":1}},"width":4}"#;
+        let stroke: Stroke = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (stroke.cap, stroke.join),
+            (StrokeCap::Round, StrokeJoin::Round)
+        );
+        assert!(stroke.dash.is_empty() && stroke.widths.is_empty());
+    }
     use super::*;
 
     fn block(text: &str, runs: Vec<StyleRun>) -> TextSpec {

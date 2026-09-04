@@ -1050,7 +1050,14 @@ export function App() {
                     : null,
                   stroke: closed
                     ? null
-                    : { color: hexColor(fill), width: 4, widths: [], dash: [] },
+                    : {
+                        color: hexColor(fill),
+                        width: 4,
+                        widths: [],
+                        dash: [],
+                        cap: "Round",
+                        join: "Round",
+                      },
                   gradient: null,
                 },
               },
@@ -2045,6 +2052,8 @@ export function App() {
                   width: brushSize,
                   widths,
                   dash: [],
+                  cap: "Round",
+                  join: "Round",
                 },
                 gradient: null,
               },
@@ -7194,6 +7203,8 @@ function KindProps({
                         width: 4,
                         widths: [],
                         dash: [],
+                        cap: "Round",
+                        join: "Round",
                       }
                     : null,
                 }),
@@ -7255,6 +7266,38 @@ function KindProps({
             </select>
           </label>
         )}
+        {/* Where a line stops and how it turns a corner. A rect's and an
+            ellipse's stroke is a band lying inside a closed outline: it
+            never stops, and its corners are the shape's own — so neither
+            question arises and neither is asked. */}
+        {v.stroke &&
+          "Path" in v.shape &&
+          (
+            [
+              ["Ends", "cap", ["Butt", "Round", "Square"]],
+              ["Corners", "join", ["Miter", "Round", "Bevel"]],
+            ] as const
+          ).map(([label, key, choices]) => (
+            <label className="row" key={key}>
+              {label}
+              <select
+                value={v.stroke![key] ?? choices[1]}
+                onChange={(e) =>
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, [key]: e.target.value } }),
+                    false,
+                  )
+                }
+                aria-label={`Line ${label.toLowerCase()}`}
+              >
+                {choices.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
         {"Rect" in v.shape &&
           (() => {
             const rect = v.shape.Rect;

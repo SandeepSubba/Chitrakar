@@ -412,7 +412,7 @@ fn bounds_in_parent_space_inner(
             // Path strokes are centered on the line, so they overhang the
             // anchor bounds (rect/ellipse strokes are inner bands and don't).
             if let (VectorShape::Path { .. }, Some(stroke)) = (shape, stroke) {
-                let pad = stroke.width * max_scale(node.transform);
+                let pad = stroke_pad(stroke) * max_scale(node.transform);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
                 }
@@ -1168,32 +1168,11 @@ fn render_child(
                     }
                 };
                 if let Some(paint) = fill_paint {
-                    paint_shape(
-                        dst,
-                        doc,
-                        shape,
-                        t,
-                        &paint,
-                        blend,
-                        clip,
-                        None,
-                        &[],
-                        &[],
-                        mask,
-                    );
+                    paint_shape(dst, doc, shape, t, &paint, blend, clip, None, mask);
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
-                    // A dashed stroke is drawn at one width: the pieces
-                    // the pattern leaves are what is stroked, and a width
-                    // that swells along the line has nothing to swell
-                    // along any more.
-                    let dashes = dashed_rings(shape, &stroke.dash, stroke.width);
-                    let widths = if dashes.is_empty() {
-                        flatten_widths(shape, &stroke.widths)
-                    } else {
-                        Vec::new()
-                    };
+                    let pieces = stroke_pieces(&flatten_shape(shape), stroke);
                     paint_shape(
                         dst,
                         doc,
@@ -1202,9 +1181,11 @@ fn render_child(
                         &Paint::Solid(color),
                         blend,
                         clip,
-                        Some(stroke.width),
-                        &widths,
-                        &dashes,
+                        Some(&StrokeGeom {
+                            width: stroke.width,
+                            pad: stroke_pad(stroke),
+                            pieces: &pieces,
+                        }),
                         mask,
                     );
                 }
@@ -2400,6 +2381,288 @@ pub struct StrokeRing {
     pub closed: bool,
 }
 
+/// One convex piece of the region a stroke covers. A stroke is the
+/// *union* of its pieces: a point is stroked if any one of them holds
+/// it, however they overlap. Stating the region this way lets a renderer
+/// that samples it and a renderer that draws it read the same statement,
+/// which is what keeps the two from drifting.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StrokePiece {
+    /// The band from `a` to `b`, its half-width running from `ha` to
+    /// `hb`, cut flat at both ends. A half-width that changes linearly
+    /// has a straight edge, so this is exactly the quadrilateral through
+    /// the four rim points — no more and no less than the segment.
+    Band {
+        a: [f32; 2],
+        b: [f32; 2],
+        ha: f32,
+        hb: f32,
+    },
+    /// A round cap or a round join, which are the same thing.
+    Disc { at: [f32; 2], r: f32 },
+    /// A corner carried across (bevel or miter) or an end squared off:
+    /// a convex polygon of three or four points, wound either way.
+    Corner([[f32; 2]; 4], usize),
+}
+
+impl StrokePiece {
+    /// Whether the piece holds a point in the shape's own space.
+    pub fn covers(&self, x: f32, y: f32) -> bool {
+        match *self {
+            StrokePiece::Band { a, b, ha, hb } => {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len2 = dx * dx + dy * dy;
+                if len2 <= 1e-12 {
+                    return false;
+                }
+                let t = ((x - a[0]) * dx + (y - a[1]) * dy) / len2;
+                if !(0.0..=1.0).contains(&t) {
+                    return false;
+                }
+                let (cx, cy) = (a[0] + t * dx, a[1] + t * dy);
+                let d2 = (x - cx).powi(2) + (y - cy).powi(2);
+                let w = ha + (hb - ha) * t;
+                w > 0.0 && d2 <= w * w
+            }
+            StrokePiece::Disc { at, r } => {
+                r > 0.0 && (x - at[0]).powi(2) + (y - at[1]).powi(2) <= r * r
+            }
+            StrokePiece::Corner(pts, n) => {
+                // Convex, so a point is inside when it is on the same
+                // side of every edge. A piece with no area holds nothing
+                // — otherwise "on the same side of all of them" would be
+                // vacuously true and a degenerate corner would cover the
+                // page.
+                let side = |i: usize| {
+                    let (p, q) = (pts[i], pts[(i + 1) % n]);
+                    (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0])
+                };
+                let area: f32 = (0..n)
+                    .map(|i| {
+                        let (p, q) = (pts[i], pts[(i + 1) % n]);
+                        p[0] * q[1] - q[0] * p[1]
+                    })
+                    .sum();
+                if area.abs() < 1e-9 {
+                    return false;
+                }
+                (0..n).all(|i| side(i) >= 0.0) || (0..n).all(|i| side(i) <= 0.0)
+            }
+        }
+    }
+
+    /// The box the piece lies in.
+    fn bounds(&self) -> [f32; 4] {
+        let grow = |b: [f32; 4], p: [f32; 2], r: f32| {
+            [
+                b[0].min(p[0] - r),
+                b[1].min(p[1] - r),
+                b[2].max(p[0] + r),
+                b[3].max(p[1] + r),
+            ]
+        };
+        let empty = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        match *self {
+            StrokePiece::Band { a, b, ha, hb } => grow(grow(empty, a, ha), b, hb),
+            StrokePiece::Disc { at, r } => grow(empty, at, r),
+            StrokePiece::Corner(pts, n) => pts[..n].iter().fold(empty, |acc, p| grow(acc, *p, 0.0)),
+        }
+    }
+}
+
+/// The box a set of pieces lies in, or nothing when there are none.
+pub fn pieces_bounds(pieces: &[StrokePiece]) -> Option<[f32; 4]> {
+    pieces.iter().map(StrokePiece::bounds).reduce(|a, b| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    })
+}
+
+/// The region a path's stroke covers, in the shape's own space.
+///
+/// Empty for a rect or an ellipse that is not dashed: their stroke is a
+/// band lying inside a closed outline, which the signed distance to that
+/// outline states better than any number of pieces would.
+pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec<StrokePiece> {
+    let mut out = Vec::new();
+    // A dashed stroke is drawn at one width, and each piece the pattern
+    // left is a line of its own — so each gets the caps a line gets,
+    // which is what makes a dashed rule end square instead of round.
+    // A pattern with nothing on in it leaves no pieces, and is read as a
+    // solid stroke rather than as no stroke at all.
+    let runs = dashed_rings(shape, &stroke.dash, stroke.width);
+    if !runs.is_empty() {
+        let half = stroke.width / 2.0;
+        for run in runs {
+            ring_pieces(
+                &StrokeRing {
+                    half: vec![half; run.len()],
+                    points: run,
+                    closed: false,
+                },
+                stroke.cap,
+                stroke.join,
+                &mut out,
+            );
+        }
+        return out;
+    }
+    for ring in stroke_skeleton(shape, stroke.width, &stroke.widths) {
+        ring_pieces(&ring, stroke.cap, stroke.join, &mut out);
+    }
+    out
+}
+
+/// The pieces of one ring: a band per segment, a join at every corner,
+/// and a cap at either end of a ring that does not close.
+fn ring_pieces(
+    ring: &StrokeRing,
+    cap: chitrakar_doc::StrokeCap,
+    join: chitrakar_doc::StrokeJoin,
+    out: &mut Vec<StrokePiece>,
+) {
+    let n = ring.points.len();
+    if n < 2 {
+        return;
+    }
+    let segments = if ring.closed { n } else { n - 1 };
+    for i in 0..segments {
+        let j = (i + 1) % n;
+        out.push(StrokePiece::Band {
+            a: ring.points[i],
+            b: ring.points[j],
+            ha: ring.half[i],
+            hb: ring.half[j],
+        });
+    }
+    // Every point of a closed ring is a corner; an open one turns at the
+    // points between its ends and stops at the two.
+    if ring.closed {
+        for i in 0..n {
+            join_piece(ring, i, join, out);
+        }
+    } else {
+        for i in 1..n - 1 {
+            join_piece(ring, i, join, out);
+        }
+        cap_piece(ring, 0, 1, cap, out);
+        cap_piece(ring, n - 1, n - 2, cap, out);
+    }
+}
+
+/// A unit vector from `a` to `b`, or nothing when they are the same point.
+fn direction(a: [f32; 2], b: [f32; 2]) -> Option<[f32; 2]> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    (len > 1e-9).then(|| [dx / len, dy / len])
+}
+
+/// What fills the outside of the corner at point `i`.
+///
+/// Only the outside: on the inside of a turn the two bands already
+/// overlap, so there is nothing to fill there — which is why the bands
+/// can be cut flat and the corner drawn on top.
+fn join_piece(
+    ring: &StrokeRing,
+    i: usize,
+    join: chitrakar_doc::StrokeJoin,
+    out: &mut Vec<StrokePiece>,
+) {
+    let (n, v, h) = (ring.points.len(), ring.points[i], ring.half[i]);
+    if h <= 0.0 {
+        return;
+    }
+    if join == chitrakar_doc::StrokeJoin::Round {
+        out.push(StrokePiece::Disc { at: v, r: h });
+        return;
+    }
+    let (Some(d1), Some(d2)) = (
+        direction(ring.points[(i + n - 1) % n], v),
+        direction(v, ring.points[(i + 1) % n]),
+    ) else {
+        return;
+    };
+    let cross = d1[0] * d2[1] - d1[1] * d2[0];
+    // Straight on has no corner to fill, and a line doubling back on
+    // itself has no outside to fill it on.
+    if cross.abs() < 1e-6 {
+        return;
+    }
+    // The outer side of the turn is the side the line turns away from.
+    let outward = |d: [f32; 2]| {
+        if cross > 0.0 {
+            [d[1], -d[0]]
+        } else {
+            [-d[1], d[0]]
+        }
+    };
+    let (n1, n2) = (outward(d1), outward(d2));
+    let rim = |nrm: [f32; 2]| [v[0] + nrm[0] * h, v[1] + nrm[1] * h];
+    let (p1, p2) = (rim(n1), rim(n2));
+    let bevel = StrokePiece::Corner([v, p1, p2, v], 3);
+    if join == chitrakar_doc::StrokeJoin::Bevel {
+        out.push(bevel);
+        return;
+    }
+    // A miter reaches to where the two outer edges cross, which is
+    // along the line bisecting them — and it runs away as the corner
+    // sharpens, so past the limit the corner is cut off instead.
+    let Some(mid) = direction([0.0, 0.0], [n1[0] + n2[0], n1[1] + n2[1]]) else {
+        out.push(bevel);
+        return;
+    };
+    let along = mid[0] * n1[0] + mid[1] * n1[1];
+    if along <= 1.0 / chitrakar_doc::MITER_LIMIT {
+        out.push(bevel);
+        return;
+    }
+    let reach = h / along;
+    out.push(StrokePiece::Corner(
+        [v, p1, [v[0] + mid[0] * reach, v[1] + mid[1] * reach], p2],
+        4,
+    ));
+}
+
+/// What closes the end of a ring at point `end`, `inward` being the point
+/// it runs back towards.
+fn cap_piece(
+    ring: &StrokeRing,
+    end: usize,
+    inward: usize,
+    cap: chitrakar_doc::StrokeCap,
+    out: &mut Vec<StrokePiece>,
+) {
+    let (v, h) = (ring.points[end], ring.half[end]);
+    if h <= 0.0 {
+        return;
+    }
+    match cap {
+        // Flat on the last point: the band already stops there.
+        chitrakar_doc::StrokeCap::Butt => {}
+        chitrakar_doc::StrokeCap::Round => out.push(StrokePiece::Disc { at: v, r: h }),
+        chitrakar_doc::StrokeCap::Square => {
+            let Some(d) = direction(ring.points[inward], v) else {
+                return;
+            };
+            let nrm = [-d[1], d[0]];
+            let at = |sn: f32, sd: f32| {
+                [
+                    v[0] + nrm[0] * h * sn + d[0] * h * sd,
+                    v[1] + nrm[1] * h * sn + d[1] * h * sd,
+                ]
+            };
+            out.push(StrokePiece::Corner(
+                [at(1.0, 0.0), at(1.0, 1.0), at(-1.0, 1.0), at(-1.0, 0.0)],
+                4,
+            ));
+        }
+    }
+}
+
 /// The skeleton a path's stroke covers, in the shape's local space.
 ///
 /// The stroke is the union of the round-capped segments between
@@ -2452,74 +2715,40 @@ pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<S
     rings
 }
 
-/// Stroke coverage. Rects and ellipses use an inner band of the given width
-/// (bounds stay stable); paths use a stroke centered on the line so open
-/// paths render as line art.
-fn stroke_covers(
-    shape: &VectorShape,
-    width: f32,
-    widths: &[f32],
-    dashes: &[Vec<[f32; 2]>],
-    x: f32,
-    y: f32,
-) -> bool {
-    // A broken-up stroke is the same distance test against the pieces the
-    // pattern left, which are open polylines however the shape was closed.
-    //
-    // Where it sits has to be where the solid stroke sat: a path's is
-    // centred on the line, and a rect's or an ellipse's is a band lying
-    // inside its edge. Measuring the full width from the outline and
-    // keeping only what is inside gives that same band, so dashing a
-    // shape breaks its stroke up without moving it.
-    if !dashes.is_empty() {
-        let half = width / 2.0;
-        return dashes.iter().any(|run| {
-            (0..run.len().saturating_sub(1))
-                .any(|i| segment_distance(x, y, run[i], run[i + 1]) <= half)
-        });
+/// How far past the box its anchors make a path's stroke can land, in
+/// the shape's own space. A round or square cap reaches half a width
+/// (a square cap's corner a little further, but not past a whole one),
+/// and a mitred corner as far as the limit allows.
+pub fn stroke_pad(stroke: &chitrakar_doc::Stroke) -> f32 {
+    if stroke.join == chitrakar_doc::StrokeJoin::Miter {
+        stroke.width * chitrakar_doc::MITER_LIMIT / 2.0
+    } else {
+        stroke.width
     }
-    if let VectorShape::Path {
-        points,
-        closed,
-        subpaths,
-        ..
-    } = shape
-    {
-        if points.len() < 2 {
-            return false;
-        }
-        let segments = if *closed {
-            points.len()
-        } else {
-            points.len() - 1
-        };
-        // A varying stroke is still a distance test, just against a width
-        // that changes along the segment — which keeps caps round and
-        // self-crossings solid, where building an outline polygon would
-        // have to decide what those mean.
-        let at = |i: usize| -> f32 { widths.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0) };
-        let varying = !widths.is_empty();
-        let half = width / 2.0;
-        let on_main = (0..segments).any(|i| {
-            let j = (i + 1) % points.len();
-            let (a, b) = (points[i], points[j]);
-            if !varying {
-                return segment_distance(x, y, a, b) <= half;
-            }
-            let t = segment_parameter(x, y, a, b);
-            let w = half * (at(i) + (at(j) - at(i)) * t);
-            segment_distance(x, y, a, b) <= w
-        });
-        // Extra rings are always closed and never carry varying widths, so
-        // they are a plain distance test against the whole ring.
-        return on_main
-            || subpaths.iter().any(|ring| {
-                ring.len() >= 2
-                    && (0..ring.len()).any(|i| {
-                        let b = ring[(i + 1) % ring.len()];
-                        segment_distance(x, y, ring[i], b) <= half
-                    })
-            });
+}
+
+/// A stroke worked out once for a paint, rather than once per sample:
+/// the region it covers, the width its inner-band form is measured by,
+/// and how far past the line it can reach.
+struct StrokeGeom<'a> {
+    width: f32,
+    /// How far, in the shape's own space, the stroke can land beyond the
+    /// box its anchors make.
+    pad: f32,
+    /// Empty for the inner band of a rect or an ellipse; see
+    /// [`stroke_pieces`].
+    pieces: &'a [StrokePiece],
+}
+
+/// Stroke coverage. A path's stroke — and any dashed stroke, whatever
+/// the shape — is the union of the pieces [`stroke_pieces`] states, which
+/// the caller works out once for the paint rather than once per sample.
+/// A rect's or an ellipse's is a band of the given width lying inside its
+/// edge, so thickening a border never grows the shape; that is the signed
+/// distance to the outline, and needs no pieces.
+fn stroke_covers(shape: &VectorShape, width: f32, pieces: &[StrokePiece], x: f32, y: f32) -> bool {
+    if !pieces.is_empty() || matches!(shape, VectorShape::Path { .. }) {
+        return pieces.iter().any(|p| p.covers(x, y));
     }
     if !shape_covers(shape, x, y) {
         return false;
@@ -2745,9 +2974,7 @@ fn rect_coverage(width: f32, height: f32, t: Transform, inv: Inverse, px: u32, p
 #[allow(clippy::too_many_arguments)]
 fn pixel_coverage(
     shape: &VectorShape,
-    stroke_width: Option<f32>,
-    stroke_widths: &[f32],
-    dashes: &[Vec<[f32; 2]>],
+    stroke: Option<&StrokeGeom<'_>>,
     t: Transform,
     inv: Inverse,
     px: u32,
@@ -2766,7 +2993,7 @@ fn pixel_coverage(
             radius,
         },
         None,
-    ) = (shape, stroke_width)
+    ) = (shape, stroke)
     {
         if *radius <= 0.0 {
             return rect_coverage(*width, *height, t, inv, px, py);
@@ -2774,9 +3001,9 @@ fn pixel_coverage(
     }
     let covers = |sx: f32, sy: f32| {
         let (x, y) = inv.at(sx, sy);
-        match stroke_width {
+        match stroke {
             None => shape_covers(shape, x, y),
-            Some(sw) => stroke_covers(shape, sw, stroke_widths, dashes, x, y),
+            Some(s) => stroke_covers(shape, s.width, s.pieces, x, y),
         }
     };
     let (fx, fy) = (px as f32, py as f32);
@@ -2911,9 +3138,7 @@ fn paint_shape(
     paint: &Paint,
     mode: BlendMode,
     clip: ClipRect,
-    stroke_width: Option<f32>,
-    stroke_widths: &[f32],
-    dashes: &[Vec<[f32; 2]>],
+    stroke: Option<&StrokeGeom<'_>>,
     mask: MaskRef<'_>,
 ) {
     // Smooth paths render as their flattened spline polyline.
@@ -2924,9 +3149,10 @@ fn paint_shape(
             Some(b) => b.intersect(clip),
             None => return,
         };
-    // Centered path strokes overhang the anchor bounds.
-    if let (Some(sw), VectorShape::Path { .. }) = (stroke_width, shape) {
-        let pad = (sw * max_scale(t)).ceil() as u32 + 1;
+    // A stroke reaches past the anchors it runs between — a path's is
+    // centred on the line, and a mitred corner runs out further still.
+    if let (Some(s), VectorShape::Path { .. }) = (stroke, shape) {
+        let pad = (s.pad * max_scale(t)).ceil() as u32 + 1;
         bbox = ClipRect {
             x0: bbox.x0.saturating_sub(pad),
             y0: bbox.y0.saturating_sub(pad),
@@ -2947,7 +3173,7 @@ fn paint_shape(
             points, subpaths, ..
         },
         None,
-    ) = (shape, stroke_width)
+    ) = (shape, stroke)
     {
         let rings: Vec<&[[f32; 2]]> = std::iter::once(points.as_slice())
             .chain(subpaths.iter().map(|r| r.as_slice()))
@@ -2957,7 +3183,7 @@ fn paint_shape(
     }
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
-            let a = pixel_coverage(shape, stroke_width, stroke_widths, dashes, t, inv, px, py);
+            let a = pixel_coverage(shape, stroke, t, inv, px, py);
             if a <= 0.0 {
                 continue;
             }
@@ -3144,7 +3370,7 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
         MaskKind::Vector { shape, .. } => match m.inv {
-            Some(inv) => pixel_coverage(shape, None, &[], &[], m.t, inv, x, y),
+            Some(inv) => pixel_coverage(shape, None, m.t, inv, x, y),
             None => 0.0,
         },
         // Read off the plane it was worked out into; without one there
@@ -4509,14 +4735,11 @@ fn hit_in_group(
                     } else if let Some(s) = stroke {
                         // A dashed outline is picked along the whole of
                         // it: clicking a gap should still catch the line.
-                        stroke_covers(
-                            shape,
-                            s.width,
-                            &flatten_widths(shape, &s.widths),
-                            &[],
-                            lx,
-                            ly,
-                        )
+                        let solid = chitrakar_doc::Stroke {
+                            dash: Vec::new(),
+                            ..s.clone()
+                        };
+                        stroke_covers(shape, s.width, &stroke_pieces(shape, &solid), lx, ly)
                     } else {
                         false
                     };
@@ -4570,7 +4793,7 @@ fn hit_in_group(
 mod tests {
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};
-    use chitrakar_doc::{Command, Node};
+    use chitrakar_doc::{Command, Node, StrokeCap, StrokeJoin};
 
     fn filled_rect(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
         let mut node = Node::vector(
@@ -4840,6 +5063,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash,
+                cap: Default::default(),
+                join: Default::default(),
             }),
             gradient: None,
         };
@@ -4882,6 +5107,180 @@ mod tests {
         );
     }
 
+    /// Where a line stops is a question the stroke answers: flat on the
+    /// last point, rounded off past it, or squared off past it.
+    #[test]
+    fn a_cap_says_where_the_line_stops() {
+        let mut doc = Document::new(90, 30, ColorMode::Rgb);
+        let root = doc.root();
+        // A line ending at x = 60, eight wide — so four past the end.
+        let mut node = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[20.0, 15.0], [60.0, 15.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 8.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: StrokeCap::Round,
+                join: Default::default(),
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let capped = |doc: &mut Document, cap: StrokeCap| {
+            let mut kind = doc.node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                if let Some(st) = stroke.take() {
+                    *stroke = Some(chitrakar_doc::Stroke { cap, ..st });
+                }
+            }
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            render(doc).unwrap()
+        };
+        // Along the line, well inside it: every cap draws this.
+        let on_the_line = |s: &Surface| s.get(40, 15).a > 0.5;
+        // Two past the end, level with it: a rounded and a squared end
+        // reach here, a flat one does not.
+        let past_the_end = |s: &Surface| s.get(62, 15).a > 0.5;
+        // Three past and three off to the side: only a squared end has a
+        // corner out here — a round one is four from the last point, and
+        // this is 4.24.
+        let the_corner = |s: &Surface| s.get(63, 18).a > 0.5;
+
+        let butt = capped(&mut doc, StrokeCap::Butt);
+        assert!(on_the_line(&butt), "a flat end still draws the line");
+        assert!(!past_the_end(&butt), "and stops on the last point");
+        assert!(!the_corner(&butt));
+
+        let round = capped(&mut doc, StrokeCap::Round);
+        assert!(past_the_end(&round), "a round end reaches past it");
+        assert!(!the_corner(&round), "but has no corner out at the side");
+
+        let square = capped(&mut doc, StrokeCap::Square);
+        assert!(past_the_end(&square));
+        assert!(the_corner(&square), "a square end has a corner");
+    }
+
+    /// Where a line turns is the other question: carried out to the
+    /// point the two edges cross, rounded off, or cut across.
+    #[test]
+    fn a_join_says_how_the_line_turns() {
+        let mut doc = Document::new(100, 70, ColorMode::Rgb);
+        let root = doc.root();
+        // Right along y = 40, then up: the outside of the turn is the
+        // square from (60,40) out to (72,52), twelve being half of the
+        // width.
+        let mut node = Node::vector(
+            "elbow",
+            VectorShape::Path {
+                points: vec![[10.0, 40.0], [60.0, 40.0], [60.0, 5.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 24.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Round,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let joined = |doc: &mut Document, join: StrokeJoin| {
+            let mut kind = doc.node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                if let Some(st) = stroke.take() {
+                    *stroke = Some(chitrakar_doc::Stroke { join, ..st });
+                }
+            }
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            render(doc).unwrap()
+        };
+        // Just outside the corner point: inside every join there is.
+        let by_the_corner = |s: &Surface| s.get(62, 42).a > 0.5;
+        // Past the straight cut across the corner but still within
+        // twelve of it: a round join reaches here, a bevel does not.
+        let past_the_cut = |s: &Surface| s.get(64, 49).a > 0.5;
+        // Out at the far corner of the square, seventeen from the turn:
+        // only a miter reaches that far.
+        let the_point = |s: &Surface| s.get(70, 50).a > 0.5;
+
+        let bevel = joined(&mut doc, StrokeJoin::Bevel);
+        assert!(by_the_corner(&bevel), "a bevel still fills the corner");
+        assert!(!past_the_cut(&bevel), "up to the cut and no further");
+        assert!(!the_point(&bevel));
+
+        let round = joined(&mut doc, StrokeJoin::Round);
+        assert!(past_the_cut(&round), "a round join is fuller than that");
+        assert!(!the_point(&round), "but goes no further than a half-width");
+
+        let miter = joined(&mut doc, StrokeJoin::Miter);
+        assert!(past_the_cut(&miter));
+        assert!(the_point(&miter), "a miter carries the corner to a point");
+
+        // A corner sharp enough to send the miter running is cut off
+        // instead: the limit is four half-widths, and this doubles back
+        // to about ten degrees.
+        let mut kind = doc.node(id).unwrap().kind.clone();
+        if let NodeKind::Vector { shape, .. } = &mut kind {
+            *shape = VectorShape::Path {
+                points: vec![[10.0, 40.0], [60.0, 40.0], [12.0, 32.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            };
+        }
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+        let spike = render(&doc).unwrap();
+        let reach = (60..100)
+            .filter(|x| (0..70).any(|y| spike.get(*x, y).a > 0.5))
+            .count();
+        assert!(
+            reach <= (chitrakar_doc::MITER_LIMIT * 12.0) as usize,
+            "past the limit the corner is cut off, not carried out ({reach})"
+        );
+    }
+
     /// A dashed stroke is the line with pieces missing: on where the
     /// pattern says on, bare where it says off, and the same line when
     /// the pattern is taken away again.
@@ -4906,6 +5305,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -4938,6 +5339,8 @@ mod tests {
                         width: 4.0,
                         widths: Vec::new(),
                         dash,
+                        cap: Default::default(),
+                        join: Default::default(),
                     }),
                     gradient: None,
                 }),
@@ -4987,6 +5390,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: vec![8.0, 8.0],
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -7345,6 +7750,8 @@ mod tests {
                 width: 3.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -7852,6 +8259,8 @@ mod tests {
                 width: 12.0,
                 widths: vec![1.0, 0.15],
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8799,6 +9208,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {
@@ -8863,6 +9274,8 @@ mod tests {
                 width: 2.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         doc.apply(Command::AddNode {

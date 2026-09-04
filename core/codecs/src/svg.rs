@@ -134,7 +134,7 @@ fn write_node(
                 );
                 let _ = writeln!(out, r#"{pad}<g{common} clip-path="url(#{name})">"#);
                 if let Some(color) = background {
-                    let ground = paint_attrs(doc, Some(color), None, None, child, defs);
+                    let ground = paint_attrs(doc, Some(color), None, None, child, defs, false);
                     let _ = writeln!(
                         out,
                         r#"{pad}  <rect width="{width}" height="{height}"{ground}/>"#
@@ -174,6 +174,7 @@ fn write_node(
                     gradient.as_ref(),
                     child,
                     defs,
+                    inner.is_none(),
                 );
                 match shape {
                     VectorShape::Rect {
@@ -205,7 +206,8 @@ fn write_node(
                             Some(band) => {
                                 let half = band.width / 2.0;
                                 let (iw, ih) = (width - band.width, height - band.width);
-                                let line = paint_attrs(doc, None, Some(band), None, child, defs);
+                                let line =
+                                    paint_attrs(doc, None, Some(band), None, child, defs, false);
                                 let _ = writeln!(out, "{pad}<g{common}>");
                                 let _ = writeln!(
                                     out,
@@ -233,7 +235,7 @@ fn write_node(
                         Some(band) => {
                             let half = band.width / 2.0;
                             let (ix, iy) = (rx - half, ry - half);
-                            let line = paint_attrs(doc, None, Some(band), None, child, defs);
+                            let line = paint_attrs(doc, None, Some(band), None, child, defs, false);
                             let _ = writeln!(out, "{pad}<g{common}>");
                             let _ = writeln!(
                                 out,
@@ -581,6 +583,7 @@ fn common_attrs(node: &chitrakar_doc::Node) -> String {
     s
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_attrs(
     doc: &Document,
     fill: Option<&AuthoredColor>,
@@ -588,6 +591,10 @@ fn paint_attrs(
     gradient: Option<&Gradient>,
     id: NodeId,
     defs: &mut String,
+    // Whether the stroke has ends and corners of its own to say
+    // something about: true for a path's line, false for the band lying
+    // inside a rect's or an ellipse's closed outline.
+    ends: bool,
 ) -> String {
     let mut s = String::new();
     // A gradient paints in place of the flat fill, and exports live: our
@@ -603,7 +610,7 @@ fn paint_attrs(
                     r#" stroke="{}" stroke-width="{}"{}"#,
                     color_hex(doc, stroke.color),
                     stroke.width,
-                    dash_attr(stroke)
+                    stroke_attrs(stroke, ends)
                 );
             }
             return s;
@@ -625,20 +632,39 @@ fn paint_attrs(
             r#" stroke="{}" stroke-width="{}"{}"#,
             color_hex(doc, stroke.color),
             stroke.width,
-            dash_attr(stroke)
+            stroke_attrs(stroke, ends)
         );
     }
     s
 }
 
-/// A dash pattern as SVG says it, which is the same list of lengths on
-/// and off the document keeps. Empty for a solid stroke.
-fn dash_attr(stroke: &chitrakar_doc::Stroke) -> String {
-    if stroke.dash.is_empty() || stroke.dash.iter().all(|d| *d <= 0.0) {
-        return String::new();
+/// What a stroke says about itself beyond its colour and width: the dash
+/// pattern (the same list of lengths on and off the document keeps), and
+/// how it ends and turns.
+///
+/// SVG takes butt ends and mitred corners as read and so writes nothing
+/// for them; the rest are said out loud. The miter limit is four in both,
+/// so that too goes without saying.
+fn stroke_attrs(stroke: &chitrakar_doc::Stroke, ends: bool) -> String {
+    let mut s = String::new();
+    if !stroke.dash.is_empty() && stroke.dash.iter().any(|d| *d > 0.0) {
+        let lengths: Vec<String> = stroke.dash.iter().map(|d| d.to_string()).collect();
+        let _ = write!(s, r#" stroke-dasharray="{}""#, lengths.join(" "));
     }
-    let lengths: Vec<String> = stroke.dash.iter().map(|d| d.to_string()).collect();
-    format!(r#" stroke-dasharray="{}""#, lengths.join(" "))
+    if !ends {
+        return s;
+    }
+    match stroke.cap {
+        chitrakar_doc::StrokeCap::Butt => {}
+        chitrakar_doc::StrokeCap::Round => s.push_str(r#" stroke-linecap="round""#),
+        chitrakar_doc::StrokeCap::Square => s.push_str(r#" stroke-linecap="square""#),
+    }
+    match stroke.join {
+        chitrakar_doc::StrokeJoin::Miter => {}
+        chitrakar_doc::StrokeJoin::Round => s.push_str(r#" stroke-linejoin="round""#),
+        chitrakar_doc::StrokeJoin::Bevel => s.push_str(r#" stroke-linejoin="bevel""#),
+    }
+    s
 }
 
 fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut String) {
@@ -865,6 +891,8 @@ mod tests {
                 width: 8.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             }))),
         })
         .unwrap();
@@ -898,6 +926,8 @@ mod tests {
                 width: 2.0,
                 widths: Vec::new(),
                 dash,
+                cap: Default::default(),
+                join: Default::default(),
             }),
             gradient: None,
         };
@@ -920,6 +950,102 @@ mod tests {
                 .unwrap()
                 .contains(r#"stroke-dasharray="6 3""#),
             "and a dashed one carries its pattern"
+        );
+    }
+
+    /// How a line ends and turns travels too — and only when there is
+    /// something to say: SVG already takes flat ends and mitred corners
+    /// as read, and a rect's or an ellipse's band has no ends at all.
+    #[test]
+    fn how_a_line_ends_and_turns_travels() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let id = filled(&mut doc, "line", 40.0, 40.0);
+        let line = |cap, join| chitrakar_doc::NodeKind::Vector {
+            shape: VectorShape::Path {
+                points: vec![[0.0, 0.0], [40.0, 0.0], [40.0, 40.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            fill: None,
+            stroke: Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap,
+                join,
+            }),
+            gradient: None,
+        };
+        let exported = |doc: &mut Document, cap, join| {
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(line(cap, join)),
+            })
+            .unwrap();
+            export_svg(doc).unwrap()
+        };
+
+        let svg = exported(
+            &mut doc,
+            chitrakar_doc::StrokeCap::Butt,
+            chitrakar_doc::StrokeJoin::Miter,
+        );
+        assert!(
+            !svg.contains("linecap") && !svg.contains("linejoin"),
+            "what SVG assumes goes without saying: {svg}"
+        );
+
+        let svg = exported(
+            &mut doc,
+            chitrakar_doc::StrokeCap::Round,
+            chitrakar_doc::StrokeJoin::Round,
+        );
+        assert!(
+            svg.contains(r#"stroke-linecap="round""#) && svg.contains(r#"stroke-linejoin="round""#),
+            "the rest is said out loud: {svg}"
+        );
+
+        let svg = exported(
+            &mut doc,
+            chitrakar_doc::StrokeCap::Square,
+            chitrakar_doc::StrokeJoin::Bevel,
+        );
+        assert!(
+            svg.contains(r#"stroke-linecap="square""#)
+                && svg.contains(r#"stroke-linejoin="bevel""#),
+            "and so is this: {svg}"
+        );
+
+        // A rect's stroke is a band lying inside a closed outline: it has
+        // no ends, and its corners are the rect's own.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                fill: None,
+                stroke: Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 4.0,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    cap: chitrakar_doc::StrokeCap::Round,
+                    join: chitrakar_doc::StrokeJoin::Round,
+                }),
+                gradient: None,
+            }),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            !svg.contains("linecap") && !svg.contains("linejoin"),
+            "a band inside an outline says nothing about either: {svg}"
         );
     }
 
@@ -1628,6 +1754,8 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         place(&mut doc, ring, [60.0, 10.0]);
@@ -1725,6 +1853,34 @@ mod tests {
             },
         })
         .unwrap();
+
+        // A line with ends and a corner of its own: squared off past its
+        // last point and cut across where it turns, so export has to say
+        // both — SVG takes flat ends and mitred corners as read, and a
+        // reader drawing those instead would show up here.
+        let mut elbow = painted(
+            "elbow",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [14.0, 0.0], [14.0, 20.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            BLUE,
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut elbow.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Square,
+                join: chitrakar_doc::StrokeJoin::Bevel,
+            });
+        }
+        place(&mut doc, elbow, [98.0, 6.0]);
 
         let mut lettering = chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE);
         // The second letter is set apart: another colour, so the page
@@ -1828,6 +1984,17 @@ mod tests {
             at(18, 6)[0] > 200 && at(18, 6)[2] > 200,
             "and its clear half shows paper, not the pixel beside it {:?}",
             at(18, 6)
+        );
+        assert!(
+            at(112, 28)[2] > 200 && at(112, 28)[0] < 60,
+            "the line is squared off past its last point {:?}",
+            at(112, 28)
+        );
+        assert_eq!(at(112, 31), &[255, 255, 255], "and stops there");
+        assert_eq!(
+            at(114, 3),
+            &[255, 255, 255],
+            "its corner is cut across, not carried out to a point"
         );
 
         // Text is the one thing a mean would forgive being a line off:

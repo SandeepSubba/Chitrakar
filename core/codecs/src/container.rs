@@ -358,6 +358,8 @@ mod tests {
                 width: 3.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Square,
+                join: chitrakar_doc::StrokeJoin::Bevel,
             });
             *gradient = Some(chitrakar_doc::Gradient::Linear {
                 from: [0.0, 0.0],
@@ -579,6 +581,20 @@ mod tests {
             "the copy still follows what it followed"
         );
         assert!(back.node(over).unwrap().clipped, "and the clip survived");
+        let chitrakar_doc::NodeKind::Vector {
+            stroke: Some(line), ..
+        } = &back.node(shape_id).unwrap().kind
+        else {
+            panic!("a stroked shape")
+        };
+        assert_eq!(
+            (line.cap, line.join),
+            (
+                chitrakar_doc::StrokeCap::Square,
+                chitrakar_doc::StrokeJoin::Bevel
+            ),
+            "and the line still ends and turns the way it was drawn"
+        );
         let after = chitrakar_render::render(&back).unwrap();
         assert_eq!((before.width, before.height), (after.width, after.height));
         let mut worst = 0.0f32;

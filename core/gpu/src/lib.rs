@@ -1204,12 +1204,13 @@ fn fill_path(
     });
 }
 
-/// Draw a path's stroke: the union of the round-capped segments the CPU
-/// tests a sample against, laid down as geometry — a trapezoid per
-/// segment between the two half-widths at its ends, and a disc at every
-/// point where the segments meet or the line stops. The stencil takes
-/// the union (a pixel is in the stroke if any piece covers it, however
-/// the pieces overlap), and one quad covers it.
+/// Draw a path's stroke: the very region the CPU tests a sample against,
+/// laid down as geometry. `chitrakar_render::stroke_pieces` states that
+/// region as a union of convex pieces — a band per segment, a disc where
+/// an end or a corner is round, a polygon where one is squared, bevelled
+/// or mitred — and each piece is tessellated here. The stencil takes the
+/// union (a pixel is in the stroke if any piece covers it, however the
+/// pieces overlap), and one quad covers it.
 fn stroke_path(
     shape: &VectorShape,
     t: Transform,
@@ -1233,50 +1234,53 @@ fn stroke_path(
             ..Default::default()
         }
     };
-    for ring in chitrakar_render::stroke_skeleton(shape, stroke.width, &stroke.widths) {
-        let n = ring.points.len();
-        let segments = if ring.closed { n } else { n - 1 };
-        for i in 0..segments {
-            let j = (i + 1) % n;
-            let (a, b) = (ring.points[i], ring.points[j]);
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let len = (dx * dx + dy * dy).sqrt();
-            if len < 1e-9 {
-                continue;
-            }
+    for piece in chitrakar_render::stroke_pieces(shape, stroke) {
+        match piece {
             // The boundary of a segment whose half-width runs linearly
-            // from one end to the other is a straight line, so the piece
-            // between the two discs is a trapezoid.
-            let (nx, ny) = (-dy / len, dx / len);
-            let (ha, hb) = (ring.half[i], ring.half[j]);
-            let corners = [
-                [a[0] + nx * ha, a[1] + ny * ha],
-                [b[0] + nx * hb, b[1] + ny * hb],
-                [b[0] - nx * hb, b[1] - ny * hb],
-                [a[0] - nx * ha, a[1] - ny * ha],
-            ];
-            for k in [0, 1, 2, 0, 2, 3] {
-                tris.push(vertex(corners[k], &mut box_));
+            // from one end to the other is a straight line, so the band
+            // between the two rims is a quadrilateral.
+            chitrakar_render::StrokePiece::Band { a, b, ha, hb } => {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 1e-9 {
+                    continue;
+                }
+                let (nx, ny) = (-dy / len, dx / len);
+                let corners = [
+                    [a[0] + nx * ha, a[1] + ny * ha],
+                    [b[0] + nx * hb, b[1] + ny * hb],
+                    [b[0] - nx * hb, b[1] - ny * hb],
+                    [a[0] - nx * ha, a[1] - ny * ha],
+                ];
+                for k in [0, 1, 2, 0, 2, 3] {
+                    tris.push(vertex(corners[k], &mut box_));
+                }
             }
-        }
-        for (i, p) in ring.points.iter().enumerate() {
-            // A disc at every point: the round join between two
-            // segments and the round cap at either end are the same
-            // thing, which is what a distance test gives.
-            let h = ring.half[i];
-            if h <= 0.0 || (!ring.closed && segments == 0) {
-                continue;
+            chitrakar_render::StrokePiece::Disc { at, r } => {
+                if r <= 0.0 {
+                    continue;
+                }
+                // Enough sides that the fan is smooth at the size it is
+                // actually seen at.
+                let sides = ((r * scale) as usize + 8).clamp(8, 64);
+                for k in 0..sides {
+                    let angle = |k: usize| k as f32 / sides as f32 * std::f32::consts::TAU;
+                    let (a0, a1) = (angle(k), angle(k + 1));
+                    for q in [
+                        at,
+                        [at[0] + r * a0.cos(), at[1] + r * a0.sin()],
+                        [at[0] + r * a1.cos(), at[1] + r * a1.sin()],
+                    ] {
+                        tris.push(vertex(q, &mut box_));
+                    }
+                }
             }
-            let sides = ((h * scale) as usize + 8).clamp(8, 64);
-            for k in 0..sides {
-                let angle = |k: usize| k as f32 / sides as f32 * std::f32::consts::TAU;
-                let (a0, a1) = (angle(k), angle(k + 1));
-                for q in [
-                    *p,
-                    [p[0] + h * a0.cos(), p[1] + h * a0.sin()],
-                    [p[0] + h * a1.cos(), p[1] + h * a1.sin()],
-                ] {
-                    tris.push(vertex(q, &mut box_));
+            // Convex, so a fan from its first point covers it.
+            chitrakar_render::StrokePiece::Corner(pts, n) => {
+                for k in 1..n - 1 {
+                    for q in [pts[0], pts[k], pts[k + 1]] {
+                        tris.push(vertex(q, &mut box_));
+                    }
                 }
             }
         }
@@ -1426,7 +1430,7 @@ fn quad(
 mod tests {
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};
-    use chitrakar_doc::{Command, Node};
+    use chitrakar_doc::{Command, Node, StrokeCap, StrokeJoin};
 
     /// A renderer, or nothing where the machine has no adapter — except
     /// in CI, which installs a software driver on purpose: a skip there
@@ -2026,6 +2030,8 @@ mod tests {
                 width,
                 widths,
                 dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
             });
         }
         Box::new(node)
@@ -2144,6 +2150,76 @@ mod tests {
             thickness(&drawn, 92) > thickness(&drawn, 76),
             "it swells from its thin start"
         );
+    }
+
+    /// How a line ends and turns is stated once — as the pieces the CPU
+    /// tests a sample against — so the GPU lays down the same ends and
+    /// the same corners rather than an idea of its own.
+    #[test]
+    fn ends_and_corners_are_the_same_shape_on_both() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(160, 60, ColorMode::Rgb);
+        // The same elbow three times, ending and turning three ways.
+        let ways = [
+            (StrokeCap::Butt, StrokeJoin::Miter),
+            (StrokeCap::Square, StrokeJoin::Bevel),
+            (StrokeCap::Round, StrokeJoin::Round),
+        ];
+        for (i, (cap, join)) in ways.into_iter().enumerate() {
+            let mut node = stroked(
+                "elbow",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [24.0, 0.0], [24.0, 30.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                8.0,
+                Vec::new(),
+            );
+            if let NodeKind::Vector {
+                stroke: Some(s), ..
+            } = &mut node.kind
+            {
+                s.cap = cap;
+                s.join = join;
+            }
+            add(
+                &mut doc,
+                node,
+                Transform::translation(12.0 + i as f32 * 48.0, 12.0),
+            );
+        }
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.004,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // Out past the corner, where only a miter reaches; and out past
+        // the last point off to one side, where only a square end has
+        // anything. The three have to differ here — otherwise the two
+        // renderers could agree by both drawing one shape three times.
+        for (y, want, what) in [
+            (8, [true, false, false], "corner"),
+            (45, [false, true, false], "end"),
+        ] {
+            for (i, on) in want.into_iter().enumerate() {
+                let x = 39 + i as u32 * 48;
+                let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
+                assert_eq!(
+                    c > 0.5,
+                    on,
+                    "the CPU's {what} at ({x}, {y}) is {c}, wanted {on}"
+                );
+                assert!((g - c).abs() < 0.25, "the {what} at ({x}, {y}): {g} vs {c}");
+            }
+        }
     }
 
     fn texted(
@@ -2299,6 +2375,8 @@ mod tests {
                         width: 2.0,
                         widths: Vec::new(),
                         dash: Vec::new(),
+                        cap: Default::default(),
+                        join: Default::default(),
                     }),
                     gradient: None,
                 }),
