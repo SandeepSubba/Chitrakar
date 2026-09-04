@@ -106,8 +106,8 @@ assert(
 );
 assert(
   (await page.locator(".topbar .menu-label").allTextContents()).join(",") ===
-    "File,Edit,View",
-  "menu bar carries File, Edit and View",
+    "File,Edit,Page,View",
+  "menu bar carries File, Edit, Page and View",
 );
 await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
@@ -4627,6 +4627,57 @@ assert(
       (await page.locator('select[aria-label="Line ends"]').count()) === 0,
     "a rect's stroke is asked neither question",
   );
+}
+
+// 9j3. The page turns. A wide page with a mark in one corner stands up
+// on its end, the mark goes round with it, and it undoes.
+{
+  await newDocument(600, 300, "rgb");
+  const at = await page.locator("#engine-page").boundingBox();
+  const [ux, uy] = [at.width / 600, at.height / 300];
+  await page.click('button[aria-label="Rect"]');
+  await page.mouse.move(at.x + 20 * ux, at.y + 20 * uy);
+  await page.mouse.down();
+  await page.mouse.move(at.x + 80 * ux, at.y + 60 * uy, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const inked = (x, y) => canvasPixel(x, y).then((px) => px[3] > 128);
+  const size = () =>
+    page.locator("#engine-page").evaluate((el) => [
+      Math.round(el.getBoundingClientRect().width),
+      Math.round(el.getBoundingClientRect().height),
+    ]);
+  const [w0, h0] = await size();
+  assert(w0 > h0, `the page starts wider than it is tall (${w0}x${h0})`);
+  assert(await inked(50, 40), "with a mark in its top left");
+  assert(!(await inked(550, 40)), "and nothing in its top right");
+
+  await menuClick("Page", "Turn right");
+  await page.waitForTimeout(400);
+  const [w1, h1] = await size();
+  assert(h1 > w1, `turned right it stands on its end (${w1}x${h1})`);
+  // The page is 300x600 now, and what was top-left is top-right: the
+  // mark sits within twenty of the right-hand edge.
+  assert(await inked(260, 50), "the mark went round to the right");
+  assert(!(await inked(50, 50)), "and left where it was");
+
+  await menuClick("Page", "Turn upside down");
+  await page.waitForTimeout(400);
+  assert(await inked(40, 550), "upside down puts it at the bottom left");
+
+  for (let i = 0; i < 2; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+  }
+  // The page's shape, not the size it is drawn at: the view was fitted
+  // to the page standing up and stays where the last fit put it.
+  const [w2, h2] = await size();
+  assert(
+    Math.abs(w2 / h2 - w0 / h0) < 0.02,
+    `two undos put the page back the way it was (${w2}x${h2} against ${w0}x${h0})`,
+  );
+  assert(await inked(50, 40), "with its mark back in the corner");
+  assert(!(await inked(550, 40)), "and nothing where the turn had put it");
 }
 
 // 10. Recovery: a draft of the document is kept as it changes, and a

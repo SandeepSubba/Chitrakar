@@ -576,6 +576,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Turn the page a quarter of the way round, `quarters` times
+    /// clockwise; an odd number swaps its width and height.
+    pub fn turn_canvas(&mut self, quarters: u8) -> Result<(), JsError> {
+        self.inner.turn_canvas(quarters).map_err(to_js)
+    }
+
     /// Force the next `render_frame` to redraw everything, for when the
     /// canvas it is copied into has been replaced.
     pub fn invalidate(&mut self) {

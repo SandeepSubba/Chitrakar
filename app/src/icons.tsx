@@ -36,6 +36,8 @@ export type IconName =
   | "duplicate"
   | "shadow"
   | "crop"
+  | "turnRight"
+  | "turnLeft"
   | "copy"
   | "cut"
   | "paste"
@@ -116,6 +118,18 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   // Tools
+  turnRight: (
+    <>
+      <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+      <path d="M20 4v4h-4" />
+    </>
+  ),
+  turnLeft: (
+    <>
+      <path d="M4 12a8 8 0 1 0 2.34-5.66" />
+      <path d="M4 4v4h4" />
+    </>
+  ),
   crop: (
     <>
       <path d="M6.5 2.5v15h15" />

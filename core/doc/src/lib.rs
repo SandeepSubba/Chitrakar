@@ -567,6 +567,79 @@ impl Document {
                     dy: -dy,
                 })
             }
+            Command::TurnCanvas { quarters } => {
+                let turns = quarters % 4;
+                if turns == 0 {
+                    return Ok(Command::TurnCanvas { quarters: 0 });
+                }
+                let (w, h) = (self.meta.width as f32, self.meta.height as f32);
+                // The page's own corners decide where everything lands:
+                // turned clockwise, the old page's top-left corner
+                // becomes the new page's top-right one, so the turn
+                // carries a shift with it that puts the page back over
+                // its own origin.
+                let turn = match turns {
+                    1 => Transform {
+                        a: 0.0,
+                        b: 1.0,
+                        c: -1.0,
+                        d: 0.0,
+                        e: h,
+                        f: 0.0,
+                    },
+                    2 => Transform {
+                        a: -1.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: -1.0,
+                        e: w,
+                        f: h,
+                    },
+                    _ => Transform {
+                        a: 0.0,
+                        b: -1.0,
+                        c: 1.0,
+                        d: 0.0,
+                        e: 0.0,
+                        f: w,
+                    },
+                };
+                if turns % 2 == 1 {
+                    std::mem::swap(&mut self.meta.width, &mut self.meta.height);
+                }
+                // Top-level layers are placed against the page, so the
+                // turn goes in front of what each already does. Anything
+                // deeper is placed against its parent and turns with it.
+                let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
+                for id in top {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.transform = turn.compose(node.transform);
+                    }
+                }
+                // A guide is a line, so a quarter turn either moves it or
+                // stands it on its end; which of the two falls out of
+                // where two of its own points land.
+                let at = |x: f32, y: f32| {
+                    (
+                        turn.a * x + turn.c * y + turn.e,
+                        turn.b * x + turn.d * y + turn.f,
+                    )
+                };
+                for guide in &mut self.guides {
+                    let (p, q) = match *guide {
+                        Guide::Vertical(v) => (at(v, 0.0), at(v, 1.0)),
+                        Guide::Horizontal(v) => (at(0.0, v), at(1.0, v)),
+                    };
+                    *guide = if (p.0 - q.0).abs() < 1e-4 {
+                        Guide::Vertical(p.0)
+                    } else {
+                        Guide::Horizontal(p.1)
+                    };
+                }
+                Ok(Command::TurnCanvas {
+                    quarters: 4 - turns,
+                })
+            }
             Command::SetGuides { guides } => {
                 let prev = std::mem::replace(&mut self.guides, guides);
                 Ok(Command::SetGuides { guides: prev })
@@ -798,6 +871,16 @@ pub enum Command {
         height: u32,
         dx: f32,
         dy: f32,
+    },
+    /// Turn the page a quarter of the way round, `quarters` times
+    /// clockwise. An odd number swaps the page's width and height, and
+    /// everything on it — layers and guides alike — turns with it, so
+    /// what the page holds is unchanged and only its orientation is not.
+    /// Its own inverse in shape: the same command with the turn made up
+    /// to a full circle. A page that fits can always be stood on its
+    /// end, since what a page may be is the same either way round.
+    TurnCanvas {
+        quarters: u8,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).

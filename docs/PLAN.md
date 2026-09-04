@@ -68,7 +68,11 @@ without reading anything else.*
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK, and the crop tool
   re-frames one after the fact — the page becomes the dragged rectangle
-  and the picture stays where it was inside it.
+  and the picture stays where it was inside it. The Page menu turns the
+  page a quarter of the way round either way, or the whole way over: an
+  odd turn stands it on its end, and layers and guides go round with it,
+  so a portrait photograph opened into a landscape page is one menu item
+  away from being the right way up.
   Edges are anti-aliased: rect fills analytically, path fills by a scanline
   rasterizer (exact horizontally), the rest by coverage sampling, and vector
   mask edges feather the same way. Placed images sample bilinearly in
@@ -347,9 +351,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~284),
+- **Verify before committing:** `cargo test --workspace` (~285),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~527 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~534 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -407,9 +411,10 @@ without reading anything else.*
      of the editor misses first — artboards, a brush that paints pixels.
 - **Chrome:** "?" (or View › Keys and gestures) opens a sheet of every
   key and gesture, since half of what this editor can do is a gesture
-  nobody would guess at. Document actions live in a File/Edit/View menu bar — Edit
-  carries cut/copy/paste/duplicate/delete and select-all beside undo, View
-  carries fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
+  nobody would guess at. Document actions live in a File/Edit/Page/View menu bar — Edit
+  carries cut/copy/paste/duplicate/delete and select-all beside undo, Page
+  the turns, View
+  fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
   none of it depends on knowing the shortcut; the tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is

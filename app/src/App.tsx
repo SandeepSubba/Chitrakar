@@ -675,7 +675,7 @@ export function App() {
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
   /** Which top-level menu is open, if any. */
-  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "view" | null>(
+  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "page" | "view" | null>(
     null,
   );
   const openInputRef = useRef<HTMLInputElement>(null);
@@ -2440,6 +2440,21 @@ export function App() {
     return () => document.removeEventListener("selectionchange", onSelect);
   }, []);
 
+  /** Turn the page a quarter of the way round, carrying everything on it
+   * with it. The page's shape changes, so the view is fitted to it again
+   * — a page turned on its end would otherwise run off the screen. */
+  const turnPage = (quarters: number) => {
+    if (!session) return;
+    try {
+      session.turn_canvas(quarters);
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Turn: ${err}`);
+    }
+  };
+
   const [renaming, setRenaming] = useState<{
     id: NodeId;
     value: string;
@@ -4147,6 +4162,24 @@ export function App() {
             </MenuItem>
             <MenuItem icon="check" onClick={deselect} hint="Esc">
               Deselect
+            </MenuItem>
+          </MenuButton>
+
+          <MenuButton
+            label="Page"
+            open={openMenu === "page"}
+            onOpen={() => setOpenMenu(openMenu === "page" ? null : "page")}
+            onHover={() => openMenu && setOpenMenu("page")}
+            onClose={() => setOpenMenu(null)}
+          >
+            <MenuItem icon="turnRight" onClick={() => turnPage(1)}>
+              Turn right
+            </MenuItem>
+            <MenuItem icon="turnLeft" onClick={() => turnPage(3)}>
+              Turn left
+            </MenuItem>
+            <MenuItem icon="turnRight" onClick={() => turnPage(2)}>
+              Turn upside down
             </MenuItem>
           </MenuButton>
 

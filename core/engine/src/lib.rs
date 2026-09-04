@@ -253,6 +253,7 @@ impl Session {
             Command::AddNode { .. }
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
+            | Command::TurnCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
             // needs repainting when they change; nor does a lock.
             | Command::SetGuides { .. }
@@ -406,7 +407,10 @@ impl Session {
         // Both touch more than one node, so the whole canvas is the only
         // safe dirty region — and a resize changes what "the whole canvas"
         // even means.
-        let batch = matches!(cmd, Command::Batch(_) | Command::ResizeCanvas { .. });
+        let batch = matches!(
+            cmd,
+            Command::Batch(_) | Command::ResizeCanvas { .. } | Command::TurnCanvas { .. }
+        );
         let target = Self::command_target(&cmd);
         let pre = self
             .stroke_bounds(&cmd)
@@ -514,6 +518,12 @@ impl Session {
             Command::ResizeCanvas { width, height, .. } => {
                 format!("Resize canvas to {width}x{height}")
             }
+            Command::TurnCanvas { quarters } => match quarters % 4 {
+                1 => "Turn the page right".into(),
+                2 => "Turn the page upside down".into(),
+                3 => "Turn the page left".into(),
+                _ => "Leave the page as it is".into(),
+            },
             Command::Batch(_) => "Multiple edits".into(),
         }
     }
@@ -2811,6 +2821,12 @@ impl Session {
         })
     }
 
+    /// Turn the page a quarter of the way round, `quarters` times
+    /// clockwise, carrying everything on it round with it.
+    pub fn turn_canvas(&mut self, quarters: u8) -> Result<(), EngineError> {
+        self.apply(Command::TurnCanvas { quarters })
+    }
+
     /// Force the next present to recompute the whole canvas. The surface
     /// the frame is copied into lives outside the engine, so when that is
     /// replaced — a resized canvas element, say — the engine has to be
@@ -3558,6 +3574,89 @@ mod tests {
         assert_eq!(session.document().meta.width, 64);
         let (back, _) = session.render_cached().unwrap();
         assert_eq!(back.get(35, 35).a, 1.0, "undo puts the page back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn turning_the_page_carries_everything_round_with_it() {
+        use chitrakar_doc::Guide;
+        // A wide page with a mark in one corner, so which way round it
+        // came out is a question with an answer.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 0.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(5, 5).a, 1.0, "the mark is in the top left");
+
+        // A quarter turn to the right: the page stands up, and the mark
+        // that was top-left is now top-right.
+        session.turn_canvas(1).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (40, 80),
+            "an odd turn swaps the page's sides"
+        );
+        let (turned, _) = session.render_cached().unwrap();
+        assert_eq!((turned.width, turned.height), (40, 80));
+        assert_eq!(turned.get(35, 5).a, 1.0, "the mark went round to the right");
+        assert_eq!(turned.get(5, 5).a, 0.0, "and is not where it was");
+        // A line down the page at x=10 is now a line across it at y=10;
+        // one across at y=4 is now down it, ten from the right-hand edge.
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Horizontal(10.0), Guide::Vertical(36.0)],
+            "the guides went round with the artwork"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap(), "and it undoes");
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40)
+        );
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 5).a, 1.0, "the mark is back in the corner");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            "and so are the guides"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // Four quarter turns is where it started, whichever way they are
+        // taken, and a turn of none is not an edit at all.
+        for _ in 0..4 {
+            session.turn_canvas(1).unwrap();
+        }
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40)
+        );
+        let (round, _) = session.render_cached().unwrap();
+        assert_eq!(round.get(5, 5).a, 1.0, "all the way round is where it was");
+        session.turn_canvas(3).unwrap();
+        session.turn_canvas(1).unwrap();
+        let (both, _) = session.render_cached().unwrap();
+        assert_eq!(both.get(5, 5).a, 1.0, "left and then right is neither");
         assert_cache_matches_fresh(&mut session);
     }
 
