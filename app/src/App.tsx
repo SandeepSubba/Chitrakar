@@ -776,6 +776,9 @@ export function App() {
   const [sides, setSides] = useState(5);
   /** What the crop is held to, by name. */
   const [cropRatio, setCropRatio] = useState("Free");
+  /** Waiting for a click to say which pixel of the picture is meant to
+   * be grey, for the white balance to be worked out from. */
+  const [pickingNeutral, setPickingNeutral] = useState(false);
   /** Which of the shape tools sits in the rail's one shape slot, and
    * whether the rest are showing. */
   const [shapeTool, setShapeTool] = useState<Tool>("Rect");
@@ -2039,6 +2042,12 @@ export function App() {
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
+    // Asked which pixel is grey, the next click on the page answers it
+    // and nothing else happens — the tool in hand waits its turn.
+    if (pickingNeutral) {
+      pickNeutral(x, y);
+      return;
+    }
     if (tool === "Clone") {
       // Alt sets where the clone reads from, which is what that key does
       // in every editor that has this tool.
@@ -4410,6 +4419,32 @@ export function App() {
     );
   };
 
+  /** Take the balance from a pixel that is meant to be grey: the engine
+   * reads what the layer is given at that point and answers the
+   * temperature and tint that would neutralize it. One entry, since it
+   * is one decision, and the picking stops whether or not there was
+   * anything there to read. */
+  const pickNeutral = (x: number, y: number) => {
+    setPickingNeutral(false);
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("WhiteBalance" in adj)) return;
+    let read: Float32Array;
+    try {
+      read = session.neutral_balance(selected, x, y);
+    } catch (err) {
+      alert(`White balance: ${err}`);
+      return;
+    }
+    if (read.length !== 2) return; // nothing there to balance
+    setKind(
+      { Adjustment: { WhiteBalance: { temperature: read[0], tint: read[1] } } },
+      false,
+    );
+  };
+
   /** Reorder within the parent group: +1 raises toward the top. */
   const reorderSelected = (direction: 1 | -1) => {
     if (!selectedLayer) return;
@@ -6427,6 +6462,8 @@ export function App() {
                   onEdit={setKind}
                   onGestureEnd={endGesture}
                   onAutoLevels={autoLevels}
+                  onPickNeutral={() => setPickingNeutral((on) => !on)}
+                  pickingNeutral={pickingNeutral}
                   cmyk={cmyk}
                   fonts={fontNames}
                   shapes={layers
@@ -7807,6 +7844,10 @@ interface KindPropsProps {
    * needs the engine's own reading of the histogram, which lives a
    * level up. */
   onAutoLevels: () => void;
+  /** Ask for the next click on the page to say which pixel is meant to
+   * be grey, and whether that ask is outstanding. */
+  onPickNeutral: () => void;
+  pickingNeutral: boolean;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
@@ -7823,6 +7864,8 @@ function KindProps({
   shapes,
   onAlong,
   onAutoLevels,
+  onPickNeutral,
+  pickingNeutral,
 }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
@@ -7892,6 +7935,17 @@ function KindProps({
       const p = adj.WhiteBalance;
       return (
         <>
+          {/* The way a photograph is actually balanced: point at
+              something that is meant to be grey and let the numbers
+              follow, rather than pushing two sliders about. */}
+          <button
+            className={pickingNeutral ? "auto-levels on" : "auto-levels"}
+            onClick={onPickNeutral}
+            title="Click something in the picture that is meant to be grey"
+            aria-label="Pick a grey"
+          >
+            {pickingNeutral ? "Click a grey…" : "Pick a grey"}
+          </button>
           {slider("Temperature", p.temperature, -1, 1, 0.01, (v) =>
             wrap({ WhiteBalance: { ...p, temperature: v } }),
           )}

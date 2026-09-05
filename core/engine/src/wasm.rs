@@ -277,6 +277,18 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// The temperature and tint that would make the colour at a document
+    /// point neutral, read from what the layer is given rather than from
+    /// the finished page. Pass -1 for the page itself. Empty where there
+    /// is nothing to balance.
+    pub fn neutral_balance(&self, below: f64, x: f32, y: f32) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .neutral_balance(below, x, y)
+            .map(|p| p.map(|v| v.to_vec()).unwrap_or_default())
+            .map_err(to_js)
+    }
+
     /// The frame under a document point, or -1 where there is none.
     pub fn frame_at(&self, x: f32, y: f32) -> f64 {
         self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)

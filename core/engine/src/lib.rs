@@ -955,20 +955,12 @@ impl Session {
         Ok(self.doc.children_of(parent)?[index])
     }
 
-    /// How the page's tones are spread, as four runs of 256 counts —
-    /// red, green, blue, then luminance — in the display encoding, which
-    /// is the encoding the graphs that read a histogram are drawn over.
+    /// The document as a layer sees it: everything from that layer
+    /// upward hidden, so what is left is what it is given rather than
+    /// what it makes. `None` asks for the finished page.
     ///
-    /// `below` asks for what an adjustment layer *sees* rather than for
-    /// the finished page: everything composited under it, which is what
-    /// its own graph has to be read against. Transparent pixels are not
-    /// counted — a histogram of a half-empty page should describe the
-    /// picture on it, not the hole around it.
-    ///
-    /// Taken from a render shrunk to about a hundred thousand pixels: a
-    /// histogram is a shape, and the shape settles long before the last
-    /// pixel is counted.
-    pub fn histogram(&self, below: Option<NodeId>) -> Result<Vec<u32>, EngineError> {
+    /// A copy, since it is a question rather than an edit.
+    fn seen_by(&self, below: Option<NodeId>) -> Result<Document, EngineError> {
         let mut doc = self.doc.clone();
         if let Some(id) = below {
             let mut order = Vec::new();
@@ -986,6 +978,24 @@ impl Session {
                 }
             }
         }
+        Ok(doc)
+    }
+
+    /// How the page's tones are spread, as four runs of 256 counts —
+    /// red, green, blue, then luminance — in the display encoding, which
+    /// is the encoding the graphs that read a histogram are drawn over.
+    ///
+    /// `below` asks for what an adjustment layer *sees* rather than for
+    /// the finished page: everything composited under it, which is what
+    /// its own graph has to be read against. Transparent pixels are not
+    /// counted — a histogram of a half-empty page should describe the
+    /// picture on it, not the hole around it.
+    ///
+    /// Taken from a render shrunk to about a hundred thousand pixels: a
+    /// histogram is a shape, and the shape settles long before the last
+    /// pixel is counted.
+    pub fn histogram(&self, below: Option<NodeId>) -> Result<Vec<u32>, EngineError> {
+        let doc = self.seen_by(below)?;
         let (w, h) = (doc.meta.width.max(1) as f32, doc.meta.height.max(1) as f32);
         let scale = (100_000.0 / (w * h)).sqrt().min(1.0);
         let (pw, ph) = (
@@ -1079,6 +1089,69 @@ impl Session {
             chitrakar_color::srgb_to_linear(lo as f32 / 255.0),
             chitrakar_color::srgb_to_linear(hi as f32 / 255.0),
         ])
+    }
+
+    /// The temperature and tint that would make the colour at a document
+    /// point neutral: "this is grey — make it grey", which is how a
+    /// picture taken under the wrong light is put right in one click
+    /// rather than by pushing two sliders about.
+    ///
+    /// Read from what the layer itself is given (everything under it),
+    /// not from the finished page, since the finished page already has
+    /// whatever balance is being replaced.
+    ///
+    /// White balance is a gain per channel — red up and blue down as it
+    /// warms, green against magenta for the tint — so making a colour
+    /// neutral is two equations in two unknowns and has an exact answer.
+    /// It is clamped to what the sliders can say, so a colour further
+    /// off than they reach gets as far as they go.
+    ///
+    /// `None` where there is nothing to balance: off the page, on a
+    /// transparent pixel, or on one so dark that its colour is noise.
+    pub fn neutral_balance(
+        &self,
+        below: Option<NodeId>,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<[f32; 2]>, EngineError> {
+        let doc = self.seen_by(below)?;
+        let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+        if !(x >= 0.0 && y >= 0.0 && x < w && y < h) {
+            return Ok(None);
+        }
+        let mut surface = Surface::new(1, 1);
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 1,
+                y1: 1,
+            },
+            Transform::translation(-x.floor(), -y.floor()),
+        )?;
+        let px = surface.get(0, 0);
+        if px.a <= 0.01 {
+            return Ok(None);
+        }
+        // The pixel is premultiplied linear light, which is the light the
+        // gains are applied to.
+        let (r, g, b) = (px.r / px.a, px.g / px.a, px.b / px.a);
+        if r + b < 1e-3 || g < 1e-3 {
+            return Ok(None);
+        }
+        // Red and blue move together and opposite: (1 + warm) and
+        // (1 - warm). Setting the two equal gives the warmth outright.
+        let warm = (b - r) / (b + r);
+        // Both ends then land on the same value, and the tint is what
+        // takes green to meet it.
+        let target = r * (1.0 + warm);
+        let mag = 1.0 - target / g;
+        Ok(Some([
+            (warm * 2.0).clamp(-1.0, 1.0),
+            (mag * 2.0).clamp(-1.0, 1.0),
+        ]))
     }
 
     /// The frame under a document point, if any — what a shape drawn
@@ -5797,6 +5870,78 @@ mod tests {
             (still - hi).abs() < 1e-6,
             "a speck did not become the white point: {still} against {hi}"
         );
+    }
+
+    /// Told which pixel is meant to be grey, the balance that makes it
+    /// grey — and the picture it is put on comes out neutral there.
+    #[test]
+    fn a_neutral_picked_off_the_page_balances_the_light() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "cast",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+        );
+        // A grey under a blue light: what a photograph taken indoors on
+        // daylight film looks like.
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.45,
+                g: 0.5,
+                b: 0.62,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let before = session.color_at(20.0, 20.0).unwrap();
+        assert!(
+            before[2] > before[0] + 20,
+            "a blue cast to take out: {before:?}"
+        );
+
+        let [temperature, tint] = session
+            .neutral_balance(None, 20.0, 20.0)
+            .unwrap()
+            .expect("a colour to balance");
+        assert!(
+            temperature > 0.0,
+            "the light was cold, so it warms: {temperature}"
+        );
+        let index = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(Node::adjustment(
+                    "balance",
+                    chitrakar_doc::Adjustment::WhiteBalance { temperature, tint },
+                )),
+            })
+            .unwrap();
+        let after = session.color_at(20.0, 20.0).unwrap();
+        assert!(
+            (after[0] as i32 - after[1] as i32).abs() <= 2
+                && (after[1] as i32 - after[2] as i32).abs() <= 2,
+            "the picked pixel came out grey: {after:?}"
+        );
+
+        // Nothing to balance is said rather than guessed at.
+        assert!(session
+            .neutral_balance(None, 100.0, 100.0)
+            .unwrap()
+            .is_none());
+        let bare = Session::new(10, 10, ColorMode::Rgb);
+        assert!(bare.neutral_balance(None, 5.0, 5.0).unwrap().is_none());
     }
 
     /// Dropping a layer into a frame that sits away from the origin

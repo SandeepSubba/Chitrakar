@@ -51,7 +51,14 @@ without reading anything else.*
   eye, and levels' own points are shown in the encoding that histogram
   is drawn in (they are kept in linear light, where the adjustment
   works) so that what a slider says is where the graph says the picture
-  is; Auto sets the two input points from that same histogram, a
+  is; white balance can be taken from the picture rather than typed —
+  point at something meant to be grey and the temperature and tint that
+  neutralize it follow, worked out from what that layer is given rather
+  than from the finished page, which already carries whatever balance is
+  being replaced (the gains are a channel each, so making a colour
+  neutral is two equations with an exact answer, clamped to what the
+  sliders can say);
+  Auto sets the two input points from that same histogram, a
   thousandth of the picture left outside at each end so that a speck of
   dust or a clipped highlight is not what decides where a picture's
   black is;
@@ -503,9 +510,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~296),
+- **Verify before committing:** `cargo test --workspace` (~297),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~663 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~668 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

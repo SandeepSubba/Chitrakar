@@ -5918,6 +5918,63 @@ assert(
   await pickTool("Move");
 }
 
+// 9s. White balance taken from the picture: point at something meant to
+// be grey and the numbers follow, which is how a photograph taken under
+// the wrong light is put right.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  // A grey under a blue light: what an indoor photograph looks like on
+  // the wrong film.
+  await setColor("Fill colour", "#7382a3");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const cast = await canvasPixel(200, 150);
+  assert(
+    cast[2] > cast[0] + 20,
+    `a blue cast to take out (${cast})`,
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "white-balance");
+  await page.waitForTimeout(250);
+  await page.locator(".panel ul li", { hasText: "White balance" }).click();
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Pick a grey"]');
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+  await page.mouse.click(...at(200, 150));
+  await page.waitForTimeout(350);
+  const balanced = await canvasPixel(200, 150);
+  assert(
+    Math.abs(balanced[0] - balanced[1]) < 4 && Math.abs(balanced[1] - balanced[2]) < 4,
+    `the pixel that was picked came out grey (${cast} -> ${balanced})`,
+  );
+  assert(
+    Number(await page.locator('input[aria-label="Temperature"]').inputValue()) > 0,
+    "and the light it was under is named as a cold one",
+  );
+  // The click balanced rather than picking a layer or drawing one: the
+  // move tool was in hand and nothing moved.
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === 2,
+    "with nothing else made by the click",
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  const back = await canvasPixel(200, 150);
+  assert(
+    Math.abs(back[2] - cast[2]) < 3,
+    `and one undo puts the light back (${back})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
