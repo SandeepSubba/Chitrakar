@@ -1,0 +1,13 @@
+[package]
+name = "chitrakar-render"
+description = "Render graph: CPU reference renderer now, wgpu/vello backends next"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+ab_glyph = "0.2"
+rustybuzz = "0.20"

@@ -1,0 +1,815 @@
+//! wasm-bindgen surface for the webview UI. Thin translation layer only:
+//! all behavior lives in [`Session`](crate::Session).
+//!
+//! Conventions across the boundary:
+//! - commands travel as serde-JSON strings of [`Command`](crate::Command);
+//! - node ids travel as `f64` (they are sequence numbers, far below 2^53);
+//! - frames stay in wasm memory: `render_frame` re-encodes only the dirty
+//!   region into an internal RGBA8 buffer, exposed via `frame_ptr`/
+//!   `frame_len` for zero-copy reads from JS.
+
+use crate::{ColorMode, NodeId, Session};
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct WasmSession {
+    inner: Session,
+    frame: Vec<u8>,
+}
+
+#[wasm_bindgen]
+impl WasmSession {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32, cmyk: bool) -> WasmSession {
+        let mode = if cmyk {
+            ColorMode::Cmyk
+        } else {
+            ColorMode::Rgb
+        };
+        WasmSession {
+            inner: Session::new(width, height, mode),
+            frame: Vec::new(),
+        }
+    }
+
+    /// Open a `.chitra` file.
+    pub fn open(bytes: &[u8]) -> Result<WasmSession, JsError> {
+        Ok(WasmSession {
+            inner: Session::load(bytes).map_err(to_js)?,
+            frame: Vec::new(),
+        })
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.inner.document().meta.width
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.inner.document().meta.height
+    }
+
+    /// The document's resolution, in pixels per inch.
+    #[wasm_bindgen(getter)]
+    pub fn dpi(&self) -> f32 {
+        self.inner.dpi()
+    }
+
+    /// Set the resolution (document setup, not an edit).
+    pub fn set_dpi(&mut self, dpi: f32) -> Result<(), JsError> {
+        self.inner.set_dpi(dpi).map_err(to_js)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn cmyk(&self) -> bool {
+        self.inner.document().meta.color_mode == ColorMode::Cmyk
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn root_id(&self) -> f64 {
+        self.inner.document().root().0 as f64
+    }
+
+    pub fn apply(&mut self, command_json: &str) -> Result<(), JsError> {
+        self.inner.apply_json(command_json).map_err(to_js)
+    }
+
+    /// Apply a command as a live drag preview (no history until commit).
+    pub fn preview(&mut self, command_json: &str) -> Result<(), JsError> {
+        self.inner.preview_json(command_json).map_err(to_js)
+    }
+
+    /// End the preview gesture as one undo step.
+    pub fn commit_preview(&mut self) -> bool {
+        self.inner.commit_preview()
+    }
+
+    /// Abort the preview gesture, restoring pre-gesture state.
+    pub fn cancel_preview(&mut self) -> Result<bool, JsError> {
+        self.inner.cancel_preview().map_err(to_js)
+    }
+
+    pub fn undo(&mut self) -> Result<bool, JsError> {
+        self.inner.undo().map_err(to_js)
+    }
+
+    pub fn redo(&mut self) -> Result<bool, JsError> {
+        self.inner.redo().map_err(to_js)
+    }
+
+    /// Width of the presented frame in device pixels: the document width
+    /// times the view scale.
+    pub fn frame_width(&self) -> u32 {
+        self.inner.present_size().0
+    }
+
+    pub fn frame_height(&self) -> u32 {
+        self.inner.present_size().1
+    }
+
+    /// Present only what a viewport of `width x height` device pixels can
+    /// see, with the document's origin at `(x, y)` inside it and `scale`
+    /// device pixels to the document pixel.
+    pub fn set_viewport(&mut self, scale: f32, x: f32, y: f32, width: u32, height: u32) {
+        self.inner.set_viewport(scale, x, y, width, height);
+    }
+
+    /// Re-render what changed since the last call into the internal RGBA8
+    /// frame. Returns the dirty rect `[x, y, w, h]` in frame pixels, or an
+    /// empty array when nothing changed. Read pixels via
+    /// `frame_ptr`/`frame_len`.
+    pub fn render_frame(&mut self) -> Result<Vec<u32>, JsError> {
+        let (fw, fh) = self.inner.present_size();
+        let expected = (fw * fh * 4) as usize;
+        let first_frame = self.frame.len() != expected;
+        if first_frame {
+            self.frame = vec![0; expected];
+        }
+        let full = crate::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: fw,
+            y1: fh,
+        };
+        let (_, dirty) = self.inner.render_cached().map_err(to_js)?;
+        let clip = match (dirty, first_frame) {
+            (Some(clip), _) => clip,
+            (None, false) => return Ok(Vec::new()),
+            (None, true) => full,
+        };
+        self.inner.encode_present_region(clip, &mut self.frame);
+        Ok(vec![clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0])
+    }
+
+    pub fn frame_ptr(&self) -> *const u8 {
+        self.frame.as_ptr()
+    }
+
+    pub fn frame_len(&self) -> usize {
+        self.frame.len()
+    }
+
+    /// Layers panel data: JSON array of `LayerInfo`, topmost first.
+    pub fn layers_json(&self) -> String {
+        serde_json::to_string(&self.inner.layers()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// History labels as JSON `{past: [...oldest first], future: [...next
+    /// redo first]}`.
+    pub fn history_json(&self) -> String {
+        let (past, future) = self.inner.history_labels();
+        serde_json::to_string(&serde_json::json!({ "past": past, "future": future }))
+            .unwrap_or_else(|_| "{}".into())
+    }
+
+    /// Move through history: negative undoes, positive redoes.
+    pub fn jump(&mut self, delta: i32) -> Result<(), JsError> {
+        self.inner.jump(delta).map_err(to_js)
+    }
+
+    /// Group same-parent nodes (one undo step); returns the group id.
+    pub fn group_nodes(&mut self, ids: Vec<f64>, name: &str) -> Result<f64, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .group_nodes(&ids, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Line up or space out several layers (see `Session::align_nodes`).
+    pub fn align_nodes(&mut self, ids: Vec<f64>, mode: &str) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.align_nodes(&ids, mode).map_err(to_js)
+    }
+
+    /// The colour the page shows at a document point, as four bytes of
+    /// straight sRGB with alpha; empty off the page.
+    pub fn color_at(&self, x: f32, y: f32) -> Vec<u8> {
+        self.inner
+            .color_at(x, y)
+            .map(|c| c.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Bring an SVG in as a group of shape layers (see
+    /// `Session::place_svg`). Returns the group's id.
+    pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
+        self.inner
+            .place_svg(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Set a text block along a shape layer's outline (see
+    /// `Session::text_along`).
+    pub fn text_along(&mut self, text: f64, shape: f64) -> Result<(), JsError> {
+        self.inner
+            .text_along(NodeId(text as u64), NodeId(shape as u64))
+            .map_err(to_js)
+    }
+
+    /// A small square picture of one layer on its own: RGBA8, `size`
+    /// across. Empty when the layer has no picture of its own.
+    pub fn thumbnail(&self, id: f64, size: u32) -> Vec<u8> {
+        self.inner
+            .thumbnail(NodeId(id as u64), size)
+            .unwrap_or_default()
+    }
+
+    /// A small square picture of a layer's mask, fitted the way the
+    /// layer's own picture is. Empty when there is no mask.
+    pub fn mask_thumbnail(&self, id: f64, size: u32) -> Vec<u8> {
+        self.inner
+            .mask_thumbnail(NodeId(id as u64), size)
+            .unwrap_or_default()
+    }
+
+    /// Add an empty layer to paint on at the top of the document.
+    /// Returns its id.
+    pub fn add_paint_layer(&mut self, name: &str) -> Result<f64, JsError> {
+        self.inner
+            .add_paint_layer(name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Put a frame on the page at (x, y), `width`×`height` in document
+    /// units, with `background` an authored colour as JSON (or empty for
+    /// a frame with no ground of its own). Returns its id.
+    pub fn add_artboard(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background: &str,
+    ) -> Result<f64, JsError> {
+        let color = if background.is_empty() {
+            None
+        } else {
+            Some(serde_json::from_str(background).map_err(|e| JsError::new(&e.to_string()))?)
+        };
+        self.inner
+            .add_artboard(name, x, y, width, height, color)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// How the page's tones are spread: 4 × 256 counts (red, green,
+    /// blue, luminance) in the display encoding. A layer id asks for
+    /// what that layer sees — everything under it — rather than for the
+    /// finished page; pass -1 for the page itself.
+    pub fn histogram(&self, below: f64) -> Result<Vec<u32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner.histogram(below).map_err(to_js)
+    }
+
+    /// Where the picture's tones start and stop, as the two input points
+    /// levels wants, in the linear light it works in. A layer id asks
+    /// about what that layer sees; pass -1 for the page itself.
+    pub fn auto_levels(&self, below: f64) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .auto_levels(below)
+            .map(|p| p.to_vec())
+            .map_err(to_js)
+    }
+
+    /// Where each channel's own tones start and stop — six numbers, two
+    /// to a channel in red, green, blue order, in the display encoding a
+    /// curve is drawn in. Pass -1 for the page itself.
+    pub fn auto_color(&self, below: f64) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .auto_color(below)
+            .map(|ends| ends.iter().flatten().copied().collect())
+            .map_err(to_js)
+    }
+
+    /// The temperature and tint that would make the colour at a document
+    /// point neutral, read from what the layer is given rather than from
+    /// the finished page. Pass -1 for the page itself. Empty where there
+    /// is nothing to balance.
+    pub fn neutral_balance(&self, below: f64, x: f32, y: f32) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .neutral_balance(below, x, y)
+            .map(|p| p.map(|v| v.to_vec()).unwrap_or_default())
+            .map_err(to_js)
+    }
+
+    /// The frame under a document point, or -1 where there is none.
+    pub fn frame_at(&self, x: f32, y: f32) -> f64 {
+        self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)
+    }
+
+    /// A document point in the coordinates layers inside `id` use.
+    /// Empty when that space has collapsed.
+    pub fn point_inside(&self, id: f64, x: f32, y: f32) -> Vec<f32> {
+        self.inner
+            .point_inside(NodeId(id as u64), x, y)
+            .map(|p| p.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// How many layers a group or frame holds.
+    pub fn child_count(&self, id: f64) -> usize {
+        self.inner.child_count(NodeId(id as u64))
+    }
+
+    /// Move a layer to a new parent and slot, keeping it where it is on
+    /// the page (see `Session::reparent`).
+    pub fn reparent(&mut self, id: f64, parent: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .reparent(NodeId(id as u64), NodeId(parent as u64), index)
+            .map_err(to_js)
+    }
+
+    /// Put a live copy of a layer beside it (see
+    /// `Session::make_instance`). Returns the copy's id.
+    pub fn make_instance(&mut self, of: f64) -> Result<f64, JsError> {
+        self.inner
+            .make_instance(NodeId(of as u64))
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Give a copy a layer of its own in place of the original's `index`
+    /// (see `Session::override_child`). Returns the copy's own layer.
+    pub fn override_child(&mut self, instance: f64, index: usize) -> Result<f64, JsError> {
+        self.inner
+            .override_child(NodeId(instance as u64), index)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Take that stand-in away, so the copy follows the original there.
+    pub fn clear_override(&mut self, instance: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .clear_override(NodeId(instance as u64), index)
+            .map_err(to_js)
+    }
+
+    /// The original's layers a copy could stand in for, as JSON: an
+    /// array of `{name, own}`, `own` saying whether it already does.
+    pub fn overridable_json(&self, instance: f64) -> String {
+        let rows: Vec<_> = self
+            .inner
+            .overridable(NodeId(instance as u64))
+            .into_iter()
+            .map(|(name, own)| serde_json::json!({ "name": name, "own": own }))
+            .collect();
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The command that gives a frame a new size and moves what is in it
+    /// by how each layer is pinned, as JSON — apply it with `preview`
+    /// while a corner is being dragged and with `apply` when it is let
+    /// go, so the whole drag is one entry. `dx`/`dy` shift the frame's
+    /// own origin, in its coordinates before the resize.
+    pub fn artboard_resize(
+        &self,
+        id: f64,
+        width: f32,
+        height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<String, JsError> {
+        self.inner
+            .artboard_resize(NodeId(id as u64), width, height, dx, dy)
+            .map_err(to_js)
+    }
+
+    /// A frame's contents as a PNG, at the size it shows on the page
+    /// times `scale`.
+    pub fn export_artboard_png(&self, id: f64, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .artboard_png(NodeId(id as u64), scale)
+            .map_err(to_js)
+    }
+
+    /// Start a brush stroke on a paint layer. The point and the radius
+    /// are in document units; `color` is an authored colour as JSON, the
+    /// way a command carries one. The stroke previews as it is drawn and
+    /// becomes one entry in history at `commit_preview`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_begin(
+        &mut self,
+        layer: f64,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: &str,
+        softness: f32,
+        erase: bool,
+        on_mask: bool,
+    ) -> Result<(), JsError> {
+        let color =
+            serde_json::from_str(color).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        self.inner
+            .paint_begin(
+                NodeId(layer as u64),
+                x,
+                y,
+                radius,
+                color,
+                softness,
+                erase,
+                on_mask,
+            )
+            .map_err(to_js)
+    }
+
+    /// Give a layer a mask a brush can work on, when it has not got one.
+    /// False when a mask of another kind is already there.
+    pub fn ensure_painted_mask(&mut self, id: f64) -> Result<bool, JsError> {
+        self.inner
+            .ensure_painted_mask(NodeId(id as u64))
+            .map_err(to_js)
+    }
+
+    /// Put a new anchor on a path at the point nearest a document point,
+    /// splitting the segment it lands on. Returns its index.
+    pub fn insert_anchor(
+        &mut self,
+        id: f64,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<usize, JsError> {
+        self.inner
+            .insert_anchor(NodeId(id as u64), x, y, within)
+            .map_err(to_js)
+    }
+
+    /// Take an anchor off a path.
+    pub fn remove_anchor(&mut self, id: f64, index: usize) -> Result<(), JsError> {
+        self.inner
+            .remove_anchor(NodeId(id as u64), index)
+            .map_err(to_js)
+    }
+
+    /// Add an empty layer to clone onto at the top of the document.
+    /// Returns its id.
+    pub fn add_clone_layer(&mut self, name: &str) -> Result<f64, JsError> {
+        self.inner
+            .add_clone_layer(name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Where the stroke being drawn reads from, in document units, and
+    /// whether it heals rather than clones.
+    pub fn paint_source(&mut self, dx: f32, dy: f32, heal: bool) -> Result<(), JsError> {
+        self.inner.paint_source(dx, dy, heal).map_err(to_js)
+    }
+
+    /// Carry the stroke being drawn on to another point.
+    pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), JsError> {
+        self.inner.paint_extend(x, y, radius).map_err(to_js)
+    }
+
+    /// Whether a brush stroke is being drawn.
+    pub fn is_painting(&self) -> bool {
+        self.inner.is_painting()
+    }
+
+    /// A layer's look without its shape, as JSON: what it is painted
+    /// with, what hangs off it, and how it sits on what is under it.
+    pub fn copy_style(&self, id: f64) -> Result<String, JsError> {
+        self.inner.copy_style(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Give that look to every layer named, in one undo step.
+    pub fn paste_style(&mut self, json: &str, ids: Vec<f64>) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.paste_style(json, &ids).map_err(to_js)
+    }
+
+    /// Set the opacity of several layers as one undo step.
+    pub fn set_opacity_of(&mut self, ids: Vec<f64>, opacity: f32) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.set_opacity_of(&ids, opacity).map_err(to_js)
+    }
+
+    /// Set the blend mode of several layers as one undo step; `blend` is
+    /// the mode's name, as the document spells it.
+    pub fn set_blend_of(&mut self, ids: Vec<f64>, blend: &str) -> Result<(), JsError> {
+        let blend = serde_json::from_str(&format!("\"{blend}\""))
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.set_blend_of(&ids, blend).map_err(to_js)
+    }
+
+    /// Mirror layers about their shared box, left for right when
+    /// `horizontal`, else top for bottom (see `Session::flip_nodes`).
+    pub fn flip_nodes(&mut self, ids: Vec<f64>, horizontal: bool) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.flip_nodes(&ids, horizontal).map_err(to_js)
+    }
+
+    /// Combine shape layers into one compound path. `op` is one of
+    /// "union", "intersect", "subtract" or "exclude". Returns the new
+    /// layer's id.
+    pub fn boolean_nodes(&mut self, ids: Vec<f64>, op: &str) -> Result<f64, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .boolean_nodes(&ids, op)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Scope an adjustment or filter to one layer: the layer and the new
+    /// node (as AddNode's node JSON) go into a group together. Returns the
+    /// group's id.
+    pub fn adjust_node(&mut self, id: f64, node_json: &str) -> Result<f64, JsError> {
+        let node: crate::Node =
+            serde_json::from_str(node_json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner
+            .adjust_node(NodeId(id as u64), node)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Put a node and its subtree on the clipboard.
+    pub fn copy_node(&self, id: f64) -> Result<(), JsError> {
+        self.inner.copy_node(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Paste the clipboard into the root; returns the new node's id, or
+    /// undefined when the clipboard is empty.
+    pub fn paste(&mut self) -> Result<Option<f64>, JsError> {
+        self.inner
+            .paste(None)
+            .map(|id| id.map(|i| i.0 as f64))
+            .map_err(to_js)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_clipboard(&self) -> bool {
+        crate::clipboard_has_content()
+    }
+
+    /// Copy a node and its subtree just above itself; returns the copy's id.
+    /// Duplicate several layers as one undo step (see
+    /// `Session::duplicate_nodes`); the copies come back in order.
+    pub fn duplicate_nodes(&mut self, ids: Vec<f64>, offset: bool) -> Result<Vec<f64>, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .duplicate_nodes(&ids, offset)
+            .map(|copies| copies.into_iter().map(|id| id.0 as f64).collect())
+            .map_err(to_js)
+    }
+
+    pub fn duplicate_node(&mut self, id: f64) -> Result<f64, JsError> {
+        self.inner
+            .duplicate_node(NodeId(id as u64))
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Dissolve a group into its parent (one undo step).
+    pub fn ungroup_node(&mut self, id: f64) -> Result<(), JsError> {
+        self.inner.ungroup_node(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Topmost clickable node at a document-space point, or undefined.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<f64> {
+        self.inner.hit_test(x, y).map(|id| id.0 as f64)
+    }
+
+    /// Full affine transform of a node as `[a, b, c, d, e, f]`.
+    pub fn transform_of(&self, id: f64) -> Result<Vec<f32>, JsError> {
+        let t = self.inner.transform_of(NodeId(id as u64)).map_err(to_js)?;
+        Ok(vec![t.a, t.b, t.c, t.d, t.e, t.f])
+    }
+
+    /// A node's kind parameters as JSON (see `Session::kind_json`).
+    pub fn kind_json(&self, id: f64) -> Result<String, JsError> {
+        self.inner.kind_json(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// A node's mask as JSON, `null` when unmasked.
+    pub fn mask_json(&self, id: f64) -> Result<String, JsError> {
+        self.inner.mask_json(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Resize the page, shifting top-level layers so the picture stays
+    /// put. Cropping is this with the crop rect's size and negated origin.
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), JsError> {
+        self.inner
+            .resize_canvas(width, height, dx, dy)
+            .map_err(to_js)
+    }
+
+    /// Turn the page a quarter of the way round, `quarters` times
+    /// clockwise; an odd number swaps its width and height.
+    pub fn turn_canvas(&mut self, quarters: u8) -> Result<(), JsError> {
+        self.inner.turn_canvas(quarters).map_err(to_js)
+    }
+
+    /// Mirror the page across its own middle: left to right when
+    /// The page size a straighten by this angle would leave, as
+    /// [width, height]: the largest rectangle of the page's own
+    /// proportions that still fits once it has been turned.
+    pub fn straighten_size(&self, degrees: f32) -> Vec<u32> {
+        let (w, h) = self.inner.straighten_size(degrees);
+        vec![w, h]
+    }
+
+    /// `across_x`, top to bottom when not.
+    pub fn mirror_canvas(&mut self, across_x: bool) -> Result<(), JsError> {
+        self.inner.mirror_canvas(across_x).map_err(to_js)
+    }
+
+    /// Force the next `render_frame` to redraw everything, for when the
+    /// canvas it is copied into has been replaced.
+    pub fn invalidate(&mut self) {
+        self.inner.invalidate();
+    }
+
+    /// The document's guides as JSON: an array of `{"Vertical": x}` or
+    /// `{"Horizontal": y}`.
+    pub fn guides_json(&self) -> String {
+        self.inner.guides_json()
+    }
+
+    /// The document's palette as JSON: an array of `{name, color}`.
+    pub fn swatches_json(&self) -> String {
+        self.inner.swatches_json()
+    }
+
+    /// A node's effect list as JSON.
+    pub fn effects_json(&self, id: f64) -> Result<String, JsError> {
+        self.inner.effects_json(NodeId(id as u64)).map_err(to_js)
+    }
+
+    /// Doc-space bounds of a node as `[x, y, w, h]`; empty if it has none.
+    pub fn bounds_of(&self, id: f64) -> Vec<f32> {
+        self.inner
+            .bounds_of(NodeId(id as u64))
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Transform from a node's parent space into document space, as
+    /// `[a, b, c, d, e, f]`.
+    pub fn parent_space_of(&self, id: f64) -> Vec<f32> {
+        self.inner.parent_space_of(NodeId(id as u64)).to_vec()
+    }
+
+    /// Local-space bounds of a node as `[x0, y0, x1, y1]`; empty if none.
+    pub fn local_bounds_of(&self, id: f64) -> Vec<f32> {
+        self.inner
+            .local_bounds_of(NodeId(id as u64))
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
+        self.inner
+            .place_image(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Register a font (TrueType/OpenType bytes) under a name text blocks
+    /// can use. Process-wide, so once is enough per page load.
+    pub fn register_font(name: &str, bytes: &[u8]) -> Result<(), JsError> {
+        Session::register_font(name, bytes.to_vec()).map_err(to_js)
+    }
+
+    /// The names text blocks can be set in, as a JSON array.
+    pub fn font_names() -> String {
+        serde_json::to_string(&Session::font_names()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The node the last command touched, or undefined. Undo hands the
+    /// layer it brought back here so the selection can follow it.
+    pub fn last_touched_node(&self) -> Option<f64> {
+        self.inner.last_touched_node().map(|id| id.0 as f64)
+    }
+
+    /// Set the CMYK press profile from ICC bytes.
+    pub fn set_cmyk_profile(&mut self, icc: &[u8]) -> Result<(), JsError> {
+        self.inner.set_cmyk_profile(icc.to_vec()).map_err(to_js)
+    }
+
+    /// Show through a monitor's own profile, from ICC bytes: everything
+    /// presented is taken from sRGB to that screen's numbers. A view
+    /// setting — nothing about the document, or what it exports, moves.
+    pub fn set_display_profile(&mut self, icc: &[u8]) -> Result<(), JsError> {
+        self.inner.set_display_profile(icc).map_err(to_js)
+    }
+
+    /// Go back to showing sRGB as it is.
+    pub fn clear_display_profile(&mut self) {
+        self.inner.clear_display_profile();
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_display_profile(&self) -> bool {
+        self.inner.has_display_profile()
+    }
+
+    /// Toggle display soft-proofing (and gamut warning) through the press
+    /// profile.
+    pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), JsError> {
+        self.inner.set_proofing(proof, gamut_warn).map_err(to_js)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_cmyk_profile(&self) -> bool {
+        self.inner.has_cmyk_profile()
+    }
+
+    /// Serialize to `.chitra` bytes.
+    pub fn save(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.save().map_err(to_js)
+    }
+
+    /// Render and encode as PNG (export).
+    pub fn export_png(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.render_png().map_err(to_js)
+    }
+
+    /// Render and encode as JPEG (export); transparency flattens onto white.
+    pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, JsError> {
+        self.inner.export_jpeg(quality).map_err(to_js)
+    }
+
+    /// PNG at `scale` pixels per document pixel, of the region
+    /// `[x, y, w, h]` in document pixels — or of the whole page when `w`
+    /// or `h` is zero.
+    pub fn export_png_at(
+        &self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Result<Vec<u8>, JsError> {
+        let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
+        self.inner.render_png_at(scale, region).map_err(to_js)
+    }
+
+    /// The same for JPEG.
+    #[allow(clippy::too_many_arguments)]
+    pub fn export_jpeg_at(
+        &self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        quality: u8,
+    ) -> Result<Vec<u8>, JsError> {
+        let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
+        self.inner
+            .export_jpeg_at(scale, region, quality)
+            .map_err(to_js)
+    }
+
+    /// Export a one-page PDF (CMYK-separated when a press profile is set).
+    pub fn export_pdf(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_pdf().map_err(to_js)
+    }
+
+    /// The document's frames as the pages of one PDF, each page its
+    /// frame's own size.
+    pub fn export_pdf_frames(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_pdf_frames().map_err(to_js)
+    }
+
+    /// Export as SVG markup.
+    pub fn export_svg(&self) -> Result<String, JsError> {
+        self.inner.export_svg().map_err(to_js)
+    }
+
+    /// Export a print-ready CMYK TIFF (needs a loaded press profile).
+    pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_cmyk_tiff().map_err(to_js)
+    }
+}
+
+fn to_js(e: crate::EngineError) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+/// The bytes of the Display P3 profile, so a screen known to be P3 — most
+/// of what Apple has shipped for years — can be shown properly without
+/// hunting down an .icc file for it. Any other screen wants its own
+/// profile loaded from a file.
+#[wasm_bindgen]
+pub fn display_p3_profile() -> Vec<u8> {
+    chitrakar_color::cms::display_p3_profile_bytes()
+}

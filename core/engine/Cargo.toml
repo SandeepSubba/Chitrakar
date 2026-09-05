@@ -1,0 +1,27 @@
+[package]
+name = "chitrakar-engine"
+description = "Public engine API embedded by the app shells (native + WASM)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib for the wasm-bindgen build, rlib for native embedding.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-opt needs a binaryen download that restricted-network environments
+# block; the unoptimized module is fine while the engine is this small.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+chitrakar-render.workspace = true
+chitrakar-codecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
