@@ -843,6 +843,26 @@ body {
   fill: rgb(0 0 0 / 0.55);
 }
 
+/* The thirds, drawn thinner than the frame: a guide to put a horizon
+   on, not another edge. */
+.crop-third {
+  stroke: rgb(255 255 255 / 0.5);
+  stroke-width: 1;
+}
+
+/* The crop's ratio picker. The same width as the number above it, and
+   as the buttons, so that picking a tool never moves the rail — and with
+   it the canvas — sideways under the pointer. */
+.tool-ratio {
+  width: 2.4rem;
+  padding: 0.2rem 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.68rem;
+}
+
 .crop-frame {
   fill: none;
   stroke: #fff;

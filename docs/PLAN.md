@@ -103,7 +103,15 @@ without reading anything else.*
   dissolving one folds its transform into its children. Documents are any
   size, chosen from presets or typed, in RGB or CMYK, and the crop tool
   re-frames one after the fact — the page becomes the dragged rectangle
-  and the picture stays where it was inside it. Canvas size is the
+  and the picture stays where it was inside it. A crop can be held to a
+  ratio — a print's, a screen's, a square, or the page's own — which is
+  what a photograph is nearly always cropped to rather than to whatever
+  the drag happened to be; the frame drawn while dragging and the crop
+  taken on the way up are the same box worked out by the same function,
+  clamped to the page and then fitted to the ratio inside what is left,
+  so a square crop that runs off the bottom comes out square and smaller
+  rather than not square at all. The thirds are drawn over the frame,
+  which is where a horizon goes. Canvas size is the
   other half of that: cropping can only ever take room away, and this
   gives the page room — the couple of centimetres of white around a
   photograph that every print asks for — with one of the page's nine
@@ -497,7 +505,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~296),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~657 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~663 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

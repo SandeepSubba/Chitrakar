@@ -5837,6 +5837,87 @@ assert(
   );
 }
 
+// 9r. A crop held to a ratio, and the thirds to put a horizon on. A
+// photograph is nearly always cropped to something — a print, a screen,
+// a square — rather than to whatever the drag happened to be.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#3388cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  await pickTool("Crop");
+  const picker = page.locator('select[aria-label="Crop ratio"]');
+  assert(
+    (await picker.count()) === 1,
+    "the crop tool brings its ratios with it",
+  );
+  await picker.selectOption("1:1");
+  await page.waitForTimeout(150);
+
+  // A wide drag comes out square, and says so while it is being dragged.
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(340, 200), { steps: 8 });
+  await page.waitForTimeout(200);
+  const frame = await page.locator(".crop-frame").boundingBox();
+  assert(
+    Math.abs(frame.width - frame.height) < 3,
+    `the box being dragged is held square (${frame.width}x${frame.height})`,
+  );
+  assert(
+    (await page.locator(".crop-third").count()) === 4,
+    "with the thirds drawn on it",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const page1 = await page.locator("#engine-page").boundingBox();
+  assert(
+    Math.abs(page1.width - page1.height) < 3,
+    `and the page it makes is square (${page1.width}x${page1.height})`,
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  const back = await page.locator("#engine-page").boundingBox();
+  assert(
+    Math.abs(back.width / back.height - 400 / 300) < 0.03,
+    `undo puts the page back (${back.width}x${back.height})`,
+  );
+
+  // Free again, a drag is whatever it was dragged. (A crop puts the move
+  // tool back in hand when it lands, so the crop tool is taken up again.)
+  await pickTool("Crop");
+  await picker.selectOption("Free");
+  await page.waitForTimeout(150);
+  const b2 = await page.locator("#engine-page").boundingBox();
+  const at2 = (x, y) => [
+    b2.x + (x / 400) * b2.width,
+    b2.y + (y / 300) * b2.height,
+  ];
+  await page.mouse.move(...at2(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at2(340, 140), { steps: 8 });
+  await page.waitForTimeout(200);
+  const wide = await page.locator(".crop-frame").boundingBox();
+  assert(
+    wide.width > wide.height * 2,
+    `free, the box is what it was dragged (${wide.width}x${wide.height})`,
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  await pickTool("Move");
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

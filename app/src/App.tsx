@@ -667,6 +667,31 @@ const toShown = (v: number) =>
 const toLinear = (v: number) =>
   v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
 
+/** What a crop can be held to. A photograph is nearly always cropped to
+ * something — a print, a screen, a square — rather than to whatever the
+ * drag happened to be, and the ones worth naming are few. "Original" is
+ * the page's own proportions, which is how a picture is cropped tighter
+ * without changing what it fits. */
+const CROP_RATIOS: Record<string, number | null> = {
+  Free: null,
+  Original: 0,
+  "1:1": 1,
+  "4:5": 4 / 5,
+  "5:4": 5 / 4,
+  "3:2": 3 / 2,
+  "2:3": 2 / 3,
+  "16:9": 16 / 9,
+  "9:16": 9 / 16,
+};
+
+/** The ratio a name asks for, as width over height: nothing for a free
+ * crop, and the page's own for "Original". */
+const cropRatioOf = (name: string, page: [number, number]): number | null => {
+  const r = CROP_RATIOS[name];
+  if (r === null || r === undefined) return null;
+  return r === 0 ? page[0] / Math.max(1, page[1]) : r;
+};
+
 const SNAP_PX = 6;
 
 /** Where the layout stops having room for the panel beside the canvas.
@@ -749,6 +774,8 @@ export function App() {
    * two, since a five-sided thing and a five-pointed one are the same
    * ask made twice. */
   const [sides, setSides] = useState(5);
+  /** What the crop is held to, by name. */
+  const [cropRatio, setCropRatio] = useState("Free");
   /** Which of the shape tools sits in the rail's one shape slot, and
    * whether the rest are showing. */
   const [shapeTool, setShapeTool] = useState<Tool>("Rect");
@@ -2280,6 +2307,27 @@ export function App() {
     (e.target as Element).setPointerCapture(e.pointerId);
   };
 
+  /** What a crop drag would actually take: the box dragged, clamped to
+   * the page — a crop can only ever take room away — and then held to
+   * the ratio asked for, as the largest box of that ratio inside what is
+   * left. Both the frame drawn while dragging and the crop committed on
+   * the way up ask this one function, so the frame cannot promise a
+   * square and hand back an oblong when the drag runs off the page. */
+  const cropBox = (drag: ToolDrag): [number, number, number, number] => {
+    const [x0, y0, w, h] = dragBox(drag);
+    const clamp = (v: number, hi: number) => Math.min(Math.max(v, 0), hi);
+    const x = clamp(x0, docSize[0]);
+    const y = clamp(y0, docSize[1]);
+    let cw = clamp(x0 + w, docSize[0]) - x;
+    let ch = clamp(y0 + h, docSize[1]) - y;
+    const ratio = cropRatioOf(cropRatio, docSize);
+    if (ratio && cw > 0 && ch > 0) {
+      if (cw / ch > ratio) cw = ch * ratio;
+      else ch = cw / ratio;
+    }
+    return [x, y, cw, ch];
+  };
+
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
     const band = marqueeRef.current;
@@ -2350,7 +2398,18 @@ export function App() {
         [drag.lastX, drag.lastY],
       );
     }
-    if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
+    // A crop held to a ratio follows the cursor on whichever side has
+    // travelled further and takes the other from the ratio, so the box
+    // grows with the drag rather than fighting it. The ratio is the whole
+    // ask, so shift has nothing left to say about the shape.
+    const ratio = drag.tool === "Crop" ? cropRatioOf(cropRatio, docSize) : null;
+    if (ratio) {
+      let [w, h] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+      const sign = (v: number) => (v < 0 ? -1 : 1);
+      if (Math.abs(w) / ratio > Math.abs(h)) h = (sign(h) * Math.abs(w)) / ratio;
+      else w = sign(w) * Math.abs(h) * ratio;
+      [drag.lastX, drag.lastY] = [drag.startX + w, drag.startY + h];
+    } else if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
       const side = Math.max(
         Math.abs(drag.lastX - drag.startX),
         Math.abs(drag.lastY - drag.startY),
@@ -2388,7 +2447,7 @@ export function App() {
         view.x + x * view.zoom,
         view.y + y * view.zoom,
       ];
-      const [bx, by, bw, bh] = dragBox(drag);
+      const [bx, by, bw, bh] = cropBox(drag);
       const [ax, ay] = toHost(bx, by);
       const [cx, cy] = toHost(bx + bw, by + bh);
       setCropRect([ax, ay, cx, cy]);
@@ -2564,16 +2623,15 @@ export function App() {
         : w >= MIN_SIZE && h >= MIN_SIZE;
     if (!enough) return;
     if (drag.tool === "Crop") {
-      // Crop to the dragged rectangle, clamped to the page: the document
-      // becomes that rectangle and every layer shifts with it, so what was
-      // framed stays framed. Both corners are clamped, not just the
-      // origin — a frame started off the page would otherwise keep the
-      // width it was dragged with and come out bigger than it looked.
-      const clamp = (v: number, hi: number) => Math.min(Math.max(v, 0), hi);
-      const cx = Math.round(clamp(x0, docSize[0]));
-      const cy = Math.round(clamp(y0, docSize[1]));
-      const cw = Math.round(clamp(x0 + w, docSize[0])) - cx;
-      const ch = Math.round(clamp(y0 + h, docSize[1])) - cy;
+      // Crop to the frame that was drawn — the same box, worked out by
+      // the same function, so what was shown is what is taken. The
+      // document becomes that rectangle and every layer shifts with it,
+      // so what was framed stays framed.
+      const [bx, by, bw, bh] = cropBox(drag);
+      const cx = Math.round(bx);
+      const cy = Math.round(by);
+      const cw = Math.round(bx + bw) - cx;
+      const ch = Math.round(by + bh) - cy;
       if (cw < 1 || ch < 1) return;
       try {
         session.resize_canvas(cw, ch, -cx, -cy);
@@ -5275,6 +5333,24 @@ export function App() {
               aria-label={tool === "Star" ? "Points" : "Sides"}
             />
           )}
+          {/* What the crop is held to. Only while the crop tool is in
+              hand, like the number of sides above it. */}
+          {tool === "Crop" && (
+            <select
+              className="tool-ratio"
+              value={cropRatio}
+              onChange={(e) => setCropRatio(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
+              title="Hold the crop to a ratio"
+              aria-label="Crop ratio"
+            >
+              {Object.keys(CROP_RATIOS).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
           <input
             type="color"
             value={fill}
@@ -5580,6 +5656,29 @@ export function App() {
                 width={cropRect[2] - cropRect[0]}
                 height={cropRect[3] - cropRect[1]}
               />
+              {/* Thirds: where a horizon or a face is put by anyone who
+                  has been told where to put one, and the reason a crop is
+                  worth watching while it is dragged. */}
+              {[1, 2].map((n) => (
+                <line
+                  key={`v${n}`}
+                  className="crop-third"
+                  x1={cropRect[0] + ((cropRect[2] - cropRect[0]) * n) / 3}
+                  y1={cropRect[1]}
+                  x2={cropRect[0] + ((cropRect[2] - cropRect[0]) * n) / 3}
+                  y2={cropRect[3]}
+                />
+              ))}
+              {[1, 2].map((n) => (
+                <line
+                  key={`h${n}`}
+                  className="crop-third"
+                  x1={cropRect[0]}
+                  y1={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
+                  x2={cropRect[2]}
+                  y2={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
+                />
+              ))}
             </svg>
           )}
           {marquee && (
