@@ -92,6 +92,11 @@ export type Adjustment =
   | { GradientMap: { stops: GradientStop[] } }
   /** Turned inside out, on the values a device shows. */
   | { Invert: { amount: number } }
+  /** Hue, saturation and lightness asked of one band of colour at a
+   * time — six triples in red, yellow, green, cyan, blue, magenta
+   * order, each a hue shift, a saturation change and a lightness
+   * change. */
+  | { SelectiveHsl: { bands: [number, number, number][] } }
   /** The two ends of the tone range moved without touching the middle:
    * shadows above zero opens up what is dark, highlights above zero
    * pulls back what is bright, and both run to -1 for the opposite. */

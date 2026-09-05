@@ -354,6 +354,25 @@ pub enum Adjustment {
     Invert {
         amount: f32,
     },
+    /// Hue, saturation and lightness asked of one band of colour at a
+    /// time — the reds, the yellows, the greens, the cyans, the blues,
+    /// the magentas — which is how a sky is deepened without touching
+    /// the grass, or a face warmed without warming the wall behind it.
+    ///
+    /// `bands` is six triples in that order: a hue shift (-1..=1, half a
+    /// band's width at the ends), a saturation change and a lightness
+    /// change (-1..=1 each). A shorter list is read as zeroes, so a file
+    /// written before a band existed still reads.
+    ///
+    /// A pixel belongs to the bands its own hue falls between, by how
+    /// near it is to each — the weights are a triangle a band wide, so
+    /// they always add to one and no colour sits in a seam. How much of
+    /// the change it takes is how much colour it has: a grey has no hue
+    /// to speak to and is left alone.
+    SelectiveHsl {
+        #[serde(default)]
+        bands: Vec<[f32; 3]>,
+    },
     /// The two ends of the tone range, moved without touching the middle:
     /// `shadows` above zero opens up what is dark, `highlights` above
     /// zero pulls back what is bright, and both run to -1 for the

@@ -693,6 +693,17 @@ const cropRatioOf = (name: string, page: [number, number]): number | null => {
   return r === 0 ? page[0] / Math.max(1, page[1]) : r;
 };
 
+/** The six bands of colour a picture is spoken to in, in the order a
+ * colour wheel is read, each drawn in something like its own colour. */
+const COLOUR_BANDS: [string, string][] = [
+  ["Reds", "#ff6b6b"],
+  ["Yellows", "#e3c341"],
+  ["Greens", "#4fc76b"],
+  ["Cyans", "#3fc6d0"],
+  ["Blues", "#5b8cff"],
+  ["Magentas", "#d071e0"],
+];
+
 const SNAP_PX = 6;
 
 /** Where the layout stops having room for the panel beside the canvas.
@@ -3075,6 +3086,23 @@ export function App() {
             stops: [
               { offset: 0, color: hexColor("#000000") },
               { offset: 1, color: hexColor("#ffffff") },
+            ],
+          },
+        },
+      },
+    },
+    "colour-bands": {
+      name: "Colour bands",
+      kind: {
+        Adjustment: {
+          SelectiveHsl: {
+            bands: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
             ],
           },
         },
@@ -8521,6 +8549,8 @@ function KindProps({
   pickingNeutral,
   onAutoColour,
 }: KindPropsProps) {
+  // Which band of colour the panel is showing, when it is showing one.
+  const [band, setBand] = useState(0);
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -8605,6 +8635,51 @@ function KindProps({
           )}
           {slider("Tint", p.tint, -1, 1, 0.01, (v) =>
             wrap({ WhiteBalance: { ...p, tint: v } }),
+          )}
+        </>
+      );
+    }
+    if ("SelectiveHsl" in adj) {
+      const p = adj.SelectiveHsl;
+      const bands: [number, number, number][] = Array.from(
+        { length: 6 },
+        (_, i) => p.bands[i] ?? [0, 0, 0],
+      );
+      const set = (i: number, k: number, v: number): NodeKind => {
+        const next = bands.map((t) => [...t] as [number, number, number]);
+        next[i][k] = v;
+        return wrap({ SelectiveHsl: { bands: next } });
+      };
+      const touched = (i: number) => bands[i].some((v) => Math.abs(v) > 1e-6);
+      return (
+        <>
+          {/* One band at a time, in the order a colour wheel is read.
+              The dot says which ones have been asked for something, so
+              nothing is hidden behind the picker. */}
+          <div className="curve-channels" role="group" aria-label="Colour band">
+            {COLOUR_BANDS.map(([name, colour], i) => (
+              <button
+                key={name}
+                type="button"
+                className={i === band ? "active" : ""}
+                style={{ color: colour }}
+                aria-pressed={i === band}
+                aria-label={`${name} band`}
+                onClick={() => setBand(i)}
+              >
+                {name.slice(0, 3)}
+                {touched(i) ? "•" : ""}
+              </button>
+            ))}
+          </div>
+          {slider("Band hue", bands[band][0], -1, 1, 0.01, (v) =>
+            set(band, 0, v),
+          )}
+          {slider("Band saturation", bands[band][1], -1, 1, 0.01, (v) =>
+            set(band, 1, v),
+          )}
+          {slider("Band lightness", bands[band][2], -1, 1, 0.01, (v) =>
+            set(band, 2, v),
           )}
         </>
       );

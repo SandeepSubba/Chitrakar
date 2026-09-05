@@ -69,6 +69,15 @@ without reading anything else.*
   thousandth of the picture left outside at each end so that a speck of
   dust or a clipped highlight is not what decides where a picture's
   black is;
+  hue, saturation and lightness asked of one band of colour at a time —
+  the reds, the yellows, the greens, the cyans, the blues, the magentas —
+  which is how a sky is deepened without touching the grass, or a face
+  warmed without warming the wall behind it: a pixel belongs to the bands
+  its own hue falls between, by how near it is to each, and the weights
+  are a triangle a band wide so they always add to one and no colour sits
+  in a seam; how much of the change it takes is how much colour it has,
+  fading out towards grey, though a third of full saturation already
+  takes all of it, since a pale sky is still a sky;
   shadows and highlights, which moves the two ends of the tone range and
   leaves the middle where it is — the first thing asked of a photograph
   after exposure, since a face against a window is dark because the
@@ -601,9 +610,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~302),
+- **Verify before committing:** `cargo test --workspace` (~304),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~759 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~764 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

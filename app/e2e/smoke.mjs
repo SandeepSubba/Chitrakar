@@ -6772,6 +6772,65 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9ac. One band of colour at a time: the blues come up and the greens
+// beside them are left where they were, which is how a sky is deepened
+// without touching the grass.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await paint("#4d7bcc", 0, 0, 400, 150); // a sky
+  await paint("#5aa347", 0, 150, 400, 300); // and the grass under it
+  const sky = () => canvasPixel(200, 70);
+  const grass = () => canvasPixel(200, 230);
+  const chroma = (px) =>
+    Math.max(px[0], px[1], px[2]) - Math.min(px[0], px[1], px[2]);
+  const before = [await sky(), await grass()];
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "colour-bands");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Colour bands" }).click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('[aria-label="Colour band"] button').count()) === 6,
+    "six bands to choose from",
+  );
+  await page.click('button[aria-label="Blues band"]');
+  await page.waitForTimeout(150);
+  await setSlider("Band saturation", 0.8);
+  await page.waitForTimeout(350);
+  const after = [await sky(), await grass()];
+  assert(
+    chroma(after[0]) > chroma(before[0]) + 15,
+    `the blues come up (${before[0]} -> ${after[0]})`,
+  );
+  assert(
+    Math.abs(chroma(after[1]) - chroma(before[1])) < 4,
+    `and the greens are left where they were (${before[1]} -> ${after[1]})`,
+  );
+  // The picker says which bands have been asked for something.
+  const dots = (await page.locator('[aria-label="Colour band"] button').allTextContents())
+    .filter((t) => t.includes("•")).length;
+  assert(dots === 1, `one band asked for, and the picker says which (${dots})`);
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs(chroma(await sky()) - chroma(before[0])) < 4,
+    "and one undo puts the sky back",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

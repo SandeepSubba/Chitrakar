@@ -1667,6 +1667,48 @@ fn transfer() -> &'static Transfer {
     })
 }
 
+/// A colour's hue, saturation and lightness, with the hue in sixths of
+/// the wheel — red at 0, yellow at 1, and so on round to magenta at 5,
+/// which is the order the bands of a colour panel are always in.
+fn to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let light = (max + min) / 2.0;
+    let chroma = max - min;
+    if chroma <= 1e-6 {
+        return (0.0, 0.0, light);
+    }
+    let sat = chroma / (1.0 - (2.0 * light - 1.0).abs()).max(1e-6);
+    let hue = if max == r {
+        ((g - b) / chroma).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / chroma + 2.0
+    } else {
+        (r - g) / chroma + 4.0
+    };
+    (hue.rem_euclid(6.0), sat.clamp(0.0, 1.0), light)
+}
+
+/// And back.
+fn from_hsl(hue: f32, sat: f32, light: f32) -> (f32, f32, f32) {
+    let chroma = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let x = chroma * (1.0 - (hue.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hue as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = light - chroma / 2.0;
+    (
+        (r + m).clamp(0.0, 1.0),
+        (g + m).clamp(0.0, 1.0),
+        (b + m).clamp(0.0, 1.0),
+    )
+}
+
 /// Linear light to what a device shows, off the table rather than
 /// through a `powf` — for the places that only need to know *where* a
 /// tone sits, not to take a value over and bring it back. A round trip
@@ -5007,6 +5049,46 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let f = |v: f32| (lum + (v - lum) * s + lightness).clamp(0.0, 1.0);
             (f(r), f(g), f(b))
         }
+        Adjustment::SelectiveHsl { bands } => {
+            // A colour is named where it is seen, so the hue a band
+            // speaks to is read off the values a device shows.
+            let (hue, sat, light) = to_hsl(shown_value(r), shown_value(g), shown_value(b));
+            // Six bands, a sixth of the wheel apart, each weighted by how
+            // near the pixel's hue is to it: a triangle a band wide, so
+            // the weights add to one and no colour sits in a seam.
+            let (mut dh, mut ds, mut dl) = (0.0, 0.0, 0.0);
+            for (i, band) in bands.iter().enumerate().take(6) {
+                let away = (hue - i as f32).abs();
+                let w = (1.0 - away.min(6.0 - away)).max(0.0);
+                dh += w * band[0];
+                ds += w * band[1];
+                dl += w * band[2];
+            }
+            // A grey has no hue to speak to, and asked for nothing
+            // nothing happens — exactly nothing, rather than a round
+            // trip's worth of drift.
+            if sat <= 1e-4 || (dh == 0.0 && ds == 0.0 && dl == 0.0) {
+                (r, g, b)
+            } else {
+                // How much of the change a pixel takes is how much colour
+                // it has, so the bands fade out towards grey rather than
+                // stopping at a threshold — but a colour only has to be
+                // a third of the way to full before it takes all of it,
+                // since a pale sky is still a sky and asking for a shift
+                // and getting a third of one is not what was meant.
+                let take = (sat * 3.0).clamp(0.0, 1.0);
+                let (nr, ng, nb) = from_hsl(
+                    (hue + dh * 0.5 * take).rem_euclid(6.0),
+                    (sat * (1.0 + ds * take)).clamp(0.0, 1.0),
+                    (light + dl * 0.5 * take).clamp(0.0, 1.0),
+                );
+                (
+                    chitrakar_color::srgb_to_linear(nr),
+                    chitrakar_color::srgb_to_linear(ng),
+                    chitrakar_color::srgb_to_linear(nb),
+                )
+            }
+        }
         Adjustment::Levels {
             in_black,
             in_white,
@@ -7413,6 +7495,114 @@ mod tests {
         assert!(
             (left.r - srgb(0.5).r).abs() < 1e-6,
             "nothing to map through"
+        );
+    }
+
+    /// The bands speak to their own colours and leave the others alone,
+    /// and a grey has no hue to speak to at all.
+    #[test]
+    fn a_band_of_colour_is_spoken_to_on_its_own() {
+        let colour = |r: f32, g: f32, b: f32| to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let sat_of = |p: LinearRgba| {
+            let (_, s, _) = to_hsl(
+                chitrakar_color::linear_to_srgb(p.r),
+                chitrakar_color::linear_to_srgb(p.g),
+                chitrakar_color::linear_to_srgb(p.b),
+            );
+            s
+        };
+        // Saturation up on the blues alone.
+        let bands = Adjustment::SelectiveHsl {
+            bands: vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.8, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+        };
+        let sky = colour(0.25, 0.4, 0.75);
+        let grass = colour(0.3, 0.6, 0.25);
+        let lifted = apply_adjustment(&bands, None, sky);
+        let left = apply_adjustment(&bands, None, grass);
+        assert!(
+            sat_of(lifted) > sat_of(sky) + 0.05,
+            "the blues come up: {} against {}",
+            sat_of(sky),
+            sat_of(lifted)
+        );
+        assert!(
+            (sat_of(left) - sat_of(grass)).abs() < 0.02,
+            "and the greens are left where they were: {} against {}",
+            sat_of(grass),
+            sat_of(left)
+        );
+
+        // A grey has no hue, so no band reaches it.
+        let grey = colour(0.5, 0.5, 0.5);
+        let untouched = apply_adjustment(&bands, None, grey);
+        assert!((untouched.r - grey.r).abs() < 1e-6 && (untouched.b - grey.b).abs() < 1e-6);
+
+        // Asked for nothing, it is the identity — exactly, not nearly.
+        let none = Adjustment::SelectiveHsl {
+            bands: vec![[0.0; 3]; 6],
+        };
+        assert_eq!(apply_adjustment(&none, None, sky).r, sky.r);
+        // And a file written before the bands existed reads as nothing.
+        let empty = Adjustment::SelectiveHsl { bands: Vec::new() };
+        assert_eq!(apply_adjustment(&empty, None, sky).b, sky.b);
+
+        // A hue shift moves the band it is asked of round the wheel.
+        let turned = Adjustment::SelectiveHsl {
+            bands: vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+        };
+        let moved = apply_adjustment(&turned, None, sky);
+        let hue_of = |p: LinearRgba| {
+            to_hsl(
+                chitrakar_color::linear_to_srgb(p.r),
+                chitrakar_color::linear_to_srgb(p.g),
+                chitrakar_color::linear_to_srgb(p.b),
+            )
+            .0
+        };
+        assert!(
+            (hue_of(moved) - hue_of(sky)).abs() > 0.2,
+            "the blues turn: {} against {}",
+            hue_of(sky),
+            hue_of(moved)
+        );
+    }
+
+    /// Round-tripping a colour through hue, saturation and lightness
+    /// gives it back, which is what makes a band that asks for nothing
+    /// change nothing.
+    #[test]
+    fn hsl_gives_back_the_colour_it_was_given() {
+        let mut worst = 0.0f32;
+        for i in 0..=20 {
+            for j in 0..=20 {
+                for k in 0..=20 {
+                    let (r, g, b) = (i as f32 / 20.0, j as f32 / 20.0, k as f32 / 20.0);
+                    let (h, s, l) = to_hsl(r, g, b);
+                    let (br, bg, bb) = from_hsl(h, s, l);
+                    worst = worst
+                        .max((br - r).abs())
+                        .max((bg - g).abs())
+                        .max((bb - b).abs());
+                }
+            }
+        }
+        assert!(
+            worst < 1e-5,
+            "hue, saturation and lightness round trip: {worst}"
         );
     }
 
