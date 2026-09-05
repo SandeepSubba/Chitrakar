@@ -5665,6 +5665,46 @@ assert(
     "with nothing added or lost",
   );
 
+  // The menu reaches the things the panel's own buttons do, and the one
+  // thing the canvas could not do at all: pick the group a layer is in,
+  // since hit testing only ever reports the leaves.
+  await page.keyboard.press("Control+a");
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(300);
+  // Let go first: a click inside a group that is already picked keeps
+  // the group, which is what makes a group draggable at all.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.mouse.click(...at(80, 80));
+  await page.waitForTimeout(250);
+  const leaf = await page
+    .locator(".panel ul li.selected .layer-name")
+    .innerText();
+  assert(!leaf.startsWith("Group"), `a click picks the leaf (${leaf})`);
+  await page.mouse.click(...at(80, 80), { button: "right" });
+  await page.waitForTimeout(250);
+  await menu.locator("text=Select the group this is in").click();
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected .layer-name").innerText()).startsWith(
+      "Group",
+    ),
+    "and the menu reaches the group it is in",
+  );
+  await page.mouse.click(...at(80, 80), { button: "right" });
+  await page.waitForTimeout(250);
+  await menu.locator("text=Lock").click();
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li .lock-toggle[aria-pressed='true']").count()) === 1,
+    "Lock locks what is picked",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
   // A menu asked for hard against the corner stays inside the window
   // rather than hanging off it where nothing could reach it.
   const win = await page.evaluate(() => [window.innerWidth, window.innerHeight]);

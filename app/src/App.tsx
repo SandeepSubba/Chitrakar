@@ -4619,6 +4619,31 @@ export function App() {
     });
   };
 
+  /** The group or frame the picked layer sits in, when it sits in one.
+   * Hit testing only ever reports leaves, so a group is reachable from
+   * the canvas only by asking for the one a layer is in. */
+  const parentGroup = (): NodeId | null => {
+    if (!selectedLayer) return null;
+    const up = selectedLayer.parent as NodeId;
+    const row = layers.find((l) => l.id === up);
+    return row && HOLDS_CHILDREN.has(row.kind) ? up : null;
+  };
+
+  /** Lock or hide everything picked, in one entry: what the panel's own
+   * buttons do to one layer, offered where the layers are. */
+  const setLockedAll = (locked: boolean) => {
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds = ids.map((id) => ({ SetLocked: { id, locked } }) as Command);
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+  const setVisibleAll = (visible: boolean) => {
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds = ids.map((id) => ({ SetVisible: { id, visible } }) as Command);
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+
   /** All the way to the top of its own group, or all the way under it.
    * Stepping there is as many clicks as there are layers in the way, and
    * as many entries in the history; this is one of each. A layer already
@@ -5505,6 +5530,32 @@ export function App() {
                 hint="Ctrl+Shift+["
               >
                 Send to back
+              </MenuItem>
+              <hr />
+              {parentGroup() !== null && (
+                <MenuItem
+                  icon="foldOpen"
+                  onClick={() => {
+                    const up = parentGroup();
+                    if (up === null) return;
+                    setSelected(up);
+                    setMultiSel([]);
+                  }}
+                >
+                  Select the group this is in
+                </MenuItem>
+              )}
+              <MenuItem
+                icon={selectedLayer?.locked ? "unlock" : "lock"}
+                onClick={() => setLockedAll(!selectedLayer?.locked)}
+              >
+                {selectedLayer?.locked ? "Unlock" : "Lock"}
+              </MenuItem>
+              <MenuItem
+                icon={selectedLayer?.visible ? "eyeOff" : "eye"}
+                onClick={() => setVisibleAll(!selectedLayer?.visible)}
+              >
+                {selectedLayer?.visible ? "Hide" : "Show"}
               </MenuItem>
               <hr />
               {selectionSet.length > 1 && (

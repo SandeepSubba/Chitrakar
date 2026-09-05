@@ -347,7 +347,10 @@ without reading anything else.*
   profile exactly as a fill does.
   A right-click on the canvas offers what can be done with what is under
   the pointer, where the pointer is: cut, copy, duplicate, the front and
-  the back, group and ungroup, delete — and on bare canvas the things
+  the back, lock and hide, group and ungroup, delete, and the one thing
+  the canvas could not do at all — pick the group a layer is in, since
+  hit testing only ever reports the leaves and a group was reachable
+  only from the panel — and on bare canvas the things
   that need no layer at all. Right-clicking something not already picked
   picks it first, since a menu about "this" has to be about what was
   pointed at, and a menu asked for against a corner is kept inside the
@@ -563,7 +566,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~734 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~737 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
