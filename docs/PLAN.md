@@ -548,7 +548,19 @@ without reading anything else.*
   An adjustment works out what it can before the pass rather than per
   pixel (`chitrakar_render::prepare`): a curves adjustment's tables, and
   a gradient map's ramp — resolved and sorted once instead of eight
-  million times, which took a full-page map from 1.48 s to 0.95 s.
+  million times, which took a full-page map from 1.48 s to 0.95 s, and
+  then read off into a table of its own (`RampLut`, a thousand entries),
+  which took it from 835 ms to 389 ms. Walking the stops per pixel meant
+  finding the pair a tone falls between and mixing them in the display
+  encoding — six crossings of the transfer curve and three back, every
+  pixel — where a ramp is a curve of one variable and can be read off
+  once; the GPU bakes its own row of texels for the same reason, and a
+  test holds the table to the ramp everywhere rather than only at the
+  entries it was built from. The transfer curve is tabulated for the
+  places that need to know where a tone sits and not for the ones that
+  take a value over and bring it back: a round trip through a table is a
+  hair short of exact, and at eight bits that showed up as a level on a
+  channel a curve had not been drawn for.
   Resolving it there is also where a CMYK document's stops meet its
   press profile, which is the last place the document is to hand.
   A placed photo shown smaller than
@@ -587,7 +599,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~301),
+- **Verify before committing:** `cargo test --workspace` (~302),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~755 browser
   assertions). Both suites self-skip CMYK-profile steps unless

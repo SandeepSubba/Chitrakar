@@ -1667,6 +1667,16 @@ fn transfer() -> &'static Transfer {
     })
 }
 
+/// Linear light to what a device shows, off the table rather than
+/// through a `powf` — for the places that only need to know *where* a
+/// tone sits, not to take a value over and bring it back. A round trip
+/// through the table is a hair short of exact, which at eight bits can
+/// show up as a level: an adjustment that should change nothing has to
+/// change nothing, so those keep the real curve.
+fn shown_value(v: f32) -> f32 {
+    on_curve(&transfer().to_shown, v.clamp(0.0, 1.0))
+}
+
 fn on_curve(table: &[f32], v: f32) -> f32 {
     let x = v.clamp(0.0, 1.0) * CURVE_STEPS as f32;
     let i = x as usize;
@@ -4761,10 +4771,57 @@ pub struct CurveLuts {
 /// shape to it belongs here.
 pub enum Prepared {
     Curves(CurveLuts),
-    /// A gradient map's stops, resolved and put in order. Resolving is
-    /// also where a CMYK document's stops go through its press profile,
-    /// which is the one place the document is still to hand.
-    Ramp(Vec<(f32, LinearRgba)>),
+    /// A gradient map's ramp, resolved, put in order and read off into a
+    /// table. Resolving is also where a CMYK document's stops go through
+    /// its press profile, which is the one place the document is still
+    /// to hand.
+    Ramp(RampLut),
+}
+
+/// How finely a gradient map's ramp is read off before the pass.
+///
+/// Walking the stops per pixel means finding the pair a tone falls
+/// between and mixing them in the display encoding — six crossings of
+/// the transfer curve and three back — for every pixel of the page. The
+/// ramp is a curve of one variable, so it can be read off once into a
+/// table and looked up instead, which is what the GPU does with its own
+/// row of texels for the same reason.
+const RAMP_STEPS: usize = 1024;
+
+/// A ramp read off into a table, entry by entry, premultiplied as the
+/// stops themselves are.
+pub struct RampLut {
+    table: Box<[LinearRgba]>,
+}
+
+impl RampLut {
+    /// Read a sorted ramp off into a table. Fewer than two stops is not
+    /// a ramp at all and gets no table, which is what the caller reads
+    /// as "leave the picture alone".
+    fn of(stops: &[(f32, LinearRgba)]) -> Option<Self> {
+        if stops.len() < 2 {
+            return None;
+        }
+        let table = (0..=RAMP_STEPS)
+            .map(|i| ramp(stops, i as f32 / RAMP_STEPS as f32))
+            .collect();
+        Some(Self { table })
+    }
+
+    /// The colour at `t`, between the entries either side of it.
+    fn at(&self, t: f32) -> LinearRgba {
+        let x = t.clamp(0.0, 1.0) * RAMP_STEPS as f32;
+        let i = x as usize;
+        let f = x - i as f32;
+        let a = self.table[i];
+        let b = self.table[(i + 1).min(RAMP_STEPS)];
+        LinearRgba {
+            r: a.r + (b.r - a.r) * f,
+            g: a.g + (b.g - a.g) * f,
+            b: a.b + (b.b - a.b) * f,
+            a: a.a + (b.a - a.a) * f,
+        }
+    }
 }
 
 /// Work out what the adjustment can work out ahead of the pass, or
@@ -4774,9 +4831,9 @@ pub enum Prepared {
 pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
     match adj {
         Adjustment::Curves { .. } => Some(Prepared::Curves(curve_lut_of(adj))),
-        Adjustment::GradientMap { stops } => Some(Prepared::Ramp(sorted_ramp(stops, |c| {
-            resolve_color(doc, c)
-        }))),
+        Adjustment::GradientMap { stops } => {
+            RampLut::of(&sorted_ramp(stops, |c| resolve_color(doc, c))).map(Prepared::Ramp)
+        }
         _ => None,
     }
 }
@@ -5013,37 +5070,40 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
         }
         Adjustment::GradientMap { stops } => {
             let owned;
-            // Prepared for the pass where there is a pass; worked out
-            // here when there is not, so the function stays total. Only
-            // the prepared ramp knows a CMYK document's press profile.
-            let ramp = match ready {
-                Some(Prepared::Ramp(ramp)) => ramp,
+            // Read off for the pass where there is a pass; read off here
+            // when there is not, so the function stays total and both
+            // paths answer alike. Only the prepared ramp knows a CMYK
+            // document's press profile.
+            let lut = match ready {
+                Some(Prepared::Ramp(lut)) => Some(lut),
                 _ => {
-                    owned = sorted_ramp(stops, to_working);
-                    &owned
+                    owned = RampLut::of(&sorted_ramp(stops, to_working));
+                    owned.as_ref()
                 }
             };
-            if ramp.len() < 2 {
-                (r, g, b)
-            } else {
-                // Where a tone sits along the ramp is its brightness as a
-                // device shows it: the middle of the ramp should land on
-                // the tones that look middling, and linear light's middle
-                // shows as a light grey.
-                let lum = chitrakar_color::linear_to_srgb(
-                    (chitrakar_doc::LUMA[0] * r
-                        + chitrakar_doc::LUMA[1] * g
-                        + chitrakar_doc::LUMA[2] * b)
-                        .clamp(0.0, 1.0),
-                );
-                // The stops are premultiplied by their own alpha; the
-                // pixel keeps the alpha it already had, so the ramp's is
-                // divided back out.
-                let c = ramp_color(ramp, lum);
-                if c.a > 0.0 {
-                    (c.r / c.a, c.g / c.a, c.b / c.a)
-                } else {
-                    (r, g, b)
+            match lut {
+                // Fewer than two stops is not a ramp: nothing to map
+                // through, so the picture is left as it is.
+                None => (r, g, b),
+                Some(lut) => {
+                    // Where a tone sits along the ramp is its brightness
+                    // as a device shows it: the middle of the ramp should
+                    // land on the tones that look middling, and linear
+                    // light's middle shows as a light grey.
+                    let lum = shown_value(
+                        chitrakar_doc::LUMA[0] * r
+                            + chitrakar_doc::LUMA[1] * g
+                            + chitrakar_doc::LUMA[2] * b,
+                    );
+                    // The stops are premultiplied by their own alpha; the
+                    // pixel keeps the alpha it already had, so the ramp's
+                    // is divided back out.
+                    let c = lut.at(lum);
+                    if c.a > 0.0 {
+                        (c.r / c.a, c.g / c.a, c.b / c.a)
+                    } else {
+                        (r, g, b)
+                    }
                 }
             }
         }
@@ -7354,6 +7414,41 @@ mod tests {
             (left.r - srgb(0.5).r).abs() < 1e-6,
             "nothing to map through"
         );
+    }
+
+    /// The table a gradient map's ramp is read off into stands in for
+    /// walking the stops, so it has to agree with them everywhere — not
+    /// merely at the entries it was built from.
+    #[test]
+    fn the_ramp_table_agrees_with_the_ramp() {
+        let stop = |at: f32, r: f32, g: f32, b: f32| {
+            (at, to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 }))
+        };
+        // Stops that are not evenly spaced, so the table's entries and
+        // the ramp's corners do not line up.
+        let stops = vec![
+            stop(0.0, 0.05, 0.0, 0.2),
+            stop(0.37, 0.9, 0.1, 0.0),
+            stop(0.62, 0.0, 0.6, 0.9),
+            stop(1.0, 1.0, 1.0, 0.4),
+        ];
+        let lut = RampLut::of(&stops).unwrap();
+        let mut worst = 0.0f32;
+        for i in 0..=2000 {
+            let t = i as f32 / 2000.0;
+            let (a, b) = (ramp(&stops, t), lut.at(t));
+            for (x, y) in [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)] {
+                worst = worst.max((x - y).abs());
+            }
+        }
+        // Two thousandths of a channel: a quarter of a level at eight
+        // bits, and that only where a stop falls between two entries.
+        assert!(worst < 0.002, "the table follows the ramp: {worst}");
+        // The ends are the stops themselves, exactly.
+        assert_eq!(lut.at(0.0).r, stops[0].1.r);
+        assert_eq!(lut.at(1.0).b, stops[3].1.b);
+        // Fewer than two stops is not a ramp at all.
+        assert!(RampLut::of(&stops[..1]).is_none());
     }
 
     /// A vignette takes the corners down and leaves the middle alone,
