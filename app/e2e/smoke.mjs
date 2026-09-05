@@ -6324,6 +6324,135 @@ assert(
   assert((await picked()) === 0, "and the last one out leaves nothing picked");
 }
 
+// 9y. The sheet of keys is a promise, and a sheet that lies about what
+// the app does is worse than no sheet — the multi-selection it claimed
+// on the canvas was not there. So: every letter it names, pressed, and
+// the rail asked what it is holding.
+{
+  await newDocument(400, 300, "rgb");
+  // Which tool is in hand: the rail marks it, and the shape slot wears
+  // the name of whichever shape it is holding.
+  const inHand = () =>
+    page.$eval(".toolbar .tool.active", (el) => el.getAttribute("aria-label"));
+  const picked = () =>
+    page.locator(".panel ul li.selected, .panel ul li.multi").count();
+  for (const [key, tool] of [
+    ["v", "Move"],
+    ["m", "Move"],
+    ["f", "Frame"],
+    ["r", "Rect"],
+    ["e", "Ellipse"],
+    ["l", "Line"],
+    ["y", "Polygon"],
+    ["k", "Star"],
+    ["p", "Pen"],
+    ["b", "Brush"],
+    ["n", "Paint"],
+    ["s", "Clone"],
+    ["t", "Text"],
+    ["c", "Crop"],
+    ["i", "Eyedropper"],
+  ]) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(80);
+    assert((await inHand()) === tool, `"${key}" takes up ${tool}`);
+  }
+
+  // The sheet's own line about itself, and the two document keys that
+  // are about the selection rather than about a layer.
+  await page.keyboard.press("v");
+  await page.waitForTimeout(80);
+  await pickTool("Rect");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  for (const [x0, y0, x1, y1] of [
+    [30, 30, 120, 120],
+    [200, 30, 290, 120],
+  ]) {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  }
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
+    "Escape lets go of the selection",
+  );
+  await page.keyboard.press("Control+a");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
+    "and Ctrl+A picks the lot",
+  );
+  await page.keyboard.press("?");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('[aria-label="Keys and gestures"]').count()) === 1,
+    "and ? is what opens the sheet that says so",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // The two ways it says the view can be carried, neither of which is
+  // allowed to carry anything in the document with it.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const layerX = () =>
+    page.locator('input[aria-label="X position"]').inputValue();
+  const stood = await layerX();
+  const pageAt = async () =>
+    (await page.locator("#engine-page").boundingBox()).x;
+  const home = await pageAt();
+  await page.keyboard.down("Space");
+  await page.mouse.move(...at(200, 150));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 150), { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.up("Space");
+  await page.waitForTimeout(250);
+  const spaced = await pageAt();
+  assert(spaced > home + 40, `space-drag carries the view (${home} -> ${spaced})`);
+
+  await page.mouse.move(...at(300, 150));
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(...at(200, 150), { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(250);
+  assert(
+    Math.abs((await pageAt()) - home) < 6,
+    `and middle-drag carries it back (${await pageAt()} against ${home})`,
+  );
+  assert(
+    (await layerX()) === stood,
+    "with nothing in the document moved by either",
+  );
+
+  // "Shift-drag a band — adds to what is picked", which the band's own
+  // block says in a comment and never asked of it.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.mouse.click(...at(75, 75));
+  await page.waitForTimeout(200);
+  assert((await picked()) === 1, "one picked to add to");
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(180, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(320, 20), { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(250);
+  assert(
+    (await picked()) === 2,
+    "and a band dragged with shift adds what it touches to it",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

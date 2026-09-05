@@ -541,9 +541,19 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
+- **The sheet of keys is a promise:** `?` opens a list of what the app
+  says it does with the keyboard and the pointer, and a line of it that
+  the app does not honour is a bug of the worst kind — the
+  multi-selection it claimed on the canvas was missing for months
+  because the panel's own version of it was well tested and nobody asked
+  the canvas. The suite now presses every letter the sheet names and
+  asks the rail what it is holding, and drives the gestures it promises
+  that no other block covers: both ways of carrying the view, letting go
+  of a selection and picking all of it, and adding to one with a band.
+  Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~702 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~725 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
