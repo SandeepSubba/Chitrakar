@@ -21,6 +21,7 @@ import {
   VectorShape,
   WasmSession,
   colorToHex,
+  display_p3_profile,
   effectBody,
   effectKind,
   getWasmMemory,
@@ -936,6 +937,7 @@ export function App() {
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
   const iccInputRef = useRef<HTMLInputElement>(null);
+  const screenIccInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
   const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
@@ -4798,6 +4800,10 @@ export function App() {
   });
 
   const [hasIcc, setHasIcc] = useState(false);
+  /** Whether the screen's own profile is in force. A view setting: it
+   * belongs to the machine rather than the document, so it survives a
+   * new document and is saved with nothing. */
+  const [hasScreenIcc, setHasScreenIcc] = useState(false);
   const [proofing, setProofing] = useState(false);
   const [gamutWarn, setGamutWarn] = useState(false);
 
@@ -4859,6 +4865,33 @@ export function App() {
         alert(`Could not use ICC profile: ${err}`);
       }
     });
+  };
+
+  /** The screen's own profile. Everything shown is taken from sRGB to
+   * that display's numbers, so a wide-gamut monitor draws the picture as
+   * it is rather than as far out as its own red will go. Nothing else
+   * moves: not the document, not an export, not a colour picked off the
+   * page. */
+  const loadScreenProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.arrayBuffer().then((buf) => {
+      try {
+        session.set_display_profile(new Uint8Array(buf));
+        setHasScreenIcc(true);
+        refresh(session);
+      } catch (err) {
+        alert(`Could not use monitor profile: ${err}`);
+      }
+    });
+  };
+
+  const clearScreenProfile = () => {
+    if (!session) return;
+    session.clear_display_profile();
+    setHasScreenIcc(false);
+    refresh(session);
   };
 
   return (
@@ -4976,6 +5009,34 @@ export function App() {
             >
               {hasIcc ? "Replace press profile…" : "Load press profile…"}
             </MenuItem>
+            <MenuItem
+              icon={hasScreenIcc ? "check" : "proof"}
+              onClick={() => pick(screenIccInputRef)}
+            >
+              {hasScreenIcc
+                ? "Replace monitor profile…"
+                : "Load monitor profile…"}
+            </MenuItem>
+            <MenuItem
+              icon="proof"
+              onClick={() => {
+                if (!session) return;
+                try {
+                  session.set_display_profile(display_p3_profile());
+                  setHasScreenIcc(true);
+                  refresh(session);
+                } catch (err) {
+                  alert(`Could not use monitor profile: ${err}`);
+                }
+              }}
+            >
+              Show as Display P3
+            </MenuItem>
+            {hasScreenIcc && (
+              <MenuItem icon="profile" onClick={clearScreenProfile}>
+                Show sRGB as it is
+              </MenuItem>
+            )}
           </MenuButton>
 
           <MenuButton
@@ -5193,6 +5254,14 @@ export function App() {
               ICC ✓
             </span>
           )}
+          {hasScreenIcc && (
+            <span
+              className="icc-badge"
+              title="What is shown is going through this screen's own profile"
+            >
+              Screen ✓
+            </span>
+          )}
           {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
           {units !== "px" && (
             <>
@@ -5225,6 +5294,14 @@ export function App() {
           type="file"
           accept=".icc,.icm"
           onChange={loadIccProfile}
+          hidden
+        />
+        <input
+          ref={screenIccInputRef}
+          type="file"
+          accept=".icc,.icm"
+          onChange={loadScreenProfile}
+          aria-label="Monitor profile"
           hidden
         />
         <input

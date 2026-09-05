@@ -442,7 +442,15 @@ without reading anything else.*
   dragged to be. Both are remembered between visits, so a workspace
   arranged once stays arranged.
   Color: embedded ICC honored on import, CMYK documents with press profiles,
-  soft proofing + gamut warning. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
+  soft proofing + gamut warning, and the screen's own profile — everything
+  shown is taken from sRGB to that display's numbers, so a wide-gamut
+  monitor draws the picture as it is rather than as far out as its own
+  red will go. It is the last thing applied to what is shown and applied
+  to nothing else: not the document, not an export, not a colour picked
+  off the page, and it is not saved with the file, because it belongs to
+  the machine rather than the picture. A profile is loaded from a file,
+  or Display P3 is offered outright, since most of what Apple ships is
+  P3 and few people have the .icc to hand. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
   the selection — rendered at that size, not upsampled), JPEG, SVG,
   CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
@@ -522,9 +530,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~298),
+- **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~685 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~690 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -830,8 +838,14 @@ chitrakar/
   drawn in CMYK documents author real ink values with C/M/Y/K ink sliders ✅.
 - Soft proofing ✅ + gamut warning ✅: display-only round trip through the
   press profile at the presentation-encode step (exports stay unproofed);
-  out-of-gamut pixels mark neutral grey. Monitor profiles and rendering-
-  intent selection pending.
+  out-of-gamut pixels mark neutral grey. Monitor profiles ✅: an sRGB →
+  display transform at the same step, after proofing (proofing says what
+  the press would make of the picture; this says what this screen makes
+  of that), from a loaded .icc or the built-in Display P3. Rendering-
+  intent selection is still pending, and blocked upstream: moxcms 0.9
+  stores `TransformOptions::rendering_intent` but never reads it, and all
+  four intents give byte-identical output through a real CMYK profile, so
+  a picker for it would be a control that does nothing.
 - Export: PNG ✅ (sRGB composite), SVG ✅ (live vector markup — shapes,
   paths, groups with opacity/blend, embedded rasters, text; a mask
   travels as a picture of what it lets through — white with the coverage

@@ -36,6 +36,62 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
     transform.transform(&src, pixels).is_ok()
 }
 
+/// A monitor's own profile, as the transform the screen wants: sRGB in,
+/// that display's numbers out.
+///
+/// Everything in the engine is sRGB by the time it is presented, and a
+/// screen that is not sRGB will show those numbers as its own — a
+/// wide-gamut display draws sRGB's red at its own red, which is a good
+/// deal further out. Converting here is what makes a picture look the
+/// same on that screen as on a plain one; a display already sRGB needs
+/// none of it.
+///
+/// A view setting rather than a document one: it belongs to the machine
+/// the document is being looked at on, so it is never saved with the
+/// file and never applied to what is exported.
+#[derive(Clone)]
+pub struct DisplayCms {
+    transform: Arc<moxcms::Transform8BitExecutor>,
+}
+
+impl std::fmt::Debug for DisplayCms {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DisplayCms")
+    }
+}
+
+impl DisplayCms {
+    /// Parse ICC bytes; errors unless the profile's device space is RGB,
+    /// since a monitor is an RGB device.
+    pub fn new(icc: &[u8]) -> Result<Self, String> {
+        let profile = ColorProfile::new_from_slice(icc).map_err(|e| format!("{e:?}"))?;
+        if profile.color_space != DataColorSpace::Rgb {
+            return Err(format!(
+                "profile device space is {:?}, expected RGB",
+                profile.color_space
+            ));
+        }
+        let srgb = ColorProfile::new_srgb();
+        let transform = srgb
+            .create_transform_8bit(
+                Layout::Rgba,
+                &profile,
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(Self { transform })
+    }
+
+    /// Take presented sRGB pixels to the display's own numbers, in place.
+    /// Alpha rides through untouched. Pixels are left alone rather than
+    /// corrupted if the transform refuses them.
+    pub fn to_display_rgba8(&self, pixels: &mut [u8]) {
+        let src = pixels.to_vec();
+        let _ = self.transform.transform(&src, pixels);
+    }
+}
+
 /// A parsed CMYK press profile with a cached CMYK→sRGB transform, used for
 /// authored CMYK colors in documents that carry a profile.
 #[derive(Clone)]

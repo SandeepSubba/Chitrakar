@@ -6127,6 +6127,68 @@ assert(
   );
 }
 
+// 9v. The screen's own profile: what is shown goes through it, and
+// nothing else does — not the document, not what it exports.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#ff0000");
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(360, 260), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const plain = await canvasPixel(200, 150);
+  assert(
+    plain[0] === 255 && plain[1] === 0,
+    `pure red on a screen taken for sRGB (${plain})`,
+  );
+
+  await menuClick("File", "Show as Display P3");
+  await page.waitForTimeout(400);
+  const shown = await canvasPixel(200, 150);
+  assert(
+    shown[0] < 250 && shown[1] > 10,
+    `a wide-gamut screen is asked for less than all of its red (${shown})`,
+  );
+  assert(
+    await page.isVisible("text=Screen ✓"),
+    "and the bar says the screen has a profile of its own",
+  );
+
+  // What is exported is the picture, not what this screen makes of it.
+  const [pngDl] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export PNG")).first().click(),
+  ]);
+  const png = await readFile(await pngDl.path());
+  const exported = await page.evaluate(async (bytes) => {
+    const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });
+    const bmp = await createImageBitmap(blob);
+    const c = document.createElement("canvas");
+    c.width = bmp.width;
+    c.height = bmp.height;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(bmp, 0, 0);
+    return Array.from(ctx.getImageData(200, 150, 1, 1).data);
+  }, Array.from(png));
+  assert(
+    exported[0] === 255 && exported[1] === 0 && exported[2] === 0,
+    `the export is the picture, not the screen (${exported})`,
+  );
+
+  await menuClick("File", "Show sRGB as it is");
+  await page.waitForTimeout(400);
+  const back = await canvasPixel(200, 150);
+  assert(
+    back[0] === 255 && back[1] === 0,
+    `and it can be taken off again (${back})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

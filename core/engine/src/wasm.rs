@@ -693,6 +693,23 @@ impl WasmSession {
         self.inner.set_cmyk_profile(icc.to_vec()).map_err(to_js)
     }
 
+    /// Show through a monitor's own profile, from ICC bytes: everything
+    /// presented is taken from sRGB to that screen's numbers. A view
+    /// setting — nothing about the document, or what it exports, moves.
+    pub fn set_display_profile(&mut self, icc: &[u8]) -> Result<(), JsError> {
+        self.inner.set_display_profile(icc).map_err(to_js)
+    }
+
+    /// Go back to showing sRGB as it is.
+    pub fn clear_display_profile(&mut self) {
+        self.inner.clear_display_profile();
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn has_display_profile(&self) -> bool {
+        self.inner.has_display_profile()
+    }
+
     /// Toggle display soft-proofing (and gamut warning) through the press
     /// profile.
     pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), JsError> {
@@ -775,4 +792,13 @@ impl WasmSession {
 
 fn to_js(e: crate::EngineError) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// The bytes of the Display P3 profile, so a screen known to be P3 — most
+/// of what Apple has shipped for years — can be shown properly without
+/// hunting down an .icc file for it. Any other screen wants its own
+/// profile loaded from a file.
+#[wasm_bindgen]
+pub fn display_p3_profile() -> Vec<u8> {
+    chitrakar_color::cms::display_p3_profile_bytes()
 }

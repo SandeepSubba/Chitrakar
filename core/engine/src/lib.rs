@@ -188,6 +188,11 @@ pub struct Session {
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
     soft_proof: bool,
+    /// The screen's own profile, when one has been given: the last thing
+    /// applied to what is shown, and applied to nothing else. It belongs
+    /// to the machine rather than the document, so it is not saved with
+    /// the file and never reaches an export.
+    display_cms: Option<chitrakar_color::cms::DisplayCms>,
     gamut_warn: bool,
     /// Whether any layer is a live copy of another. Kept rather than
     /// looked up: the dirty region has to ask on every command, and the
@@ -228,6 +233,7 @@ impl Session {
             last_touched: None,
             proof_cms: None,
             soft_proof: false,
+            display_cms: None,
             gamut_warn: false,
             has_copies: false,
         }
@@ -3125,18 +3131,48 @@ impl Session {
             return;
         };
         surface.encode_srgb8_region(clip, out);
-        if !self.soft_proof {
+        let proof = self.soft_proof.then_some(self.proof_cms.as_ref()).flatten();
+        if proof.is_none() && self.display_cms.is_none() {
             return;
         }
-        let Some(proof) = &self.proof_cms else {
-            return;
-        };
         let w = surface.width as usize;
         for y in clip.y0..clip.y1 {
             let row = (y as usize * w + clip.x0 as usize) * 4;
             let end = (y as usize * w + clip.x1 as usize) * 4;
-            proof.proof_rgba8(&mut out[row..end], self.gamut_warn);
+            if let Some(proof) = proof {
+                proof.proof_rgba8(&mut out[row..end], self.gamut_warn);
+            }
+            // The screen's own profile is the last word: proofing says
+            // what the press would make of the picture, and this says
+            // what this screen will make of that.
+            if let Some(display) = &self.display_cms {
+                display.to_display_rgba8(&mut out[row..end]);
+            }
         }
+    }
+
+    /// Show through a monitor's own profile: everything presented is
+    /// taken from sRGB to that screen's numbers, so a wide-gamut display
+    /// draws the picture as it is rather than as far out as its own red
+    /// will go. Nothing else is touched — not the document, not an
+    /// export, not a colour picked off the page.
+    pub fn set_display_profile(&mut self, icc: &[u8]) -> Result<(), EngineError> {
+        self.display_cms =
+            Some(chitrakar_color::cms::DisplayCms::new(icc).map_err(EngineError::BadCommand)?);
+        // The composite is unchanged; what is shown of it is not.
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    /// Go back to showing sRGB numbers as they are, which is what a
+    /// screen without a profile of its own is assumed to want.
+    pub fn clear_display_profile(&mut self) {
+        self.display_cms = None;
+        self.mark_dirty(Bounds::Everything);
+    }
+
+    pub fn has_display_profile(&self) -> bool {
+        self.display_cms.is_some()
     }
 
     pub fn has_cmyk_profile(&self) -> bool {
@@ -5133,6 +5169,80 @@ mod tests {
         // Export stays unproofed: proofing is a display transform.
         let exported = session.render().unwrap().get(0, 0).to_srgb8();
         assert_eq!(exported, [0, 0, 255, 255]);
+    }
+
+    /// A screen with a profile of its own is shown the numbers it wants,
+    /// and nothing else in the document moves.
+    #[test]
+    fn a_monitor_profile_changes_what_is_shown_and_nothing_else() {
+        let mut session = Session::new(4, 4, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "red",
+            VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        let mut plain = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut plain);
+        assert_eq!(&plain[0..4], &[255, 0, 0, 255]);
+
+        // A wide-gamut screen: sRGB's red is well inside what it can
+        // show, so the numbers sent to it are pulled in from its own.
+        session
+            .set_display_profile(&chitrakar_color::cms::display_p3_profile_bytes())
+            .unwrap();
+        assert!(session.has_display_profile());
+        let mut shown = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut shown);
+        assert!(
+            shown[0] < 250 && shown[1] > 10,
+            "sRGB red asks a P3 screen for less than all of its red: {:?}",
+            &shown[0..4]
+        );
+        assert_eq!(shown[3], 255, "and alpha rides through");
+
+        // Nothing else moved: not the document, not an export, not a
+        // colour picked off the page.
+        assert_eq!(
+            session.render().unwrap().get(0, 0).to_srgb8(),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(session.color_at(2.0, 2.0), Some([255, 0, 0, 255]));
+
+        session.clear_display_profile();
+        let mut back = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut back);
+        assert_eq!(&back[0..4], &[255, 0, 0, 255], "and it can be taken off");
+
+        // A CMYK profile is not a monitor.
+        assert!(session.set_display_profile(b"not an icc at all").is_err());
     }
 
     #[test]

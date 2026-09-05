@@ -6,7 +6,10 @@
  * and re-reads rendered pixels / layer state from the engine.
  */
 
-import init, { WasmSession } from "./wasm-pkg/chitrakar_engine";
+import init, {
+  WasmSession,
+  display_p3_profile,
+} from "./wasm-pkg/chitrakar_engine";
 
 export type NodeId = number;
 /** The W3C compositing modes, which is what SVG's mix-blend-mode and
@@ -477,3 +480,8 @@ export function sendCommand(session: WasmSession, cmd: Command): void {
 export function sendPreview(session: WasmSession, cmd: Command): void {
   session.preview(JSON.stringify(cmd));
 }
+
+/** The Display P3 profile's own bytes, for a screen known to be P3 —
+ * most of what Apple has shipped for years — without hunting down an
+ * .icc file for it. */
+export { display_p3_profile };
