@@ -266,6 +266,17 @@ impl WasmSession {
         self.inner.histogram(below).map_err(to_js)
     }
 
+    /// Where the picture's tones start and stop, as the two input points
+    /// levels wants, in the linear light it works in. A layer id asks
+    /// about what that layer sees; pass -1 for the page itself.
+    pub fn auto_levels(&self, below: f64) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .auto_levels(below)
+            .map(|p| p.to_vec())
+            .map_err(to_js)
+    }
+
     /// The frame under a document point, or -1 where there is none.
     pub fn frame_at(&self, x: f32, y: f32) -> f64 {
         self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)

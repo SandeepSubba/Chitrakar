@@ -1547,6 +1547,14 @@ button.fold:hover {
   opacity: 0.4;
   mix-blend-mode: screen;
 }
+
+/* The Auto button sits under the histogram it reads, at the width of
+   the fields it fills in. */
+.auto-levels {
+  width: 100%;
+  margin-bottom: 0.35rem;
+}
+
 .levels-histogram {
   width: 100%;
   height: 44px;

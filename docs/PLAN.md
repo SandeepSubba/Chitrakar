@@ -48,7 +48,13 @@ without reading anything else.*
   curves and levels graphs are drawn over a histogram of what the layer
   actually sees — everything composited under it, not the finished page
   — so a black point can be set where the picture stops rather than by
-  eye;
+  eye, and levels' own points are shown in the encoding that histogram
+  is drawn in (they are kept in linear light, where the adjustment
+  works) so that what a slider says is where the graph says the picture
+  is; Auto sets the two input points from that same histogram, a
+  thousandth of the picture left outside at each end so that a speck of
+  dust or a clipped highlight is not what decides where a picture's
+  black is;
   shadows and highlights, which moves the two ends of the tone range and
   leaves the middle where it is — the first thing asked of a photograph
   after exposure, since a face against a window is dark because the
@@ -489,9 +495,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~295),
+- **Verify before committing:** `cargo test --workspace` (~296),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~653 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~657 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

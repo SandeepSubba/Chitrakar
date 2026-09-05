@@ -659,6 +659,14 @@ const guideIsVertical = (g: DocGuide) => "Vertical" in g;
 /** How close, in screen pixels, an edge has to come before it snaps. A
  * fixed screen distance rather than a document one, so snapping feels the
  * same however far you are zoomed in. */
+/** The sRGB transfer curve and its inverse — the engine's, in the UI.
+ * A tone the panel puts a number on is the tone a device shows, since
+ * that is the number the histogram behind it is drawn against. */
+const toShown = (v: number) =>
+  v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+const toLinear = (v: number) =>
+  v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+
 const SNAP_PX = 6;
 
 /** Where the layout stops having room for the panel beside the canvas.
@@ -4315,6 +4323,35 @@ export function App() {
     else run(cmd);
   };
 
+  /** Set the picked levels layer's input points to where the picture it
+   * sees actually starts and stops — the answer to "use the whole range"
+   * that most work on a photograph begins with. The engine reads it off
+   * the same histogram the panel draws, and it lands as one entry in the
+   * history, since it is one decision. */
+  const autoLevels = () => {
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("Levels" in adj)) return;
+    let points: Float32Array;
+    try {
+      points = session.auto_levels(selected);
+    } catch (err) {
+      alert(`Auto levels: ${err}`);
+      return;
+    }
+    if (points.length !== 2) return;
+    setKind(
+      {
+        Adjustment: {
+          Levels: { ...adj.Levels, in_black: points[0], in_white: points[1] },
+        },
+      },
+      false,
+    );
+  };
+
   /** Reorder within the parent group: +1 raises toward the top. */
   const reorderSelected = (direction: 1 | -1) => {
     if (!selectedLayer) return;
@@ -6290,6 +6327,7 @@ export function App() {
                   }
                   onEdit={setKind}
                   onGestureEnd={endGesture}
+                  onAutoLevels={autoLevels}
                   cmyk={cmyk}
                   fonts={fontNames}
                   shapes={layers
@@ -7666,6 +7704,10 @@ interface KindPropsProps {
    * one is picked (null takes the text off its path). */
   shapes: { id: number; name: string }[];
   onAlong: (shape: number | null) => void;
+  /** Set a levels layer's input points from the picture it sees. It
+   * needs the engine's own reading of the histogram, which lives a
+   * level up. */
+  onAutoLevels: () => void;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
@@ -7681,6 +7723,7 @@ function KindProps({
   fonts,
   shapes,
   onAlong,
+  onAutoLevels,
 }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
@@ -7850,6 +7893,12 @@ function KindProps({
       const p = adj.Levels;
       const set = (patch: Partial<typeof p>) =>
         wrap({ Levels: { ...p, ...patch } });
+      // The four points are shown in the encoding the histogram above
+      // them is drawn in, and kept in the linear light the adjustment
+      // works in. A black point set to where the picture starts has to
+      // be read off the graph that says where that is, and linear light
+      // puts the middle of a picture at a fifth of the way along.
+      const at = (v: number) => Math.round(toShown(v) * 100) / 100;
       return (
         <>
           {/* The tones the sliders are about to move, so the black and
@@ -7864,18 +7913,26 @@ function KindProps({
           >
             <Histogram bins={bins} width={256} height={64} />
           </svg>
-          {slider("Input black", p.in_black, 0, 1, 0.01, (v) =>
-            set({ in_black: v }),
+          <button
+            className="auto-levels"
+            onClick={onAutoLevels}
+            title="Set the input points to where the picture's own tones start and stop"
+            aria-label="Auto levels"
+          >
+            Auto
+          </button>
+          {slider("Input black", at(p.in_black), 0, 1, 0.01, (v) =>
+            set({ in_black: toLinear(v) }),
           )}
-          {slider("Input white", p.in_white, 0, 1, 0.01, (v) =>
-            set({ in_white: v }),
+          {slider("Input white", at(p.in_white), 0, 1, 0.01, (v) =>
+            set({ in_white: toLinear(v) }),
           )}
           {slider("Gamma", p.gamma, 0.2, 3, 0.02, (v) => set({ gamma: v }))}
-          {slider("Output black", p.out_black, 0, 1, 0.01, (v) =>
-            set({ out_black: v }),
+          {slider("Output black", at(p.out_black), 0, 1, 0.01, (v) =>
+            set({ out_black: toLinear(v) }),
           )}
-          {slider("Output white", p.out_white, 0, 1, 0.01, (v) =>
-            set({ out_white: v }),
+          {slider("Output white", at(p.out_white), 0, 1, 0.01, (v) =>
+            set({ out_white: toLinear(v) }),
           )}
         </>
       );

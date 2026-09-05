@@ -1027,6 +1027,60 @@ impl Session {
         Ok(bins)
     }
 
+    /// Where the picture's own tones start and stop, as the black and
+    /// white points [`Adjustment::Levels`] wants — the answer to "make
+    /// this photograph use the whole range it has", which is where most
+    /// work on a photograph begins.
+    ///
+    /// Read off the same histogram the panel draws, so the numbers agree
+    /// with the graph they are set against, and given back in the linear
+    /// light the adjustment itself works in.
+    ///
+    /// A thousandth of the picture is left outside at each end. A
+    /// handful of stray pixels — a speck of dust, a clipped highlight off
+    /// a chrome bumper — should not be what decides where the whole
+    /// picture's black is; taking the outermost pixel instead is how an
+    /// auto-level does nothing at all to a picture with one bright speck
+    /// in it.
+    ///
+    /// A picture with nothing in it, or all of one tone, gets the range
+    /// back untouched rather than a stretch of nothing.
+    pub fn auto_levels(&self, below: Option<NodeId>) -> Result<[f32; 2], EngineError> {
+        let bins = self.histogram(below)?;
+        // The luminance run: the fourth of the four.
+        let luma = &bins[768..1024];
+        let total: u64 = luma.iter().map(|&c| c as u64).sum();
+        let tail = total / 1000;
+        if total == 0 {
+            return Ok([0.0, 1.0]);
+        }
+        let mut run = 0u64;
+        let mut lo = 0usize;
+        for (i, &c) in luma.iter().enumerate() {
+            run += c as u64;
+            if run > tail {
+                lo = i;
+                break;
+            }
+        }
+        run = 0;
+        let mut hi = 255usize;
+        for (i, &c) in luma.iter().enumerate().rev() {
+            run += c as u64;
+            if run > tail {
+                hi = i;
+                break;
+            }
+        }
+        if hi <= lo {
+            return Ok([0.0, 1.0]);
+        }
+        Ok([
+            chitrakar_color::srgb_to_linear(lo as f32 / 255.0),
+            chitrakar_color::srgb_to_linear(hi as f32 / 255.0),
+        ])
+    }
+
     /// The frame under a document point, if any — what a shape drawn
     /// there should go into.
     pub fn frame_at(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -5681,6 +5735,68 @@ mod tests {
             "and the curve is shown what it is given, not what it makes"
         );
         let _ = rect;
+    }
+
+    /// Auto levels answers where the picture's own tones start and stop,
+    /// in the light the adjustment works in — and a speck is not a tone.
+    #[test]
+    fn auto_levels_reads_where_the_picture_starts_and_stops() {
+        let grey = |session: &mut Session, name: &str, v: f32, w: f32, h: f32| {
+            let root = session.document().root();
+            let index = session.document().children_of(root).unwrap().len();
+            let mut node = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: v,
+                    g: v,
+                    b: v,
+                    a: 1.0,
+                });
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+        };
+
+        // A page with nothing on it has no tones to stretch, and is left
+        // the range it had rather than given a nonsense one.
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        assert_eq!(session.auto_levels(None).unwrap(), [0.0, 1.0]);
+
+        // Two greys over the whole page: the picture uses the middle of
+        // the range and nothing else, which is exactly the picture that
+        // wants levelling.
+        grey(&mut session, "dark", 0.3, 60.0, 60.0);
+        grey(&mut session, "light", 0.6, 60.0, 30.0);
+        let [lo, hi] = session.auto_levels(None).unwrap();
+        let want = |v: f32| chitrakar_color::srgb_to_linear((v * 255.0).round() / 255.0);
+        assert!(
+            (lo - want(0.3)).abs() < 0.01 && (hi - want(0.6)).abs() < 0.01,
+            "the two ends of what is actually there: {lo} {hi} against {} {}",
+            want(0.3),
+            want(0.6)
+        );
+
+        // One bright speck is not the picture's white point. A single
+        // pixel of white is inside the thousandth left out at each end,
+        // so the answer does not move.
+        grey(&mut session, "speck", 1.0, 1.0, 1.0);
+        let [_, still] = session.auto_levels(None).unwrap();
+        assert!(
+            (still - hi).abs() < 1e-6,
+            "a speck did not become the white point: {still} against {hi}"
+        );
     }
 
     /// Dropping a layer into a frame that sits away from the origin

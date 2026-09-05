@@ -5778,6 +5778,65 @@ assert(
   );
 }
 
+// 9q. Auto levels: the input points set to where the picture's own tones
+// start and stop, read off the same histogram the panel draws — and the
+// points are shown in the encoding that histogram is drawn in, so what
+// the sliders say is where the graph says the picture is.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  // A picture using the middle of the range and nothing else — the
+  // picture that wants levelling.
+  await paint("#4d4d4d", 0, 0, 400, 300);
+  await paint("#999999", 0, 0, 400, 150);
+  const dark = () => canvasPixel(200, 250).then((px) => px[0]);
+  const light = () => canvasPixel(200, 60).then((px) => px[0]);
+  const [dark0, light0] = [await dark(), await light()];
+  assert(
+    Math.abs(dark0 - 77) < 4 && Math.abs(light0 - 153) < 4,
+    `two middling tones and nothing else (${dark0}, ${light0})`,
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "levels");
+  await page.waitForTimeout(250);
+  await page.locator(".panel ul li", { hasText: "Levels" }).click();
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Auto levels"]');
+  await page.waitForTimeout(350);
+  const points = [
+    Number(await page.locator('input[aria-label="Input black"]').inputValue()),
+    Number(await page.locator('input[aria-label="Input white"]').inputValue()),
+  ];
+  assert(
+    Math.abs(points[0] - 0.3) < 0.03 && Math.abs(points[1] - 0.6) < 0.03,
+    `the points land where the tones are (${points})`,
+  );
+  const [dark1, light1] = [await dark(), await light()];
+  assert(
+    dark1 < 12 && light1 > 243,
+    `and the picture is stretched over the whole range (${dark1}, ${light1})`,
+  );
+
+  // One entry: one undo puts the picture back where it was.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await dark()) - dark0) < 3 && Math.abs((await light()) - light0) < 3,
+    "and it is one entry in the history",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
