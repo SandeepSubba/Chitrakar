@@ -88,7 +88,11 @@ export type Adjustment =
   /** Every tone replaced by the colour at its own place along a ramp. */
   | { GradientMap: { stops: GradientStop[] } }
   /** Turned inside out, on the values a device shows. */
-  | { Invert: { amount: number } };
+  | { Invert: { amount: number } }
+  /** The two ends of the tone range moved without touching the middle:
+   * shadows above zero opens up what is dark, highlights above zero
+   * pulls back what is bright, and both run to -1 for the opposite. */
+  | { ShadowsHighlights: { shadows: number; highlights: number } };
 
 /** How much each channel contributes to brightness: the Rec. 709
  * weights, and the default recipe for a black-and-white conversion. */

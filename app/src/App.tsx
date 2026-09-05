@@ -2879,6 +2879,12 @@ export function App() {
         },
       },
     },
+    "shadows-highlights": {
+      name: "Shadows & highlights",
+      kind: {
+        Adjustment: { ShadowsHighlights: { shadows: 0.35, highlights: 0.35 } },
+      },
+    },
     invert: {
       name: "Invert",
       kind: { Adjustment: { Invert: { amount: 1 } } },
@@ -7712,6 +7718,21 @@ function KindProps({
           )}
           {slider("Tint", p.tint, -1, 1, 0.01, (v) =>
             wrap({ WhiteBalance: { ...p, tint: v } }),
+          )}
+        </>
+      );
+    }
+    if ("ShadowsHighlights" in adj) {
+      const p = adj.ShadowsHighlights;
+      // Both run the other way too, which is what deepens a shadow or
+      // brings a highlight up rather than fixing one.
+      return (
+        <>
+          {slider("Shadows", p.shadows, -1, 1, 0.01, (v) =>
+            wrap({ ShadowsHighlights: { ...p, shadows: v } }),
+          )}
+          {slider("Highlights", p.highlights, -1, 1, 0.01, (v) =>
+            wrap({ ShadowsHighlights: { ...p, highlights: v } }),
           )}
         </>
       );

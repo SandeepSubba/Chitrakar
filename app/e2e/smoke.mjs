@@ -5644,6 +5644,78 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9o. Shadows and highlights: the two ends of the tone range move and
+// the middle stays where it is, which is the first thing asked of a
+// photograph after exposure.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape"); // the colour goes to what is picked
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await paint("#202020", 20, 20, 120, 120);
+  await paint("#808080", 150, 20, 250, 120);
+  await paint("#e8e8e8", 280, 20, 380, 120);
+  const tones = async () => [
+    (await canvasPixel(70, 70))[0],
+    (await canvasPixel(200, 70))[0],
+    (await canvasPixel(330, 70))[0],
+  ];
+  const [dark0, mid0, light0] = await tones();
+  assert(
+    dark0 < 60 && Math.abs(mid0 - 128) < 12 && light0 > 200,
+    `a dark, a middling and a bright tone to work on (${dark0},${mid0},${light0})`,
+  );
+
+  await page.selectOption(
+    '[aria-label="Add adjustment layer"]',
+    "shadows-highlights",
+  );
+  await page.waitForTimeout(300);
+  const [dark1, mid1, light1] = await tones();
+  assert(
+    dark1 > dark0 + 15,
+    `the shadows open up (${dark0} -> ${dark1})`,
+  );
+  assert(
+    light1 < light0 - 15,
+    `the highlights come back (${light0} -> ${light1})`,
+  );
+  assert(
+    Math.abs(mid1 - mid0) < 5,
+    `and the middle stays where it is (${mid0} -> ${mid1})`,
+  );
+
+  // Both run the other way as well: asked for -1, the shadows deepen
+  // rather than lift.
+  await page.locator(".panel ul li", { hasText: "Shadows & highlights" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Shadows", -1);
+  await page.waitForTimeout(300);
+  const [dark2] = await tones();
+  assert(
+    dark2 < dark0,
+    `and asked the other way they deepen (${dark0} -> ${dark2})`,
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  const [dark3, , light3] = await tones();
+  assert(
+    Math.abs(dark3 - dark0) < 3 && Math.abs(light3 - light0) < 3,
+    `undo takes the slider and the layer with it (${dark3},${light3})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

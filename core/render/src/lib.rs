@@ -5005,6 +5005,39 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 }
             }
         }
+        Adjustment::ShadowsHighlights {
+            shadows,
+            highlights,
+        } => {
+            // Which end a pixel belongs to is its brightness as a device
+            // shows it: the shadows of a photograph are the tones that
+            // look dark, and linear light's own middle shows as a light
+            // grey rather than as a middle one.
+            let lum = (chitrakar_doc::LUMA[0] * r
+                + chitrakar_doc::LUMA[1] * g
+                + chitrakar_doc::LUMA[2] * b)
+                .clamp(0.0, 1.0);
+            let s = chitrakar_color::linear_to_srgb(lum);
+            let (lo, hi) = (shadows.clamp(-1.0, 1.0), highlights.clamp(-1.0, 1.0));
+            // Each end pulls as the square of the distance from the other,
+            // so the middle of the range is left where it is, and each
+            // pull is scaled by how much room there is left in that
+            // direction — a tone already white cannot be opened up.
+            let moved = 0.5 * (lo * (1.0 - s) * (1.0 - s) * (1.0 - s) - hi * s * s * s);
+            let want = (s + moved).clamp(0.0, 1.0);
+            let target = chitrakar_color::srgb_to_linear(want);
+            if lum <= 1e-6 {
+                // Nothing to scale: a black pixel has no colour to keep,
+                // so it takes the new brightness as a neutral.
+                (target, target, target)
+            } else {
+                // The brightness moves and the colour comes along: a
+                // shadow lifted is the same colour it was, which scaling
+                // the three channels together is what says.
+                let k = target / lum;
+                (r * k, g * k, b * k)
+            }
+        }
         Adjustment::Invert { amount } => {
             // On the values a device shows: light inverted is not what
             // anyone means by a negative, since linear 0.5 shows as 188
@@ -7278,6 +7311,82 @@ mod tests {
             (left.r - srgb(0.5).r).abs() < 1e-6,
             "nothing to map through"
         );
+    }
+
+    /// The two ends of the tone range move and the middle stays: what is
+    /// dark opens up, what is bright pulls back, and the colour of both
+    /// comes along unchanged.
+    #[test]
+    fn shadows_and_highlights_move_their_own_ends() {
+        let grey = |v: f32| {
+            to_working(AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            })
+        };
+        let shown = |p: LinearRgba| chitrakar_color::linear_to_srgb(p.r);
+        let lift = Adjustment::ShadowsHighlights {
+            shadows: 1.0,
+            highlights: 0.0,
+        };
+        let dark = shown(apply_adjustment(&lift, None, grey(0.1)));
+        let mid = shown(apply_adjustment(&lift, None, grey(0.5)));
+        let bright = shown(apply_adjustment(&lift, None, grey(0.95)));
+        assert!(dark > 0.1 + 0.15, "the shadows open up: {dark}");
+        assert!((mid - 0.5).abs() < 0.08, "the middle barely moves: {mid}");
+        assert!(
+            (bright - 0.95).abs() < 0.01,
+            "and the highlights are left alone: {bright}"
+        );
+
+        let tame = Adjustment::ShadowsHighlights {
+            shadows: 0.0,
+            highlights: 1.0,
+        };
+        let top = shown(apply_adjustment(&tame, None, grey(0.95)));
+        let floor = shown(apply_adjustment(&tame, None, grey(0.1)));
+        assert!(top < 0.95 - 0.15, "the highlights come back: {top}");
+        assert!(
+            (floor - 0.1).abs() < 0.01,
+            "and the shadows are left alone: {floor}"
+        );
+
+        // Asked for nothing, it is the identity — which is what a
+        // document written before this existed reads as.
+        let none = apply_adjustment(
+            &Adjustment::ShadowsHighlights {
+                shadows: 0.0,
+                highlights: 0.0,
+            },
+            None,
+            grey(0.3),
+        );
+        assert!(
+            (none.r - grey(0.3).r).abs() < 1e-6,
+            "no ask, no change: {none:?}"
+        );
+
+        // A lifted shadow is the colour it was: the three channels are
+        // scaled together, so the ratios between them hold.
+        let blue = to_working(AuthoredColor::Srgb {
+            r: 0.05,
+            g: 0.1,
+            b: 0.2,
+            a: 1.0,
+        });
+        let up = apply_adjustment(&lift, None, blue);
+        let (was, now) = (blue.b / blue.g, up.b / up.g);
+        assert!(
+            (was - now).abs() < 1e-4 && up.b > blue.b,
+            "the colour comes along: {was} against {now}"
+        );
+
+        // A pixel with no light in it has no colour to keep, and still
+        // lifts rather than staying black.
+        let black = apply_adjustment(&lift, None, grey(0.0));
+        assert!(black.r > 0.0 && (black.r - black.b).abs() < 1e-6);
     }
 
     /// A negative is taken on the values a device shows, so a middling

@@ -354,6 +354,29 @@ pub enum Adjustment {
     Invert {
         amount: f32,
     },
+    /// The two ends of the tone range, moved without touching the middle:
+    /// `shadows` above zero opens up what is dark, `highlights` above
+    /// zero pulls back what is bright, and both run to -1 for the
+    /// opposite — deepening the shadows, brightening the highlights. It
+    /// is the first thing asked of a photograph after exposure: a face
+    /// against a window is dark because the window is bright, and no
+    /// single exposure fixes both.
+    ///
+    /// Which end a pixel belongs to is decided by its brightness as a
+    /// device shows it, and each end's pull falls off as the square of
+    /// the distance from it, so the middle of the range is left alone.
+    /// What moves is the pixel's brightness; its colour comes along
+    /// unchanged, because a shadow lifted is the same colour it was.
+    ///
+    /// This is a function of the pixel and nothing else. Photoshop's
+    /// version reads the neighbourhood too, which is what gives it local
+    /// contrast and its halos; a per-pixel one cannot make a halo, and
+    /// cannot tell a dark thing in bright surroundings from a dark thing
+    /// in dark ones.
+    ShadowsHighlights {
+        shadows: f32,
+        highlights: f32,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709

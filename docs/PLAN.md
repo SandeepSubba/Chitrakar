@@ -49,6 +49,15 @@ without reading anything else.*
   actually sees — everything composited under it, not the finished page
   — so a black point can be set where the picture stops rather than by
   eye;
+  shadows and highlights, which moves the two ends of the tone range and
+  leaves the middle where it is — the first thing asked of a photograph
+  after exposure, since a face against a window is dark because the
+  window is bright and no single exposure fixes both; each end's pull
+  falls off as the cube of the distance from it, what moves is the
+  pixel's brightness and its colour comes along, and both run the other
+  way for deepening a shadow rather than lifting one (a function of the
+  pixel alone: Photoshop's reads the neighbourhood too, which is where
+  its local contrast and its halos come from);
   black and white, which is a recipe rather than a switch — the weights
   decide which colours come out light, so a high red weight darkens a
   blue sky the way a red filter on the lens did, and they are normalized
@@ -473,9 +482,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~294),
+- **Verify before committing:** `cargo test --workspace` (~295),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~637 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~643 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
