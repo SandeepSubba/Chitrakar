@@ -6000,6 +6000,12 @@ assert(
   await page.waitForTimeout(200);
   const dialog = page.locator('[role="dialog"][aria-label="Straighten"]');
   assert((await dialog.count()) === 1, "the Page menu offers straightening");
+  // The panel is over the canvas, not in front of it: the page can still
+  // be reached while the angle is being chosen.
+  assert(
+    (await page.locator(".modal-scrim").count()) === 0,
+    "and it leaves the page reachable",
+  );
   // Where the ink starts, down a column: on a level bar it is the same
   // wherever you look, and on a turned one it is not.
   const topInk = async (x, height) => {
@@ -6071,6 +6077,40 @@ assert(
   assert(
     (await canvasPixel(200, 150))[3] > 200,
     "and the picture with it",
+  );
+
+  // The way a horizon is actually straightened: draw along the thing
+  // that ought to be level and the angle follows from it.
+  await menuClick("Page", "Straighten…");
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Draw a level line"]');
+  await page.waitForTimeout(150);
+  // A line running down to the right by about ten degrees.
+  await page.mouse.move(...at(60, 120));
+  await page.mouse.down();
+  await page.mouse.move(...at(260, 155), { steps: 8 });
+  assert(
+    (await page.locator(".level-line").count()) === 1,
+    "the line is drawn as it is dragged",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const found = Number(
+    await page.locator('input[aria-label="Straighten degrees"]').inputValue(),
+  );
+  assert(
+    Math.abs(found + 9.9) < 1.5,
+    `the angle follows from the line (${found})`,
+  );
+  assert(
+    (await page.locator(".level-line").count()) === 0,
+    "and the line goes once it has been read",
+  );
+  await page.click('button[aria-label="Leave the page as it is"]');
+  await page.waitForTimeout(300);
+  assert(
+    await page.isVisible("text=RGB, 400×300"),
+    "cancelling after a level line leaves the page alone",
   );
 }
 

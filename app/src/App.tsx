@@ -781,6 +781,15 @@ export function App() {
    * be grey, for the white balance to be worked out from. */
   const [pickingNeutral, setPickingNeutral] = useState(false);
   const [straightenOpen, setStraightenOpen] = useState(false);
+  /** The angle the straighten panel is showing, and whether it is
+   * waiting for a line to be drawn along something level. */
+  const [straightenBy, setStraightenBy] = useState(0);
+  const [levelling, setLevelling] = useState(false);
+  /** The line being drawn along something level, in host coordinates. */
+  const levelRef = useRef<[number, number, number, number] | null>(null);
+  const [levelLine, setLevelLine] = useState<
+    [number, number, number, number] | null
+  >(null);
   /** Which of the shape tools sits in the rail's one shape slot, and
    * whether the rest are showing. */
   const [shapeTool, setShapeTool] = useState<Tool>("Rect");
@@ -2073,6 +2082,14 @@ export function App() {
       pickNeutral(x, y);
       return;
     }
+    // Asked for a line along something level, the next drag draws it.
+    if (levelling) {
+      const [hx, hy] = canvasPoint(e);
+      levelRef.current = [hx, hy, hx, hy];
+      setLevelLine([hx, hy, hx, hy]);
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
     if (tool === "Clone") {
       // Alt sets where the clone reads from, which is what that key does
       // in every editor that has this tool.
@@ -2388,6 +2405,17 @@ export function App() {
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    if (levelRef.current) {
+      const [hx, hy] = canvasPoint(e);
+      levelRef.current = [
+        levelRef.current[0],
+        levelRef.current[1],
+        hx,
+        hy,
+      ];
+      setLevelLine(levelRef.current);
+      return;
+    }
     const band = marqueeRef.current;
     if (band) {
       const [x, y] = docPoint(e);
@@ -2576,6 +2604,27 @@ export function App() {
 
   const onCanvasPointerUp = () => {
     if (pinchRef.current) return;
+    const level = levelRef.current;
+    if (level) {
+      levelRef.current = null;
+      setLevelLine(null);
+      setLevelling(false);
+      const [dx, dy] = [level[2] - level[0], level[3] - level[1]];
+      // A line too short to have an angle was a click, not a drag.
+      if (Math.hypot(dx, dy) > 8) {
+        // Whichever it is nearer — level or upright — is what it is
+        // taken to be, so a doorframe does as well as a horizon. The
+        // page turns the other way by however far off it is.
+        let off = (Math.atan2(dy, dx) * 180) / Math.PI;
+        off = ((off % 180) + 180) % 180;
+        if (off > 90) off -= 180;
+        if (off > 45) off -= 90;
+        if (off < -45) off += 90;
+        setStraightenBy(-off);
+        previewStraighten(-off);
+      }
+      return;
+    }
     if (paintingRef.current && session) {
       paintingRef.current = null;
       strokeEnd.current = lastPaint.current;
@@ -5176,7 +5225,14 @@ export function App() {
             <MenuItem icon="turnRight" onClick={() => turnPage(2)}>
               Turn upside down
             </MenuItem>
-            <MenuItem icon="turnLeft" onClick={() => setStraightenOpen(true)}>
+            <MenuItem
+              icon="turnLeft"
+              onClick={() => {
+                setStraightenBy(0);
+                setLevelling(false);
+                setStraightenOpen(true);
+              }}
+            >
               Straighten…
             </MenuItem>
             <hr />
@@ -5474,13 +5530,21 @@ export function App() {
       )}
       {straightenOpen && (
         <StraightenDialog
-          onPreview={previewStraighten}
+          degrees={straightenBy}
+          levelling={levelling}
+          onAngle={(d) => {
+            setStraightenBy(d);
+            previewStraighten(d);
+          }}
+          onLevel={() => setLevelling((on) => !on)}
           onCancel={() => {
             setStraightenOpen(false);
+            setLevelling(false);
             previewStraighten(0);
           }}
           onApply={() => {
             setStraightenOpen(false);
+            setLevelling(false);
             endGesture();
           }}
         />
@@ -5975,6 +6039,17 @@ export function App() {
                   y2={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
                 />
               ))}
+            </svg>
+          )}
+          {levelLine && (
+            <svg className="level-overlay" aria-hidden="true">
+              <line
+                className="level-line"
+                x1={levelLine[0]}
+                y1={levelLine[1]}
+                x2={levelLine[2]}
+                y2={levelLine[3]}
+              />
             </svg>
           )}
           {marquee && (
@@ -7393,20 +7468,22 @@ function NewDocDialog({
  * than guessed at, and cropped back to the page's own proportions when it
  * is taken. */
 function StraightenDialog({
-  onPreview,
+  degrees,
+  onAngle,
+  onLevel,
+  levelling,
   onCancel,
   onApply,
 }: {
-  onPreview: (degrees: number) => void;
+  degrees: number;
+  onAngle: (degrees: number) => void;
+  onLevel: () => void;
+  levelling: boolean;
   onCancel: () => void;
   onApply: () => void;
 }) {
-  const [degrees, setDegrees] = useState(0);
-  const set = (v: number) => {
-    const d = Math.max(-45, Math.min(45, Number.isFinite(v) ? v : 0));
-    setDegrees(d);
-    onPreview(d);
-  };
+  const set = (v: number) =>
+    onAngle(Math.max(-45, Math.min(45, Number.isFinite(v) ? v : 0)));
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -7417,13 +7494,11 @@ function StraightenDialog({
   }, [onCancel]);
 
   return (
-    <div className="modal-scrim" onPointerDown={onCancel}>
-      <div
-        className="modal"
-        role="dialog"
-        aria-label="Straighten"
-        onPointerDown={(e) => e.stopPropagation()}
-      >
+    // Over the canvas rather than in front of it: a horizon is laid
+    // level against the page itself, so the page has to stay reachable
+    // while the angle is chosen.
+    <div className="straighten-panel" role="dialog" aria-label="Straighten">
+      <div>
         <h2>Straighten</h2>
         <label className="row">
           Angle
@@ -7454,11 +7529,20 @@ function StraightenDialog({
           />
           <span className="unit">°</span>
         </label>
+        <button
+          className={levelling ? "mask-button on" : "mask-button"}
+          onClick={onLevel}
+          aria-label="Draw a level line"
+        >
+          {levelling ? "Draw along it…" : "Draw a level line"}
+        </button>
         <p className="modal-note">
+          Drag along something that ought to be level — a horizon, a
+          window, the edge of a table — and the angle follows from it.
           The page turns about its own middle and is cropped back to the
-          shape it was, which is what takes away the wedges of nothing the
-          turn brings in at the corners. Nothing is resampled: what is on
-          the page is turned, not redrawn.
+          shape it was, which takes away the wedges of nothing the turn
+          brings in at the corners. Nothing is resampled: what is on the
+          page is turned, not redrawn.
         </p>
         <div className="modal-actions">
           <button

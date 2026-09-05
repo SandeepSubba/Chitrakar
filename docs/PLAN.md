@@ -134,7 +134,11 @@ without reading anything else.*
   all, turned about the page's own middle and cropped back to the shape
   the page was, which is what a crooked horizon wants. The turn shows as
   the slider is dragged rather than only once it is taken, so a horizon
-  is laid level against the edge of the page by eye; the whole gesture
+  is laid level against the edge of the page by eye — or drawn along:
+  the panel sits over the canvas rather than in front of it, and a line
+  dragged along anything that ought to be level or upright (a horizon, a
+  doorframe, the edge of a table) sets the angle from however far off it
+  is, taking it for whichever of the two it is nearer; the whole gesture
   is one entry, and cancelling leaves nothing behind. Nothing is
   resampled — a turned layer is a transform, and the corners the turn
   brings in are off the page rather than gone — which is a thing a pixel
@@ -553,7 +557,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~725 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~730 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

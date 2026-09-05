@@ -855,6 +855,41 @@ body {
 
 /* The crop frame: everything outside it is dimmed, so what survives the
    crop is what still looks like the picture. */
+/* The straighten panel sits over the canvas rather than in front of it:
+   a horizon is laid level against the page, so the page has to stay
+   reachable while the angle is chosen. */
+.straighten-panel {
+  position: fixed;
+  right: 1.2rem;
+  bottom: 1.2rem;
+  z-index: 30;
+  width: 17rem;
+  padding: 0.7rem 0.8rem;
+  background: color-mix(in srgb, var(--panel) 94%, #000);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+}
+
+.straighten-panel h2 {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+/* The line drawn along something that ought to be level. */
+.level-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.level-line {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
 .crop-shade {
   fill: rgb(0 0 0 / 0.55);
 }
