@@ -330,6 +330,10 @@ export type Command =
   | { SetGuides: { guides: ({ Vertical: number } | { Horizontal: number })[] } }
   | { SetSwatches: { swatches: Swatch[] } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
+  /** Turn the page by any angle about its own middle and give it the size
+   * it should have afterwards — what straightening a crooked horizon is
+   * made of. `Session::straighten_size` answers the size. */
+  | { StraightenCanvas: { degrees: number; width: number; height: number } }
   | { Batch: Command[] };
 
 /** Mirror of `chitrakar_engine::LayerInfo`. */

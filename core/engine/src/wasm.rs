@@ -606,6 +606,14 @@ impl WasmSession {
     }
 
     /// Mirror the page across its own middle: left to right when
+    /// The page size a straighten by this angle would leave, as
+    /// [width, height]: the largest rectangle of the page's own
+    /// proportions that still fits once it has been turned.
+    pub fn straighten_size(&self, degrees: f32) -> Vec<u32> {
+        let (w, h) = self.inner.straighten_size(degrees);
+        vec![w, h]
+    }
+
     /// `across_x`, top to bottom when not.
     pub fn mirror_canvas(&mut self, across_x: bool) -> Result<(), JsError> {
         self.inner.mirror_canvas(across_x).map_err(to_js)

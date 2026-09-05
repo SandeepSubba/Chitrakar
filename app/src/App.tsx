@@ -779,6 +779,7 @@ export function App() {
   /** Waiting for a click to say which pixel of the picture is meant to
    * be grey, for the white balance to be worked out from. */
   const [pickingNeutral, setPickingNeutral] = useState(false);
+  const [straightenOpen, setStraightenOpen] = useState(false);
   /** Which of the shape tools sits in the rail's one shape slot, and
    * whether the rest are showing. */
   const [shapeTool, setShapeTool] = useState<Tool>("Rect");
@@ -3088,6 +3089,27 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** Turn the page as the slider is dragged, so a crooked horizon can be
+   * laid level by eye. Every step starts from where the gesture began
+   * rather than from the last one — turning by a degree ten times is not
+   * turning by ten, and the page it is cropped back to has to be worked
+   * out from the page it started as. */
+  const previewStraighten = (degrees: number) => {
+    if (!session) return;
+    try {
+      session.cancel_preview();
+      if (degrees !== 0) {
+        const [w, h] = Array.from(session.straighten_size(degrees));
+        sendPreview(session, {
+          StraightenCanvas: { degrees, width: w, height: h },
+        });
+      }
+      refresh(session);
+    } catch (err) {
+      alert(`Straighten: ${err}`);
+    }
+  };
+
   /** The text style buttons show what the selection says, and moving a
    * selection is not a state change — so nothing would re-render them
    * and a button would go on showing, and applying, what the last
@@ -5004,6 +5026,9 @@ export function App() {
             <MenuItem icon="turnRight" onClick={() => turnPage(2)}>
               Turn upside down
             </MenuItem>
+            <MenuItem icon="turnLeft" onClick={() => setStraightenOpen(true)}>
+              Straighten…
+            </MenuItem>
             <hr />
             <MenuItem icon="flipH" onClick={() => mirrorPage(true)}>
               Mirror left to right
@@ -5259,6 +5284,19 @@ export function App() {
           onResize={(w, h, dx, dy) => {
             setCanvasSizeOpen(false);
             resizePage(w, h, dx, dy);
+          }}
+        />
+      )}
+      {straightenOpen && (
+        <StraightenDialog
+          onPreview={previewStraighten}
+          onCancel={() => {
+            setStraightenOpen(false);
+            previewStraighten(0);
+          }}
+          onApply={() => {
+            setStraightenOpen(false);
+            endGesture();
           }}
         />
       )}
@@ -7101,6 +7139,99 @@ function NewDocDialog({
  * every print asks for — without a single layer having to be moved by
  * hand. Both are one command: a new size, and the shift that decides
  * where the old page sits inside it. */
+/** Straighten: an angle to turn the page by, shown as it is dragged so a
+ * crooked horizon can be laid level against the edge of the page rather
+ * than guessed at, and cropped back to the page's own proportions when it
+ * is taken. */
+function StraightenDialog({
+  onPreview,
+  onCancel,
+  onApply,
+}: {
+  onPreview: (degrees: number) => void;
+  onCancel: () => void;
+  onApply: () => void;
+}) {
+  const [degrees, setDegrees] = useState(0);
+  const set = (v: number) => {
+    const d = Math.max(-45, Math.min(45, Number.isFinite(v) ? v : 0));
+    setDegrees(d);
+    onPreview(d);
+  };
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Straighten"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Straighten</h2>
+        <label className="row">
+          Angle
+          <input
+            type="range"
+            min={-45}
+            max={45}
+            step={0.1}
+            value={degrees}
+            onChange={(e) => set(Number(e.target.value))}
+            aria-label="Straighten angle"
+          />
+        </label>
+        <label className="row">
+          Degrees
+          <input
+            type="number"
+            min={-45}
+            max={45}
+            step={0.1}
+            value={degrees}
+            onChange={(e) => set(Number(e.target.value))}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") onApply();
+            }}
+            aria-label="Straighten degrees"
+          />
+          <span className="unit">°</span>
+        </label>
+        <p className="modal-note">
+          The page turns about its own middle and is cropped back to the
+          shape it was, which is what takes away the wedges of nothing the
+          turn brings in at the corners. Nothing is resampled: what is on
+          the page is turned, not redrawn.
+        </p>
+        <div className="modal-actions">
+          <button
+            className="mask-button"
+            onClick={onCancel}
+            aria-label="Leave the page as it is"
+          >
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={onApply}
+            aria-label="Straighten the page"
+          >
+            Straighten
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CanvasSizeDialog({
   width,
   height,

@@ -130,7 +130,15 @@ without reading anything else.*
   so a portrait photograph opened into a landscape page is one menu item
   away from being the right way up; and it mirrors the page across
   either middle, which is a different thing from flipping a selection —
-  the guides cross with the artwork. Turning, mirroring and
+  the guides cross with the artwork. And it straightens: any angle at
+  all, turned about the page's own middle and cropped back to the shape
+  the page was, which is what a crooked horizon wants. The turn shows as
+  the slider is dragged rather than only once it is taken, so a horizon
+  is laid level against the edge of the page by eye; the whole gesture
+  is one entry, and cancelling leaves nothing behind. Nothing is
+  resampled — a turned layer is a transform, and the corners the turn
+  brings in are off the page rather than gone — which is a thing a pixel
+  editor cannot say about straightening. Turning, mirroring and
   resizing are one transform of the page's own space put through one
   function, so what travels with the page is decided once: the layers,
   what masks them (a mask is written in the space its owner is placed
@@ -510,9 +518,9 @@ without reading anything else.*
   every antialiased edge and every resampled image, and cost a transfer
   crossing per channel per pixel on the hot path. It is a real divergence,
   left open deliberately.
-- **Verify before committing:** `cargo test --workspace` (~297),
+- **Verify before committing:** `cargo test --workspace` (~298),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~668 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~679 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

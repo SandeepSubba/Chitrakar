@@ -68,6 +68,28 @@ pub fn canvas_fits(width: u32, height: u32) -> bool {
         && width as u64 * height as u64 <= MAX_CANVAS_PIXELS
 }
 
+/// The page a straighten leaves behind: the largest rectangle of the
+/// page's own proportions that still fits inside it once it has been
+/// turned. Straightening a photograph is turning it a little and then
+/// cropping away the wedges of nothing the turn brings in at the
+/// corners, and this is where that crop stops.
+///
+/// Both sides have to fit: turned by `t`, a rectangle `w` by `h` needs
+/// `w·cos t + h·sin t` of room across and `w·sin t + h·cos t` down, so
+/// the scale is whichever of the two the page can least afford.
+pub fn straightened_size(width: u32, height: u32, degrees: f32) -> (u32, u32) {
+    let (w, h) = (width.max(1) as f32, height.max(1) as f32);
+    let t = degrees.to_radians().abs();
+    let (s, c) = (t.sin().abs(), t.cos().abs());
+    let k = (w / (w * c + h * s))
+        .min(h / (w * s + h * c))
+        .clamp(0.0, 1.0);
+    (
+        ((w * k).round() as u32).max(1),
+        ((h * k).round() as u32).max(1),
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentMeta {
     pub width: u32,
@@ -637,6 +659,39 @@ impl Document {
                 });
                 Ok(Command::MirrorCanvas { across_x })
             }
+            Command::StraightenCanvas {
+                degrees,
+                width,
+                height,
+            } => {
+                if !canvas_fits(width, height) {
+                    return Err(DocError::BadCanvasSize(width, height));
+                }
+                let prev = (self.meta.width, self.meta.height);
+                let (cx, cy) = (prev.0 as f32 / 2.0, prev.1 as f32 / 2.0);
+                let (nx, ny) = (width as f32 / 2.0, height as f32 / 2.0);
+                let (s, c) = degrees.to_radians().sin_cos();
+                // Turned about the middle of the page it was, and landed
+                // on the middle of the page it becomes: p' = R(p - old
+                // middle) + new middle. Written out, the turn's own
+                // translation is what carries the second half.
+                let turn = Transform {
+                    a: c,
+                    b: s,
+                    c: -s,
+                    d: c,
+                    e: nx - (c * cx - s * cy),
+                    f: ny - (s * cx + c * cy),
+                };
+                self.meta.width = width;
+                self.meta.height = height;
+                self.map_page(turn);
+                Ok(Command::StraightenCanvas {
+                    degrees: -degrees,
+                    width: prev.0,
+                    height: prev.1,
+                })
+            }
             Command::TurnCanvas { quarters } => {
                 let turns = quarters % 4;
                 if turns == 0 {
@@ -920,6 +975,23 @@ pub enum Command {
     /// own inverse: doing it twice is doing nothing.
     MirrorCanvas {
         across_x: bool,
+    },
+    /// Turn the page by any angle about its own middle and give it the
+    /// size it should have afterwards, the middle of the new page landing
+    /// on the middle of the old one. What a crooked horizon is put right
+    /// with — and non-destructive here in a way it is not in a pixel
+    /// editor, since a turned layer is a transform rather than resampled
+    /// pixels, and the corners it takes in are off the page rather than
+    /// gone.
+    ///
+    /// The size is asked for rather than worked out, so the command says
+    /// exactly what it does: its inverse is the turn back with the old
+    /// size, which lands every point where it started.
+    /// [`straightened_size`] is what a caller usually asks for it.
+    StraightenCanvas {
+        degrees: f32,
+        width: u32,
+        height: u32,
     },
     /// Turn the page a quarter of the way round, `quarters` times
     /// clockwise. An odd number swaps the page's width and height, and

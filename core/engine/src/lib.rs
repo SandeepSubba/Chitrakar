@@ -254,6 +254,7 @@ impl Session {
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
             | Command::TurnCanvas { .. }
+            | Command::StraightenCanvas { .. }
             | Command::MirrorCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
             // needs repainting when they change; nor does a lock.
@@ -413,6 +414,7 @@ impl Session {
             Command::Batch(_)
                 | Command::ResizeCanvas { .. }
                 | Command::TurnCanvas { .. }
+                | Command::StraightenCanvas { .. }
                 | Command::MirrorCanvas { .. }
         );
         let target = Self::command_target(&cmd);
@@ -528,6 +530,9 @@ impl Session {
                 } else {
                     "Mirror the page top to bottom".into()
                 }
+            }
+            Command::StraightenCanvas { degrees, .. } => {
+                format!("Straighten the page by {degrees:.1}°")
             }
             Command::TurnCanvas { quarters } => match quarters % 4 {
                 1 => "Turn the page right".into(),
@@ -2972,6 +2977,25 @@ impl Session {
     /// clockwise, carrying everything on it round with it.
     pub fn turn_canvas(&mut self, quarters: u8) -> Result<(), EngineError> {
         self.apply(Command::TurnCanvas { quarters })
+    }
+
+    /// The page a straighten by `degrees` would leave: the largest
+    /// rectangle of the page's own proportions that still fits inside it
+    /// once turned, which is where the crop that follows a straighten
+    /// stops.
+    pub fn straighten_size(&self, degrees: f32) -> (u32, u32) {
+        chitrakar_doc::straightened_size(self.doc.meta.width, self.doc.meta.height, degrees)
+    }
+
+    /// Turn the page by any angle about its own middle and crop it back
+    /// to its own proportions — what a crooked horizon is put right with.
+    pub fn straighten(&mut self, degrees: f32) -> Result<(), EngineError> {
+        let (width, height) = self.straighten_size(degrees);
+        self.apply(Command::StraightenCanvas {
+            degrees,
+            width,
+            height,
+        })
     }
 
     /// Mirror the page across its own middle, left to right when
@@ -5870,6 +5894,87 @@ mod tests {
             (still - hi).abs() < 1e-6,
             "a speck did not become the white point: {still} against {hi}"
         );
+    }
+
+    /// Straightening turns the page about its own middle and crops back
+    /// to its own proportions; undoing it puts every point back exactly.
+    #[test]
+    fn straightening_turns_the_page_and_crops_it_back_to_shape() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let id = add_rect(&mut session, "mark", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(180.0, 130.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![chitrakar_doc::Guide::Vertical(200.0)],
+            })
+            .unwrap();
+        let middle = session.document().node(id).unwrap().transform;
+
+        // Ten degrees: the page keeps its proportions and loses the room
+        // the turn takes at the corners.
+        let (w, h) = session.straighten_size(10.0);
+        assert!(
+            w < 400 && h < 300 && ((w as f32 / h as f32) - 4.0 / 3.0).abs() < 0.02,
+            "the page it leaves is smaller and the same shape: {w}x{h}"
+        );
+        session.straighten(10.0).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (w, h)
+        );
+        let turned = session.document().node(id).unwrap().transform;
+        assert!(
+            (turned.a - 10f32.to_radians().cos()).abs() < 1e-4
+                && (turned.b - 10f32.to_radians().sin()).abs() < 1e-4,
+            "the layer went round with the page: {turned:?}"
+        );
+        // A mark on the page's middle stays on it: the middle of the page
+        // it becomes lands on the middle of the page it was.
+        let mid = [
+            turned.a * 20.0 + turned.c * 20.0 + turned.e,
+            turned.b * 20.0 + turned.d * 20.0 + turned.f,
+        ];
+        assert!(
+            (mid[0] - w as f32 / 2.0).abs() < 0.5 && (mid[1] - h as f32 / 2.0).abs() < 0.5,
+            "and what was in the middle is still in the middle: {mid:?}"
+        );
+        // A guide is part of the page and goes round with it, which for a
+        // straight line means it is no longer upright — the guides are
+        // upright or level by construction, so it lands where its own
+        // axis takes it rather than being left behind.
+        assert_eq!(session.document().guides().len(), 1);
+
+        // Undo is the turn back with the old size, which is exact.
+        session.undo().unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (400, 300)
+        );
+        let back = session.document().node(id).unwrap().transform;
+        for (a, b) in [
+            (back.a, middle.a),
+            (back.b, middle.b),
+            (back.c, middle.c),
+            (back.d, middle.d),
+            (back.e, middle.e),
+            (back.f, middle.f),
+        ] {
+            assert!((a - b).abs() < 1e-3, "undone exactly: {back:?} {middle:?}");
+        }
+
+        // Straightening by nothing is a page the same size, and no turn.
+        assert_eq!(session.straighten_size(0.0), (400, 300));
     }
 
     /// Told which pixel is meant to be grey, the balance that makes it

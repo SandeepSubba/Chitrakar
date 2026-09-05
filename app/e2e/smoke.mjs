@@ -5975,6 +5975,105 @@ assert(
   );
 }
 
+// 9t. Straighten: the page turns by any angle about its own middle, is
+// cropped back to the shape it was, and shows the turn as the slider is
+// dragged rather than only once it is taken.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#cc4422");
+  await pickTool("Rect");
+  // A level bar across the middle: a crooked horizon to put right.
+  await page.mouse.move(...at(40, 140));
+  await page.mouse.down();
+  await page.mouse.move(...at(360, 160), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(200, 150))[3] > 200 && (await canvasPixel(200, 60))[3] === 0,
+    "a level bar to turn",
+  );
+
+  await menuClick("Page", "Straighten…");
+  await page.waitForTimeout(200);
+  const dialog = page.locator('[role="dialog"][aria-label="Straighten"]');
+  assert((await dialog.count()) === 1, "the Page menu offers straightening");
+  // Where the ink starts, down a column: on a level bar it is the same
+  // wherever you look, and on a turned one it is not.
+  const topInk = async (x, height) => {
+    for (let y = 0; y < height; y += 3) {
+      if ((await canvasPixel(x, y))[3] > 128) return y;
+    }
+    return null;
+  };
+  const level = [await topInk(80, 300), await topInk(280, 300)];
+  assert(
+    level[0] !== null && Math.abs(level[0] - level[1]) < 6,
+    `the bar starts level (${level})`,
+  );
+
+  await setSlider("Straighten angle", 10);
+  await page.waitForTimeout(350);
+  // The turn shows while the dialog is open, before it is taken.
+  const tilted = [await topInk(80, 247), await topInk(240, 247)];
+  assert(
+    tilted[0] !== null &&
+      tilted[1] !== null &&
+      tilted[1] > tilted[0] + 15,
+    `the page turns as the slider is dragged (${level} -> ${tilted})`,
+  );
+  const size = await page.evaluate(() => {
+    const c = document.getElementById("engine-page");
+    return [c.clientWidth, c.clientHeight];
+  });
+  await page.click('button[aria-label="Straighten the page"]');
+  await page.waitForTimeout(400);
+  assert((await dialog.count()) === 0, "and taking it closes the dialog");
+  assert(
+    await page.isVisible("text=RGB, 329×247"),
+    "the page is cropped back to its own shape, smaller by what the turn took",
+  );
+  const kept = await page.evaluate(() => {
+    const c = document.getElementById("engine-page");
+    return [c.clientWidth, c.clientHeight];
+  });
+  assert(
+    Math.abs(kept[0] / kept[1] - size[0] / size[1]) < 0.02,
+    "the shape it was shown as is the shape it came out",
+  );
+
+  // One entry: the whole gesture undoes at once, back to the page it was.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    await page.isVisible("text=RGB, 400×300"),
+    "and the whole turn is one entry in the history",
+  );
+  const back = [await topInk(80, 300), await topInk(280, 300)];
+  assert(
+    back[0] !== null && Math.abs(back[0] - back[1]) < 6,
+    `with the bar level again (${back})`,
+  );
+
+  // Cancelled, it leaves nothing behind.
+  await menuClick("Page", "Straighten…");
+  await page.waitForTimeout(200);
+  await setSlider("Straighten angle", -20);
+  await page.waitForTimeout(300);
+  await page.click('button[aria-label="Leave the page as it is"]');
+  await page.waitForTimeout(400);
+  assert(
+    await page.isVisible("text=RGB, 400×300"),
+    "cancelling a straighten puts the page back",
+  );
+  assert(
+    (await canvasPixel(200, 150))[3] > 200,
+    "and the picture with it",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
