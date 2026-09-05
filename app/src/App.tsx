@@ -661,6 +661,11 @@ const guideIsVertical = (g: DocGuide) => "Vertical" in g;
  * same however far you are zoomed in. */
 const SNAP_PX = 6;
 
+/** Roughly how much room the right-click menu takes, which is what keeps
+ * it inside the window. Wide enough for its longest line and tall enough
+ * for the most items it ever shows. */
+const CONTEXT_MENU: [number, number] = [250, 330];
+
 /** What `snapAxis` answers when nothing is being snapped to. */
 const NO_SNAP = { delta: 0, guide: null as number | null };
 
@@ -1614,6 +1619,51 @@ export function App() {
    * Pointer events say nothing about the other fingers, so they are kept
    * here: two of them are a pinch. */
   const touchesRef = useRef<Map<number, [number, number]>>(new Map());
+
+  /** Where the menu a right-click asks for is drawn, in window
+   * coordinates, or null when there is none open. */
+  const [contextAt, setContextAt] = useState<[number, number] | null>(null);
+
+  const onCanvasContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // A menu about "this" has to be about what was pointed at: a
+    // right-click on something that is not picked picks it first, and one
+    // on bare canvas leaves the selection alone and offers what can be
+    // done with no layer in hand.
+    if (session) {
+      const [x, y] = docPoint(e);
+      const hit = session.hit_test(x, y);
+      if (hit !== undefined && !selectionSet.includes(hit)) {
+        setSelected(inSelectedGroup(hit) ? selected : hit);
+        setMultiSel([]);
+      }
+    }
+    // Kept inside the window: a menu opened near the right edge or the
+    // bottom would otherwise hang off it with no way to scroll to it.
+    setContextAt([
+      Math.max(8, Math.min(e.clientX, window.innerWidth - CONTEXT_MENU[0])),
+      Math.max(8, Math.min(e.clientY, window.innerHeight - CONTEXT_MENU[1])),
+    ]);
+  };
+
+  // A click anywhere else, or Escape, puts the menu away — the same two
+  // ways the menus in the bar close.
+  const contextRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!contextAt) return;
+    // A press inside the menu is the item being chosen: taking the menu
+    // away there would delete the button before its click ever landed.
+    const away = (e: PointerEvent) => {
+      if (!contextRef.current?.contains(e.target as Node)) setContextAt(null);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setContextAt(null);
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("keydown", key);
+    };
+  }, [contextAt]);
 
   const isPanTrigger = (e: React.PointerEvent) =>
     e.button === 1 || (e.button === 0 && spaceRef.current);
@@ -4959,6 +5009,74 @@ export function App() {
         />
       </header>
       {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
+      {contextAt && (
+        <div
+          className="menu-pop context-menu"
+          ref={contextRef}
+          role="menu"
+          style={{ left: contextAt[0], top: contextAt[1] }}
+          onClick={() => setContextAt(null)}
+        >
+          {selectionSet.length > 0 ? (
+            <>
+              <MenuItem icon="cut" onClick={cutSelected} hint="Ctrl+X">
+                Cut
+              </MenuItem>
+              <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
+                Copy
+              </MenuItem>
+              <MenuItem
+                icon="duplicate"
+                onClick={duplicateSelected}
+                hint="Ctrl+D"
+              >
+                Duplicate
+              </MenuItem>
+              <hr />
+              <MenuItem
+                icon="raise"
+                onClick={() => orderSelected(true)}
+                hint="Ctrl+Shift+]"
+              >
+                Bring to front
+              </MenuItem>
+              <MenuItem
+                icon="lower"
+                onClick={() => orderSelected(false)}
+                hint="Ctrl+Shift+["
+              >
+                Send to back
+              </MenuItem>
+              <hr />
+              {selectionSet.length > 1 && (
+                <MenuItem icon="group" onClick={groupSelection}>
+                  Group
+                </MenuItem>
+              )}
+              {selectedLayer?.kind === "group" && (
+                <MenuItem icon="ungroup" onClick={ungroupSelection}>
+                  Ungroup
+                </MenuItem>
+              )}
+              <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
+                Delete
+              </MenuItem>
+            </>
+          ) : (
+            <>
+              <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
+                Paste
+              </MenuItem>
+              <MenuItem icon="selectAll" onClick={selectAll} hint="Ctrl+A">
+                Select all
+              </MenuItem>
+              <MenuItem icon="fit" onClick={fitView} hint="Ctrl+0">
+                Fit document to window
+              </MenuItem>
+            </>
+          )}
+        </div>
+      )}
       {canvasSizeOpen && (
         <CanvasSizeDialog
           width={docSize[0]}
@@ -5201,6 +5319,7 @@ export function App() {
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
           onPointerCancel={onHostPointerUp}
+          onContextMenu={onCanvasContextMenu}
           onPointerLeave={() => setBrushAt(null)}
         >
           {/* Rulers along the top and left edges, marked in document
@@ -6556,6 +6675,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Shift-drag a band", "Adds to what is picked"],
       ["Ctrl-click a layer", "Adds one layer to the selection"],
       ["Double-click text", "Type into it on the canvas"],
+      ["Right-click", "What can be done with what is under the pointer"],
       ["Escape", "Let go of the selection"],
     ],
   ],

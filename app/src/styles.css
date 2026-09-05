@@ -115,6 +115,12 @@ body {
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
 }
 
+/* The same popup, put where the pointer asked for it rather than under a
+   label in the bar. Its place comes in as a style of its own. */
+.context-menu {
+  position: fixed;
+}
+
 .menu-pop hr {
   border: 0;
   border-top: 1px solid var(--border);

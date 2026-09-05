@@ -5551,6 +5551,99 @@ assert(
   );
 }
 
+// 9n. The right-click menu: what can be done with what was pointed at,
+// where it was pointed at. Right-clicking something not already picked
+// picks it, and bare canvas offers what needs no layer at all.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const menu = page.locator(".context-menu");
+  const drawRect = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await drawRect(40, 40, 160, 160);
+  await drawRect(220, 40, 340, 160);
+
+  // Bare canvas: no layer in hand, so the menu offers the things that
+  // need none.
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.mouse.click(...at(200, 260), { button: "right" });
+  await page.waitForTimeout(200);
+  assert((await menu.count()) === 1, "right-click opens a menu");
+  const bare = await menu.innerText();
+  assert(
+    bare.includes("Select all") && !bare.includes("Bring to front"),
+    `with nothing picked it offers what needs nothing (${bare.replace(/\s+/g, " ")})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert((await menu.count()) === 0, "and Escape puts it away");
+
+  // Right-clicking the second rect picks it, and the menu is about it.
+  await page.mouse.click(...at(280, 100), { button: "right" });
+  await page.waitForTimeout(250);
+  const picked = Number(
+    await page.locator('input[aria-label="X position"]').inputValue(),
+  );
+  assert(
+    Math.abs(picked - 220) < 1.5,
+    `right-clicking a layer picks it (${picked})`,
+  );
+  const onIt = await menu.innerText();
+  assert(
+    onIt.includes("Bring to front") && onIt.includes("Delete"),
+    "and the menu is about the layer",
+  );
+  // The menu sits where the pointer asked for it.
+  const where = await menu.boundingBox();
+  const [mx, my] = at(280, 100);
+  assert(
+    Math.abs(where.x - mx) < 3 && Math.abs(where.y - my) < 3,
+    `the menu opened where the click was (${where.x},${where.y} against ${mx},${my})`,
+  );
+
+  // Choosing an item does what it says: this one is under the other, and
+  // comes out over it.
+  const rows = await page.locator(".panel ul li .layer-name").count();
+  await menu.locator("text=Bring to front").click();
+  await page.waitForTimeout(300);
+  assert((await menu.count()) === 0, "choosing an item closes the menu");
+  assert(
+    (await page.locator(".panel ul li .layer-name").first().innerText()).includes(
+      "Rect 2",
+    ),
+    "and it did what it said",
+  );
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rows,
+    "with nothing added or lost",
+  );
+
+  // A menu asked for hard against the corner stays inside the window
+  // rather than hanging off it where nothing could reach it.
+  const win = await page.evaluate(() => [window.innerWidth, window.innerHeight]);
+  const host = await page.locator(".canvas-host").boundingBox();
+  await page.mouse.click(host.x + host.width - 4, host.y + host.height - 4, {
+    button: "right",
+  });
+  await page.waitForTimeout(250);
+  const corner = await menu.boundingBox();
+  assert(
+    corner.x + corner.width <= win[0] && corner.y + corner.height <= win[1],
+    `a menu in the corner stays in the window (${corner.x + corner.width} of ${win[0]}, ${corner.y + corner.height} of ${win[1]})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

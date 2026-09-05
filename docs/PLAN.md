@@ -289,6 +289,13 @@ without reading anything else.*
   give to the picked shape or block of text, alt-clicked to take out
   again. In a CMYK document they are ink, and resolve through the press
   profile exactly as a fill does.
+  A right-click on the canvas offers what can be done with what is under
+  the pointer, where the pointer is: cut, copy, duplicate, the front and
+  the back, group and ungroup, delete — and on bare canvas the things
+  that need no layer at all. Right-clicking something not already picked
+  picks it first, since a menu about "this" has to be about what was
+  pointed at, and a menu asked for against a corner is kept inside the
+  window rather than hanging off it.
   The eyedropper (I) takes the colour the page shows under the cursor —
   the composite, effects and opacity included — as the colour to draw
   with, and gives it to the picked shape or block of text.
@@ -468,7 +475,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~627 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~637 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
