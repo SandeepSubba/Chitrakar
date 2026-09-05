@@ -4695,15 +4695,35 @@ export function App() {
   /** Every frame on the page, each as its own PNG at its own size —
    * what having frames is for. Named after the frame, so a page of them
    * comes out as a set of named pictures. */
+  /** What a frame exports at, and what to call the file: the frame says
+   * which multiple it wants, and the name carries it the way every
+   * export of a screen has been named since screens had two of them. */
+  const frameScale = (id: NodeId): number => {
+    if (!session) return 1;
+    try {
+      const kind = JSON.parse(session.kind_json(id)) as NodeKind;
+      if (kind && typeof kind === "object" && "Artboard" in kind) {
+        const at = kind.Artboard.export_scale;
+        return Number.isFinite(at) && at > 0 ? at : 1;
+      }
+    } catch {
+      /* a frame that has gone exports at its own size */
+    }
+    return 1;
+  };
+  const frameFile = (name: string, at: number) =>
+    `${fileName()} - ${name}${at > 1 ? `@${at}x` : ""}.png`;
+
   const exportArtboards = () => {
     if (!session) return;
     const boards = layers.filter((l) => l.kind === "artboard");
     if (boards.length === 0) return;
     try {
       for (const board of boards) {
+        const at = frameScale(board.id as NodeId);
         download(
-          session.export_artboard_png(board.id, 1),
-          `${fileName()} - ${board.name}.png`,
+          session.export_artboard_png(board.id, at),
+          frameFile(board.name, at),
           "image/png",
         );
       }
@@ -4719,9 +4739,10 @@ export function App() {
     const board = layers.find((l) => l.id === selected);
     if (!board || board.kind !== "artboard") return;
     try {
+      const at = frameScale(board.id as NodeId);
       download(
-        session.export_artboard_png(board.id, 1),
-        `${fileName()} - ${board.name}.png`,
+        session.export_artboard_png(board.id, at),
+        frameFile(board.name, at),
         "image/png",
       );
     } catch (err) {
@@ -8902,6 +8923,23 @@ function KindProps({
               <option key={name} value={i}>
                 {name.includes("×") ? name : `${name} (${w} × ${h})`}
               </option>
+            ))}
+          </select>
+        </label>
+        <label className="row">
+          Export at
+          <select
+            value={String(f.export_scale > 0 ? f.export_scale : 1)}
+            onChange={(e) =>
+              onEdit(
+                { Artboard: { ...f, export_scale: Number(e.target.value) } },
+                false,
+              )
+            }
+            aria-label="Frame export scale"
+          >
+            {[1, 2, 3].map((n) => (
+              <option key={n} value={n}>{`${n}×`}</option>
             ))}
           </select>
         </label>

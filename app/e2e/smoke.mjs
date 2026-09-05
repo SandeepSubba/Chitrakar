@@ -3217,7 +3217,45 @@ assert(
       bytes.readUInt32BE(16) === 200 && bytes.readUInt32BE(20) === 200,
       `the picked frame exports at its own size (${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)})`,
     );
+    assert(
+      !oneBoard.suggestedFilename().includes("@"),
+      "and is named plainly at one to one",
+    );
   }
+
+  // A frame says which multiple it wants exporting at, and that travels
+  // with the frame rather than being remembered at the moment of export.
+  await page.selectOption('select[aria-label="Frame export scale"]', "2");
+  await page.waitForTimeout(250);
+  const [twiceBoard] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export this artboard")).click(),
+  ]);
+  {
+    const bytes = await readFile(await twiceBoard.path());
+    assert(
+      bytes.readUInt32BE(16) === 400 && bytes.readUInt32BE(20) === 400,
+      `asked for twice, it comes out twice (${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)})`,
+    );
+    assert(
+      twiceBoard.suggestedFilename().includes("@2x"),
+      `and the file says so (${twiceBoard.suggestedFilename()})`,
+    );
+  }
+  // Every frame at once honours each frame's own multiple.
+  const [allBoards] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export every artboard")).click(),
+  ]);
+  {
+    const bytes = await readFile(await allBoards.path());
+    assert(
+      bytes.readUInt32BE(16) === 400 && allBoards.suggestedFilename().includes("@2x"),
+      "and exporting them all honours what each one asks for",
+    );
+  }
+  await page.selectOption('select[aria-label="Frame export scale"]', "1");
+  await page.waitForTimeout(250);
 
   // Dragged out past the frame's edge, the rect is cut at the edge. The
   // panel runs top-first and the frame owns the rect, so the frame is

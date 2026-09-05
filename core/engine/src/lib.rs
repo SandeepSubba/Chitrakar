@@ -1404,6 +1404,7 @@ impl Session {
             width: w0,
             height: h0,
             background,
+            export_scale,
         } = &node.kind
         else {
             return Err(EngineError::BadCommand("that layer is not a frame".into()));
@@ -1419,6 +1420,7 @@ impl Session {
                     width,
                     height,
                     background: *background,
+                    export_scale: *export_scale,
                 }),
             },
             Command::SetTransform {

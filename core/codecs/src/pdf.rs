@@ -729,6 +729,7 @@ impl Page {
                 width,
                 height,
                 background,
+                ..
             } => {
                 // The ground first, then the frame's rectangle as the
                 // clip everything inside is drawn against. Both are

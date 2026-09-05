@@ -1008,6 +1008,7 @@ fn render_child(
                 width,
                 height,
                 background,
+                ..
             } => {
                 // The frame's own box, in the space it is placed in.
                 let frame = transformed_local_bounds(t, (0.0, 0.0, *width, *height));
@@ -5130,6 +5131,7 @@ fn hit_in_group(
                 width,
                 height,
                 background,
+                ..
             } => {
                 let t = parent.compose(node.transform);
                 let Some((lx, ly)) = to_local(t, x, y) else {

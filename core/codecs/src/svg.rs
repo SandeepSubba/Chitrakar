@@ -123,6 +123,7 @@ fn write_node(
                 width,
                 height,
                 background,
+                ..
             } => {
                 // A frame is a group cut to a rectangle, which SVG says
                 // with a clipPath in the frame's own space — so it goes

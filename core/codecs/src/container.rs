@@ -582,7 +582,8 @@ mod tests {
                 chitrakar_doc::NodeKind::Artboard {
                     width: 40.0,
                     height: 40.0,
-                    background: Some(_)
+                    background: Some(_),
+                    ..
                 }
             ),
             "the frame came back a frame"

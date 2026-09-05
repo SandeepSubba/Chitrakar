@@ -252,7 +252,13 @@ without reading anything else.*
   new parent's space is taken back out of its transform, which fixes
   dropping into an off-origin group too); and File › Export every
   artboard writes one PNG per frame, at the frame's own size, named
-  after it, with nothing of the page around it; File › Export PDF of the
+  after it, with nothing of the page around it — or at twice or three
+  times that, since a frame carries the multiple it wants exporting at
+  the way it carries its size: which screen a frame is for is a property
+  of the frame rather than a thing to remember at the moment of
+  exporting, and the file is named `@2x` the way every export of a screen
+  has been named since screens had two of them. A file written before
+  frames could say reads as one to one; File › Export PDF of the
   frames writes them as the pages of one file instead, in the order they
   sit on the document, each page its frame's own size and live where PDF
   has the words — a brochure laid out as artboards comes out a brochure.
@@ -557,7 +563,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~730 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~734 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -929,7 +935,9 @@ chitrakar/
   (a clipPath) and PDF (a rectangle clip). Resized by its handles or its
   W/H fields rather than scaled, with a ground that can be any colour or
   none, and what is inside pinned to its edges, its middle or both.
-  Frames as export presets still to come.
+  A frame carries the multiple it wants exporting at (1×, 2×, 3×), so
+  which screen it is for is part of the frame rather than something to
+  remember at the moment of exporting ✅.
 - Symbols/components ✅ first pass: `NodeKind::Instance` draws another
   layer's content in its own place, with a cycle guard in the document
   (any structural command that would let a copy reach itself is refused

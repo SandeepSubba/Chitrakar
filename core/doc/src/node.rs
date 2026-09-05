@@ -745,6 +745,16 @@ pub enum NodeKind {
         /// Painted behind the contents, inside the frame. `None` is a
         /// frame that shows what is under it on the page.
         background: Option<AuthoredColor>,
+        /// How many pixels a pixel of the frame exports as. A frame is
+        /// usually made at the size it is designed at and wanted at
+        /// twice or three times that, and which multiple belongs to
+        /// which frame is a property of the frame rather than a thing to
+        /// remember at the moment of exporting. Additive: a file written
+        /// before this reads as 1, and so does anything at or below
+        /// zero, since a frame exporting as nothing is not a wish anyone
+        /// has.
+        #[serde(default = "one")]
+        export_scale: f32,
     },
 }
 
@@ -1111,6 +1121,7 @@ impl Node {
                 width,
                 height,
                 background,
+                export_scale: 1.0,
             },
         )
     }

@@ -304,6 +304,10 @@ export type NodeKind =
         width: number;
         height: number;
         background: AuthoredColor | null;
+        /** How many pixels a pixel of the frame exports as: which
+         * multiple belongs to which frame is a property of the frame. A
+         * file written before this reads as 1. */
+        export_scale: number;
       };
     };
 
