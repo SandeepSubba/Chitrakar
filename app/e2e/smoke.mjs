@@ -65,6 +65,19 @@ const canvasPixel = (x, y) =>
     return Array.from(c.getContext("2d").getImageData(dx, dy, 1, 1).data);
   }, [x, y]);
 
+/** The app asks before throwing away work that has not been saved, and
+ * Playwright dismisses every dialog unless told otherwise — which would
+ * answer "no" to every question the suite provokes. One handler answers
+ * them all, remembering what was asked so a test can read it, and any
+ * test that wants a "no" says so for the length of one action. */
+let dialogAnswer = "accept";
+let lastDialog = "";
+page.on("dialog", async (d) => {
+  lastDialog = d.message();
+  if (dialogAnswer === "dismiss") await d.dismiss();
+  else await d.accept();
+});
+
 const assert = (cond, msg) => {
   if (!cond) throw new Error("FAIL: " + msg);
   console.log("ok:", msg);
@@ -6829,6 +6842,73 @@ assert(
     Math.abs(chroma(await sky()) - chroma(before[0])) < 4,
     "and one undo puts the sky back",
   );
+}
+
+// 9ad. Work that has not been saved is said so, and is not thrown away
+// without asking. The draft kept in the browser is a net for a crash,
+// not for this: starting another document overwrites it a breath later.
+{
+  await newDocument(400, 300, "rgb");
+  const dot = page.locator('[aria-label="Unsaved changes"]');
+  assert((await dot.count()) === 0, "a document nothing has been done to is saved");
+
+  await page.keyboard.press("Escape");
+  await pickTool("Rect");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert((await dot.count()) === 1, "and drawing on it says otherwise");
+
+  // Asked to start another, it asks first — and taking the question back
+  // leaves the document where it was.
+  dialogAnswer = "dismiss";
+  lastDialog = "";
+  await menuClick("File", "New document…");
+  await page.waitForTimeout(300);
+  dialogAnswer = "accept";
+  assert(
+    lastDialog.includes("not been saved"),
+    `it asks before throwing the work away (${lastDialog})`,
+  );
+  assert(
+    (await page.locator('[role="dialog"][aria-label="New document"]').count()) === 0,
+    "and says no for you when you say no",
+  );
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === 1,
+    "with the work still there",
+  );
+
+  // Undone back to where it was saved, it is saved again: the mark is
+  // about the work, not about how many times the mouse moved.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await dot.count()) === 0,
+    "undoing back to where it was saved counts as saved",
+  );
+  // And with nothing to lose, it does not ask.
+  await menuClick("File", "New document…");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('[role="dialog"][aria-label="New document"]').count()) === 1,
+    "so it opens the dialog without a word",
+  );
+  await page.click('[aria-label="New document"] >> text=Cancel');
+  await page.waitForTimeout(200);
+
+  // Leave something on the page for the block that follows — and with
+  // it, work that has not been saved, which its reload has to get past.
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
 }
 
 // 10. Recovery: a draft of the document is kept as it changes, and a

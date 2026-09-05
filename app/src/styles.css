@@ -69,6 +69,15 @@ body {
   font-size: 0.72rem;
 }
 
+/* Work that has not been saved, said where the name is and no louder
+   than that. */
+.unsaved-dot {
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
+  margin-left: -0.15rem;
+}
+
 .doc-chip {
   display: flex;
   align-items: center;

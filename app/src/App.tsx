@@ -801,6 +801,12 @@ export function App() {
    * shape's proportions: letting go of a photograph a little squashed is
    * a mistake nobody notices until it is printed. */
   const [keepRatio, setKeepRatio] = useState(true);
+  /** How many edits deep the document was when it was last saved,
+   * opened or begun. Anything else is work that has not been written
+   * down anywhere a person could find it again — and undoing back to
+   * that point counts as saved again, which is what a person means by
+   * it. */
+  const [savedAt, setSavedAt] = useState(0);
   /** The line being drawn along something level, in host coordinates. */
   const levelRef = useRef<[number, number, number, number] | null>(null);
   const [levelLine, setLevelLine] = useState<
@@ -1218,6 +1224,7 @@ export function App() {
       paintCount.current = 0;
       setCloneFrom(null);
       setDocName("untitled");
+      setSavedAt(0);
       refresh(s);
       fitView();
     },
@@ -4588,6 +4595,8 @@ export function App() {
       // keep empty history on parse issues
     }
   }
+  /** Whether there is work here that has not been saved. */
+  const unsaved = history.past.length !== savedAt;
 
   const setKind = (kind: NodeKind, gesture: boolean) => {
     if (!selectedLayer) return;
@@ -4772,6 +4781,7 @@ export function App() {
   const saveFile = () => {
     if (!session) return;
     download(session.save(), `${fileName()}.chitra`, "application/zip");
+    setSavedAt(history.past.length);
   };
 
   const exportPng = () => {
@@ -4948,12 +4958,33 @@ export function App() {
       setHasIcc(s.has_cmyk_profile);
       setProofing(false);
       setGamutWarn(false);
+      setSavedAt(0);
       refresh(s);
       fitView();
     } catch (err) {
       alert(`Could not open document: ${err}`);
     }
   };
+
+  // Closing the tab on work nobody has written down: the browser's own
+  // question is the only one that can be asked at that point, and it is
+  // only asked when there is something to ask about.
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsaved]);
+
+  /** Ask before throwing away work nobody has written down. The draft
+   * kept in the browser is a net for a crash, not for this: starting
+   * another document overwrites it a breath later, so this is the only
+   * moment at which anything can be said. */
+  const mayDiscard = () =>
+    !unsaved ||
+    window.confirm(
+      "This document has changes that have not been saved. Opening another leaves them behind.",
+    );
 
   const openFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -5161,11 +5192,17 @@ export function App() {
             onHover={() => openMenu && setOpenMenu("file")}
             onClose={() => setOpenMenu(null)}
           >
-            <MenuItem icon="newDoc" onClick={() => setNewDocOpen(true)}>
+            <MenuItem
+              icon="newDoc"
+              onClick={() => mayDiscard() && setNewDocOpen(true)}
+            >
               New document…
             </MenuItem>
             <hr />
-            <MenuItem icon="open" onClick={() => pick(openInputRef)}>
+            <MenuItem
+              icon="open"
+              onClick={() => mayDiscard() && pick(openInputRef)}
+            >
               Open…
             </MenuItem>
             <MenuItem icon="image" onClick={() => pick(placeInputRef)}>
@@ -5505,6 +5542,16 @@ export function App() {
           title="What this document is called; every save and export is named after it"
           aria-label="Document name"
         />
+        {/* A dot for work that has not been saved, where the name is. */}
+        {unsaved && (
+          <span
+            className="unsaved-dot"
+            title="This document has changes that have not been saved"
+            aria-label="Unsaved changes"
+          >
+            •
+          </span>
+        )}
         <span className="doc-chip">
           {hasIcc && (
             <span className="icc-badge" title="A CMYK press profile is loaded">

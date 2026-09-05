@@ -480,7 +480,14 @@ without reading anything else.*
   tracking and a wrap width for paragraph text.
   A draft of the open document is written to IndexedDB a breath after
   every change, and a fresh visit offers it back (Restore or Discard),
-  so a closed tab or a crash loses nothing. The document has a name —
+  so a closed tab or a crash loses nothing. Work that has not been saved
+  is said so — a dot beside the name — and is not thrown away without a
+  question: starting another document or opening one asks first, and the
+  browser asks its own question on the way out of the tab. The draft is a
+  net for a crash and not for this, since starting another document
+  overwrites it a breath later; undoing back to where the document was
+  last saved counts as saved again, because that is what a person means
+  by it. The document has a name —
   typed in the bar, taken from the file it was opened from, restored
   with the draft — and every save and export is named after it.
   The shapes share one slot in the rail — the one last used sits in it
@@ -612,7 +619,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~304),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~764 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~771 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
