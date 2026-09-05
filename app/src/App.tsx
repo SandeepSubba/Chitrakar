@@ -3861,6 +3861,49 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** The angle the picked layer is turned by, in degrees. Read off its
+   * transform's own first column, which is where a rotation lives: a
+   * layer that has also been sheared has no single angle, and this is
+   * the one its own x axis sits at. */
+  const selAngle = (): number => {
+    if (!session || selected === null) return 0;
+    const t = toTransform(session.transform_of(selected));
+    return (Math.atan2(t.b, t.a) * 180) / Math.PI;
+  };
+
+  /** Turn the picked layer to an angle rather than by one: the knob is
+   * for turning by eye, and this is for the times a thing has to be at
+   * forty-five degrees exactly. About the middle of its own box, like
+   * the knob, so typing an angle turns it where it stands. */
+  const setAngle = (degrees: number) => {
+    if (!session || selected === null || !selBounds || selBounds.length !== 4) {
+      return;
+    }
+    const t = toTransform(session.transform_of(selected));
+    const d = (degrees * Math.PI) / 180 - Math.atan2(t.b, t.a);
+    if (!Number.isFinite(d) || Math.abs(d) < 1e-6) return;
+    const inv = inverseOf(toTransform(session.parent_space_of(selected)));
+    const docCentre: [number, number] = [
+      selBounds[0] + selBounds[2] / 2,
+      selBounds[1] + selBounds[3] / 2,
+    ];
+    const [cx, cy] = inv ? inv(...docCentre) : docCentre;
+    const [cos, sin] = [Math.cos(d), Math.sin(d)];
+    run({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: cos * t.a - sin * t.b,
+          b: sin * t.a + cos * t.b,
+          c: cos * t.c - sin * t.d,
+          d: sin * t.c + cos * t.d,
+          e: cos * (t.e - cx) - sin * (t.f - cy) + cx,
+          f: sin * (t.e - cx) + cos * (t.f - cy) + cy,
+        },
+      },
+    });
+  };
+
   /** Gradient geometry on the canvas: the ends of a linear ramp, the centre
    * and rim of a radial one, and each stop's position along the line.
    * Coordinates are the gradient's own — the shape's box, normalized — so
@@ -6443,6 +6486,28 @@ export function App() {
                       />
                     </label>
                   ))}
+                  {/* The angle the knob above the selection drags, said
+                      as a number: some things have to be at forty-five
+                      degrees exactly, and a knob cannot promise that. */}
+                  <label key="angle">
+                    R
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`r${Math.round(selAngle() * 10)}`}
+                      defaultValue={Math.round(selAngle() * 10) / 10}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      onBlur={(e) => {
+                        const v = Number(e.currentTarget.value);
+                        if (Number.isFinite(v)) setAngle(v);
+                      }}
+                      aria-label="Angle"
+                      title="Degrees clockwise"
+                    />
+                  </label>
                 </div>
               )}
               <label>

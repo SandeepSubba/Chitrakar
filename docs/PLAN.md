@@ -321,7 +321,11 @@ without reading anything else.*
   ctrl-click by ctrl-click — moves as one (alt-dragging takes a copy and
   leaves the original), by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
-  placement is typed: the panel carries X/Y/W/H in document pixels.
+  placement is typed: the panel carries X/Y/W/H in document pixels, and
+  the angle beside them — the knob turns a layer by eye, and some things
+  have to be at forty-five degrees exactly. Typing one turns the layer
+  about the middle of its own box, which is where the knob turns it, so
+  the number says where it stands rather than moving it.
   The document keeps a palette of its own: colours added from whatever
   is being drawn with, saved with the file, clicked to draw with and to
   give to the picked shape or block of text, alt-clicked to take out
@@ -520,7 +524,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~298),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~679 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~685 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

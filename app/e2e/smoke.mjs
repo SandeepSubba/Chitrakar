@@ -6074,6 +6074,59 @@ assert(
   );
 }
 
+// 9u. The angle a layer is turned by, said as a number: the knob turns
+// by eye, and some things have to be at forty-five degrees exactly.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#22aa66");
+  await pickTool("Rect");
+  // A wide, short bar about the middle of the page: turned upright, it
+  // covers what it did not and leaves what it did.
+  await page.mouse.move(...at(100, 130));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 170), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+
+  const angle = page.locator('input[aria-label="Angle"]');
+  assert((await angle.count()) === 1, "the panel says what angle it is at");
+  assert(
+    Math.abs(Number(await angle.inputValue())) < 0.05,
+    `a shape drawn out is at no angle (${await angle.inputValue()})`,
+  );
+  assert(
+    (await canvasPixel(280, 150))[3] > 200 && (await canvasPixel(200, 60))[3] === 0,
+    "the bar lies across the page",
+  );
+
+  await angle.fill("90");
+  await angle.press("Enter");
+  await page.waitForTimeout(400);
+  assert(
+    Math.abs(Number(await angle.inputValue()) - 90) < 0.5,
+    `typing an angle turns it, and it says so (${await angle.inputValue()})`,
+  );
+  // Turned about its own middle: it now stands where it lay.
+  assert(
+    (await canvasPixel(200, 60))[3] > 200 && (await canvasPixel(280, 150))[3] === 0,
+    "turned about its own middle, it stands where it lay",
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(
+    Math.abs(Number(await angle.inputValue())) < 0.5 &&
+      (await canvasPixel(280, 150))[3] > 200,
+    "and one undo lays it back down",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
