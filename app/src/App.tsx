@@ -1610,10 +1610,72 @@ export function App() {
     return acc;
   };
 
+  /** Fingers on the canvas, by pointer id, in the canvas's coordinates.
+   * Pointer events say nothing about the other fingers, so they are kept
+   * here: two of them are a pinch. */
+  const touchesRef = useRef<Map<number, [number, number]>>(new Map());
+
   const isPanTrigger = (e: React.PointerEvent) =>
     e.button === 1 || (e.button === 0 && spaceRef.current);
 
+  /** Where a pointer is in the canvas's own coordinates — the space the
+   * view's own offset is written in, which is what a pinch has to work
+   * in to keep the page under the fingers. */
+  const canvasPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return [e.clientX - (rect?.left ?? 0), e.clientY - (rect?.top ?? 0)];
+  };
+
+  /** A pinch, once it has begun: the fingers' distance and middle when it
+   * did, and the view it started from. Everything is worked out against
+   * these rather than step by step, so the zoom cannot drift over a long
+   * gesture. */
+  const pinchRef = useRef<{
+    dist: number;
+    mid: [number, number];
+    zoom: number;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  /** A second finger takes the gesture over. Whatever one finger had
+   * begun is abandoned — half a rect dragged out on the way to a pinch is
+   * not something anyone meant to draw — and the two carry the view
+   * instead, which is how every touch app behaves and the only way to
+   * zoom or pan a tablet, where there is no wheel and no space bar. */
+  const beginPinch = () => {
+    const pts = [...touchesRef.current.values()];
+    if (pts.length !== 2) return;
+    cancelGesture();
+    marqueeRef.current = null;
+    setMarquee(null);
+    paintingRef.current = null;
+    setPenPoints([]);
+    pinchRef.current = {
+      dist: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1,
+      mid: [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2],
+      zoom: view.zoom,
+      x: view.x,
+      y: view.y,
+    };
+  };
+
+  /** Note where a finger is, and let the second one take the view over.
+   * One finger is the tool's, as a mouse is; two are the view's. Both the
+   * canvas and the room around it feed this, because the canvas keeps the
+   * pointer events it acts on to itself and a pinch may still begin on
+   * it. */
+  const trackTouch = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch") return;
+    touchesRef.current.set(e.pointerId, canvasPoint(e));
+    if (touchesRef.current.size === 2 && !pinchRef.current) beginPinch();
+  };
+
   const onHostPointerDown = (e: React.PointerEvent) => {
+    trackTouch(e);
     if (!isPanTrigger(e)) return;
     panDragRef.current = {
       pointerX: e.clientX,
@@ -1626,6 +1688,34 @@ export function App() {
   };
 
   const onHostPointerMove = (e: React.PointerEvent) => {
+    if (e.pointerType === "touch" && touchesRef.current.has(e.pointerId)) {
+      touchesRef.current.set(e.pointerId, canvasPoint(e));
+      const pinch = pinchRef.current;
+      const pts = [...touchesRef.current.values()];
+      if (pinch && pts.length >= 2) {
+        const dist =
+          Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1;
+        const mid: [number, number] = [
+          (pts[0][0] + pts[1][0]) / 2,
+          (pts[0][1] + pts[1][1]) / 2,
+        ];
+        const zoom = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, (pinch.zoom * dist) / pinch.dist),
+        );
+        // The point the fingers began around stays under them: the view
+        // is scaled about it and then carried to where the middle is now,
+        // so a pinch pans as well as zooms, which is one gesture to a
+        // hand and should be one here.
+        const k = zoom / pinch.zoom;
+        setView({
+          zoom,
+          x: mid[0] - (pinch.mid[0] - pinch.x) * k,
+          y: mid[1] - (pinch.mid[1] - pinch.y) * k,
+        });
+        return;
+      }
+    }
     if ((tool === "Paint" || tool === "Clone") && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
       setBrushAt([e.clientX - rect.left, e.clientY - rect.top]);
@@ -1639,8 +1729,15 @@ export function App() {
     }));
   };
 
-  const onHostPointerUp = () => {
+  const onHostPointerUp = (e: React.PointerEvent) => {
     panDragRef.current = null;
+    if (e.pointerType === "touch") {
+      touchesRef.current.delete(e.pointerId);
+      // The pinch ends with the first finger lifted rather than the last:
+      // carrying on with one would make the page jump to wherever that
+      // finger happens to be.
+      if (touchesRef.current.size < 2) pinchRef.current = null;
+    }
   };
 
   useEffect(() => {
@@ -1826,6 +1923,11 @@ export function App() {
   };
 
   const onCanvasPointerDown = (e: React.PointerEvent) => {
+    // Before the guard below, and before this handler keeps the event
+    // from the one on the canvas's host: a finger landing here is what
+    // begins a pinch.
+    trackTouch(e);
+    if (pinchRef.current) return; // the second finger, or a third
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
     const [x, y] = docPoint(e);
@@ -2098,6 +2200,7 @@ export function App() {
   };
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
+    if (pinchRef.current) return; // two fingers are the view's, not a tool's
     const band = marqueeRef.current;
     if (band) {
       const [x, y] = docPoint(e);
@@ -2274,6 +2377,7 @@ export function App() {
   };
 
   const onCanvasPointerUp = () => {
+    if (pinchRef.current) return;
     if (paintingRef.current && session) {
       paintingRef.current = null;
       strokeEnd.current = lastPaint.current;
@@ -5096,6 +5200,7 @@ export function App() {
           onPointerDown={onHostPointerDown}
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
+          onPointerCancel={onHostPointerUp}
           onPointerLeave={() => setBrushAt(null)}
         >
           {/* Rulers along the top and left edges, marked in document

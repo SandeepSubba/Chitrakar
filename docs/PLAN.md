@@ -305,7 +305,13 @@ without reading anything else.*
   back throws it away.
   The view has the keys every editor has: Ctrl+= and Ctrl+- zoom about
   the middle of the window, Ctrl+0 fits the page to it and Ctrl+1 shows
-  the page's own pixels one for one.
+  the page's own pixels one for one. A tablet has neither wheel nor space
+  bar, so two fingers are the view's there: a pinch zooms about the point
+  they began around and their middle carries the page, one gesture doing
+  both because that is one gesture to a hand. One finger stays the tool's,
+  as a mouse is, and the second takes over — whatever the first had begun
+  is let go of rather than left half-drawn, since half a rect dragged out
+  on the way to a pinch is not something anyone meant to draw.
   Zooming in re-renders rather than magnifies: the engine composites a
   viewport at the resolution the canvas is displayed at, so outlines,
   gradients and glyphs are re-solved instead of interpolated, and a page
@@ -462,7 +468,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~294),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~621 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~627 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -800,7 +806,10 @@ chitrakar/
 ### Phase 4 — Mobile shells
 - Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
-  brush tools).
+  brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
+  with a mouse's speed standing in for it); the view's own gestures ✅
+  (two fingers pinch to zoom and carry the page, and take the gesture
+  over from the one that began it).
 - Platform file integration (Files app, Android SAF, share sheets).
 
 ### Phase 5 — Depth (ongoing)

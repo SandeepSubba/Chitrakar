@@ -5425,6 +5425,132 @@ assert(
   );
 }
 
+// 9m. Two fingers are the view's: a pinch zooms about the point they
+// began around, their middle carries the page, and whatever one finger
+// had begun is let go of rather than left half-drawn. There is no wheel
+// and no space bar on a tablet, so this is the only way to get about.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Control+1");
+  await page.waitForTimeout(250);
+  // Synthetic pointers have no capture to take; the real ones on a
+  // tablet do.
+  await page.evaluate(() => {
+    window.__capture = [
+      Element.prototype.setPointerCapture,
+      Element.prototype.releasePointerCapture,
+    ];
+    Element.prototype.setPointerCapture = () => {};
+    Element.prototype.releasePointerCapture = () => {};
+  });
+  const finger = (type, id, x, y) =>
+    page.evaluate(
+      ([type, id, x, y]) => {
+        document.getElementById("engine-canvas").dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            pointerId: id,
+            pointerType: "touch",
+            isPrimary: id === 1,
+            buttons: type === "pointerup" ? 0 : 1,
+            clientX: x,
+            clientY: y,
+          }),
+        );
+      },
+      [type, id, x, y],
+    );
+  const pageBox = () => page.locator("#engine-page").boundingBox();
+  const before = await pageBox();
+  const [cx, cy] = [before.x + before.width / 2, before.y + before.height / 2];
+  assert(
+    Math.abs(before.width - 400) < 2,
+    `the page is at its own size to begin with (${before.width})`,
+  );
+
+  // Two fingers, a hundred apart, spread to two hundred: twice the zoom,
+  // about the middle they began around, which does not move.
+  await finger("pointerdown", 1, cx - 50, cy);
+  await finger("pointerdown", 2, cx + 50, cy);
+  await finger("pointermove", 1, cx - 100, cy);
+  await finger("pointermove", 2, cx + 100, cy);
+  await page.waitForTimeout(300);
+  const spread = await pageBox();
+  await finger("pointerup", 1, cx - 100, cy);
+  await finger("pointerup", 2, cx + 100, cy);
+  await page.waitForTimeout(250);
+  assert(
+    Math.abs(spread.width - 800) < 8,
+    `spreading two fingers doubled the zoom (${spread.width})`,
+  );
+  assert(
+    Math.abs(spread.x + spread.width / 2 - cx) < 4 &&
+      Math.abs(spread.y + spread.height / 2 - cy) < 4,
+    "and the point they began around stayed under them",
+  );
+
+  // Both fingers together carry the page rather than resizing it.
+  await finger("pointerdown", 1, cx - 100, cy);
+  await finger("pointerdown", 2, cx + 100, cy);
+  await finger("pointermove", 1, cx - 40, cy);
+  await finger("pointermove", 2, cx + 160, cy);
+  await page.waitForTimeout(300);
+  const panned = await pageBox();
+  await finger("pointerup", 1, cx - 40, cy);
+  await finger("pointerup", 2, cx + 160, cy);
+  await page.waitForTimeout(250);
+  assert(
+    Math.abs(panned.x - (spread.x + 60)) < 6 &&
+      Math.abs(panned.width - spread.width) < 8,
+    `two fingers together carried the page (${panned.x} against ${spread.x + 60})`,
+  );
+
+  // A rect begun with one finger is let go of when the second lands.
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(250);
+  await pickTool("Rect");
+  // Named rows, not every row: an empty document's panel holds a line of
+  // advice, which a first layer replaces rather than joins.
+  const rows = await page.locator(".panel ul li .layer-name").count();
+  const box = await pageBox();
+  const [px, py] = [box.x + box.width / 4, box.y + box.height / 4];
+  await finger("pointerdown", 1, px, py);
+  await finger("pointermove", 1, px + 40, py + 40);
+  await finger("pointerdown", 2, px + 140, py + 40);
+  await finger("pointermove", 1, px + 20, py + 40);
+  await finger("pointermove", 2, px + 240, py + 40);
+  await page.waitForTimeout(250);
+  await finger("pointerup", 1, px + 20, py + 40);
+  await finger("pointerup", 2, px + 240, py + 40);
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rows,
+    "the rect the pinch interrupted was let go of, not drawn",
+  );
+  await page.evaluate(() => {
+    [Element.prototype.setPointerCapture, Element.prototype.releasePointerCapture] =
+      window.__capture;
+  });
+
+  // Leave a layer behind for the block that follows, drawn the way a
+  // mouse draws one — on a page fitted to the window again, since the
+  // pinch above left it several times its size.
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(300);
+  const fit = await pageBox();
+  await page.mouse.move(fit.x + 40, fit.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(fit.x + 200, fit.y + 160, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rows + 1,
+    "and a rect drawn with a mouse still lands",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
