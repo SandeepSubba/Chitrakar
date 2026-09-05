@@ -351,7 +351,14 @@ without reading anything else.*
   reads the rulers, the geometry fields and the status line in that
   unit through it. Rulers run along the canvas edges; dragging out of one places a guide
   that layers snap to and that saves with the document, and dropping it
-  back throws it away.
+  back throws it away. A grid of eight, sixteen or thirty-two pixels can
+  be laid under the artwork, and its lines catch a drag exactly as the
+  page's edges and the other layers' do — they are listed as lines like
+  any other rather than solved for, so nothing about the snapping has to
+  know a grid from a guide. It is a view setting: it says how you are
+  working rather than what the document is, so it is remembered between
+  visits and saved with nothing. A grid finer than the screen can draw is
+  not drawn at all, since a grey wash is not a grid.
   The view has the keys every editor has: Ctrl+= and Ctrl+- zoom about
   the middle of the window, Ctrl+0 fits the page to it and Ctrl+1 shows
   the page's own pixels one for one.
@@ -532,7 +539,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~690 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~695 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

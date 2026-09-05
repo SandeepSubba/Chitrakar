@@ -1055,6 +1055,21 @@ export function App() {
   /** The guides the user has placed, read back from the document. */
   const [docGuides, setDocGuides] = useState<DocGuide[]>([]);
   const [showGuides, setShowGuides] = useState(true);
+  /** How far apart the grid's lines are, in document pixels; 0 for no
+   * grid at all. A view setting like the guides' own visibility — it
+   * says how you are working rather than what the document is — so it is
+   * remembered here rather than saved with the file. */
+  const [grid, setGrid] = useState(() => {
+    const kept = Number(localStorage.getItem("chitrakar:grid"));
+    return Number.isFinite(kept) && kept > 0 ? kept : 0;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("chitrakar:grid", String(grid));
+    } catch {
+      /* a browser with no room for it still draws the grid */
+    }
+  }, [grid]);
   /** A guide being dragged: out of a ruler (index null) or an existing one
    * being moved. `at` is where it currently sits, in document units. */
   const [guideDrag, setGuideDrag] = useState<{
@@ -1615,6 +1630,13 @@ export function App() {
     // A guide is placed to be snapped to; that is the whole point of one.
     for (const g of docGuides) {
       (guideIsVertical(g) ? xs : ys).push(guideAt(g));
+    }
+    // So is a grid. Its lines are listed rather than solved for, which
+    // costs nothing at the sizes a grid is worth having and keeps every
+    // kind of line the same kind of thing to the snapping.
+    if (grid > 0 && docSize[0] / grid + docSize[1] / grid < 4000) {
+      for (let x = 0; x <= docSize[0]; x += grid) xs.push(x);
+      for (let y = 0; y <= docSize[1]; y += grid) ys.push(y);
     }
     if (!session) return [xs, ys];
     for (const layer of layers) {
@@ -5187,6 +5209,25 @@ export function App() {
             <MenuItem icon="trash" onClick={() => setGuidesDoc([])}>
               Clear guides
             </MenuItem>
+            <hr />
+            {/* A grid is a view setting and a set of lines to catch on,
+                so it is offered by the size it should be rather than as
+                a switch with a number hidden somewhere else. */}
+            <MenuItem
+              icon={grid === 0 ? "check" : "fit"}
+              onClick={() => setGrid(0)}
+            >
+              No grid
+            </MenuItem>
+            {[8, 16, 32].map((size) => (
+              <MenuItem
+                key={size}
+                icon={grid === size ? "check" : "fit"}
+                onClick={() => setGrid(size)}
+              >
+                {`Grid of ${size} px`}
+              </MenuItem>
+            ))}
           </MenuButton>
         </nav>
 
@@ -5739,6 +5780,44 @@ export function App() {
             );
           })()}
           {/* Guides: the ones placed, plus the one being dragged. */}
+          {grid > 0 && (
+            <svg className="grid-overlay" aria-hidden="true">
+              {/* Only the lines the page has room for at this zoom: a
+                  grid finer than the screen can draw is a grey wash, and
+                  a grey wash is not a grid. */}
+              {grid * view.zoom >= 4 &&
+                (() => {
+                  const lines = [];
+                  for (let x = 0; x <= docSize[0]; x += grid) {
+                    const at = view.x + x * view.zoom;
+                    lines.push(
+                      <line
+                        key={`gx${x}`}
+                        className="grid-line"
+                        x1={at}
+                        y1={view.y}
+                        x2={at}
+                        y2={view.y + docSize[1] * view.zoom}
+                      />,
+                    );
+                  }
+                  for (let y = 0; y <= docSize[1]; y += grid) {
+                    const at = view.y + y * view.zoom;
+                    lines.push(
+                      <line
+                        key={`gy${y}`}
+                        className="grid-line"
+                        x1={view.x}
+                        y1={at}
+                        x2={view.x + docSize[0] * view.zoom}
+                        y2={at}
+                      />,
+                    );
+                  }
+                  return lines;
+                })()}
+            </svg>
+          )}
           {showGuides && (
             <svg className="guide-overlay" aria-hidden="true">
               {docGuides.map((g, i) => {

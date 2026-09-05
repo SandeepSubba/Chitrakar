@@ -6189,6 +6189,74 @@ assert(
   );
 }
 
+// 9w. A grid to work against: drawn under the artwork, and a set of
+// lines to catch on like any other.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  assert(
+    (await page.locator(".grid-overlay").count()) === 0,
+    "no grid until one is asked for",
+  );
+
+  await menuClick("View", "Grid of 32 px");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".grid-line").count()) > 10,
+    "the grid is drawn once it is",
+  );
+
+  // A rect dragged out a few pixels off a grid line starts on it: the
+  // grid's lines catch a drawn corner the way the page's edges do.
+  await page.keyboard.press("Escape");
+  await pickTool("Rect");
+  await page.mouse.move(...at(66, 98));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const on = [
+    Number(await page.locator('input[aria-label="X position"]').inputValue()),
+    Number(await page.locator('input[aria-label="Y position"]').inputValue()),
+  ];
+  assert(
+    Math.abs(on[0] - 64) < 1.5 && Math.abs(on[1] - 96) < 1.5,
+    `a corner drawn near a grid line lands on it (${on})`,
+  );
+
+  // Taken away, the lines go and so does the catching.
+  await menuClick("View", "No grid");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".grid-overlay").count()) === 0,
+    "and it can be taken away again",
+  );
+  await page.keyboard.press("Escape");
+  await pickTool("Rect");
+  // Clear of the first rect's own edges, which catch a corner whether
+  // there is a grid or not.
+  await page.mouse.move(...at(166, 250));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 280), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const free = [
+    Number(await page.locator('input[aria-label="X position"]').inputValue()),
+    Number(await page.locator('input[aria-label="Y position"]').inputValue()),
+  ];
+  assert(
+    Math.abs(free[0] - 166) < 1.5 && Math.abs(free[1] - 250) < 1.5,
+    `with no grid the corner stays where it was put (${free})`,
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

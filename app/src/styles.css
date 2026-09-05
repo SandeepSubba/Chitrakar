@@ -765,6 +765,22 @@ body {
   border-bottom: 1px solid rgb(255 255 255 / 0.08);
 }
 
+/* The grid: under the artwork's own overlays and quiet enough to draw
+   on top of, since it is there to line things up against rather than to
+   be looked at. */
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.grid-line {
+  stroke: color-mix(in srgb, var(--accent) 28%, transparent);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
 .guide-overlay {
   position: absolute;
   inset: 0;
