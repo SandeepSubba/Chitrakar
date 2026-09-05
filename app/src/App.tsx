@@ -3142,6 +3142,10 @@ export function App() {
       name: "Sharpen",
       kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
     },
+    vignette: {
+      name: "Vignette",
+      kind: { Filter: { Vignette: { amount: 0.5, radius: 0.4, softness: 1 } } },
+    },
   };
 
   /** Add an adjustment or filter. A key on its own puts it at the top,
@@ -8672,6 +8676,24 @@ function KindProps({
             />
             One colour
           </label>
+        </>
+      );
+    }
+    if ("Vignette" in filter) {
+      const p = filter.Vignette;
+      return (
+        <>
+          {/* Below zero it lifts the corners instead, which is what
+              takes a vignette a lens put there back out. */}
+          {slider("Vignette amount", p.amount, -1, 1, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, amount: v } },
+          }))}
+          {slider("Vignette radius", p.radius, 0, 0.95, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, radius: v } },
+          }))}
+          {slider("Vignette softness", p.softness, 0, 1, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, softness: v } },
+          }))}
         </>
       );
     }

@@ -151,7 +151,10 @@ export type Filter =
   | { Pixelate: { size: number } }
   /** Grain: a function of where a speck sits in the document and of the
    * seed, so the same page grains the same way every time it is drawn. */
-  | { Noise: { amount: number; grain: number; mono: boolean; seed: number } };
+  | { Noise: { amount: number; grain: number; mono: boolean; seed: number } }
+  /** The corners taken down (or brought up), measured from the middle of
+   * the page in document units so it sits on the picture. */
+  | { Vignette: { amount: number; radius: number; softness: number } };
 
 export type MaskKind =
   | { Vector: { shape: VectorShape; transform: Transform } }

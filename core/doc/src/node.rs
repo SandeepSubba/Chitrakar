@@ -415,6 +415,24 @@ pub enum Filter {
         mono: bool,
         seed: u32,
     },
+    /// The corners of the page taken down (or brought up), which is what
+    /// a lens does and what a photographer does on purpose afterwards to
+    /// hold the eye in the middle of a picture.
+    ///
+    /// `amount` above zero darkens and below zero lightens; `radius` is
+    /// how far out from the middle nothing happens at all, as a fraction
+    /// of the way to the corner; `softness` is how gradually it comes in
+    /// once it does — 0 a straight ramp, 1 an eased one that has no edge
+    /// anywhere.
+    ///
+    /// Measured from the middle of the page in document units, so it
+    /// sits on the picture rather than on the window: panning slides the
+    /// picture under it and the darkening stays where it is on the page.
+    Vignette {
+        amount: f32,
+        radius: f32,
+        softness: f32,
+    },
 }
 
 /// A straight line the user placed to lay work out against. Not artwork —

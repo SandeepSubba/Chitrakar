@@ -83,7 +83,13 @@ without reading anything else.*
   what anyone means by a negative) and
   filter layers (gaussian blur, sharpen, pixelate — squares of one
   colour each, the average of what they covered, which is what a face or
-  a number is taken out of a picture with — and noise, which is grain)
+  a number is taken out of a picture with — noise, which is grain, and a
+  vignette, which takes the corners of the page down to hold the eye in
+  the middle of a picture, or lifts them to take one a lens put there
+  back out; it is measured from the middle of the page in document
+  units, so panning slides the picture under it rather than carrying it
+  along, and it scales the three channels and leaves alpha alone, so it
+  darkens the colour without touching what is covered)
   — over everything below, or
   scoped to one layer, which groups the two so the group's isolation does
   the confining — masks on any layer — an
@@ -564,9 +570,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~299),
+- **Verify before committing:** `cargo test --workspace` (~300),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~737 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~743 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

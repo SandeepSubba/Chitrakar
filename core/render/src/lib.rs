@@ -3743,6 +3743,47 @@ fn apply_filter(
                 }
             });
         }
+        Filter::Vignette {
+            amount,
+            radius,
+            softness,
+        } => {
+            let original = blur::snapshot(dst, clip);
+            let Some(inv) = Inverse::of(view) else {
+                return;
+            };
+            // The page's own middle and its own corner: a vignette is
+            // measured on the picture, so panning slides the picture
+            // under it rather than carrying it along.
+            let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+            let (cx, cy) = (w / 2.0, h / 2.0);
+            let far = (cx * cx + cy * cy).sqrt().max(1e-3);
+            let inner = radius.clamp(0.0, 0.999);
+            let ease = softness.clamp(0.0, 1.0);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let w = amount * opacity * coverage_at(doc, mask, x, y);
+                if w == 0.0 || o.a <= 0.0 {
+                    return o;
+                }
+                let (dx, dy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
+                let d = ((dx - cx).powi(2) + (dy - cy).powi(2)).sqrt() / far;
+                let t = ((d - inner) / (1.0 - inner)).clamp(0.0, 1.0);
+                // Softness eases the shoulder: nothing of it is a
+                // straight ramp from where it begins, all of it a curve
+                // that has no edge anywhere.
+                let fall = t + (t * t * (3.0 - 2.0 * t) - t) * ease;
+                let gain = (1.0 - w * fall).max(0.0);
+                // Premultiplied, so scaling the three channels and
+                // leaving alpha alone darkens the colour without
+                // touching what is or is not covered.
+                LinearRgba {
+                    r: o.r * gain,
+                    g: o.g * gain,
+                    b: o.b * gain,
+                    a: o.a,
+                }
+            });
+        }
         Filter::Sharpen { sigma, amount } => {
             let original = blur::snapshot(dst, clip);
             blur::gaussian_blur(dst, clip, *sigma * scale);
@@ -7313,6 +7354,72 @@ mod tests {
             (left.r - srgb(0.5).r).abs() < 1e-6,
             "nothing to map through"
         );
+    }
+
+    /// A vignette takes the corners down and leaves the middle alone,
+    /// and it is measured on the page rather than on the window.
+    #[test]
+    fn a_vignette_darkens_the_corners_and_leaves_the_middle() {
+        let mut doc = Document::new(80, 80, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "flat",
+            VectorShape::Rect {
+                width: 80.0,
+                height: 80.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.8,
+                g: 0.8,
+                b: 0.8,
+                a: 1.0,
+            });
+        }
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::filter(
+                "vignette",
+                Filter::Vignette {
+                    amount: 0.8,
+                    radius: 0.3,
+                    softness: 1.0,
+                },
+            )),
+        })
+        .unwrap();
+        let surface = render(&doc).unwrap();
+        let middle = surface.get(40, 40);
+        let corner = surface.get(2, 2);
+        let side = surface.get(40, 2);
+        assert!(
+            corner.r < middle.r * 0.6,
+            "the corner is taken down: {} against {}",
+            corner.r,
+            middle.r
+        );
+        assert!(
+            (middle.r - chitrakar_color::srgb_to_linear(0.8)).abs() < 0.01,
+            "and the middle is left alone: {}",
+            middle.r
+        );
+        assert!(
+            side.r > corner.r && side.r < middle.r,
+            "with the edge between the two: {} {} {}",
+            middle.r,
+            side.r,
+            corner.r
+        );
+        assert_eq!(corner.a, middle.a, "and nothing is made more or less there");
     }
 
     /// The two ends of the tone range move and the middle stays: what is

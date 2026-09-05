@@ -6571,6 +6571,68 @@ assert(
   );
 }
 
+// 9z. A vignette: the corners taken down and the middle left alone,
+// measured on the page rather than on the window.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#cccccc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const flat = [
+    (await canvasPixel(200, 150))[0],
+    (await canvasPixel(8, 8))[0],
+  ];
+  assert(
+    Math.abs(flat[0] - flat[1]) < 3,
+    `a flat grey page to work on (${flat})`,
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "vignette");
+  await page.waitForTimeout(350);
+  const shaded = [
+    (await canvasPixel(200, 150))[0],
+    (await canvasPixel(8, 8))[0],
+    (await canvasPixel(200, 8))[0],
+  ];
+  assert(
+    shaded[1] < shaded[0] - 40,
+    `the corner comes down (${flat[1]} -> ${shaded[1]})`,
+  );
+  assert(
+    Math.abs(shaded[0] - flat[0]) < 3,
+    `and the middle is left alone (${flat[0]} -> ${shaded[0]})`,
+  );
+  assert(
+    shaded[2] > shaded[1] && shaded[2] < shaded[0],
+    `with the edge between the two (${shaded})`,
+  );
+
+  // Asked the other way it lifts the corners instead, which is what
+  // takes one a lens put there back out.
+  await page.locator(".panel ul li", { hasText: "Vignette" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Vignette amount", -0.8);
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(8, 8))[0] > flat[1] + 20,
+    `and below zero it lifts them (${await canvasPixel(8, 8)})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(
+    Math.abs((await canvasPixel(8, 8))[0] - flat[1]) < 3,
+    "and undo takes the whole thing off",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
