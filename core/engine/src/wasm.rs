@@ -277,6 +277,17 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Where each channel's own tones start and stop — six numbers, two
+    /// to a channel in red, green, blue order, in the display encoding a
+    /// curve is drawn in. Pass -1 for the page itself.
+    pub fn auto_color(&self, below: f64) -> Result<Vec<f32>, JsError> {
+        let below = (below >= 0.0).then(|| NodeId(below as u64));
+        self.inner
+            .auto_color(below)
+            .map(|ends| ends.iter().flatten().copied().collect())
+            .map_err(to_js)
+    }
+
     /// The temperature and tint that would make the colour at a document
     /// point neutral, read from what the layer is given rather than from
     /// the finished page. Pass -1 for the page itself. Empty where there

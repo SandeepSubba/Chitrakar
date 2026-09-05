@@ -6657,6 +6657,66 @@ assert(
   );
 }
 
+// 9aa. Auto colour: each channel taken to its own ends, which is what
+// pulls a colour cast out of a picture without being told what in it is
+// meant to be grey.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  // Two tones under a blue light: every channel is short of the range
+  // and blue reaches further up than red.
+  await paint("#4d668c", 0, 0, 400, 300);
+  await paint("#8ca6cc", 0, 0, 400, 150);
+  const dark = await canvasPixel(200, 220);
+  const light = await canvasPixel(200, 60);
+  assert(
+    dark[2] > dark[0] + 25 && light[2] > light[0] + 25,
+    `a blue cast over both tones (${dark}, ${light})`,
+  );
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "curves");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Curves" }).click();
+  await page.waitForTimeout(200);
+  await page.click('button[aria-label="Auto colour"]');
+  await page.waitForTimeout(400);
+  const fixed = [await canvasPixel(200, 220), await canvasPixel(200, 60)];
+  assert(
+    Math.abs(fixed[0][0] - fixed[0][2]) < 12 &&
+      Math.abs(fixed[1][0] - fixed[1][2]) < 12,
+    `the cast comes out (${dark} -> ${fixed[0]}, ${light} -> ${fixed[1]})`,
+  );
+  assert(
+    fixed[0][0] < 30 && fixed[1][0] > 225,
+    `and each channel is taken to its own ends (${fixed[0]}, ${fixed[1]})`,
+  );
+  // Three channels touched, which the picker's own dots say.
+  assert(
+    (await page.locator(".curve-channels button").allTextContents()).filter((t) =>
+      t.includes("•"),
+    ).length === 3,
+    "with all three channels written, and the master left alone",
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await canvasPixel(200, 220))[2] - dark[2]) < 3,
+    "and one undo puts the light back",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

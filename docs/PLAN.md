@@ -51,7 +51,14 @@ without reading anything else.*
   eye, and levels' own points are shown in the encoding that histogram
   is drawn in (they are kept in linear light, where the adjustment
   works) so that what a slider says is where the graph says the picture
-  is; white balance can be taken from the picture rather than typed —
+  is; a curves layer takes each channel to its own ends on one press,
+  which is what pulls a colour cast out of a picture without being told
+  what in it is meant to be grey — a photograph under a blue light has a
+  blue channel reaching further than its red, and stretching each to
+  where its own tones stop is the same picture without the light (two
+  points a channel, the plainest curve that says it, and a channel with
+  nothing to stretch written as nothing at all);
+  white balance can be taken from the picture rather than typed —
   point at something meant to be grey and the temperature and tint that
   neutralize it follow, worked out from what that layer is given rather
   than from the finished page, which already carries whatever balance is
@@ -580,9 +587,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~300),
+- **Verify before committing:** `cargo test --workspace` (~301),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~750 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~755 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

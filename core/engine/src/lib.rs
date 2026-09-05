@@ -1102,6 +1102,54 @@ impl Session {
         ])
     }
 
+    /// Where each channel's own tones start and stop — red, green and
+    /// blue, in that order, as the pair of points a curve wants. Taking
+    /// each channel to the whole range on its own is what pulls a colour
+    /// cast out of a picture: a photograph under a blue light has a blue
+    /// channel that reaches further than its red, and stretching each to
+    /// its own ends is the same picture without the light.
+    ///
+    /// The same reading and the same thousandth left out at each end as
+    /// [`Session::auto_levels`], and in the display encoding, which is
+    /// where a curve is drawn.
+    ///
+    /// A channel with nothing in it, or all of one tone, is given the
+    /// range back untouched rather than a stretch of nothing.
+    pub fn auto_color(&self, below: Option<NodeId>) -> Result<[[f32; 2]; 3], EngineError> {
+        let bins = self.histogram(below)?;
+        let mut out = [[0.0, 1.0]; 3];
+        for (c, ends) in out.iter_mut().enumerate() {
+            let run = &bins[c * 256..(c + 1) * 256];
+            let total: u64 = run.iter().map(|&v| v as u64).sum();
+            if total == 0 {
+                continue;
+            }
+            let tail = total / 1000;
+            let mut seen = 0u64;
+            let mut lo = 0usize;
+            for (i, &v) in run.iter().enumerate() {
+                seen += v as u64;
+                if seen > tail {
+                    lo = i;
+                    break;
+                }
+            }
+            seen = 0;
+            let mut hi = 255usize;
+            for (i, &v) in run.iter().enumerate().rev() {
+                seen += v as u64;
+                if seen > tail {
+                    hi = i;
+                    break;
+                }
+            }
+            if hi > lo {
+                *ends = [lo as f32 / 255.0, hi as f32 / 255.0];
+            }
+        }
+        Ok(out)
+    }
+
     /// The temperature and tint that would make the colour at a document
     /// point neutral: "this is grey — make it grey", which is how a
     /// picture taken under the wrong light is put right in one click
@@ -6087,6 +6135,88 @@ mod tests {
 
         // Straightening by nothing is a page the same size, and no turn.
         assert_eq!(session.straighten_size(0.0), (400, 300));
+    }
+
+    /// Auto colour reads each channel's own ends, so a picture under a
+    /// coloured light has three different answers rather than one.
+    #[test]
+    fn auto_color_reads_each_channel_on_its_own() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let root = session.document().root();
+        // A picture under a blue light: two tones, and blue reaching
+        // further up the range than red at both of them.
+        let mut add = |name: &str, rgb: [f32; 3], h: f32, index: usize| {
+            let mut node = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                    a: 1.0,
+                });
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+        };
+        add("dark", [0.3, 0.4, 0.6], 40.0, 0);
+        add("light", [0.6, 0.7, 0.9], 20.0, 1);
+        let ends = session.auto_color(None).unwrap();
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(
+            near(ends[0][0], 0.3) && near(ends[1][0], 0.4) && near(ends[2][0], 0.6),
+            "each channel starts where its own tones do: {ends:?}"
+        );
+        assert!(
+            near(ends[0][1], 0.6) && near(ends[2][1], 0.9),
+            "and stops where they stop: {ends:?}"
+        );
+        assert!(
+            ends[2][0] > ends[0][0],
+            "the blue of a blue light sits above the red: {ends:?}"
+        );
+
+        // One tone is nothing to stretch: a flat page keeps its range.
+        let mut flat = Session::new(20, 20, ColorMode::Rgb);
+        let root2 = flat.document().root();
+        let mut only = Node::vector(
+            "flat",
+            VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut only.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            });
+        }
+        flat.apply(Command::AddNode {
+            parent: root2,
+            index: 0,
+            node: Box::new(only),
+        })
+        .unwrap();
+        assert_eq!(flat.auto_color(None).unwrap(), [[0.0, 1.0]; 3]);
+
+        // Nothing on the page is nothing to stretch.
+        let bare = Session::new(8, 8, ColorMode::Rgb);
+        assert_eq!(bare.auto_color(None).unwrap(), [[0.0, 1.0]; 3]);
     }
 
     /// Told which pixel is meant to be grey, the balance that makes it

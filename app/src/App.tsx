@@ -4585,6 +4585,52 @@ export function App() {
     );
   };
 
+  /** Take each channel of the picked curves layer to its own ends: a
+   * picture under a coloured light has one channel reaching further than
+   * another, and stretching each to where its own tones stop is the same
+   * picture without the light. Written as two points a channel, which is
+   * the plainest curve that says it, and left alone where a channel has
+   * nothing to stretch. */
+  const autoColour = () => {
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("Curves" in adj)) return;
+    let ends: Float32Array;
+    try {
+      ends = session.auto_color(selected);
+    } catch (err) {
+      alert(`Auto colour: ${err}`);
+      return;
+    }
+    if (ends.length !== 6) return;
+    const channel = (i: number): [number, number][] => {
+      const [lo, hi] = [ends[i * 2], ends[i * 2 + 1]];
+      // A channel with nothing to stretch is written as nothing at all,
+      // which is what the engine reads as the identity.
+      return hi - lo > 1e-3 && (lo > 0 || hi < 1)
+        ? [
+            [lo, 0],
+            [hi, 1],
+          ]
+        : [];
+    };
+    setKind(
+      {
+        Adjustment: {
+          Curves: {
+            ...adj.Curves,
+            red: channel(0),
+            green: channel(1),
+            blue: channel(2),
+          },
+        },
+      },
+      false,
+    );
+  };
+
   /** Take the balance from a pixel that is meant to be grey: the engine
    * reads what the layer is given at that point and answers the
    * temperature and tint that would neutralize it. One entry, since it
@@ -6925,6 +6971,7 @@ export function App() {
                   onAutoLevels={autoLevels}
                   onPickNeutral={() => setPickingNeutral((on) => !on)}
                   pickingNeutral={pickingNeutral}
+                  onAutoColour={autoColour}
                   cmyk={cmyk}
                   fonts={fontNames}
                   shapes={layers
@@ -8298,6 +8345,7 @@ function CurvesPanel({
   bins,
   onEdit,
   onGestureEnd,
+  onAutoColour,
 }: {
   bins: Uint32Array | null;
   curves: {
@@ -8308,6 +8356,7 @@ function CurvesPanel({
   };
   onEdit: (curves: CurvesPanelProps["curves"], gesture: boolean) => void;
   onGestureEnd: () => void;
+  onAutoColour: () => void;
 }) {
   const [channel, setChannel] = useState<CurveChannel>("rgb");
   const DIAGONAL: [number, number][] = [
@@ -8345,6 +8394,12 @@ function CurvesPanel({
           </button>
         ))}
       </div>
+      {/* Each channel taken to its own ends, which is what pulls a
+          colour cast out: a picture under a blue light has a blue
+          channel reaching further than its red. */}
+      <button className="auto-levels" onClick={onAutoColour} aria-label="Auto colour">
+        Auto colour
+      </button>
       <CurveEditor
         key={channel}
         points={of(channel)}
@@ -8415,6 +8470,9 @@ interface KindPropsProps {
    * be grey, and whether that ask is outstanding. */
   onPickNeutral: () => void;
   pickingNeutral: boolean;
+  /** Take each channel of a curves layer to its own ends, which is what
+   * pulls a colour cast out of a picture. */
+  onAutoColour: () => void;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
@@ -8433,6 +8491,7 @@ function KindProps({
   onAutoLevels,
   onPickNeutral,
   pickingNeutral,
+  onAutoColour,
 }: KindPropsProps) {
   if (typeof kind !== "object") return null;
 
@@ -8606,6 +8665,7 @@ function KindProps({
           bins={bins}
           onEdit={(curves, gesture) => onEdit(wrap({ Curves: curves }), gesture)}
           onGestureEnd={onGestureEnd}
+          onAutoColour={onAutoColour}
         />
       );
     }
