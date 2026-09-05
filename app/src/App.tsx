@@ -6246,7 +6246,7 @@ export function App() {
                     key={`a${i}`}
                     className="anchor"
                     data-anchor={i}
-                    style={{ left: at.left - 5, top: at.top - 5 }}
+                    style={{ left: at.left, top: at.top }}
                     onPointerDown={(e) => onAnchorPointerDown(e, i)}
                     onPointerMove={onAnchorPointerMove}
                     onPointerUp={onAnchorPointerUp}
@@ -6266,7 +6266,7 @@ export function App() {
                       key={`h${i}-${side}`}
                       className="curve-handle"
                       data-handle={`${i}-${side}`}
-                      style={{ left: h.left - 4, top: h.top - 4 }}
+                      style={{ left: h.left, top: h.top }}
                       onPointerDown={(e) => onCurveHandleDown(e, i, side)}
                       onPointerMove={onCurveHandleMove}
                       onPointerUp={onCurveHandleUp}
@@ -6378,7 +6378,7 @@ export function App() {
                         data-handle="rotate"
                         title="Rotate (hold Shift to snap)"
                         aria-label="Rotate layer"
-                        style={{ left: knob[0] - 6, top: knob[1] - 6 }}
+                        style={{ left: knob[0], top: knob[1] }}
                         onPointerDown={onRotatePointerDown}
                         onPointerMove={onRotatePointerMove}
                         onPointerUp={onRotatePointerUp}
@@ -6414,7 +6414,7 @@ export function App() {
                     key={key}
                     className={corner === "move" ? "mask-move" : "mask-handle"}
                     data-mask={key}
-                    style={{ left: pt[0] - 5, top: pt[1] - 5 }}
+                    style={{ left: pt[0], top: pt[1] }}
                     onPointerDown={(e) => onMaskHandleDown(e, corner)}
                     onPointerMove={onMaskHandleMove}
                     onPointerUp={onMaskHandleUp}
@@ -6458,7 +6458,7 @@ export function App() {
                     key={key}
                     className={cls}
                     data-grad={key}
-                    style={{ left: p[0] - 5, top: p[1] - 5 }}
+                    style={{ left: p[0], top: p[1] }}
                     onPointerDown={(e) => onGradHandleDown(e, part)}
                     onPointerMove={onGradHandleMove}
                     onPointerUp={onGradHandleUp}
@@ -6522,8 +6522,8 @@ export function App() {
                     className={`handle ${c}`}
                     data-handle={c}
                     style={{
-                      left: selQuad![HANDLE_CORNER[i]][0] - 5,
-                      top: selQuad![HANDLE_CORNER[i]][1] - 5,
+                      left: selQuad![HANDLE_CORNER[i]][0],
+                      top: selQuad![HANDLE_CORNER[i]][1],
                     }}
                     onPointerDown={(e) => onHandlePointerDown(e, c)}
                     onPointerMove={onHandlePointerMove}

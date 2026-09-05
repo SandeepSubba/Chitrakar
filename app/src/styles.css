@@ -1059,6 +1059,20 @@ body {
   stroke-width: 1;
 }
 
+/* Every grab on the canvas is placed by its own middle rather than by
+   its corner, so its size is the stylesheet's business alone — which is
+   what lets a finger have bigger ones than a mouse. */
+.handle,
+.anchor,
+.curve-handle,
+.rot-handle,
+.mask-handle,
+.mask-move,
+.grad-handle,
+.grad-stop {
+  transform: translate(-50%, -50%);
+}
+
 .handle {
   position: absolute;
   width: 10px;
@@ -1794,4 +1808,29 @@ button.fold:hover {
 .keys-columns dd {
   margin: 0;
   color: var(--muted);
+}
+
+/* A finger is not a pointer: what a mouse can hit at ten pixels wants
+   twenty-odd from a fingertip, which is the difference between a canvas
+   that can be worked on a tablet and one that cannot. */
+@media (pointer: coarse) {
+  .handle,
+  .rot-handle,
+  .mask-handle,
+  .mask-move,
+  .grad-handle,
+  .grad-stop {
+    width: 22px;
+    height: 22px;
+  }
+
+  .anchor,
+  .curve-handle {
+    width: 18px;
+    height: 18px;
+  }
+
+  .guide-overlay .guide-hit {
+    stroke-width: 22;
+  }
 }

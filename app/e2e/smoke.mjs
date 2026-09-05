@@ -6656,6 +6656,61 @@ assert(
   );
 }
 
+// 11. A finger is not a pointer. On a device that says its pointer is
+// coarse, every grab on the canvas is finger-sized — which is the
+// difference between a canvas that can be worked on a tablet and one
+// that can only be looked at. Its own browser context, since what kind
+// of pointer a device has is not something a page can be told twice.
+{
+  const touch = await browser.newContext({
+    viewport: { width: 1100, height: 820 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const tp = await touch.newPage();
+  await tp.goto("http://localhost:8123/");
+  await tp.waitForSelector("#engine-canvas");
+  await tp.waitForTimeout(800);
+  assert(
+    await tp.evaluate(() => window.matchMedia("(pointer: coarse)").matches),
+    "the device reports a coarse pointer",
+  );
+  const box = await tp.locator("#engine-page").boundingBox();
+  const at = (x, y) => [
+    box.x + (x / 1280) * box.width,
+    box.y + (y / 720) * box.height,
+  ];
+  // The shapes share a slot here as everywhere: the rect sits in it.
+  await tp.click('.tool-group > button[aria-label="Rect"]');
+  await tp.mouse.move(...at(200, 200));
+  await tp.mouse.down();
+  await tp.mouse.move(...at(600, 500), { steps: 6 });
+  await tp.mouse.up();
+  await tp.waitForTimeout(400);
+  await tp.click('.toolbar > button[aria-label="Move"]');
+  await tp.mouse.click(...at(400, 350));
+  await tp.waitForTimeout(300);
+  const grab = await tp.locator(".handle").first().boundingBox();
+  assert(
+    grab && grab.width >= 20 && grab.height >= 20,
+    `a corner is finger-sized (${grab && grab.width}px)`,
+  );
+  const knob = await tp.locator(".rot-handle").boundingBox();
+  assert(
+    knob && knob.width >= 20,
+    `and so is the knob it turns by (${knob && knob.width}px)`,
+  );
+  // Still where it was: a bigger grab is drawn about the same point, so
+  // it sits on the corner rather than beside it.
+  const outline = await tp.locator(".sel-outline polygon").first().boundingBox();
+  assert(
+    Math.abs(grab.x + grab.width / 2 - outline.x) < 3 &&
+      Math.abs(grab.y + grab.height / 2 - outline.y) < 3,
+    "and it sits on the corner it moves, not beside it",
+  );
+  await touch.close();
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

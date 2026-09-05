@@ -391,6 +391,12 @@ without reading anything else.*
   for it, and the bar drops what only tells you something (the name over
   the door, the size of the page) so that nothing hangs off the side and
   slides the whole page about.
+  On a device that says its pointer is coarse, every grab on the canvas
+  is finger-sized — corners, the knob a layer turns by, a path's anchors
+  and their handles, a mask's and a gradient's, and the width of a guide
+  worth catching. Each is placed by its own middle rather than by its
+  corner, so how big it is belongs to the stylesheet alone and it sits
+  on the thing it moves at any size.
   A tablet has neither wheel nor space
   bar, so two fingers are the view's there: a pinch zooms about the point
   they began around and their middle carries the page, one gesture doing
@@ -572,7 +578,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~300),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~743 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~747 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
