@@ -5441,8 +5441,35 @@ export function App() {
               {inUnits(docSize[1], units, docDpi)} {units})
             </>
           )}{" "}
-          · {docDpi} dpi · {Math.round(view.zoom * 100)}%
+          · {docDpi} dpi
         </span>
+        {/* The zoom is read and set in the same place: "show me this at
+            four hundred percent" is a thing people say, and a wheel
+            cannot answer it. Outside the chip beside it, since that chip
+            goes when the window is narrow and this is a control. */}
+        <label className="zoom-field">
+          <input
+            type="number"
+            min={Math.round(MIN_ZOOM * 100)}
+            max={Math.round(MAX_ZOOM * 100)}
+            step={5}
+            // Keyed by what the view actually is, so wheeling or fitting
+            // re-reads rather than leaving a stale draft in the field.
+            key={Math.round(view.zoom * 1000)}
+            defaultValue={Math.round(view.zoom * 100)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
+            onBlur={(e) => {
+              const v = Number(e.currentTarget.value);
+              if (Number.isFinite(v) && v > 0) zoomTo(v / 100);
+            }}
+            aria-label="Zoom"
+            title="How far in the view is, as a percentage"
+          />
+          %
+        </label>
 
         {/* The file inputs live here, outside the menus, so they stay mounted
             whether or not a menu is open; the menu items just click them. */}

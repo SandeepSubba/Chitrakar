@@ -2655,7 +2655,7 @@ assert(
   await menuClick("View", "Actual size");
   await page.waitForTimeout(300);
   assert(
-    await page.isVisible("text=· 100%"),
+    Number(await page.locator('input[aria-label="Zoom"]').inputValue()) === 100,
     "actual size reports one hundred per cent",
   );
   await page.locator(".panel ul li").first().click();
@@ -6516,6 +6516,30 @@ assert(
   );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
+
+  // The zoom is read and set in the same place.
+  await page.keyboard.press("Control+1");
+  await page.waitForTimeout(250);
+  const zoomField = page.locator('input[aria-label="Zoom"]');
+  assert(
+    Math.abs(Number(await zoomField.inputValue()) - 100) < 2,
+    `the zoom says where the view is (${await zoomField.inputValue()})`,
+  );
+  const own = (await page.locator("#engine-page").boundingBox()).width;
+  await zoomField.fill("250");
+  await zoomField.press("Enter");
+  await page.waitForTimeout(300);
+  const zoomed = (await page.locator("#engine-page").boundingBox()).width;
+  assert(
+    Math.abs(zoomed - own * 2.5) < 6,
+    `and typing one takes the view there (${own} -> ${zoomed})`,
+  );
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs(Number(await zoomField.inputValue()) - 100) > 5,
+    "and fitting the page writes the new figure back into it",
+  );
 
   // The two ways it says the view can be carried, neither of which is
   // allowed to carry anything in the document with it.

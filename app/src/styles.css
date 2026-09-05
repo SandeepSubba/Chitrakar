@@ -49,6 +49,26 @@ body {
   padding-right: 0.35rem;
 }
 
+/* The zoom, read and set in one place. Narrow enough for three digits,
+   which is all a zoom ever needs. */
+.zoom-field {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.zoom-field input {
+  width: 3.4rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.25rem;
+  font-size: 0.72rem;
+}
+
 .doc-chip {
   display: flex;
   align-items: center;

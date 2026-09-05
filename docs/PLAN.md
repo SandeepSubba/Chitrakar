@@ -384,7 +384,11 @@ without reading anything else.*
   not drawn at all, since a grey wash is not a grid.
   The view has the keys every editor has: Ctrl+= and Ctrl+- zoom about
   the middle of the window, Ctrl+0 fits the page to it and Ctrl+1 shows
-  the page's own pixels one for one.
+  the page's own pixels one for one, and the zoom is read and set in the
+  same place — "show me this at four hundred percent" is a thing people
+  say and a wheel cannot answer it, so the figure in the bar is a field.
+  It sits outside the chip beside it, since that chip goes when the
+  window is narrow and this is a control rather than a caption.
   A window too narrow to hold a column of layers beside the canvas — a
   phone, a tablet held upright, a window dragged small — lays the panel
   over the canvas instead, out of the way until the bar's own button asks
@@ -578,7 +582,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~300),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~747 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~750 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
