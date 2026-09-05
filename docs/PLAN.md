@@ -350,7 +350,9 @@ without reading anything else.*
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels, and
   the angle beside them — the knob turns a layer by eye, and some things
-  have to be at forty-five degrees exactly. Typing one turns the layer
+  have to be at forty-five degrees exactly — with the two sides tied
+  together by default, so typing a width takes the height with it the way
+  a dragged corner does, and a chain between them to untie them. Typing one turns the layer
   about the middle of its own box, which is where the knob turns it, so
   the number says where it stands rather than moving it.
   The document keeps a palette of its own: colours added from whatever
@@ -601,7 +603,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~302),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~755 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~759 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

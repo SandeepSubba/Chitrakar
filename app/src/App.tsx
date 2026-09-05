@@ -785,6 +785,11 @@ export function App() {
    * waiting for a line to be drawn along something level. */
   const [straightenBy, setStraightenBy] = useState(0);
   const [levelling, setLevelling] = useState(false);
+  /** Whether typing one side of a layer's box changes the other with it.
+   * On to begin with, for the same reason a dragged corner keeps a
+   * shape's proportions: letting go of a photograph a little squashed is
+   * a mistake nobody notices until it is printed. */
+  const [keepRatio, setKeepRatio] = useState(true);
   /** The line being drawn along something level, in host coordinates. */
   const levelRef = useRef<[number, number, number, number] | null>(null);
   const [levelLine, setLevelLine] = useState<
@@ -4430,7 +4435,14 @@ export function App() {
       return;
     }
     const ratio = value / from;
-    const [sx, sy] = field === "w" ? [ratio, 1] : [1, ratio];
+    // With the two sides tied, typing one scales the other by the same
+    // amount, so the shape keeps its proportions rather than being
+    // squashed by a number typed into one field.
+    const [sx, sy] = keepRatio
+      ? [ratio, ratio]
+      : field === "w"
+        ? [ratio, 1]
+        : [1, ratio];
     const [fx, fy] = [selLocal[0], selLocal[1]];
     const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
     run({
@@ -6890,6 +6902,22 @@ export function App() {
                       />
                     </label>
                   ))}
+                  {/* The two sides tied together, or not: typing a
+                      width with them tied takes the height with it, the
+                      way a dragged corner does. */}
+                  <button
+                    className={keepRatio ? "ratio-lock on" : "ratio-lock"}
+                    onClick={() => setKeepRatio((on) => !on)}
+                    aria-pressed={keepRatio}
+                    aria-label="Keep the proportions"
+                    title={
+                      keepRatio
+                        ? "The sides are tied: typing one changes the other"
+                        : "The sides are free: typing one leaves the other"
+                    }
+                  >
+                    {keepRatio ? "⛓" : "⛓̸"}
+                  </button>
                   {/* The angle the knob above the selection drags, said
                       as a number: some things have to be at forty-five
                       degrees exactly, and a knob cannot promise that. */}

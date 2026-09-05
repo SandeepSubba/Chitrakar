@@ -847,6 +847,19 @@ body {
   color: var(--muted, #9aa0aa);
 }
 
+/* The chain between the two sides, sized like a field so the row still
+   reads as a row. */
+.ratio-lock {
+  padding: 0.1rem 0;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.ratio-lock.on {
+  color: var(--accent);
+}
+
 .geometry input {
   width: 100%;
   min-width: 0;

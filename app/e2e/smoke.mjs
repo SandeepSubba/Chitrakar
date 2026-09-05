@@ -6717,6 +6717,61 @@ assert(
   );
 }
 
+// 9ab. The two sides of a box, tied and untied: typing a width with them
+// tied takes the height with it, the way a dragged corner does.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 140), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const side = (which) =>
+    page
+      .locator(`input[aria-label="${which} size"]`)
+      .inputValue()
+      .then(Number);
+  const started = [await side("W"), await side("H")];
+  assert(
+    Math.abs(started[0] - 200) < 2 && Math.abs(started[1] - 100) < 2,
+    `a box twice as wide as it is tall (${started})`,
+  );
+
+  const lock = page.locator('button[aria-label="Keep the proportions"]');
+  assert(
+    (await lock.getAttribute("aria-pressed")) === "true",
+    "the sides start tied, as a dragged corner is",
+  );
+  await page.locator('input[aria-label="W size"]').fill("100");
+  await page.locator('input[aria-label="W size"]').press("Enter");
+  await page.waitForTimeout(300);
+  const tied = [await side("W"), await side("H")];
+  assert(
+    Math.abs(tied[0] - 100) < 2 && Math.abs(tied[1] - 50) < 2,
+    `halving the width halved the height with it (${tied})`,
+  );
+
+  await lock.click();
+  await page.waitForTimeout(150);
+  await page.locator('input[aria-label="W size"]').fill("200");
+  await page.locator('input[aria-label="W size"]').press("Enter");
+  await page.waitForTimeout(300);
+  const free = [await side("W"), await side("H")];
+  assert(
+    Math.abs(free[0] - 200) < 2 && Math.abs(free[1] - 50) < 2,
+    `untied, the height stays where it was (${free})`,
+  );
+  await lock.click();
+  await page.waitForTimeout(150);
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {
