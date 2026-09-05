@@ -317,8 +317,12 @@ without reading anything else.*
   pointer is there to draw, paint or crop, and a handle over the corner
   a rect was about to start at would resize what is picked instead of
   drawing. A
-  multi-selection — dragged out as a band over empty canvas, or built
-  ctrl-click by ctrl-click — moves as one (alt-dragging takes a copy and
+  multi-selection — dragged out as a band over empty canvas, built
+  shift-click by shift-click on the canvas, or ctrl-click by ctrl-click
+  down the panel (shift is what adds on the canvas because ctrl is
+  spoken for there: it drags free of the snapping, and a modifier cannot
+  mean two things about one gesture; a shift-click takes a layer out
+  again as readily as it puts one in, the primary included) — moves as one (alt-dragging takes a copy and
   leaves the original), by drag or by
   arrow key (shift for a coarse step) — in a single history entry. Exact
   placement is typed: the panel carries X/Y/W/H in document pixels, and
@@ -539,7 +543,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~299),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~695 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~702 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

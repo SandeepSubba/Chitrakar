@@ -6257,6 +6257,73 @@ assert(
   );
 }
 
+// 9x. Picking more than one thing on the canvas: shift adds what was
+// clicked to the selection and takes it out again, the way it does to a
+// band dragged over the page.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await rect("#cc3333", 40, 40, 140, 140);
+  await rect("#3366cc", 240, 40, 340, 140);
+  const picked = () =>
+    page.locator(".panel ul li.selected, .panel ul li.multi").count();
+
+  await pickTool("Move");
+  await page.mouse.click(...at(90, 90));
+  await page.waitForTimeout(200);
+  assert((await picked()) === 1, "clicking one picks one");
+
+  // `page.mouse.click` has no modifiers of its own — the key is held
+  // over it, which is what a hand does anyway.
+  const shiftClick = async (x, y) => {
+    await page.keyboard.down("Shift");
+    await page.mouse.click(...at(x, y));
+    await page.keyboard.up("Shift");
+    await page.waitForTimeout(250);
+  };
+  await shiftClick(290, 90);
+  assert((await picked()) === 2, "shift-clicking another adds it");
+  assert(
+    (await page.locator(".align-bar:not(.combine-bar) button").count()) === 8,
+    "and the two are a multi-selection, with what that offers",
+  );
+
+  // Dragging either one carries both.
+  const before = await canvasPixel(290, 90);
+  await page.mouse.move(...at(90, 90));
+  await page.mouse.down();
+  await page.mouse.move(...at(90, 190), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  assert(
+    (await canvasPixel(90, 190))[0] > 150 && (await canvasPixel(290, 190))[2] > 150,
+    "and dragging one of them carries the other",
+  );
+  assert(
+    (await canvasPixel(290, 90))[3] === 0 && before[3] > 200,
+    "leaving where they were",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // Shift-clicking a picked one takes it out again.
+  await shiftClick(290, 90);
+  assert((await picked()) === 1, "shift-clicking it again takes it out");
+  await shiftClick(90, 90);
+  assert((await picked()) === 0, "and the last one out leaves nothing picked");
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

@@ -2281,6 +2281,30 @@ export function App() {
       // the panel and still not be draggable — you would grab whichever
       // child happened to be under the cursor.
       let target = inSelectedGroup(hit) ? selected! : hit;
+      // Shift adds what was clicked to the selection and takes it out
+      // again — the same thing shift does to a band dragged over the
+      // canvas, and what every editor does with it. It is shift rather
+      // than ctrl because ctrl is spoken for here: it drags free of the
+      // snapping, and a modifier cannot mean two things about the same
+      // gesture. Nothing is dragged by such a click: it is about what is
+      // picked, not about where anything goes.
+      if (e.shiftKey) {
+        (e.target as Element).setPointerCapture(e.pointerId);
+        if (selected === null) {
+          setSelected(target);
+          setMultiSel([]);
+        } else if (!selectionSet.includes(target)) {
+          setMultiSel((prev) => [...prev, target]);
+        } else {
+          // Out again. The primary can go too, and the next one picked
+          // takes its place, so a selection can be whittled down to any
+          // of its members.
+          const rest = selectionSet.filter((id) => id !== target);
+          setSelected(rest.length > 0 ? rest[0] : null);
+          setMultiSel(rest.slice(1));
+        }
+        return;
+      }
       // Grabbing any member of a multi-selection drags the whole of it;
       // grabbing anything else starts a fresh single selection.
       // A locked layer among them stays where it is; the target itself is
@@ -6939,8 +6963,11 @@ export function App() {
                 onPointerDown={(e) => onRowPointerDown(e, l.id)}
                 onClick={(e) => {
                   if (Date.now() - layerDragDone.current < 300) return;
-                  if (e.ctrlKey || e.metaKey) {
+                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
                     // Toggle in the multi-selection; primary stays put.
+                    // Shift does it too, since that is what it does on
+                    // the canvas and a modifier should not change its
+                    // mind between one half of the window and the other.
                     if (l.id === selected) return;
                     setMultiSel((prev) =>
                       prev.includes(l.id)
@@ -7149,7 +7176,8 @@ const KEY_HELP: [string, [string, string][]][] = [
     [
       ["Drag on bare canvas", "A band picks everything it touches"],
       ["Shift-drag a band", "Adds to what is picked"],
-      ["Ctrl-click a layer", "Adds one layer to the selection"],
+      ["Shift-click a layer", "Adds it to the selection, or takes it out"],
+      ["Ctrl-click a row", "The same, in the layer panel"],
       ["Double-click text", "Type into it on the canvas"],
       ["Right-click", "What can be done with what is under the pointer"],
       ["Escape", "Let go of the selection"],
