@@ -321,7 +321,14 @@ without reading anything else.*
   back throws it away.
   The view has the keys every editor has: Ctrl+= and Ctrl+- zoom about
   the middle of the window, Ctrl+0 fits the page to it and Ctrl+1 shows
-  the page's own pixels one for one. A tablet has neither wheel nor space
+  the page's own pixels one for one.
+  A window too narrow to hold a column of layers beside the canvas — a
+  phone, a tablet held upright, a window dragged small — lays the panel
+  over the canvas instead, out of the way until the bar's own button asks
+  for it, and the bar drops what only tells you something (the name over
+  the door, the size of the page) so that nothing hangs off the side and
+  slides the whole page about.
+  A tablet has neither wheel nor space
   bar, so two fingers are the view's there: a pinch zooms about the point
   they began around and their middle carries the page, one gesture doing
   both because that is one gesture to a hand. One finger stays the tool's,
@@ -484,7 +491,7 @@ without reading anything else.*
   left open deliberately.
 - **Verify before committing:** `cargo test --workspace` (~295),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~643 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~653 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
@@ -820,7 +827,10 @@ chitrakar/
   CPU renderer). JPEG ✅.
 
 ### Phase 4 — Mobile shells
-- Tauri iOS/Android builds; responsive UI: collapsible panels → bottom toolbars.
+- Tauri iOS/Android builds; responsive UI ✅ first pass: below 900px the
+  layer panel comes over the canvas rather than beside it, asked for from
+  the bar, and the bar sheds what is only informational so the window
+  holds all of it. Bottom toolbars still to come.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

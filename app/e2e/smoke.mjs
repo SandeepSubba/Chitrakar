@@ -5716,6 +5716,68 @@ assert(
   );
 }
 
+// 9p. A narrow window — a phone, a tablet held upright, a window dragged
+// small — has no room for a column of layers beside the canvas, so the
+// panel comes over it instead and is asked for from the bar. (The
+// document from the block before carries on, so something is left in it
+// for the block after.)
+{
+  const panel = page.locator(".panel");
+  const toggle = page.locator('button[aria-label="Layers panel"]');
+  const hostWidth = async () =>
+    (await page.locator(".canvas-host").boundingBox()).width;
+  assert(
+    (await panel.isVisible()) && (await toggle.count()) === 0,
+    "a wide window shows the layers beside the canvas, asking nothing",
+  );
+
+  await page.setViewportSize({ width: 720, height: 900 });
+  await page.waitForTimeout(500);
+  assert(!(await panel.isVisible()), "a narrow one puts them away");
+  assert((await toggle.count()) === 1, "and offers a way to ask for them");
+  // Nothing hangs off the side: a bar wider than the window would make
+  // the whole page slide about under the canvas.
+  const spill = await page.evaluate(() => [
+    document.documentElement.scrollWidth,
+    window.innerWidth,
+  ]);
+  assert(
+    spill[0] <= spill[1],
+    `and the window holds the whole of the bar (${spill[0]} of ${spill[1]})`,
+  );
+  const bare = await hostWidth();
+
+  await toggle.click();
+  await page.waitForTimeout(300);
+  assert(await panel.isVisible(), "the button brings the layers back");
+  const box = await panel.boundingBox();
+  const win = await page.evaluate(() => window.innerWidth);
+  assert(
+    box.x + box.width <= win + 1 && box.width <= win * 0.8 + 1,
+    `they fit the window they are in (${box.x + box.width} of ${win})`,
+  );
+  assert(
+    Math.abs((await hostWidth()) - bare) < 1,
+    "over the canvas rather than beside it, so the canvas keeps its room",
+  );
+  // The rows are the same rows, not a second panel of them.
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) > 0,
+    "with the document's layers in them",
+  );
+
+  await toggle.click();
+  await page.waitForTimeout(300);
+  assert(!(await panel.isVisible()), "and the button puts them away again");
+
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(500);
+  assert(
+    (await panel.isVisible()) && (await toggle.count()) === 0,
+    "given the room back, they sit beside the canvas again",
+  );
+}
+
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
 {

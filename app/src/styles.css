@@ -1019,6 +1019,9 @@ body {
   display: flex;
   flex: 1;
   min-height: 0;
+  /* The panel is taken out of the row on a narrow window and laid over
+     the canvas; it measures itself against this. */
+  position: relative;
 }
 
 .toolbar {
@@ -1158,6 +1161,46 @@ body {
   border-left: 1px solid var(--border);
 }
 
+/* A narrow window — a phone, a tablet held upright, a window dragged
+   small — has no room for a column of layers beside the canvas. The
+   panel comes over the canvas there instead, and is put away again from
+   the button in the bar; the canvas is what the room is for. */
+@media (max-width: 900px) {
+  /* The bar keeps everything that can be pressed. What goes is what only
+     tells you something — the name over the door, and the size of the
+     page, which the fields in the panel say too — because a bar wider
+     than the window makes the whole page slide sideways. Wrapping is the
+     backstop for a window narrower still. */
+  .brand,
+  .doc-chip {
+    display: none;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+  }
+
+  .panel.overlay {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 15;
+    max-width: 80vw;
+    overflow-y: auto;
+    box-shadow: -12px 0 32px rgb(0 0 0 / 0.45);
+  }
+}
+
+.panel-toggle {
+  margin-left: auto;
+}
+
+.panel-toggle.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
 /* A hand's width of grab on the panel's own edge, sitting over the
    border rather than taking room from the panel. */
 .panel-edge {
@@ -1245,14 +1288,6 @@ body {
 
 .muted {
   color: var(--muted);
-}
-
-/* Tablet / phone: panels collapse toward a bottom bar (fleshed out in
-   Phase 4); this just keeps the shell usable when narrow. */
-@media (max-width: 720px) {
-  .panel {
-    display: none;
-  }
 }
 
 /* The Curves panel: a square graph to press and drag on. */

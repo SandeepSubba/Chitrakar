@@ -40,6 +40,7 @@ export type IconName =
   | "polygon"
   | "star"
   | "grip"
+  | "layers"
   | "turnRight"
   | "turnLeft"
   | "copy"
@@ -132,6 +133,9 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" />
     </>
   ),
+  // Three sheets, one over the other: what a stack of layers looks like
+  // everywhere it is drawn.
+  layers: <path d="M12 3l9 5-9 5-9-5 9-5M3 13l9 5 9-5M3 17l9 4 9-4" />,
   turnRight: (
     <>
       <path d="M20 12a8 8 0 1 1-2.34-5.66" />

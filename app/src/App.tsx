@@ -661,6 +661,10 @@ const guideIsVertical = (g: DocGuide) => "Vertical" in g;
  * same however far you are zoomed in. */
 const SNAP_PX = 6;
 
+/** Where the layout stops having room for the panel beside the canvas.
+ * The stylesheet asks the same question, in the same words. */
+const NARROW = "(max-width: 900px)";
+
 /** Roughly how much room the right-click menu takes, which is what keeps
  * it inside the window. Wide enough for its longest line and tall enough
  * for the most items it ever shows. */
@@ -766,6 +770,25 @@ export function App() {
     }
   }, [floating]);
   /** How wide the layers panel is, dragged by its own edge. */
+  /** Whether the window is too narrow to hold the layer panel beside the
+   * canvas — a phone, a tablet held upright, or a window dragged small.
+   * Read from the same media query the stylesheet uses, so the two cannot
+   * disagree about where the line is. */
+  const [narrow, setNarrow] = useState(
+    () => window.matchMedia(NARROW).matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const say = () => setNarrow(mq.matches);
+    mq.addEventListener("change", say);
+    say();
+    return () => mq.removeEventListener("change", say);
+  }, []);
+  /** Whether the panel is showing. It always is when there is room for
+   * it beside the canvas; where there is not, it comes over the canvas
+   * and starts out of the way, since the canvas is what the room is for. */
+  const [panelOpen, setPanelOpen] = useState(false);
+
   const [panelWidth, setPanelWidth] = useState(() => {
     const kept = Number(localStorage.getItem("chitrakar:panel"));
     return Number.isFinite(kept) && kept >= 180 ? Math.min(kept, 560) : 240;
@@ -5013,6 +5036,19 @@ export function App() {
           onChange={loadFont}
           hidden
         />
+        {/* Where the panel comes over the canvas rather than sitting
+            beside it, there has to be a way to ask for it back. */}
+        {narrow && (
+          <button
+            className={panelOpen ? "panel-toggle on" : "panel-toggle"}
+            onClick={() => setPanelOpen((open) => !open)}
+            title="Show or hide the layers"
+            aria-label="Layers panel"
+            aria-expanded={panelOpen}
+          >
+            <Icon name="layers" size={16} />
+          </button>
+        )}
       </header>
       {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
       {contextAt && (
@@ -5915,8 +5951,9 @@ export function App() {
           )}
         </main>
         <aside
-          className="panel"
+          className={narrow ? "panel overlay" : "panel"}
           aria-label="Layers"
+          hidden={narrow && !panelOpen}
           style={{ width: panelWidth }}
         >
           {/* The panel's own edge, dragged to give it more or less room.
