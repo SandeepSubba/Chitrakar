@@ -59,8 +59,12 @@ bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
 `node e2e/one.mjs "Colour balance"`) runs a single block against the
 harness alone — seconds instead of the full run — but the suite is
-still the gate. Env: `CHITRAKAR_CHROMIUM` (browser path override),
-`CHITRAKAR_TEST_CMYK_ICC` (enables the press-profile/proofing steps).
+still the gate. A failure names the block it happened in and prints
+what the editor looked like — the layers and which were picked — and
+puts the browser and the port away, so the next run does not die on
+EADDRINUSE about something else; a screenshot lands in `e2e/out/`. Env:
+`CHITRAKAR_CHROMIUM` (browser path override), `CHITRAKAR_TEST_CMYK_ICC`
+(enables the press-profile/proofing steps).
 
 ## Claude Code plugin
 

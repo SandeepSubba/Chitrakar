@@ -877,6 +877,15 @@ without reading anything else.*
   picked now lines up with the frame it is inside, or the page when it
   is in none, and the buttons say which. Spacing evenly still wants two,
   since it is a statement about the gaps between layers.
+- **A failing browser test says where and what:** the suite is one long
+  script whose blocks build on the document the last one left, so a
+  failure used to arrive as a line number and nothing else — and the
+  interesting question is never the assertion, it is which block, and
+  what the document had become by then. It now names the block, prints
+  the layers and which of them were picked, saves a screenshot, and —
+  the part that matters for the next run — closes the browser and the
+  port, where before a failed run held 8123 and every run after it died
+  on EADDRINUSE about nothing to do with the test.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

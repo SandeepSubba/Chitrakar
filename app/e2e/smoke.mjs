@@ -10,6 +10,7 @@
 import { chromium } from "playwright";
 import { createServer } from "http";
 import { readFile, mkdir } from "fs/promises";
+import { readFileSync } from "fs";
 import { join, extname, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -82,6 +83,98 @@ const assert = (cond, msg) => {
   if (!cond) throw new Error("FAIL: " + msg);
   console.log("ok:", msg);
 };
+
+/** Which block of the suite a source line falls in.
+ *
+ * The suite is one long script and a failure arrives as a line number,
+ * which says nothing: the blocks build on each other, so knowing that
+ * "both layers picked" failed matters much less than knowing it failed
+ * in 8x14b, three blocks after the one that changed. Read back to the
+ * nearest heading and say so. */
+const blockAt = (line) => {
+  const src = readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
+  for (let i = Math.min(line, src.length) - 1; i >= 0; i -= 1) {
+    // Sub-blocks are written indented inside their parent (8x14b sits
+    // inside 8x7), and those are the ones worth naming.
+    const head = /^\s*\/\/ (\d[\da-z]*)\. (.*)$/.exec(src[i]);
+    if (head) return `${head[1]} (line ${i + 1}): ${head[2]}`;
+  }
+  return "before the first block";
+};
+
+/** What the editor looked like when it went wrong.
+ *
+ * Everything here is a question the next run would have had to be
+ * edited to ask. A failing assertion normally means the document is not
+ * what the block thought it was — a layer left over from an earlier
+ * block, a selection that did not take — and that is exactly what this
+ * prints. Best-effort: a browser that has already fallen over says so
+ * and the failure is reported anyway. */
+const scene = async () => {
+  try {
+    return await page.evaluate(() => {
+      const rows = [...document.querySelectorAll(".panel ul li")];
+      const name = (li) =>
+        (li.querySelector(".layer-name")?.textContent ?? "?").trim() +
+        (li.classList.contains("selected")
+          ? " [picked]"
+          : li.classList.contains("multi")
+            ? " [also]"
+            : "");
+      const canvas = document.getElementById("engine-canvas");
+      return {
+        layers: rows.map(name),
+        tool:
+          document
+            .querySelector(".toolbar button.active")
+            ?.getAttribute("aria-label") ?? "?",
+        canvas: canvas ? `${canvas.width}x${canvas.height}` : "none",
+        dialog:
+          document.querySelector('[role="dialog"]')?.getAttribute("aria-label") ??
+          null,
+      };
+    });
+  } catch (err) {
+    return { unreadable: String(err).slice(0, 120) };
+  }
+};
+
+/** Report a failure with enough about it to act on, and — the part that
+ * matters for the next run — put the browser and the port away. Left
+ * running, the server holds 8123 and every later run dies on EADDRINUSE
+ * with a message about nothing to do with the test. */
+let bailing = false;
+const bail = async (err) => {
+  if (bailing) return;
+  bailing = true;
+  const stack = String((err && err.stack) || err);
+  // The last frame in this file is the one that asked, rather than the
+  // helper that threw: `assert` is the innermost frame of every failure
+  // and naming its own line names nothing.
+  const frames = [...stack.matchAll(/smoke\.mjs:(\d+):/g)];
+  const here = frames[frames.length - 1];
+  console.error("\n" + String((err && err.message) || err));
+  if (here) console.error("in block " + blockAt(Number(here[1])));
+  console.error("scene: " + JSON.stringify(await scene()));
+  if (errors.length > 0) {
+    console.error("page errors: " + JSON.stringify(errors));
+  }
+  try {
+    await page.screenshot({ path: join(OUT, "failure.png") });
+    console.error("screenshot: " + join(OUT, "failure.png"));
+  } catch {
+    // A browser too far gone to photograph; the rest still stands.
+  }
+  try {
+    await browser.close();
+  } catch {
+    // Already gone.
+  }
+  server.close();
+  process.exit(1);
+};
+process.on("uncaughtException", bail);
+process.on("unhandledRejection", bail);
 
 /** Document actions live in the menu bar, so reaching one means opening its
  * menu first. Returns the item's locator without clicking, since some steps
