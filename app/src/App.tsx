@@ -4355,6 +4355,27 @@ export function App() {
    * handles sit on the corners they actually move. */
   let selQuad: [number, number][] | null = null;
   let selLocal: [number, number, number, number] | null = null;
+  /** One layer's own box as four screen-space corners, or null where it
+   * has no box to draw. */
+  const quadOf = (id: NodeId): [number, number][] | null => {
+    if (!session) return null;
+    const lb = session.local_bounds_of(id);
+    if (lb.length !== 4) return null;
+    const t = composeT(
+      toTransform(session.parent_space_of(id)),
+      toTransform(session.transform_of(id)),
+    );
+    const to = (x: number, y: number): [number, number] => [
+      view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+      view.y + (t.b * x + t.d * y + t.f) * view.zoom,
+    ];
+    return [
+      to(lb[0], lb[1]),
+      to(lb[2], lb[1]),
+      to(lb[2], lb[3]),
+      to(lb[0], lb[3]),
+    ];
+  };
   /** Maps a point in the selected layer's own space to screen. */
   let selToScreen: ((x: number, y: number) => [number, number]) | null = null;
   /** The selected layer's parent space — the space its own transform, and
@@ -6623,6 +6644,20 @@ export function App() {
                 />
               );
             })()}
+          {/* Everything else picked is outlined too, more faintly: with
+              three layers picked the canvas used to show one box, so
+              there was no way to see from the artwork what a drag or a
+              Delete was about to act on. The handles stay on the
+              primary, which is the one they resize. */}
+          {selectionSet
+            .filter((id) => id !== selected)
+            .map((id) => [id, quadOf(id)] as const)
+            .filter(([, q]) => q !== null)
+            .map(([id, q]) => (
+              <svg key={id} className="sel-outline also" aria-hidden="true">
+                <polygon points={q!.map((p) => p.join(",")).join(" ")} />
+              </svg>
+            ))}
           {selQuad && (
             <>
               <svg className="sel-outline" aria-hidden="true">

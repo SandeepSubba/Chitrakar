@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~321),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~811 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~813 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -829,6 +829,11 @@ without reading anything else.*
   group is already travelling with the group, so moving, flipping and
   aligning now leave it out (`Session::without_nested`, and the same
   question the panel already asked before deleting or duplicating).
+  What is picked is also visible on the canvas now: every picked layer
+  is outlined, the extras dashed and at two-thirds strength, with the
+  resize handles and the rotation knob staying on the one they act on.
+  Three layers picked used to draw one box, so nothing on the artwork
+  said what a drag or a Delete was about to take.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

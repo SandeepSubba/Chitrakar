@@ -1096,6 +1096,14 @@ body {
   stroke-width: 1;
 }
 
+/* The other layers picked beside the one the handles are on: the same
+   line, dashed and half-strength, so what a drag will carry along is
+   visible without competing with the box being resized. */
+.sel-outline.also polygon {
+  stroke-dasharray: 4 3;
+  opacity: 0.65;
+}
+
 .sel-outline line {
   stroke: var(--accent);
   stroke-width: 1;

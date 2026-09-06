@@ -6989,6 +6989,12 @@ assert(
   await page.mouse.click(...at(60, 90));
   await shiftClick(190, 90);
   assert((await picked()) === 2, "two picked");
+  // And both are outlined on the canvas — the handles sit on one of
+  // them, but the other is what a Delete would take as well.
+  assert(
+    (await page.locator(".sel-outline.also").count()) === 1,
+    "the second picked layer is outlined too",
+  );
 
   // Duplicate reaches both, and the copies are what is picked after.
   await page.keyboard.press("Control+d");
@@ -7184,6 +7190,15 @@ assert(
     }
     return -1;
   };
+  // Both are outlined on the canvas, not only the one the handles are
+  // on: with three layers picked it used to show one box, so there was
+  // no way to see from the artwork what a Delete was about to take.
+  const alsoOutlined = await page.locator(".sel-outline.also").count();
+  assert(
+    alsoOutlined === 1,
+    `the other picked layer is outlined too (${alsoOutlined})`,
+  );
+
   const was = await edge();
   assert(was > 30 && was < 60, `the rects start near x=40 (${was})`);
   await page.keyboard.press("Shift+ArrowRight");
