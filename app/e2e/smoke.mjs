@@ -7695,6 +7695,69 @@ assert(
     "and picking out nothing leaves no ants",
   );
 
+  // 9al3. The wand: the run of pixels round a click that look like it.
+  // It reads the page as it is drawn, so what it picks out is what the
+  // eye would have called one thing.
+  await newDocument(400, 300, "rgb");
+  const w = await page.locator("#engine-page").boundingBox();
+  const on = (x, y) => [w.x + (x / 400) * w.width, w.y + (y / 300) * w.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#eeeeee");
+  await pickTool("Rect");
+  await page.mouse.move(...on(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...on(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await setColor("Fill colour", "#2255cc");
+  await pickTool("Rect");
+  await page.mouse.move(...on(60, 60));
+  await page.mouse.down();
+  await page.mouse.move(...on(180, 180), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  await page.click('button[aria-label="More ways to select"]');
+  await page.waitForTimeout(200);
+  await page.click('.tool-flyout button[aria-label="Wand"]');
+  await page.waitForTimeout(250);
+  assert(
+    await page.locator('input[aria-label="Wand tolerance"]').isVisible(),
+    "the wand offers how far its colour may stray",
+  );
+  await page.mouse.click(...on(120, 120));
+  await page.waitForTimeout(450);
+  assert((await page.locator(".ants").count()) === 1, "the wand picked something");
+  const wandBox = async () => {
+    const polys = await page.$$eval(".ants polygon", (els) =>
+      els.map((el) => el.getAttribute("points")),
+    );
+    const pts = polys
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  };
+  const blueBox = await wandBox();
+  const page0 = await page.locator("#engine-page").boundingBox();
+  const across = (blueBox[2] - blueBox[0]) / page0.width;
+  assert(
+    across > 0.22 && across < 0.38,
+    `it picked the blue square and stopped there (${across.toFixed(3)} of the page)`,
+  );
+
+  // Clicking the ground picks the ground, with the square as a hole in
+  // it: two rings, not one.
+  await page.mouse.click(...on(320, 250));
+  await page.waitForTimeout(450);
+  assert(
+    (await page.locator(".ants polygon").count()) === 2,
+    "the ground is picked with the square as a hole in it",
+  );
+
   // 9al2. A brush confined to the region, and still confined after it is
   // let go of. A stroke held to whatever happens to be picked at the
   // moment it is drawn would spill the instant the selection changed, so

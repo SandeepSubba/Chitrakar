@@ -2557,6 +2557,84 @@ impl Session {
         })
     }
 
+    /// Pick out the run of pixels round `(x, y)` that look like it.
+    ///
+    /// The wand. It reads the page as it is drawn — everything, the way
+    /// the eye sees it — spreads out from where it was clicked while the
+    /// colour holds, and hands the run of pixels to the tracer, which
+    /// gives back an outline. From there it is a region like any other:
+    /// added to, taken from, filled, handed to a layer.
+    ///
+    /// `tolerance` is 0 for exactly this colour and 1 for the whole
+    /// page, read on the values the screen shows rather than on linear
+    /// light — a wand is a judgement about what *looks* the same, and
+    /// linear light does not agree with the eye about that.
+    pub fn pick_similar(
+        &mut self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let (sx, sy) = (x.floor(), y.floor());
+        if !(sx >= 0.0 && sy >= 0.0 && sx < w as f32 && sy < h as f32) {
+            return Err(EngineError::BadCommand("that is not on the page".into()));
+        }
+        let page = self.render()?;
+        let shown = |p: chitrakar_color::LinearRgba| {
+            // Straight, and in the encoding the screen shows: a colour
+            // over nothing and the same colour at half alpha are not the
+            // same thing to look at, so alpha is one of the four.
+            let a = p.a.max(1e-6);
+            [
+                chitrakar_color::linear_to_srgb(p.r / a),
+                chitrakar_color::linear_to_srgb(p.g / a),
+                chitrakar_color::linear_to_srgb(p.b / a),
+                p.a,
+            ]
+        };
+        let seed = shown(page.get(sx as u32, sy as u32));
+        let near = |p: [f32; 4]| {
+            (0..4)
+                .map(|i| (p[i] - seed[i]).abs())
+                .fold(0.0f32, f32::max)
+                <= tolerance.clamp(0.0, 1.0)
+        };
+        // Spread out from the seed while the colour holds. Four-connected,
+        // so pixels that touch only at a corner are separate runs — which
+        // is what the tracer says about them too.
+        let mut inside = vec![false; (w * h) as usize];
+        let mut queue = vec![(sx as u32, sy as u32)];
+        inside[(sy as u32 * w + sx as u32) as usize] = true;
+        while let Some((cx, cy)) = queue.pop() {
+            for (nx, ny) in [
+                (cx.wrapping_sub(1), cy),
+                (cx + 1, cy),
+                (cx, cy.wrapping_sub(1)),
+                (cx, cy + 1),
+            ] {
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let at = (ny * w + nx) as usize;
+                if inside[at] || !near(shown(page.get(nx, ny))) {
+                    continue;
+                }
+                inside[at] = true;
+                queue.push((nx, ny));
+            }
+        }
+        let rings = chitrakar_render::trace_pixels(&inside, w, h);
+        let Some(region) = Self::region_of(rings) else {
+            return Err(EngineError::BadCommand("nothing there looks alike".into()));
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+            unreachable!("region_of makes a shape")
+        };
+        self.pick_region(shape, transform, how)
+    }
+
     /// Pick out the whole page.
     pub fn pick_all(&mut self) -> Result<(), EngineError> {
         let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
@@ -6132,6 +6210,98 @@ mod tests {
             at[0].abs() < 1e-3,
             "one thing aligns to the page's own left edge: {at:?}"
         );
+    }
+
+    /// The wand: the run of pixels round a click that look like it.
+    #[test]
+    fn the_wand_picks_out_what_looks_the_same() {
+        let hue = |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        // A page of one colour with a square of another on it, and a
+        // third square of the same colour somewhere else — so a wand
+        // that spreads too far shows up as picking both.
+        let paint = |session: &mut Session, id: NodeId, color| {
+            let NodeKind::Vector {
+                shape,
+                stroke,
+                gradient,
+                ..
+            } = session.document().node(id).unwrap().kind.clone()
+            else {
+                unreachable!("a shape")
+            };
+            session
+                .apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Vector {
+                        shape,
+                        fill: Some(color),
+                        stroke,
+                        gradient,
+                    }),
+                })
+                .unwrap();
+        };
+        let ground = add_rect(&mut session, "ground", 100.0, 60.0);
+        paint(&mut session, ground, hue(0.9, 0.9, 0.9));
+        for (name, at) in [("one", 10.0), ("two", 70.0)] {
+            let id = add_rect(&mut session, name, 20.0, 20.0);
+            paint(&mut session, id, hue(0.1, 0.3, 0.8));
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at, 20.0),
+                })
+                .unwrap();
+        }
+
+        session.pick_similar(20.0, 30.0, 0.05, "replace").unwrap();
+        let b = session.selection_bounds().expect("something is picked");
+        assert_eq!(
+            [b[0], b[1], b[2], b[3]],
+            [10.0, 20.0, 30.0, 40.0],
+            "the square that was clicked, and not the one across the page"
+        );
+
+        // Shift adds the other one, and now the region reaches both.
+        session.pick_similar(80.0, 30.0, 0.05, "union").unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!(
+            [b[0], b[2]],
+            [10.0, 90.0],
+            "with the second one added, the region reaches across"
+        );
+
+        // Wide enough to hold the ground as well, clicking it takes the
+        // whole page — the wand spreads while the colour holds, and at
+        // that tolerance it holds everywhere.
+        session.pick_similar(2.0, 2.0, 1.0, "replace").unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!([b[0], b[1], b[2], b[3]], [0.0, 0.0, 100.0, 60.0]);
+
+        // Tight, clicking the ground picks the ground and leaves both
+        // squares out of it: two holes in one ring.
+        session.pick_similar(2.0, 2.0, 0.02, "replace").unwrap();
+        let cover = chitrakar_render::mask_plane_over(
+            session.document(),
+            session.selection().unwrap(),
+            Transform::default(),
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 100,
+                y1: 60,
+            },
+            (100, 60),
+        );
+        let at = |x: usize, y: usize| cover[y * 100 + x];
+        assert!(at(2, 2) > 0.5, "the ground is picked");
+        assert!(at(20, 30) < 0.5, "the first square is a hole in it");
+        assert!(at(80, 30) < 0.5, "and so is the second");
+
+        // Off the page is not a click on anything.
+        assert!(session.pick_similar(-1.0, 10.0, 0.1, "replace").is_err());
+        assert!(session.pick_similar(10.0, 99.0, 0.1, "replace").is_err());
     }
 
     /// A region picked out of the page, and what picking it is for.

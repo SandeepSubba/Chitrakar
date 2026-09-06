@@ -2255,6 +2255,89 @@ pub fn dashed_rings(shape: &VectorShape, dash: &[f32], inward: f32) -> Vec<Vec<[
     out
 }
 
+/// The outline of a set of pixels, as rings in page coordinates.
+///
+/// A region picked out by colour is a set of pixels, and everything
+/// downstream here wants an outline: the booleans that add to and take
+/// from a selection, the fill that turns one into a shape, the ants that
+/// draw it. So the pixels are traced rather than kept as a coverage —
+/// and traced exactly, along the pixel boundaries themselves, because a
+/// staircase *is* the edge a set of pixels has and smoothing it would be
+/// inventing an edge nobody picked.
+///
+/// Every selected pixel offers the four edges its unselected neighbours
+/// leave exposed, wound so that each ring closes; the runs that carry
+/// straight on are collapsed, which is what keeps a large flat region to
+/// a handful of points rather than four per pixel.
+pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2]>> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || inside.len() < w * h {
+        return Vec::new();
+    }
+    let at = |x: usize, y: usize| inside[y * w + x];
+    // Directed boundary edges, from each corner to the next. A corner is
+    // an integer point, so it keys exactly.
+    let mut from: std::collections::HashMap<(u32, u32), Vec<(u32, u32)>> =
+        std::collections::HashMap::new();
+    let mut edge = |a: (u32, u32), b: (u32, u32)| from.entry(a).or_default().push(b);
+    for y in 0..h {
+        for x in 0..w {
+            if !at(x, y) {
+                continue;
+            }
+            let (x0, y0, x1, y1) = (x as u32, y as u32, x as u32 + 1, y as u32 + 1);
+            // Wound clockwise on a y-down page, so a ring's inside is on
+            // its right and a hole comes out the other way round.
+            if y == 0 || !at(x, y - 1) {
+                edge((x0, y0), (x1, y0));
+            }
+            if x + 1 == w || !at(x + 1, y) {
+                edge((x1, y0), (x1, y1));
+            }
+            if y + 1 == h || !at(x, y + 1) {
+                edge((x1, y1), (x0, y1));
+            }
+            if x == 0 || !at(x - 1, y) {
+                edge((x0, y1), (x0, y0));
+            }
+        }
+    }
+    let mut rings = Vec::new();
+    while let Some((&start, _)) = from.iter().find(|(_, next)| !next.is_empty()) {
+        let mut ring: Vec<(u32, u32)> = vec![start];
+        let mut at_point = start;
+        loop {
+            let Some(next) = from.get_mut(&at_point).and_then(Vec::pop) else {
+                break;
+            };
+            if next == start {
+                break;
+            }
+            ring.push(next);
+            at_point = next;
+        }
+        // Corners only: three points in a row along one axis are two
+        // points and a place nothing happens.
+        let mut out: Vec<[f32; 2]> = Vec::with_capacity(ring.len());
+        for i in 0..ring.len() {
+            let (p, q, r) = (
+                ring[(i + ring.len() - 1) % ring.len()],
+                ring[i],
+                ring[(i + 1) % ring.len()],
+            );
+            let straight = (p.0 == q.0 && q.0 == r.0) || (p.1 == q.1 && q.1 == r.1);
+            if !straight {
+                out.push([q.0 as f32, q.1 as f32]);
+            }
+        }
+        if out.len() >= 3 {
+            rings.push(out);
+        }
+        from.retain(|_, next| !next.is_empty());
+    }
+    rings
+}
+
 /// A shape as closed rings of straight segments, in its own local space.
 ///
 /// Booleans, and anything else that needs an outline rather than a
@@ -5546,6 +5629,88 @@ fn hit_in_group(
 
 #[cfg(test)]
 mod tests {
+
+    /// The outline of a set of pixels, traced along the pixel edges.
+    ///
+    /// A staircase *is* the edge a set of pixels has, so the tracing is
+    /// exact rather than smoothed; what it does simplify is the runs
+    /// that carry straight on, which is what keeps a flat region to a
+    /// handful of points rather than four per pixel.
+    #[test]
+    fn a_set_of_pixels_is_traced_along_its_own_edges() {
+        let grid = |w: usize, h: usize, on: &[(usize, usize)]| {
+            let mut v = vec![false; w * h];
+            for &(x, y) in on {
+                v[y * w + x] = true;
+            }
+            v
+        };
+        // One pixel is one square, four corners.
+        let rings = trace_pixels(&grid(3, 3, &[(1, 1)]), 3, 3);
+        assert_eq!(rings.len(), 1);
+        let mut got = rings[0].clone();
+        got.sort_by(|a, b| (a[0], a[1]).partial_cmp(&(b[0], b[1])).unwrap());
+        assert_eq!(
+            got,
+            vec![[1.0, 1.0], [1.0, 2.0], [2.0, 1.0], [2.0, 2.0]],
+            "one pixel is its own square"
+        );
+
+        // A 3x2 block is still four corners: the runs along its sides
+        // carry straight on, and a point where nothing happens is not a
+        // corner.
+        let block: Vec<(usize, usize)> = (0..3).flat_map(|x| (0..2).map(move |y| (x, y))).collect();
+        let rings = trace_pixels(&grid(4, 4, &block), 4, 4);
+        assert_eq!(rings.len(), 1);
+        assert_eq!(
+            rings[0].len(),
+            4,
+            "a rectangle has four corners: {:?}",
+            rings[0]
+        );
+
+        // An L has six.
+        let ell = [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2)];
+        let rings = trace_pixels(&grid(4, 4, &ell), 4, 4);
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 6, "an L has six: {:?}", rings[0]);
+
+        // A ring of pixels round a hole is two rings, and the area
+        // between them is what an even-odd fill would keep.
+        let mut donut: Vec<(usize, usize)> = Vec::new();
+        for x in 1..4 {
+            for y in 1..4 {
+                if (x, y) != (2, 2) {
+                    donut.push((x, y));
+                }
+            }
+        }
+        let rings = trace_pixels(&grid(5, 5, &donut), 5, 5);
+        assert_eq!(rings.len(), 2, "an outside and a hole: {rings:?}");
+        let area = |ring: &Vec<[f32; 2]>| {
+            let mut twice = 0.0f32;
+            for i in 0..ring.len() {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                twice += p[0] * q[1] - q[0] * p[1];
+            }
+            twice / 2.0
+        };
+        let mut areas: Vec<f32> = rings.iter().map(area).collect();
+        areas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(areas, vec![-1.0, 9.0], "the hole winds the other way");
+
+        // Two pixels that touch only at a corner are two rings, not one
+        // pinched figure of eight.
+        let rings = trace_pixels(&grid(4, 4, &[(0, 0), (1, 1)]), 4, 4);
+        assert_eq!(
+            rings.len(),
+            2,
+            "diagonal neighbours are separate: {rings:?}"
+        );
+
+        // Nothing selected is nothing traced.
+        assert!(trace_pixels(&grid(3, 3, &[]), 3, 3).is_empty());
+    }
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};
     use chitrakar_doc::{Command, Node, StrokeCap, StrokeJoin};

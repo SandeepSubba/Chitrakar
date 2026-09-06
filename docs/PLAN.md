@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~327),
+- **Verify before committing:** `cargo test --workspace` (~328),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~862 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~866 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -918,8 +918,20 @@ without reading anything else.*
   answer it asks again with the incoming region moved a five-hundredth
   of a pixel, an eighth of a per cent of the spacing between the samples
   a coverage is taken with.
-  Three tools draw one, sharing a rail slot the way the shapes do: a box
-  marquee, an ellipse and a lasso, under `M`. Shift while dragging adds
+  Four tools draw one, sharing a rail slot the way the shapes do: a box
+  marquee, an ellipse, a lasso, and a wand under `M`. The wand reads the
+  page as it is drawn, spreads out from where it was clicked while the
+  colour holds — judged on the values the screen shows, since a wand is
+  a judgement about what *looks* the same and linear light does not
+  agree with the eye about that — and hands the run of pixels to
+  `chitrakar_render::trace_pixels`, which gives back an outline. Traced
+  exactly, along the pixel boundaries themselves, because a staircase
+  *is* the edge a set of pixels has and smoothing it would be inventing
+  an edge nobody picked; runs that carry straight on collapse, so a flat
+  region is a handful of points rather than four per pixel. From there
+  it is a region like any other — added to, taken from, filled, handed
+  to a layer — which is the whole reason for tracing rather than keeping
+  a coverage. Shift while dragging adds
   to what is picked out and alt takes from it (both together keep the
   overlap), a click with neither lets go, and marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture

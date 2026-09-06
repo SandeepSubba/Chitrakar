@@ -8,6 +8,7 @@ export type IconName =
   | "marquee"
   | "marqueeEllipse"
   | "lasso"
+  | "wand"
   | "rect"
   | "ellipse"
   | "pen"
@@ -172,6 +173,13 @@ const PATHS: Record<IconName, JSX.Element> = {
   marquee: <rect x="3.5" y="5.5" width="17" height="13" strokeDasharray="3 2" />,
   marqueeEllipse: (
     <ellipse cx="12" cy="12" rx="8.5" ry="6.5" strokeDasharray="3 2" />
+  ),
+  wand: (
+    <>
+      <path d="M4 20 14.5 9.5" />
+      <path d="M13 8 16 11" />
+      <path d="M18 3v3M18 9v3M14.5 6h2.5M19.5 6H22" />
+    </>
   ),
   lasso: (
     <>

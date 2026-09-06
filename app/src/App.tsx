@@ -138,6 +138,7 @@ const TOOLS = [
   "Select",
   "Select ellipse",
   "Lasso",
+  "Wand",
   "Frame",
   "Rect",
   "Ellipse",
@@ -161,12 +162,15 @@ const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star"] as const;
  * anything, sharing one slot the way the shapes do. What they make is a
  * selection: not a layer, not artwork — a region to hand to a layer as
  * the part of it that shows. */
-const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso"] as const;
+const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as const;
 /** What each of them asks the engine for. */
 const REGION_KIND: Record<string, string> = {
   Select: "rect",
   "Select ellipse": "ellipse",
   Lasso: "path",
+  // The wand asks the engine to work the region out from the page
+  // itself, so it has no shape of its own to send.
+  Wand: "",
 };
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
@@ -244,6 +248,7 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Select: "M",
   "Select ellipse": "M",
   Lasso: "M",
+  Wand: "M",
   Frame: "F",
   Rect: "R",
   Ellipse: "E",
@@ -264,6 +269,7 @@ const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Select: "marquee",
   "Select ellipse": "marqueeEllipse",
   Lasso: "lasso",
+  Wand: "wand",
   Frame: "frame",
   Rect: "rect",
   Ellipse: "ellipse",
@@ -1212,6 +1218,9 @@ export function App() {
    * overlay wants it: the engine is not told until the pointer comes up,
    * so a drag costs no history and no repaint. */
   const [regionDrag, setRegionDrag] = useState<Region | null>(null);
+  /** How far the wand's colour may stray from the one it was clicked on:
+   * 0 is exactly that colour and 1 is the whole page. */
+  const [wandTolerance, setWandTolerance] = useState(0.12);
   /** The outline of what is picked out, in page coordinates, as the
    * engine flattens it — asked for rather than worked out again here,
    * since a rounded box, an ellipse and a freehand path each flatten
@@ -2439,6 +2448,24 @@ export function App() {
         },
       });
       setTool("Move");
+      return;
+    }
+    if (tool === "Wand") {
+      // The wand is a click, not a drag: the engine reads the page and
+      // spreads out from where it landed while the colour holds.
+      const how = e.shiftKey
+        ? e.altKey
+          ? "intersect"
+          : "union"
+        : e.altKey
+          ? "subtract"
+          : "replace";
+      try {
+        session.pick_similar(x, y, wandTolerance, how);
+        refresh(session);
+      } catch (err) {
+        alert(`Select: ${err}`);
+      }
       return;
     }
     if (SELECT_TOOLS.includes(tool as never)) {
@@ -6466,6 +6493,25 @@ export function App() {
                 <Icon name={TOOL_ICONS[t]} size={20} />
               </button>
             ),
+          )}
+          {/* How far the wand's colour may stray. Only while it is the
+              tool in hand, like the sides box below. */}
+          {tool === "Wand" && (
+            <input
+              className="tool-number"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(wandTolerance * 100)}
+              title="How far the colour may stray, in percent"
+              aria-label="Wand tolerance"
+              onChange={(e) =>
+                setWandTolerance(
+                  Math.min(1, Math.max(0, Number(e.target.value) / 100)),
+                )
+              }
+            />
           )}
           {/* How many sides, or points, the next one has. Only while one
               of the two tools that asks is in hand. */}
