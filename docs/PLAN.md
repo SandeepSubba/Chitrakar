@@ -817,10 +817,14 @@ without reading anything else.*
   and leaves the *page* where it started too — a cancel that repaints
   too little is how Escape leaves a smear of an abandoned drag on
   screen. It also writes down the engine's actual contract, which was
-  nowhere: a preview restates the whole edit from the pre-gesture
-  document (the app's call sites all do), because only the first
-  preview's inverse is kept, so the test repeats a command only where
-  repeating it is a restatement.
+  nowhere: only the *first* preview of a gesture keeps an inverse, so
+  that one inverse has to undo everything the gesture goes on to do.
+  Two shapes satisfy it and both are in use — every drag in the app
+  restates the whole edit from the pre-gesture document (the full
+  transform each move, never a delta), and the brush adds a stroke and
+  then rewrites that same stroke, where removing it undoes the lot. The
+  audit checks both: it repeats a command only where repeating it is a
+  restatement, and it draws a brush stroke the way the brush does.
 - **A group and something inside it, both picked:** the panel lists
   both, so it is an easy selection to end up with, and every operation
   that treats a selection as one thing was acting on the inner layer

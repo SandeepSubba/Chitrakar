@@ -3470,6 +3470,25 @@ pub struct LayerInfo {
 mod tests {
     use super::*;
 
+    /// How far apart two pages are, and where.
+    fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
+        let mut worst = (0.0f32, 0u32, 0u32);
+        for y in 0..b.height.min(a.height) {
+            for x in 0..b.width.min(a.width) {
+                let (p, q) = (a.get(x, y), b.get(x, y));
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs());
+                if d > worst.0 {
+                    worst = (d, x, y);
+                }
+            }
+        }
+        worst
+    }
+
     /// A gesture is the same command, told in two halves.
     ///
     /// Every drag in the editor goes through preview/commit/cancel: the
@@ -3484,6 +3503,16 @@ mod tests {
     /// started, with none — and it has to leave the *page* where it
     /// started too, because a cancel that repaints too little is how
     /// Escape leaves a smear of the abandoned drag on screen.
+    ///
+    /// Which rests on a contract worth stating: only the *first* preview
+    /// of a gesture keeps an inverse, so that one inverse has to undo
+    /// everything the gesture goes on to do. Two shapes satisfy it, and
+    /// both are in use. Every drag restates the whole edit from the
+    /// pre-gesture document — the full transform on each pointer move,
+    /// never a delta — so any one of them undoes all of them. The brush
+    /// takes the other shape: it adds a stroke and then rewrites that
+    /// same stroke as the pointer travels, and removing it undoes the
+    /// lot. This asks about both.
     #[test]
     fn every_gesture_commits_or_cancels_like_the_command_it_previews() {
         let f = chitrakar_doc::fixture::everything();
@@ -3572,6 +3601,61 @@ mod tests {
                 want.get(worst.1, worst.2)
             );
         }
+
+        // The gesture's other shape, which no command in the list above
+        // takes: a first preview whose inverse subsumes what follows,
+        // rather than a restatement of it. That is the brush — a stroke
+        // added, then that same stroke rewritten as the pointer travels
+        // — and removing it undoes every one of those rewrites at once.
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let mut brush = Session::from_document(f.doc.clone());
+        let was = state(brush.document());
+        let clean = brush.render_cached().expect("the page draws").0.clone();
+        brush
+            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink, 0.2, false, false)
+            .unwrap();
+        for step in 1..4 {
+            brush
+                .paint_extend(20.0 + 9.0 * step as f32, 24.0, 5.0)
+                .unwrap();
+        }
+        assert!(brush.is_painting(), "a stroke is being drawn");
+        assert!(brush.cancel_preview().unwrap(), "and then abandoned");
+        if let Err(what) = came_back(&state(brush.document()), &was, true) {
+            panic!("an abandoned brush stroke left something behind: {what}");
+        }
+        assert!(!brush.undo().unwrap(), "and nothing in history");
+        let after = brush.render_cached().unwrap().0.clone();
+        let worst = apart(&after, &clean);
+        assert!(
+            worst.0 < 0.002,
+            "an abandoned stroke left {},{} of itself on screen: {:?}",
+            worst.1,
+            worst.2,
+            after.get(worst.1, worst.2)
+        );
+
+        // And committed, it is one entry for the whole stroke however
+        // many samples the pointer gave.
+        let mut brush = Session::from_document(f.doc.clone());
+        brush
+            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink, 0.2, false, false)
+            .unwrap();
+        for step in 1..4 {
+            brush
+                .paint_extend(20.0 + 9.0 * step as f32, 24.0, 5.0)
+                .unwrap();
+        }
+        assert!(brush.commit_preview(), "the stroke is committed");
+        assert!(
+            brush.undo().unwrap() && !brush.undo().unwrap(),
+            "one step for the stroke, not one per sample"
+        );
     }
 
     /// Every command repaints every pixel it changes — and so does
@@ -3598,24 +3682,6 @@ mod tests {
     #[test]
     fn every_command_repaints_every_pixel_it_changes() {
         let f = chitrakar_doc::fixture::everything();
-        /// How far apart two pages are, and where.
-        fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
-            let mut worst = (0.0f32, 0u32, 0u32);
-            for y in 0..b.height.min(a.height) {
-                for x in 0..b.width.min(a.width) {
-                    let (p, q) = (a.get(x, y), b.get(x, y));
-                    let d = (p.r - q.r)
-                        .abs()
-                        .max((p.g - q.g).abs())
-                        .max((p.b - q.b).abs())
-                        .max((p.a - q.a).abs());
-                    if d > worst.0 {
-                        worst = (d, x, y);
-                    }
-                }
-            }
-            worst
-        }
         /// Both halves of the promise, for one step of a command.
         ///
         /// `was` is the page before the step. The session repaints what
