@@ -56,7 +56,10 @@ license-clean to commit.
 The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~787 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
-UI behavior changes. Env: `CHITRAKAR_CHROMIUM` (browser path override),
+UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
+`node e2e/one.mjs "Colour balance"`) runs a single block against the
+harness alone — seconds instead of the full run — but the suite is
+still the gate. Env: `CHITRAKAR_CHROMIUM` (browser path override),
 `CHITRAKAR_TEST_CMYK_ICC` (enables the press-profile/proofing steps).
 
 ## Claude Code plugin

@@ -639,7 +639,10 @@ without reading anything else.*
 - **Verify before committing:** `cargo test --workspace` (~305),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~787 browser
-  assertions). Both suites self-skip CMYK-profile steps unless
+  assertions; while writing one, `node e2e/one.mjs <block>` runs a single
+  block against the harness alone, in seconds rather than the quarter of
+  an hour the whole suite takes — the suite is still the gate). Both
+  suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
   locally is the clippy that runs in CI; bump it deliberately.
