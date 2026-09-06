@@ -6844,6 +6844,113 @@ assert(
   );
 }
 
+// 9af. Colour balance: the three ranges of tone pushed along the
+// opponent pairs. Warming the highlights leaves the shadows where they
+// are, which is the whole point of having ranges — and with the
+// brightness held, the colour moves without the picture lifting.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  // One band per range of tone, so each range has something of its own
+  // to reach and something it must leave alone.
+  await paint("#e6e6e6", 0, 0, 400, 100);
+  await paint("#808080", 0, 100, 400, 200);
+  await paint("#1a1a1a", 0, 200, 400, 300);
+  const bright = () => canvasPixel(200, 45);
+  const middle = () => canvasPixel(200, 150);
+  const dark = () => canvasPixel(200, 255);
+  const before = [await bright(), await middle(), await dark()];
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "colour-balance");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Colour balance" }).click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('[aria-label="Tone range"] button').count()) === 3,
+    "three ranges of tone to choose from",
+  );
+  assert(
+    await page.locator('input[aria-label="Keep brightness"]').isChecked(),
+    "and the brightness is held unless asked otherwise",
+  );
+  // Nothing asked for yet: a fresh layer is exactly the identity.
+  assert(
+    (await bright()).slice(0, 3).join() === before[0].slice(0, 3).join(),
+    `a fresh layer changes nothing (${before[0]} -> ${await bright()})`,
+  );
+
+  await page.click('button[aria-label="Highlights range"]');
+  await page.waitForTimeout(150);
+  await setSlider("Cyan · Red", 0.7);
+  await setSlider("Yellow · Blue", -0.7);
+  await page.waitForTimeout(350);
+  const warm = [await bright(), await middle(), await dark()];
+  assert(
+    warm[0][0] > warm[0][2] + 25,
+    `the highlights warm (${before[0]} -> ${warm[0]})`,
+  );
+  assert(
+    Math.abs(warm[2][0] - before[2][0]) < 6 &&
+      Math.abs(warm[2][2] - before[2][2]) < 6,
+    `and the shadows are left where they were (${before[2]} -> ${warm[2]})`,
+  );
+  // The picker says which range has been asked for something.
+  const dots = (
+    await page.locator('[aria-label="Tone range"] button').allTextContents()
+  ).filter((t) => t.includes("\u2022")).length;
+  assert(dots === 1, `one range asked for, and the picker says which (${dots})`);
+
+  // The other end of a grade, on the range that was left alone.
+  await page.click('button[aria-label="Shadows range"]');
+  await page.waitForTimeout(150);
+  await setSlider("Yellow · Blue", 0.7);
+  await page.waitForTimeout(350);
+  const cooled = await dark();
+  assert(
+    cooled[2] > before[2][2] + 8 && cooled[2] > cooled[0] + 8,
+    `the shadows cool (${before[2]} -> ${cooled})`,
+  );
+
+  // Holding the brightness against letting it go: the same ask on the
+  // middle, and the picture only lifts when the switch is off.
+  await page.click('button[aria-label="Midtones range"]');
+  await page.waitForTimeout(150);
+  await setSlider("Magenta · Green", 0.8);
+  await page.waitForTimeout(350);
+  const held = await middle();
+  await page.uncheck('input[aria-label="Keep brightness"]');
+  await page.waitForTimeout(400);
+  const loose = await middle();
+  const light = (px) =>
+    (Math.max(px[0], px[1], px[2]) + Math.min(px[0], px[1], px[2])) / 2;
+  assert(
+    Math.abs(light(held) - light(before[1])) < 6,
+    `held, the brightness stays where it was (${before[1]} -> ${held})`,
+  );
+  assert(
+    light(loose) > light(held) + 15,
+    `and letting it go lifts the picture (${held} -> ${loose})`,
+  );
+
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(
+    Math.abs(light(await middle()) - light(held)) < 6,
+    "and one undo puts the switch back",
+  );
+}
+
 // 9ae. A document larger than can be made: the dialog used to clamp the
 // number inside the field as it was typed, so asking for 30000 got you
 // 8192 with nothing said — and, since every keystroke was clamped, no

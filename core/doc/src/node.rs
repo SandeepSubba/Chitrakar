@@ -396,6 +396,28 @@ pub enum Adjustment {
         shadows: f32,
         highlights: f32,
     },
+    /// The three ranges of tone pushed along the three opponent pairs —
+    /// cyan/red, magenta/green, yellow/blue — which is how a print is
+    /// corrected and how a grade is given its colour: cool shadows
+    /// against warm highlights, said in the terms the correction is
+    /// thought in. Each triple is one number per pair, -1..1.
+    ///
+    /// Which range a pixel belongs to is read from its lightness, not
+    /// per channel, so a shift moves a colour rather than pulling it
+    /// apart; the three masks overlap and add to one, so no tone sits
+    /// in a seam between them.
+    ColorBalance {
+        #[serde(default)]
+        shadows: [f32; 3],
+        #[serde(default)]
+        midtones: [f32; 3],
+        #[serde(default)]
+        highlights: [f32; 3],
+        /// Hold each pixel's brightness while its colour moves, so that
+        /// correcting a cast does not also lighten the picture.
+        #[serde(default)]
+        preserve_luminosity: bool,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709

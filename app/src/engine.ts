@@ -100,7 +100,20 @@ export type Adjustment =
   /** The two ends of the tone range moved without touching the middle:
    * shadows above zero opens up what is dark, highlights above zero
    * pulls back what is bright, and both run to -1 for the opposite. */
-  | { ShadowsHighlights: { shadows: number; highlights: number } };
+  | { ShadowsHighlights: { shadows: number; highlights: number } }
+  /** The three ranges of tone pushed along the three opponent pairs —
+   * cyan/red, magenta/green, yellow/blue — each triple one number per
+   * pair, -1..1. Which range a pixel is in is read from its lightness,
+   * and `preserve_luminosity` holds that lightness while the colour
+   * moves. */
+  | {
+      ColorBalance: {
+        shadows: [number, number, number];
+        midtones: [number, number, number];
+        highlights: [number, number, number];
+        preserve_luminosity: boolean;
+      };
+    };
 
 /** How much each channel contributes to brightness: the Rec. 709
  * weights, and the default recipe for a black-and-white conversion. */

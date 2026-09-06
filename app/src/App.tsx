@@ -3121,6 +3121,21 @@ export function App() {
         Adjustment: { ShadowsHighlights: { shadows: 0.35, highlights: 0.35 } },
       },
     },
+    "colour-balance": {
+      name: "Colour balance",
+      kind: {
+        Adjustment: {
+          ColorBalance: {
+            shadows: [0, 0, 0],
+            midtones: [0, 0, 0],
+            highlights: [0, 0, 0],
+            // On, the way a correction is meant: moving colour should
+            // not also move the exposure.
+            preserve_luminosity: true,
+          },
+        },
+      },
+    },
     invert: {
       name: "Invert",
       kind: { Adjustment: { Invert: { amount: 1 } } },
@@ -8620,6 +8635,8 @@ function KindProps({
 }: KindPropsProps) {
   // Which band of colour the panel is showing, when it is showing one.
   const [band, setBand] = useState(0);
+  // And which range of tone, when the panel is showing one of those.
+  const [range, setRange] = useState(1);
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -8750,6 +8767,66 @@ function KindProps({
           {slider("Band lightness", bands[band][2], -1, 1, 0.01, (v) =>
             set(band, 2, v),
           )}
+        </>
+      );
+    }
+    if ("ColorBalance" in adj) {
+      const p = adj.ColorBalance;
+      const ranges: [string, [number, number, number]][] = [
+        ["Shadows", p.shadows],
+        ["Midtones", p.midtones],
+        ["Highlights", p.highlights],
+      ];
+      const keys = ["shadows", "midtones", "highlights"] as const;
+      const trio = ranges[range][1] ?? [0, 0, 0];
+      const set = (k: number, v: number): NodeKind => {
+        const next: [number, number, number] = [...trio];
+        next[k] = v;
+        return wrap({ ColorBalance: { ...p, [keys[range]]: next } });
+      };
+      const touched = (t: [number, number, number]) =>
+        t.some((v) => Math.abs(v) > 1e-6);
+      return (
+        <>
+          {/* One range of tone at a time, dark to light, with a dot on
+              the ones that have been asked for something so nothing is
+              hidden behind the picker. */}
+          <div className="curve-channels" role="group" aria-label="Tone range">
+            {ranges.map(([name, trio], i) => (
+              <button
+                key={name}
+                type="button"
+                className={i === range ? "active" : ""}
+                aria-pressed={i === range}
+                aria-label={`${name} range`}
+                onClick={() => setRange(i)}
+              >
+                {name.slice(0, 4)}
+                {touched(trio ?? [0, 0, 0]) ? "•" : ""}
+              </button>
+            ))}
+          </div>
+          {/* Named as both ends, which is how a correction is thought
+              of: a picture is too cyan and wants red, not "channel 0". */}
+          {slider("Cyan · Red", trio[0], -1, 1, 0.01, (v) => set(0, v))}
+          {slider("Magenta · Green", trio[1], -1, 1, 0.01, (v) => set(1, v))}
+          {slider("Yellow · Blue", trio[2], -1, 1, 0.01, (v) => set(2, v))}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.preserve_luminosity}
+              onChange={(e) =>
+                onEdit(
+                  wrap({
+                    ColorBalance: { ...p, preserve_luminosity: e.target.checked },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Keep brightness"
+            />
+            Keep brightness
+          </label>
         </>
       );
     }

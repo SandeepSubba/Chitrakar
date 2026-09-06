@@ -5222,6 +5222,62 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 (r * k, g * k, b * k)
             }
         }
+        Adjustment::ColorBalance {
+            shadows,
+            midtones,
+            highlights,
+            preserve_luminosity,
+        } => {
+            // Asked for nothing, nothing happens — exactly nothing,
+            // rather than a round trip through the display encoding and
+            // back for every pixel of an untouched layer.
+            if shadows == &[0.0; 3] && midtones == &[0.0; 3] && highlights == &[0.0; 3] {
+                (r, g, b)
+            } else {
+                // Which range a tone is in is a question about the tone
+                // that is seen, so it is asked of the shown values —
+                // linear light's own middle shows as a light grey and
+                // would count as a highlight.
+                let (sr, sg, sb) = (shown_value(r), shown_value(g), shown_value(b));
+                let light = (sr.max(sg).max(sb) + sr.min(sg).min(sb)) / 2.0;
+                // Three masks — ‾\___ , _/‾\_ , ___/‾ — with ramps a
+                // quarter wide at a third and two thirds. They add to
+                // one, so a tone is only ever shared between two
+                // neighbours and nothing sits in a seam. The scale is
+                // what keeps a slider at its end a correction rather
+                // than a wash.
+                const RAMP: f32 = 0.25;
+                const EDGE: f32 = 0.333;
+                const SCALE: f32 = 0.7;
+                let low = ((light - EDGE) / -RAMP + 0.5).clamp(0.0, 1.0) * SCALE;
+                let high = ((light + EDGE - 1.0) / RAMP + 0.5).clamp(0.0, 1.0) * SCALE;
+                let mid = ((light - EDGE) / RAMP + 0.5).clamp(0.0, 1.0)
+                    * ((light + EDGE - 1.0) / -RAMP + 0.5).clamp(0.0, 1.0)
+                    * SCALE;
+                let moved = |v: f32, i: usize| {
+                    (v + low * shadows[i].clamp(-1.0, 1.0)
+                        + mid * midtones[i].clamp(-1.0, 1.0)
+                        + high * highlights[i].clamp(-1.0, 1.0))
+                    .clamp(0.0, 1.0)
+                };
+                let (nr, ng, nb) = (moved(sr, 0), moved(sg, 1), moved(sb, 2));
+                let (nr, ng, nb) = if *preserve_luminosity {
+                    // The colour that was asked for, at the lightness the
+                    // pixel already had: correcting a cast should not
+                    // also lighten the picture.
+                    let (hue, sat, _) = to_hsl(nr, ng, nb);
+                    let (_, _, was) = to_hsl(sr, sg, sb);
+                    from_hsl(hue, sat, was)
+                } else {
+                    (nr, ng, nb)
+                };
+                (
+                    chitrakar_color::srgb_to_linear(nr),
+                    chitrakar_color::srgb_to_linear(ng),
+                    chitrakar_color::srgb_to_linear(nb),
+                )
+            }
+        }
         Adjustment::Invert { amount } => {
             // On the values a device shows: light inverted is not what
             // anyone means by a negative, since linear 0.5 shows as 188
@@ -7781,6 +7837,117 @@ mod tests {
         // lifts rather than staying black.
         let black = apply_adjustment(&lift, None, grey(0.0));
         assert!(black.r > 0.0 && (black.r - black.b).abs() < 1e-6);
+    }
+
+    /// Colour balance speaks to one range of tone at a time: warming
+    /// the highlights leaves the shadows where they are, and the three
+    /// masks meet without a seam.
+    #[test]
+    fn colour_balance_reaches_one_range_of_tone_at_a_time() {
+        let grey = |v: f32| {
+            to_working(AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            })
+        };
+        let shown = |p: LinearRgba| {
+            (
+                chitrakar_color::linear_to_srgb(p.r),
+                chitrakar_color::linear_to_srgb(p.g),
+                chitrakar_color::linear_to_srgb(p.b),
+            )
+        };
+        let balance =
+            |s: [f32; 3], m: [f32; 3], h: [f32; 3], keep: bool| Adjustment::ColorBalance {
+                shadows: s,
+                midtones: m,
+                highlights: h,
+                preserve_luminosity: keep,
+            };
+
+        // Asked for nothing it is exactly the identity — which is what a
+        // document written before this existed reads as, and what a
+        // freshly added layer is until a slider moves.
+        let none = apply_adjustment(
+            &balance([0.0; 3], [0.0; 3], [0.0; 3], true),
+            None,
+            grey(0.3),
+        );
+        assert!(
+            (none.r - grey(0.3).r).abs() < 1e-9,
+            "no ask, no change: {none:?}"
+        );
+
+        // Warm highlights: the bright end goes red, the dark end does
+        // not move at all.
+        let warm = balance([0.0; 3], [0.0; 3], [0.5, 0.0, -0.5], false);
+        let (br, _, bb) = shown(apply_adjustment(&warm, None, grey(0.9)));
+        let (dr, _, db) = shown(apply_adjustment(&warm, None, grey(0.08)));
+        assert!(
+            br > 0.9 + 0.05 && bb < 0.9 - 0.1,
+            "the highlights warm: {br} against {bb}"
+        );
+        assert!(
+            (dr - 0.08).abs() < 0.01 && (db - 0.08).abs() < 0.01,
+            "and the shadows are left alone: {dr} against {db}"
+        );
+
+        // Cool shadows, the other half of a grade, reaching the other end.
+        let cool = balance([-0.5, 0.0, 0.5], [0.0; 3], [0.0; 3], false);
+        let (sr, _, sb) = shown(apply_adjustment(&cool, None, grey(0.08)));
+        let (hr, _, hb) = shown(apply_adjustment(&cool, None, grey(0.9)));
+        assert!(sb > sr + 0.15, "the shadows cool: {sr} against {sb}");
+        assert!(
+            (hr - hb).abs() < 0.01,
+            "and the highlights stay neutral: {hr} against {hb}"
+        );
+
+        // The three masks add to one, so every tone takes the same total
+        // push and none sits in a seam between two ranges: the same
+        // number in all three ranges moves a grey the same amount
+        // wherever it sits.
+        // (With room left above for the push: a tone near white is held
+        // by the ceiling, which is the clamp speaking and not a seam.)
+        let all = balance([0.2; 3], [0.2; 3], [0.2; 3], false);
+        let lifted: Vec<f32> = [0.05f32, 0.2, 0.4, 0.6, 0.8]
+            .iter()
+            .map(|v| shown(apply_adjustment(&all, None, grey(*v))).0 - v)
+            .collect();
+        let (lo, hi) = (
+            lifted.iter().cloned().fold(f32::MAX, f32::min),
+            lifted.iter().cloned().fold(f32::MIN, f32::max),
+        );
+        assert!(hi - lo < 0.02, "the masks meet without a seam: {lifted:?}");
+
+        // Holding the brightness: the colour moves and the lightness the
+        // pixel had is the lightness it keeps.
+        // (Asked for one channel, not a pair: pushing red up and blue
+        // down by the same amount leaves the lightness where it was on
+        // its own, so it would not show the switch doing anything.)
+        let keep = balance([0.0; 3], [0.5, 0.0, 0.0], [0.0; 3], true);
+        let before = grey(0.5);
+        let after = apply_adjustment(&keep, None, before);
+        let (br, bg, bb) = shown(before);
+        let (ar, ag, ab) = shown(after);
+        let light = |r: f32, g: f32, b: f32| (r.max(g).max(b) + r.min(g).min(b)) / 2.0;
+        assert!(
+            (light(ar, ag, ab) - light(br, bg, bb)).abs() < 0.01,
+            "the brightness is held: {:?}",
+            (ar, ag, ab)
+        );
+        assert!(ar > ab + 0.1, "while the colour moves: {ar} against {ab}");
+
+        // And without it the same ask does lift the picture, which is
+        // the difference the switch is there to make.
+        let loose = balance([0.0; 3], [0.5, 0.0, 0.0], [0.0; 3], false);
+        let (lr, lg, lb) = shown(apply_adjustment(&loose, None, before));
+        assert!(
+            light(lr, lg, lb) > light(ar, ag, ab) + 0.02,
+            "and without it the picture lifts: {:?}",
+            (lr, lg, lb)
+        );
     }
 
     /// A negative is taken on the values a device shows, so a middling

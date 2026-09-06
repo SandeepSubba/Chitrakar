@@ -87,6 +87,17 @@ without reading anything else.*
   way for deepening a shadow rather than lifting one (a function of the
   pixel alone: Photoshop's reads the neighbourhood too, which is where
   its local contrast and its halos come from);
+  colour balance, the three ranges of tone pushed along the three
+  opponent pairs — cyan/red, magenta/green, yellow/blue — which is how a
+  print is corrected and how a grade is given its colour: cool shadows
+  against warm highlights, said in the terms the correction is thought
+  in rather than as three channel numbers. Which range a pixel belongs
+  to is read from its lightness rather than per channel, so a shift
+  moves a colour instead of pulling it apart, and the three masks are
+  ramps that add to one, so no tone sits in a seam between them; holding
+  the brightness (on by default) puts the pixel's own lightness back
+  after the colour has moved, so correcting a cast does not also lift
+  the picture;
   black and white, which is a recipe rather than a switch — the weights
   decide which colours come out light, so a high red weight darkens a
   blue sky the way a red filter on the lens did, and they are normalized
@@ -625,9 +636,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~304),
+- **Verify before committing:** `cargo test --workspace` (~305),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~777 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~787 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs
