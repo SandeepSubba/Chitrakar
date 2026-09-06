@@ -58,7 +58,16 @@ struct Vertex {
     params: [f32; 4],
     color: [f32; 4],
     grad: [f32; 4],
+    /// The box a mask's coverage was rasterized over, in page pixels
+    /// (x, y, width, height), so the fragment can turn where it is on
+    /// the page into where it is in that raster. A width of zero says
+    /// the layer has no mask, which is most of them.
+    mask: [f32; 4],
 }
+
+/// What a layer with no mask carries: a box of no width, which the
+/// fragment reads as "let everything through".
+const NO_MASK: [f32; 4] = [0.0; 4];
 
 /// The largest texture asked for, which is what `downlevel_defaults`
 /// guarantees on every adapter. A page that would need a bigger one —
@@ -169,6 +178,10 @@ pub struct GpuRenderer {
     layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// The stand-in bound wherever a pipeline declares a texture nothing
+    /// is reading: one white texel, which as a mask lets everything
+    /// through.
+    open: wgpu::BindGroup,
     /// What the adapter calls itself, for tests and diagnostics.
     pub adapter: String,
 }
@@ -208,11 +221,6 @@ impl GpuRenderer {
                 count: None,
             }],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shapes"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
-        });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("image"),
             entries: &[
@@ -234,9 +242,13 @@ impl GpuRenderer {
                 },
             ],
         });
-        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("image"),
-            bind_group_layouts: &[&layout, &texture_layout],
+        // One layout for every pipeline: the page, whatever texture the
+        // fragment paints from, and the mask it is held to. A pipeline
+        // that reads neither still declares them, so a draw never has to
+        // ask which groups the pipeline it is about to use expects.
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("page"),
+            bind_group_layouts: &[&layout, &texture_layout, &texture_layout],
             push_constant_ranges: &[],
         });
         // Bilinear, clamped: the texels are premultiplied linear, so the
@@ -249,6 +261,62 @@ impl GpuRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        // What stands in for a texture nothing is reading: one white
+        // texel. As a mask it lets everything through, and as the image
+        // of a shape that paints from its own colour it is never
+        // sampled — but the pipelines all declare both, so both are
+        // always bound.
+        let open = {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("no mask"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&[f32_to_f16(1.0)]),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(2),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let view = texture.create_view(&Default::default());
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("no mask"),
+                layout: &texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
+                ],
+            })
+        };
+
         let target = wgpu::ColorTargetState {
             format: wgpu::TextureFormat::Rgba16Float,
             blend: Some(PREMULTIPLIED_OVER),
@@ -263,7 +331,7 @@ impl GpuRenderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4,
-                4 => Float32x4
+                4 => Float32x4, 5 => Float32x4
             ],
         };
         // The stencil pass writes no colour and flips the buffer under
@@ -322,7 +390,7 @@ impl GpuRenderer {
         });
         let image = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("image"),
-            layout: Some(&image_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_image"),
@@ -402,7 +470,7 @@ impl GpuRenderer {
         // everything else from them.
         let shape_gradient = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes (gradient)"),
-            layout: Some(&image_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs"),
@@ -426,7 +494,7 @@ impl GpuRenderer {
         });
         let cover_gradient = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("path cover (gradient)"),
-            layout: Some(&image_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_cover"),
@@ -450,7 +518,7 @@ impl GpuRenderer {
         });
         let text = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("text"),
-            layout: Some(&image_layout),
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_cover"),
@@ -486,6 +554,7 @@ impl GpuRenderer {
             layout,
             texture_layout,
             sampler,
+            open,
             adapter: info.name,
         })
     }
@@ -669,10 +738,15 @@ impl GpuRenderer {
             });
             if let Some(quads) = &quads {
                 pass.set_bind_group(0, &bind, &[]);
+                pass.set_bind_group(1, &self.open, &[]);
                 pass.set_vertex_buffer(0, quads.slice(..));
                 pass.set_stencil_reference(0);
-                for draw in &scene.draws {
-                    match draw {
+                for item in &scene.draws {
+                    // A masked layer holds its fragments to the coverage
+                    // its mask lets through; one with none reads the
+                    // white texel that stands in for a mask.
+                    pass.set_bind_group(2, item.mask.map_or(&self.open, |at| &textures[at]), &[]);
+                    match &item.draw {
                         Draw::Shape { quad, ramp } => {
                             match ramp {
                                 Some(ramp) => {
@@ -820,11 +894,28 @@ fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(out)
 }
 
+/// One entry in painter's order: what to draw, and the mask its
+/// fragments are held to — the scene texture the layer's coverage was
+/// rasterized into, or nothing for the layers that have none.
+struct Item {
+    draw: Draw,
+    mask: Option<usize>,
+}
+
+impl Item {
+    /// A draw with no mask on it, which is what every builder makes;
+    /// `collect` puts the mask on afterwards, once for everything the
+    /// layer turned into.
+    fn of(draw: Draw) -> Item {
+        Item { draw, mask: None }
+    }
+}
+
 /// The vertices and the order to draw them in.
 #[derive(Default)]
 struct Scene {
     vertices: Vec<Vertex>,
-    draws: Vec<Draw>,
+    draws: Vec<Item>,
     /// Everything the fragment shaders sample, premultiplied in linear
     /// light and half-precision: the pixels behind a placed image, and
     /// the baked ramp behind a gradient.
@@ -878,10 +969,22 @@ fn collect(
         }
         // Anything that needs a surface of its own, or reads what is
         // under it, belongs to the CPU for now.
-        if node.mask.is_some() || !node.effects.is_empty() || node.blend != BlendMode::Normal {
+        if !node.effects.is_empty() || node.blend != BlendMode::Normal {
+            return None;
+        }
+        // A group's mask applies to what the group composites to, which
+        // is not the same as holding each of its children to it: where
+        // two of them overlap, the coverage would be taken twice. That
+        // wants the isolation pass this backend has not got, so a masked
+        // group goes back to the CPU; a masked leaf is a coverage its
+        // own fragments can be multiplied by, which is below.
+        if node.mask.is_some() && matches!(node.kind, NodeKind::Group) {
             return None;
         }
         let t = parent.compose(node.transform);
+        // Where the layer's own drawing starts, so the mask can be put
+        // on everything the layer turns into and nothing else.
+        let mark = (out.vertices.len(), out.draws.len());
         match &node.kind {
             NodeKind::Group => {
                 // A group at less than full opacity composites as a unit,
@@ -946,7 +1049,7 @@ fn collect(
                     v.local = [v.local[0] / size[0], v.local[1] / size[1]];
                 }
                 let quad = out.push(verts);
-                out.draws.push(Draw::Image { quad, texture: at });
+                out.draws.push(Item::of(Draw::Image { quad, texture: at }));
             }
             NodeKind::Text(spec) => {
                 let color = premultiplied_color(spec.fill, node.opacity * opacity)?;
@@ -954,8 +1057,70 @@ fn collect(
             }
             _ => return None,
         }
+        // The mask, once, over everything the layer drew: the CPU
+        // renderer rasterizes the coverage and the fragments read it.
+        if let Some(mask) = &node.mask {
+            let (at, box_) = mask_texture(doc, child, mask, parent, out)?;
+            for v in &mut out.vertices[mark.0..] {
+                v.mask = box_;
+            }
+            for item in &mut out.draws[mark.1..] {
+                item.mask = at;
+            }
+        }
     }
     Some(())
+}
+
+/// Rasterize a layer's mask into a scene texture, and say where it went
+/// and the box of page pixels it was rasterized over.
+///
+/// The coverage comes from `chitrakar_render::mask_plane_over` — the same
+/// reading the CPU compositor does at every pixel of a masked layer — so
+/// the two renderers cannot come to disagree about what a mask means.
+/// Only the layer's own box is rasterized: outside it there is nothing
+/// of the layer for a mask to hold back.
+fn mask_texture(
+    doc: &Document,
+    id: NodeId,
+    mask: &chitrakar_doc::Mask,
+    parent: Transform,
+    out: &mut Scene,
+) -> Option<(Option<usize>, [f32; 4])> {
+    let page = (doc.meta.width, doc.meta.height);
+    let (bx0, by0, bx1, by1) = match chitrakar_render::node_bounds(doc, id).ok()? {
+        chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
+        // A layer that reaches nowhere has nothing for a mask to hold
+        // back; one that reaches everywhere is not a leaf this backend
+        // draws.
+        chitrakar_render::Bounds::None => return Some((None, NO_MASK)),
+        chitrakar_render::Bounds::Everything => return None,
+    };
+    // A pixel of margin: the quads are grown by a device pixel so an
+    // edge is not cut short, and the coverage has to reach as far.
+    let x0 = (bx0.floor() as i64 - 1).clamp(0, page.0 as i64) as u32;
+    let y0 = (by0.floor() as i64 - 1).clamp(0, page.1 as i64) as u32;
+    let x1 = (bx1.ceil() as i64 + 1).clamp(0, page.0 as i64) as u32;
+    let y1 = (by1.ceil() as i64 + 1).clamp(0, page.1 as i64) as u32;
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w == 0 || h == 0 {
+        // Nothing of the layer is on the page; a box of no width says
+        // there is no mask, and there is nothing to hold back either.
+        return Some((None, NO_MASK));
+    }
+    // No size check: the box is clamped to the page, and a page bigger
+    // than the textures this backend asked for was handed back before
+    // any of this.
+    let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
+    let cover = chitrakar_render::mask_plane_over(doc, mask, parent, clip, page);
+    let at = out.textures.len();
+    out.textures.push(Image {
+        width: w,
+        height: h,
+        channels: 1,
+        texels: cover.iter().map(|c| f32_to_f16(*c)).collect(),
+    });
+    Some((Some(at), [x0 as f32, y0 as f32, w as f32, h as f32]))
 }
 
 /// Draw a text block: the whole block rasterized to coverage at the size
@@ -1009,6 +1174,7 @@ fn text(
         params: [0.0; 4],
         color,
         grad: [0.0; 4],
+        mask: NO_MASK,
     };
     let (x0, y0, x1, y1) = (bx0 - m, by0 - m, bx1 + m, by1 + m);
     let quad = out.push(vec![
@@ -1019,7 +1185,7 @@ fn text(
         corner(x1, y1),
         corner(x0, y1),
     ]);
-    out.draws.push(Draw::Text { quad, texture: at });
+    out.draws.push(Item::of(Draw::Text { quad, texture: at }));
     Some(())
 }
 
@@ -1106,7 +1272,7 @@ fn vector(
             grad,
             1.5,
         ));
-        out.draws.push(Draw::Shape { quad, ramp });
+        out.draws.push(Item::of(Draw::Shape { quad, ramp }));
     }
     if let Some((color, s)) = ink {
         // A band between two outlines: the shape shrunk by one figure
@@ -1127,7 +1293,7 @@ fn vector(
             // pixel every edge is softened over.
             1.5 + grow * device_scale(t),
         ));
-        out.draws.push(Draw::Shape { quad, ramp: None });
+        out.draws.push(Item::of(Draw::Shape { quad, ramp: None }));
     }
     Some(())
 }
@@ -1194,6 +1360,7 @@ fn fill_path(
         params: [0.0; 4],
         color,
         grad,
+        mask: NO_MASK,
     };
     let (lo, hi) = ((-mu, -mv), (1.0 + mu, 1.0 + mv));
     let cover = out.push(vec![
@@ -1204,11 +1371,11 @@ fn fill_path(
         corner(hi.0, hi.1),
         corner(lo.0, hi.1),
     ]);
-    out.draws.push(Draw::Path {
+    out.draws.push(Item::of(Draw::Path {
         stencil,
         cover,
         ramp,
-    });
+    }));
 }
 
 /// Draw a path's stroke: the very region the CPU tests a sample against,
@@ -1313,7 +1480,7 @@ fn stroke_path(
         corner(x1, y1),
         corner(x0, y1),
     ]);
-    out.draws.push(Draw::Stroke { union, cover });
+    out.draws.push(Item::of(Draw::Stroke { union, cover }));
 }
 
 /// A local-space point on the page.
@@ -1421,6 +1588,7 @@ fn quad(
         params,
         color,
         grad,
+        mask: NO_MASK,
     };
     let [tl, tr, br, bl] = corners;
     vec![
@@ -2362,6 +2530,391 @@ mod tests {
         })
         .unwrap();
         assert!(!GpuRenderer::can_render(&wide));
+    }
+
+    /// A mask is a coverage the CPU renderer works out and the fragment
+    /// multiplies by, so a masked layer comes out the same both ways —
+    /// a shape held to a circle, an ellipse held to a rectangle it is
+    /// only half inside, and an inverted mask, which is the hole rather
+    /// than the piece.
+    #[test]
+    fn masks_hold_a_layer_to_the_same_shape_on_both() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let square = VectorShape::Rect {
+            width: 40.0,
+            height: 40.0,
+            radius: 0.0,
+        };
+        let held = add(
+            &mut doc,
+            filled("held", square.clone(), RED),
+            Transform::translation(10.0, 10.0),
+        );
+        doc.apply(Command::SetMask {
+            id: held,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 15.0, ry: 15.0 },
+                    transform: Transform::translation(25.0, 25.0),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+
+        // The other one keeps only what falls outside its mask, and its
+        // mask hangs off the layer, so the box the coverage is worked
+        // out over matters.
+        let hole = add(
+            &mut doc,
+            filled("hole", VectorShape::Ellipse { rx: 20.0, ry: 20.0 }, BLUE),
+            Transform::translation(70.0, 10.0),
+        );
+        doc.apply(Command::SetMask {
+            id: hole,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(75.0, 15.0),
+                },
+                invert: true,
+            })),
+        })
+        .unwrap();
+
+        assert!(GpuRenderer::can_render(&doc), "a masked leaf is drawn");
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.004,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // The masks did something: the middle of the circle is painted,
+        // the corner of the square outside it is not, and the inverted
+        // one is the other way round.
+        assert!(drawn.get(30, 30).a > 0.9, "inside the mask is painted");
+        assert!(drawn.get(12, 12).a < 0.1, "outside it is not");
+        assert!(drawn.get(90, 30).a < 0.1, "inside an inverted mask is bare");
+        assert!(
+            drawn.get(72, 30).a > 0.9,
+            "and outside one is painted: {:?}",
+            drawn.get(72, 30)
+        );
+        // Pixel for pixel with the reference wherever the reference is
+        // decisive: every pixel the CPU paints solidly is painted, and
+        // every one it leaves bare is bare. The soft pixels along an
+        // edge are where the two renderers legitimately differ — the
+        // GPU's edge is analytic and the CPU's is sampled — and the
+        // mean above is what holds those.
+        // Two pixels clear of every edge on all sides: an analytic edge
+        // and a sampled one legitimately disagree within a pixel of each
+        // other, and the mean above is what holds those.
+        let all = |s: &Surface, x: u32, y: u32, want: fn(f32) -> bool| {
+            (y - 2..=y + 2).all(|b| (x - 2..=x + 2).all(|a| want(s.get(a, b).a)))
+        };
+        let mut checked = 0;
+        for y in 2..58 {
+            for x in 2..118 {
+                let (g, c) = (drawn.get(x, y).a, reference.get(x, y).a);
+                let inside = all(&reference, x, y, |a| a > 0.99);
+                let outside = all(&reference, x, y, |a| a < 0.01);
+                if !(inside || outside) {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    (g - c).abs() < 0.02,
+                    "alpha at {x},{y}: gpu {g:.3} against cpu {c:.3}"
+                );
+            }
+        }
+        assert!(checked > 5000, "most of the page is decisive: {checked}");
+
+        // A mask brushed on by hand rather than cut from a shape. Its
+        // coverage is worked out over a box rather than read at a point,
+        // and the box the GPU asks for is the layer's rather than the
+        // whole page, so it is worth proving the two agree.
+        let mut painted = Document::new(60, 60, ColorMode::Rgb);
+        let under = add(
+            &mut painted,
+            filled(
+                "under",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            Transform::translation(10.0, 10.0),
+        );
+        painted
+            .apply(Command::SetMask {
+                id: under,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Painted {
+                        strokes: vec![chitrakar_doc::PaintStroke {
+                            points: vec![[15.0, 30.0], [45.0, 30.0]],
+                            radii: vec![8.0],
+                            color: RED,
+                            softness: 0.0,
+                            erase: true,
+                            source: [0.0; 2],
+                            heal: false,
+                        }],
+                    },
+                    invert: false,
+                })),
+            })
+            .unwrap();
+        assert!(GpuRenderer::can_render(&painted));
+        let brushed = gpu.render(&painted).unwrap();
+        let by_cpu = chitrakar_render::render(&painted).unwrap();
+        let (mean, worst) = difference(&brushed, &by_cpu);
+        assert!(
+            mean < 0.004,
+            "a painted mask: mean {mean:.5} (worst {worst:.3})"
+        );
+        assert!(
+            brushed.get(30, 30).a < 0.02 && brushed.get(30, 14).a > 0.98,
+            "the stroke took a band out of it: {:?} against {:?}",
+            brushed.get(30, 30),
+            brushed.get(30, 14)
+        );
+
+        // A mask inside a group is authored in the group's space, not
+        // the page's, so the coverage has to be worked out through the
+        // group's transform. A layer at the top level would not notice
+        // the difference; one inside a moved group would.
+        let mut nested = Document::new(60, 60, ColorMode::Rgb);
+        let root = nested.root();
+        nested
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("moved")),
+            })
+            .unwrap();
+        let moved = nested.children_of(root).unwrap()[0];
+        nested
+            .apply(Command::SetTransform {
+                id: moved,
+                transform: Transform::translation(12.0, 8.0),
+            })
+            .unwrap();
+        nested
+            .apply(Command::AddNode {
+                parent: moved,
+                index: 0,
+                node: filled(
+                    "inside",
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    RED,
+                ),
+            })
+            .unwrap();
+        let inside = nested.children_of(moved).unwrap()[0];
+        nested
+            .apply(Command::SetTransform {
+                id: inside,
+                transform: Transform::translation(5.0, 5.0),
+            })
+            .unwrap();
+        nested
+            .apply(Command::SetMask {
+                id: inside,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 15.0,
+                            height: 30.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(5.0, 5.0),
+                    },
+                    invert: false,
+                })),
+            })
+            .unwrap();
+        assert!(GpuRenderer::can_render(&nested));
+        let deep = gpu.render(&nested).unwrap();
+        let flat = chitrakar_render::render(&nested).unwrap();
+        let (mean, worst) = difference(&deep, &flat);
+        assert!(
+            mean < 0.004,
+            "a mask inside a group: mean {mean:.5} (worst {worst:.3})"
+        );
+        // The mask covers the left half of the layer, and both of them
+        // moved with the group: ink at 20,20 and none at 40,20.
+        assert!(
+            deep.get(20, 20).a > 0.98 && deep.get(40, 20).a < 0.02,
+            "and it moved with the group: {:?} against {:?}",
+            deep.get(20, 20),
+            deep.get(40, 20)
+        );
+
+        // A mask on a group is a different thing — it holds what the
+        // group composites to, not each child on its own — and that
+        // still goes back to the CPU.
+        let mut grouped = Document::new(60, 60, ColorMode::Rgb);
+        let root = grouped.root();
+        grouped
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+        let group = grouped.children_of(root).unwrap()[0];
+        grouped
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: filled("in", square, RED),
+            })
+            .unwrap();
+        assert!(GpuRenderer::can_render(&grouped));
+        grouped
+            .apply(Command::SetMask {
+                id: group,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 15.0, ry: 15.0 },
+                        transform: Transform::translation(20.0, 20.0),
+                    },
+                    invert: false,
+                })),
+            })
+            .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&grouped),
+            "a masked group is the CPU's"
+        );
+    }
+
+    /// The mask reaches every kind of draw, not only the shape whose
+    /// fragment finds its own coverage: a stencilled path, a stroke, a
+    /// text block and a placed image are all held to it too.
+    #[test]
+    fn every_kind_of_layer_is_held_to_its_mask() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let half = |id: NodeId, doc: &mut Document, x: f32| {
+            // The left half of a 40-wide slot, so every layer keeps the
+            // half of itself the mask covers and loses the other.
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 20.0,
+                            height: 60.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(x, 0.0),
+                    },
+                    invert: false,
+                })),
+            })
+            .unwrap();
+        };
+
+        let mut doc = Document::new(160, 60, ColorMode::Rgb);
+        let path = add(
+            &mut doc,
+            filled(
+                "path",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [36.0, 0.0], [36.0, 36.0], [0.0, 36.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                RED,
+            ),
+            Transform::translation(2.0, 12.0),
+        );
+        half(path, &mut doc, 2.0);
+
+        let mut stroked = Node::vector(
+            "stroke",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [36.0, 0.0], [36.0, 36.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut stroked.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        let stroke = add(
+            &mut doc,
+            Box::new(stroked),
+            Transform::translation(42.0, 12.0),
+        );
+        half(stroke, &mut doc, 42.0);
+
+        let words = add(
+            &mut doc,
+            texted("words", "mask", 26.0, |_| {}),
+            Transform::translation(82.0, 16.0),
+        );
+        half(words, &mut doc, 82.0);
+
+        assert!(GpuRenderer::can_render(&doc), "each kind is drawn");
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.004,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // Each layer kept its left half and lost its right: there is ink
+        // in the first twenty columns of each slot and none in the next.
+        for (name, x) in [("path", 2.0f32), ("stroke", 42.0), ("words", 82.0)] {
+            let ink = |from: u32, to: u32| {
+                (0..60)
+                    .flat_map(|y| (from..to).map(move |x| (x, y)))
+                    .filter(|(x, y)| drawn.get(*x, *y).a > 0.5)
+                    .count()
+            };
+            let (kept, lost) = (
+                ink(x as u32, x as u32 + 20),
+                ink(x as u32 + 20, x as u32 + 38),
+            );
+            assert!(
+                kept > 40,
+                "the {name} keeps the half its mask covers: {kept}"
+            );
+            assert!(lost == 0, "and loses the half it does not: {lost}");
+        }
     }
 
     #[test]

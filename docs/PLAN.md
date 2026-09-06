@@ -636,7 +636,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~305),
+- **Verify before committing:** `cargo test --workspace` (~307),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~787 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -674,8 +674,20 @@ without reading anything else.*
   breaks a line up the way the CPU does). Text is the whole block rasterized
   to coverage at the size it is seen at — by `chitrakar_render::
   text_raster`, which the CPU path calls too, so both read the same
-  bitmap — and drawn as a quad over the block's box. It declines
-  anything else — masks, effects, filters,
+  bitmap — and drawn as a quad over the block's box. A masked layer is
+  held to its mask: the coverage comes from
+  `chitrakar_render::mask_plane_over` — the same reading the CPU
+  compositor does at every pixel of a masked layer, so a mask cannot come
+  to mean two things depending on which renderer drew it — rasterized
+  over the layer's own box, uploaded as a one-channel texture, and
+  multiplied into every fragment, whichever kind of draw it belongs to
+  (shape, stencilled path, stroke, text, image, gradient). Every mask
+  works, cut from a shape or brushed on by hand, inverted or not, since
+  all of them are that one reading. A mask on a *group* is not: it holds
+  what the group composites to, and holding each child to it instead
+  would take the coverage twice where two of them overlap, so a masked
+  group still goes back to the CPU. It declines
+  anything else — masked groups, effects, filters,
   adjustments, blend modes, a group that needs isolating, ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
@@ -689,9 +701,9 @@ without reading anything else.*
   there too.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is masks,
-     effects, adjustments and blend modes (see
-     docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is
+     effects, adjustments, blend modes and the isolation pass a masked
+     or part-opaque group wants (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

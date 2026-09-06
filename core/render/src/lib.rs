@@ -3589,6 +3589,38 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     }
 }
 
+/// The coverage a mask lets through over a rectangle of device pixels,
+/// one value a pixel, row by row from `clip.y0`.
+///
+/// This is the same reading the CPU compositor does at every pixel of a
+/// masked layer, offered to anything that needs the coverage as a plane
+/// rather than a pixel at a time — the GPU backend samples it as a
+/// texture. Stating it once is what keeps a mask from coming to mean two
+/// things depending on which renderer drew it.
+///
+/// `parent` is the space the mask is authored in — its owner's parent,
+/// already composed into device space — and `surface` is the size of the
+/// device the pixels are counted on.
+pub fn mask_plane_over(
+    doc: &Document,
+    mask: &Mask,
+    parent: Transform,
+    clip: ClipRect,
+    surface: (u32, u32),
+) -> Vec<f32> {
+    let plane = MaskRef::plane_for(Some(mask), parent, clip, surface);
+    let m = MaskRef::new(Some(mask), parent).with_plane(plane.as_ref());
+    let mut out = Vec::with_capacity(
+        ((clip.x1.saturating_sub(clip.x0)) * (clip.y1.saturating_sub(clip.y0))) as usize,
+    );
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            out.push(coverage_at(doc, m, x, y));
+        }
+    }
+    out
+}
+
 /// Multiply a surface region by a mask's coverage (used for group masks).
 fn apply_mask(doc: &Document, m: MaskRef<'_>, surface: &mut Surface, clip: ClipRect) {
     for y in clip.y0..clip.y1 {

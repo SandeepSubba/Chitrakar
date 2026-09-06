@@ -8,6 +8,10 @@ struct VsOut {
     @location(1) @interpolate(flat) params: vec4f,
     @location(2) @interpolate(flat) color: vec4f,
     @location(3) @interpolate(flat) grad: vec4f,
+    // Where this fragment is on the page, and the box the layer's mask
+    // was rasterized over — the two together say where to read it.
+    @location(4) page: vec2f,
+    @location(5) @interpolate(flat) mask: vec4f,
 };
 
 struct Page {
@@ -29,6 +33,7 @@ fn vs(
     @location(2) params: vec4f,
     @location(3) color: vec4f,
     @location(4) grad: vec4f,
+    @location(5) mask: vec4f,
 ) -> VsOut {
     var out: VsOut;
     out.pos = clip(doc);
@@ -36,7 +41,24 @@ fn vs(
     out.params = params;
     out.color = color;
     out.grad = grad;
+    out.page = doc;
+    out.mask = mask;
     return out;
+}
+
+// A layer's mask: the coverage it lets through, rasterized by the CPU
+// renderer over a box of page pixels — the same reading the CPU
+// compositor does at every pixel of a masked layer, so a mask cannot
+// come to mean two things depending on which renderer drew it. A box of
+// no width says the layer has no mask, which is most of them.
+@group(2) @binding(0) var mask_tex: texture_2d<f32>;
+@group(2) @binding(1) var mask_sampler: sampler;
+
+fn mask_cover(page: vec2f, box: vec4f) -> f32 {
+    if box.z <= 0.0 || box.w <= 0.0 {
+        return 1.0;
+    }
+    return textureSampleLevel(mask_tex, mask_sampler, (page - box.xy) / box.zw, 0.0).r;
 }
 
 // Signed distance to a rounded rectangle whose top-left is the origin.
@@ -106,7 +128,7 @@ fn coverage(in: VsOut) -> f32 {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4f {
-    return in.color * coverage(in);
+    return in.color * coverage(in) * mask_cover(in.page, in.mask);
 }
 
 // Stencil pass for a path: nothing but position, no colour written. The
@@ -131,6 +153,8 @@ struct CoverOut {
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) color: vec4f,
     @location(2) @interpolate(flat) grad: vec4f,
+    @location(3) page: vec2f,
+    @location(4) @interpolate(flat) mask: vec4f,
 };
 
 @vertex
@@ -139,18 +163,21 @@ fn vs_cover(
     @location(1) local: vec2f,
     @location(3) color: vec4f,
     @location(4) grad: vec4f,
+    @location(5) mask: vec4f,
 ) -> CoverOut {
     var out: CoverOut;
     out.pos = clip(doc);
     out.uv = local;
     out.color = color;
     out.grad = grad;
+    out.page = doc;
+    out.mask = mask;
     return out;
 }
 
 @fragment
 fn fs_cover(in: CoverOut) -> @location(0) vec4f {
-    return in.color;
+    return in.color * mask_cover(in.page, in.mask);
 }
 
 // A placed image: the quad's own coordinates are its texture coordinates,
@@ -164,23 +191,34 @@ struct ImageOut {
     @builtin(position) pos: vec4f,
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) alpha: f32,
+    @location(2) page: vec2f,
+    @location(3) @interpolate(flat) mask: vec4f,
 };
 
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
 
 @vertex
-fn vs_image(@location(0) doc: vec2f, @location(1) uv: vec2f, @location(3) color: vec4f) -> ImageOut {
+fn vs_image(
+    @location(0) doc: vec2f,
+    @location(1) uv: vec2f,
+    @location(3) color: vec4f,
+    @location(5) mask: vec4f,
+) -> ImageOut {
     var out: ImageOut;
     out.pos = clip(doc);
     out.uv = uv;
     out.alpha = color.a;
+    out.page = doc;
+    out.mask = mask;
     return out;
 }
 
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4f {
-    return textureSample(image, image_sampler, in.uv) * in.alpha;
+    return textureSample(image, image_sampler, in.uv)
+        * in.alpha
+        * mask_cover(in.page, in.mask);
 }
 
 // A text layer: the whole block rasterized to coverage at the size it
@@ -194,7 +232,7 @@ fn fs_text(in: CoverOut) -> @location(0) vec4f {
     let size = vec2f(textureDimensions(image));
     let cov = textureSampleLevel(image, image_sampler, (in.uv + vec2f(1.0, 1.0)) / size, 0.0).r;
     let inked = in.uv.x >= 0.0 && in.uv.y >= 0.0;
-    return in.color * select(0.0, cov, inked);
+    return in.color * select(0.0, cov, inked) * mask_cover(in.page, in.mask);
 }
 
 // Where a point of the shape's normalized box sits along its gradient:
@@ -232,7 +270,10 @@ fn ramp_color(t: f32) -> vec4f {
 fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
     let cov = coverage(in);
     let uv = in.local / max(in.params.xy, vec2f(1e-6, 1e-6));
-    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5)) * in.color.a * cov;
+    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5))
+        * in.color.a
+        * cov
+        * mask_cover(in.page, in.mask);
 }
 
 // A gradient-filled path: the stencil already said where the fill
@@ -241,5 +282,7 @@ fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
 // across the quad however the layer is transformed.
 @fragment
 fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
-    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5)) * in.color.a;
+    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5))
+        * in.color.a
+        * mask_cover(in.page, in.mask);
 }
