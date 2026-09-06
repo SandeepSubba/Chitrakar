@@ -4150,10 +4150,20 @@ fn lay_strokes(
         }
         let w = bbox.x1 - bbox.x0;
         let cover = stroke_cover(stroke, t, inv, band, bbox, (dst.width, dst.height));
+        // The region this stroke was confined to when it was laid down.
+        // It rides on the stroke rather than being read off the document
+        // because a stroke held to whatever happens to be picked *now*
+        // would spill the moment the selection changed — and confining
+        // it means it stays inside after the region is let go of.
+        let held = stroke
+            .clip
+            .as_deref()
+            .map(|m| mask_plane_over(doc, m, t, bbox, (dst.width, dst.height)));
         let color = resolve_color(doc, stroke.color);
         for py in bbox.y0..bbox.y1 {
             for px in bbox.x0..bbox.x1 {
-                let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
+                let at = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
+                let c = cover[at] * held.as_ref().map_or(1.0, |p| p[at]);
                 if c <= 0.0 {
                     continue;
                 }
@@ -5597,6 +5607,7 @@ mod tests {
             erase: false,
             source: [0.0, 0.0],
             heal: false,
+            clip: None,
         }
     }
 
@@ -7164,6 +7175,7 @@ mod tests {
                     erase: false,
                     source: [0.0, 0.0],
                     heal: false,
+                    clip: None,
                 }
             })
             .collect();

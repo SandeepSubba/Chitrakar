@@ -405,6 +405,7 @@ mod tests {
                 erase: false,
                 source: [0.0, 0.0],
                 heal: false,
+                clip: None,
             }),
             on_mask: false,
         })
@@ -421,6 +422,7 @@ mod tests {
                         erase: true,
                         source: [0.0, 0.0],
                         heal: false,
+                        clip: None,
                     }],
                 },
                 invert: false,
@@ -572,8 +574,65 @@ mod tests {
             )),
         );
 
+        // A region picked out of the page, and a stroke confined to one.
+        // Both are document state that nothing else carries, and a file
+        // that loses either loses work: the region silently, the stroke
+        // by letting paint out of where it was held.
+        doc.apply(Command::SetSelection {
+            selection: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: chitrakar_doc::VectorShape::Ellipse { rx: 22.0, ry: 14.0 },
+                    transform: chitrakar_doc::Transform::translation(50.0, 40.0),
+                },
+                invert: true,
+            })),
+        })
+        .unwrap();
+        let held = add(&mut doc, Box::new(Node::paint("held")));
+        doc.apply(Command::AddStroke {
+            id: held,
+            index: 0,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[10.0, 20.0], [100.0, 30.0]],
+                radii: vec![6.0],
+                color: red,
+                softness: 0.0,
+                erase: false,
+                source: [0.0, 0.0],
+                heal: false,
+                clip: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Rect {
+                            width: 40.0,
+                            height: 60.0,
+                            radius: 0.0,
+                        },
+                        transform: chitrakar_doc::Transform::default(),
+                    },
+                    invert: false,
+                })),
+            }),
+            on_mask: false,
+        })
+        .unwrap();
+
         let before = chitrakar_render::render(&doc).unwrap();
         let back = load_chitra(&save_chitra(&doc).unwrap()).unwrap();
+        assert!(
+            matches!(
+                back.selection().map(|m| (&m.kind, m.invert)),
+                Some((chitrakar_doc::MaskKind::Vector { .. }, true))
+            ),
+            "what was picked out came back, inside out as it went"
+        );
+        assert!(
+            matches!(
+                &back.node(held).unwrap().kind,
+                chitrakar_doc::NodeKind::Paint { strokes }
+                    if strokes[0].clip.is_some()
+            ),
+            "and the stroke is still held to the region it was painted in"
+        );
         // The same pixels can come from a document that lost what it was
         // made of, so check the shape of it too.
         assert!(
@@ -663,6 +722,7 @@ mod tests {
                 erase: false,
                 source: [0.0, 0.0],
                 heal: false,
+                clip: None,
             }),
         })
         .unwrap();

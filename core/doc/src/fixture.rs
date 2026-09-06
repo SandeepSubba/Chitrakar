@@ -115,6 +115,7 @@ pub fn everything() -> Fixture {
         erase: false,
         source: [0.0; 2],
         heal: false,
+        clip: None,
     };
     doc.apply(Command::AddStroke {
         id: painted,

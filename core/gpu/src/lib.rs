@@ -3625,6 +3625,7 @@ mod tests {
                             erase: true,
                             source: [0.0; 2],
                             heal: false,
+                            clip: None,
                         }],
                     },
                     invert: false,

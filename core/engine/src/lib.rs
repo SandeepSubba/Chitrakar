@@ -119,6 +119,7 @@ fn changed_bounds(
         && long.color == short.color
         && long.softness == short.softness
         && long.erase == short.erase
+        && long.clip == short.clip
         && long.points[..n] == short.points[..]
         && long.radii.len() >= short.radii.len()
         && long.radii[..short.radii.len()] == short.radii[..];
@@ -1601,6 +1602,10 @@ impl Session {
         let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
             return Ok(());
         };
+        // A region picked out confines the stroke, and goes on confining
+        // it after the region is let go of: so it rides on the stroke,
+        // in the space the stroke's own points are written in.
+        let clip = self.region_in(chitrakar_render::brush_space(&self.doc, layer, on_mask)?);
         let stroke = chitrakar_doc::PaintStroke {
             points: vec![[lx, ly]],
             radii: vec![self.radius_in_layer(layer, on_mask, radius)?],
@@ -1609,6 +1614,7 @@ impl Session {
             erase,
             source: [0.0, 0.0],
             heal: false,
+            clip,
         };
         self.preview(Command::AddStroke {
             id: layer,
@@ -2613,26 +2619,10 @@ impl Session {
             selection.invert = !selection.invert;
         }
         let parent = chitrakar_render::ancestor_space(&self.doc, id);
-        let det = parent.a * parent.d - parent.b * parent.c;
-        if det.abs() < 1e-9 {
+        let Some(into) = Self::seen_from(parent) else {
             return Err(EngineError::BadCommand(
                 "this layer sits in a space with no thickness".into(),
             ));
-        }
-        // The page's space seen from the layer's parent.
-        let (a, b, c, d) = (
-            parent.d / det,
-            -parent.b / det,
-            -parent.c / det,
-            parent.a / det,
-        );
-        let into = Transform {
-            a,
-            b,
-            c,
-            d,
-            e: -(a * parent.e + c * parent.f),
-            f: -(b * parent.e + d * parent.f),
         };
         let mut mask = selection;
         match &mut mask.kind {
@@ -2662,6 +2652,48 @@ impl Session {
                 "Mask from selection".into()
             }),
         )
+    }
+
+    /// The page's own space seen from `space` — the transform that
+    /// carries a page-space thing into it.
+    fn seen_from(space: Transform) -> Option<Transform> {
+        let det = space.a * space.d - space.b * space.c;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let (a, b, c, d) = (space.d / det, -space.b / det, -space.c / det, space.a / det);
+        Some(Transform {
+            a,
+            b,
+            c,
+            d,
+            e: -(a * space.e + c * space.f),
+            f: -(b * space.e + d * space.f),
+        })
+    }
+
+    /// What is picked out of the page, carried into `space`, ready to
+    /// ride on a stroke laid down there.
+    fn region_in(&self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
+        let mut mask = self.doc.selection()?.clone();
+        let into = Self::seen_from(space)?;
+        match &mut mask.kind {
+            chitrakar_doc::MaskKind::Vector { transform, .. }
+            | chitrakar_doc::MaskKind::Raster { transform, .. } => {
+                *transform = into.compose(*transform);
+            }
+            chitrakar_doc::MaskKind::Painted { strokes } => {
+                for stroke in strokes {
+                    for p in &mut stroke.points {
+                        *p = [
+                            into.a * p[0] + into.c * p[1] + into.e,
+                            into.b * p[0] + into.d * p[1] + into.f,
+                        ];
+                    }
+                }
+            }
+        }
+        Some(Box::new(mask))
     }
 
     /// The page-space box round what is picked out.
@@ -6264,6 +6296,123 @@ mod tests {
                 if want { "inside" } else { "outside" }
             );
         }
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A brush confined to what is picked, and still confined after.
+    ///
+    /// Painting inside a region has to stay inside it once the region is
+    /// let go of — that is what confining means. A stroke held to
+    /// whatever happens to be picked at the moment it is drawn would
+    /// spill the instant the selection changed, so the region rides on
+    /// the stroke. It is not baked, though: nothing was cut away, and
+    /// the whole stroke is still there under the clip.
+    #[test]
+    fn a_brush_stays_inside_the_region_it_was_painted_in() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::paint("painted")),
+            })
+            .unwrap();
+        let layer = session.document().children_of(root).unwrap()[0];
+
+        // A region over the left half of the page, and a stroke drawn
+        // clear across the whole of it.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::default(),
+                "replace",
+            )
+            .unwrap();
+        session
+            .paint_begin(layer, 10.0, 30.0, 6.0, ink, 0.0, false, false)
+            .unwrap();
+        for x in [30.0, 60.0, 90.0, 110.0] {
+            session.paint_extend(x, 30.0, 6.0).unwrap();
+        }
+        assert!(session.commit_preview());
+
+        let inked = |s: &Session, x: u32| s.render().unwrap().get(x, 30).a > 0.5;
+        assert!(inked(&session, 20), "paint inside the region");
+        assert!(!inked(&session, 100), "and none outside it");
+
+        // Letting go of the region changes nothing: the stroke is held
+        // by its own clip, not by what happens to be picked.
+        assert!(session.pick_none().unwrap());
+        assert!(inked(&session, 20), "still painted inside");
+        assert!(
+            !inked(&session, 100),
+            "and still not outside, with nothing picked at all"
+        );
+
+        // Nor does picking somewhere else.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(60.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(
+            !inked(&session, 100),
+            "a region picked afterwards does not let the stroke out"
+        );
+
+        // Nothing was cut away: the whole stroke is there under the clip,
+        // and taking the clip off gives it back.
+        let whole = {
+            let mut without = Session::from_document(session.document().clone());
+            let NodeKind::Paint { strokes } = &without.document().node(layer).unwrap().kind else {
+                unreachable!("a paint layer")
+            };
+            let mut bare = strokes[0].clone();
+            bare.clip = None;
+            without
+                .apply(Command::SetStroke {
+                    id: layer,
+                    index: 0,
+                    stroke: Box::new(bare),
+                    on_mask: false,
+                })
+                .unwrap();
+            without.render().unwrap()
+        };
+        assert!(
+            whole.get(100, 30).a > 0.5,
+            "the stroke itself runs the whole way across"
+        );
+
+        // And a stroke painted with nothing picked is confined to
+        // nothing, which is what it always was.
+        session.pick_none().unwrap();
+        session
+            .paint_begin(layer, 10.0, 50.0, 5.0, ink, 0.0, false, false)
+            .unwrap();
+        session.paint_extend(110.0, 50.0, 5.0).unwrap();
+        assert!(session.commit_preview());
+        assert!(
+            session.render().unwrap().get(100, 50).a > 0.5,
+            "an unconfined stroke goes where it is drawn"
+        );
         assert_cache_matches_fresh(&mut session);
     }
 

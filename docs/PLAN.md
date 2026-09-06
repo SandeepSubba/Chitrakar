@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~326),
+- **Verify before committing:** `cargo test --workspace` (~327),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~856 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~862 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -941,6 +941,13 @@ without reading anything else.*
   hole, which is what an even-odd path means by a ring inside a ring).
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
+  A brush painted with a region picked out is confined to it, and stays
+  confined after the region is let go of — which is what confining
+  means, and why the region rides on the stroke (`PaintStroke::clip`)
+  rather than being read off the document as it is drawn: a stroke held
+  to whatever happens to be picked *now* would spill the instant the
+  selection changed. Nothing is baked: the whole stroke is there under
+  the clip, and taking the clip off gives it back.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

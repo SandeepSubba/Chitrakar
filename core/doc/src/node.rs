@@ -167,6 +167,21 @@ pub struct PaintStroke {
     /// Only a clone layer reads it, and it is additive.
     #[serde(default)]
     pub heal: bool,
+    /// The region this stroke was confined to when it was laid down, in
+    /// the stroke's own space.
+    ///
+    /// Painting with a region picked out has to stay inside it *after*
+    /// the region is let go of — that is what confining means, and a
+    /// stroke held to whatever happens to be picked at the moment it is
+    /// drawn would spill the instant the selection changed. So the
+    /// region rides on the stroke.
+    ///
+    /// It is not baked, though: nothing was cut out, and taking the clip
+    /// off gives back the whole stroke. Additive, so a stroke painted
+    /// before selections existed is confined to nothing, which is what
+    /// it was.
+    #[serde(default)]
+    pub clip: Option<Box<Mask>>,
 }
 
 impl PaintStroke {

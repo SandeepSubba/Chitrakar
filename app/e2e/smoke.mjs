@@ -7694,6 +7694,52 @@ assert(
     (await page.locator(".ants").count()) === 0,
     "and picking out nothing leaves no ants",
   );
+
+  // 9al2. A brush confined to the region, and still confined after it is
+  // let go of. A stroke held to whatever happens to be picked at the
+  // moment it is drawn would spill the instant the selection changed, so
+  // the region rides on the stroke.
+  await newDocument(400, 300, "rgb");
+  const c = await page.locator("#engine-page").boundingBox();
+  const to = (x, y) => [c.x + (x / 400) * c.width, c.y + (y / 300) * c.height];
+  await page.keyboard.press("m");
+  await page.waitForTimeout(150);
+  await page.mouse.move(...to(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...to(200, 280), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  assert((await page.locator(".ants").count()) === 1, "the left half is picked");
+
+  // Paint clear across the whole page.
+  await setColor("Fill colour", "#dd3322");
+  await pickTool("Paint");
+  await page.mouse.move(...to(40, 150));
+  await page.mouse.down();
+  for (const x of [120, 200, 280, 370]) {
+    await page.mouse.move(...to(x, 150), { steps: 4 });
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(450);
+  const painted = async (x) => {
+    const [r, g, bl] = await canvasPixel(x, 150);
+    return r > 140 && g < 130 && bl < 130;
+  };
+  assert(await painted(100), "the brush painted inside the region");
+  assert(!(await painted(320)), "and stopped at its edge");
+
+  // Letting go of the region changes nothing about the stroke.
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator(".ants").count()) === 0,
+    "the region is let go of",
+  );
+  assert(await painted(100), "the paint is still there");
+  assert(
+    !(await painted(320)),
+    "and still stops where the region did, with nothing picked",
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting
