@@ -157,6 +157,14 @@ enum Draw {
         quad: std::ops::Range<u32>,
         texture: usize,
     },
+    /// Everything between this and its `Close` is drawn on a surface of
+    /// its own, because the group it belongs to composites as a unit
+    /// before it meets what is under it.
+    Open,
+    /// That surface laid over the one under it, at the group's own
+    /// opacity and held to the group's own mask — which is the item's,
+    /// so the one quad carries it rather than each of the children.
+    Close { quad: std::ops::Range<u32> },
 }
 
 /// A device, a queue and the pipelines that draw every shape.
@@ -710,16 +718,84 @@ impl GpuRenderer {
             })
             .collect();
 
+        // The passes to run, and the surfaces they run on. A group that
+        // composites as a unit is drawn on one of its own and laid down
+        // afterwards, which means ending the pass at every `Open` and
+        // every `Close` — a pass has one set of attachments, and this is
+        // where they change.
+        let passes = plan(&scene.draws);
+        let deep = passes.iter().map(|p| p.target).max().unwrap_or(0);
+        // One surface per depth of isolation, reused by every group at
+        // that depth: a group's surface is laid down the moment its
+        // `Close` comes up, so the next one along can have it back.
+        let mut surfaces = Vec::new();
+        for _ in 0..deep {
+            let multi = make(
+                "group (multisampled)",
+                SAMPLES,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            let flat = make(
+                "group",
+                1,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            );
+            let flat_view = flat.create_view(&Default::default());
+            let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("group"),
+                layout: &self.texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&flat_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            surfaces.push((
+                multi.create_view(&Default::default()),
+                flat_view,
+                read,
+                flat,
+            ));
+        }
+        let attachment = |at: usize| -> (&wgpu::TextureView, &wgpu::TextureView) {
+            match at {
+                0 => (&multi_view, &view),
+                n => (&surfaces[n - 1].0, &surfaces[n - 1].1),
+            }
+        };
+
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
+        for (n, step) in passes.iter().enumerate() {
+            let (colour, resolve) = attachment(step.target);
+            // The multisampled attachment is only worth keeping when
+            // this surface is drawn on again — which is what happens to
+            // the page while a group is taken off to its own surface and
+            // brought back. Every other pass throws it away, as the one
+            // pass a page without groups needs always did.
+            let again = passes[n + 1..].iter().any(|p| p.target == step.target);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("page"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &multi_view,
-                    resolve_target: Some(&view),
+                    view: colour,
+                    resolve_target: Some(resolve),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Discard,
+                        load: if step.clear {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: if again {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
@@ -728,6 +804,9 @@ impl GpuRenderer {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Discard,
                     }),
+                    // Cleared for every pass: a cover pass leaves the
+                    // stencil as it found it, so there is never anything
+                    // to carry across one.
                     stencil_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0),
                         store: wgpu::StoreOp::Discard,
@@ -739,9 +818,18 @@ impl GpuRenderer {
             if let Some(quads) = &quads {
                 pass.set_bind_group(0, &bind, &[]);
                 pass.set_bind_group(1, &self.open, &[]);
+                pass.set_bind_group(2, &self.open, &[]);
                 pass.set_vertex_buffer(0, quads.slice(..));
                 pass.set_stencil_reference(0);
-                for item in &scene.draws {
+                // A group's surface comes down first, over whatever was
+                // already on this one.
+                if let Some(laid) = &step.lay {
+                    pass.set_pipeline(&self.image);
+                    pass.set_bind_group(1, &surfaces[laid.from - 1].2, &[]);
+                    pass.set_bind_group(2, laid.mask.map_or(&self.open, |at| &textures[at]), &[]);
+                    pass.draw(laid.quad.clone(), 0..1);
+                }
+                for item in &scene.draws[step.items.clone()] {
                     // A masked layer holds its fragments to the coverage
                     // its mask lets through; one with none reads the
                     // white texel that stands in for a mask.
@@ -795,6 +883,9 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &textures[*texture], &[]);
                             pass.draw(quad.clone(), 0..1);
                         }
+                        // The two markers are where the passes were cut;
+                        // nothing of them is left to draw here.
+                        Draw::Open | Draw::Close { .. } => {}
                     }
                 }
             }
@@ -972,27 +1063,31 @@ fn collect(
         if !node.effects.is_empty() || node.blend != BlendMode::Normal {
             return None;
         }
-        // A group's mask applies to what the group composites to, which
-        // is not the same as holding each of its children to it: where
-        // two of them overlap, the coverage would be taken twice. That
-        // wants the isolation pass this backend has not got, so a masked
-        // group goes back to the CPU; a masked leaf is a coverage its
-        // own fragments can be multiplied by, which is below.
-        if node.mask.is_some() && matches!(node.kind, NodeKind::Group) {
-            return None;
-        }
         let t = parent.compose(node.transform);
         // Where the layer's own drawing starts, so the mask can be put
         // on everything the layer turns into and nothing else.
-        let mark = (out.vertices.len(), out.draws.len());
+        let mut mark = (out.vertices.len(), out.draws.len());
         match &node.kind {
             NodeKind::Group => {
-                // A group at less than full opacity composites as a unit,
-                // which needs an isolation pass this backend has not got.
-                if node.opacity < 1.0 {
-                    return None;
+                // A group that is less than opaque, or that carries a
+                // mask, composites as a unit before it meets what is
+                // under it: laid over that at its opacity, held to its
+                // mask. Holding each child to the mask instead would
+                // take the coverage twice where two of them overlap,
+                // and taking each child's opacity down would show them
+                // through each other. So it goes on a surface of its
+                // own, and the surface is what lands.
+                if node.opacity >= 1.0 && node.mask.is_none() {
+                    collect(doc, child, t, opacity, out)?;
+                } else {
+                    out.draws.push(Item::of(Draw::Open));
+                    collect(doc, child, t, 1.0, out)?;
+                    // The mask goes on the quad that lays the surface
+                    // down, not on what was drawn into it.
+                    mark = (out.vertices.len(), out.draws.len());
+                    let quad = out.push(page_quad(doc, node.opacity * opacity));
+                    out.draws.push(Item::of(Draw::Close { quad }));
                 }
-                collect(doc, child, t, opacity, out)?;
             }
             NodeKind::Vector {
                 shape,
@@ -1562,6 +1657,96 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
     }
 }
 
+/// One pass: the surface it draws on, whether that surface starts bare,
+/// a group's surface to lay down before anything else, and the run of
+/// items to draw.
+struct Pass {
+    /// 0 is the page; anything else is the isolation surface for that
+    /// depth of nesting.
+    target: usize,
+    clear: bool,
+    lay: Option<Laid>,
+    items: std::ops::Range<usize>,
+}
+
+/// A finished group's surface, coming back down onto the one under it.
+struct Laid {
+    from: usize,
+    quad: std::ops::Range<u32>,
+    mask: Option<usize>,
+}
+
+/// Cut the items into passes at every `Open` and `Close`. A pass has one
+/// set of attachments, so a group that composites as a unit — drawn on a
+/// surface of its own and laid down afterwards — is three passes: what
+/// came before it, the group itself, and what follows once it is down.
+///
+/// The surfaces are reused by depth. A group's is laid down the moment
+/// its `Close` comes up and nothing reads it afterwards, so the next
+/// group at that depth can have it back.
+fn plan(draws: &[Item]) -> Vec<Pass> {
+    let mut passes = Vec::new();
+    let mut stack = vec![0usize];
+    let (mut start, mut clear, mut lay) = (0usize, true, None);
+    for (i, item) in draws.iter().enumerate() {
+        let (open, close) = match &item.draw {
+            Draw::Open => (true, None),
+            Draw::Close { quad } => (false, Some(quad.clone())),
+            _ => continue,
+        };
+        passes.push(Pass {
+            target: *stack.last().unwrap(),
+            clear,
+            lay: lay.take(),
+            items: start..i,
+        });
+        if open {
+            stack.push(stack.len());
+            clear = true;
+        } else {
+            let from = stack.pop().unwrap_or(0);
+            clear = false;
+            lay = close.map(|quad| Laid {
+                from,
+                quad,
+                mask: item.mask,
+            });
+        }
+        start = i + 1;
+    }
+    passes.push(Pass {
+        target: *stack.last().unwrap(),
+        clear,
+        lay,
+        items: start..draws.len(),
+    });
+    passes
+}
+
+/// The six vertices of a quad over the whole page, reading a texture
+/// that covers it: what lays an isolated group's surface back down.
+/// `alpha` is the group's own opacity, which the image fragment reads
+/// off the colour the way a placed picture's does.
+fn page_quad(doc: &Document, alpha: f32) -> Vec<Vertex> {
+    let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+    let corner = |u: f32, v: f32| Vertex {
+        doc: [u * w, v * h],
+        local: [u, v],
+        params: [0.0; 4],
+        color: [0.0, 0.0, 0.0, alpha],
+        grad: [0.0; 4],
+        mask: NO_MASK,
+    };
+    vec![
+        corner(0.0, 0.0),
+        corner(1.0, 0.0),
+        corner(1.0, 1.0),
+        corner(0.0, 0.0),
+        corner(1.0, 1.0),
+        corner(0.0, 1.0),
+    ]
+}
+
 /// The six vertices of a shape's quad, in document space, grown by
 /// `grow` device pixels so an antialiased edge has somewhere to land.
 /// A shape wants a pixel and a half of that; an image wants none — its
@@ -1912,15 +2097,38 @@ mod tests {
         );
         assert!(mean < 0.004, "mean {mean:.5}, worst {worst:.3}");
 
-        // A group at less than full opacity composites as a unit, which
-        // this backend declines rather than getting wrong.
+        // A group at less than full opacity composites as a unit: the
+        // two rects inside it meet each other at full strength and the
+        // result is taken down together, so where they overlap the page
+        // shows half of the blue over the red rather than half of each.
+        // That is a surface of its own, and the surface is what lands.
         doc.apply(Command::SetOpacity {
             id: group,
             opacity: 0.5,
         })
         .unwrap();
-        assert!(!GpuRenderer::can_render(&doc));
-        assert!(gpu.render(&doc).is_none());
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "a group can composite as a unit"
+        );
+        let faint = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&faint, &reference);
+        assert!(
+            mean < 0.004,
+            "half-opaque group: mean {mean:.5}, worst {worst:.3}"
+        );
+        // Half of what the group came to, not half of nothing: there is
+        // ink, and it is half-strength.
+        let inside = faint.get(15, 15);
+        assert!(
+            (inside.a - 0.5).abs() < 0.02 && inside.r > 0.2,
+            "the group came down at half strength: {inside:?}"
+        );
+        assert!(
+            (inside.a - reference.get(15, 15).a).abs() < 0.02,
+            "which is what the CPU makes of it too"
+        );
     }
 
     #[test]
@@ -2766,8 +2974,9 @@ mod tests {
         );
 
         // A mask on a group is a different thing — it holds what the
-        // group composites to, not each child on its own — and that
-        // still goes back to the CPU.
+        // group composites to, not each child on its own — so the group
+        // goes on a surface of its own and the mask holds the one quad
+        // that lays that surface down.
         let mut grouped = Document::new(60, 60, ColorMode::Rgb);
         let root = grouped.root();
         grouped
@@ -2799,8 +3008,51 @@ mod tests {
             })
             .unwrap();
         assert!(
-            !GpuRenderer::can_render(&grouped),
-            "a masked group is the CPU's"
+            GpuRenderer::can_render(&grouped),
+            "a masked group composites as a unit"
+        );
+        let held = gpu.render(&grouped).unwrap();
+        let by_cpu = chitrakar_render::render(&grouped).unwrap();
+        let (mean, worst) = difference(&held, &by_cpu);
+        assert!(
+            mean < 0.004,
+            "a masked group: mean {mean:.5} (worst {worst:.3})"
+        );
+        // The mask is a circle about (35,35); the square under it
+        // reaches to 40. Where the two agree there is ink, and in the
+        // corner of the square that the circle does not reach there is
+        // none.
+        assert!(
+            held.get(35, 35).a > 0.98 && held.get(5, 5).a < 0.02,
+            "inside the mask is painted and outside it is not: {:?} against {:?}",
+            held.get(35, 35),
+            held.get(5, 5)
+        );
+
+        // Two children overlapping inside a masked group: the mask has
+        // to hold what they composite to, not each of them, or the
+        // coverage would be taken twice where they meet — which shows
+        // as a darker seam under a soft edge. Both renderers say the
+        // same thing about that seam.
+        grouped
+            .apply(Command::AddNode {
+                parent: group,
+                index: 1,
+                node: filled("over", VectorShape::Ellipse { rx: 12.0, ry: 12.0 }, BLUE),
+            })
+            .unwrap();
+        let both = grouped.children_of(group).unwrap()[1];
+        grouped
+            .apply(Command::SetOpacity {
+                id: both,
+                opacity: 0.5,
+            })
+            .unwrap();
+        let overlapped = gpu.render(&grouped).unwrap();
+        let (mean, worst) = difference(&overlapped, &chitrakar_render::render(&grouped).unwrap());
+        assert!(
+            mean < 0.004,
+            "overlapping under one mask: mean {mean:.5} (worst {worst:.3})"
         );
     }
 
@@ -2915,6 +3167,95 @@ mod tests {
             );
             assert!(lost == 0, "and loses the half it does not: {lost}");
         }
+    }
+
+    /// Groups that composite as a unit, nested and side by side: the
+    /// surfaces they are drawn on stack, and two at the same depth take
+    /// turns on the same one, since a group's surface is laid down the
+    /// moment it is finished with.
+    #[test]
+    fn surfaces_stack_and_are_taken_in_turn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let root = doc.root();
+        // A half-opaque group holding a half-opaque group, beside two
+        // half-opaque groups that are siblings.
+        let group = |doc: &mut Document, parent: NodeId, name: &str, at: f32| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: Box::new(Node::group(name)),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at, 0.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+            id
+        };
+        let box_ = |doc: &mut Document, parent: NodeId, name: &str, color, at: f32| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: filled(
+                    name,
+                    VectorShape::Rect {
+                        width: 24.0,
+                        height: 24.0,
+                        radius: 0.0,
+                    },
+                    color,
+                ),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at, 10.0),
+            })
+            .unwrap();
+        };
+        let outer = group(&mut doc, root, "outer", 4.0);
+        box_(&mut doc, outer, "a", RED, 0.0);
+        let inner = group(&mut doc, outer, "inner", 16.0);
+        box_(&mut doc, inner, "b", BLUE, 0.0);
+
+        let one = group(&mut doc, root, "one", 64.0);
+        box_(&mut doc, one, "c", RED, 0.0);
+        let two = group(&mut doc, root, "two", 88.0);
+        box_(&mut doc, two, "d", BLUE, 0.0);
+
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.004,
+            "nested and side by side: mean {mean:.5} (worst {worst:.3})"
+        );
+        // Each of the four boxes is there, and the one inside two
+        // half-opaque groups is the faintest of them.
+        let deep = drawn.get(28, 20).a;
+        let shallow = drawn.get(10, 20).a;
+        assert!(
+            (shallow - 0.5).abs() < 0.03,
+            "one group deep is half strength: {shallow}"
+        );
+        assert!(
+            (deep - 0.25).abs() < 0.03,
+            "two groups deep is a quarter: {deep}"
+        );
+        assert!(
+            (drawn.get(70, 20).a - 0.5).abs() < 0.03 && (drawn.get(94, 20).a - 0.5).abs() < 0.03,
+            "and the two beside them took the same surface in turn"
+        );
     }
 
     #[test]

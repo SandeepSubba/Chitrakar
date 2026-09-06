@@ -649,7 +649,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~309),
+- **Verify before committing:** `cargo test --workspace` (~310),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -696,12 +696,23 @@ without reading anything else.*
   multiplied into every fragment, whichever kind of draw it belongs to
   (shape, stencilled path, stroke, text, image, gradient). Every mask
   works, cut from a shape or brushed on by hand, inverted or not, since
-  all of them are that one reading. A mask on a *group* is not: it holds
-  what the group composites to, and holding each child to it instead
-  would take the coverage twice where two of them overlap, so a masked
-  group still goes back to the CPU. It declines
-  anything else — masked groups, effects, filters,
-  adjustments, blend modes, a group that needs isolating, ink authored
+  all of them are that one reading. A mask on a *group* is a different
+  thing: it holds what the group composites to, and holding each child
+  to it instead would take the coverage twice where two of them overlap.
+  So a masked group is drawn on a surface of its own, and the mask holds
+  the one quad that lays that surface down. So is a group at less than
+  full opacity, for the same reason — the layers inside it meet each
+  other at full strength and the result comes down together, which is
+  not what taking each of their opacities down would give. A pass has
+  one set of attachments, so this means cutting the work into passes at
+  every group that composites as a unit: one surface per depth of
+  nesting, reused by every group at that depth, since a group's surface
+  is laid down the moment its contents are finished and nothing reads it
+  after. The multisampled attachment is kept only when its surface is
+  drawn on again, so a page without such a group costs exactly what it
+  did. It declines
+  anything else — effects, filters,
+  adjustments, blend modes, ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
   back to the CPU. Its tests render the same page both ways and compare: mean channel
@@ -714,9 +725,11 @@ without reading anything else.*
   there too.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is
-     effects, adjustments, blend modes and the isolation pass a masked
-     or part-opaque group wants (see docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is blend
+     modes, adjustments and effects — all three read what is under them,
+     which the surfaces a group that composites as a unit is already
+     drawn on are most of the way towards (see
+     docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each
