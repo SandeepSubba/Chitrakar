@@ -239,7 +239,10 @@ impl GpuRenderer {
             label: Some("page"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The fragment stage wants it too: a vignette is measured
+                // from the middle of the page out to its corner, so the
+                // page's own size is part of the reading.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -1253,6 +1256,16 @@ fn collect(
         // what decides what "under it" means: the CPU renderer asks the
         // same question, so both give the adjustment the same page to
         // work on.
+        // A layer that rewrites what is under it has nothing left over
+        // to blend against it, and the CPU renderer reads it that way:
+        // it hands an adjustment and a filter their opacity and their
+        // mask and never looks at the blend mode. A surface of its own
+        // would be a different picture, so hand the page over instead.
+        if matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+            && node.blend != BlendMode::Normal
+        {
+            return None;
+        }
         let alone = node.blend != BlendMode::Normal
             || (matches!(node.kind, NodeKind::Group)
                 && (node.opacity < 1.0
@@ -1345,6 +1358,17 @@ fn collect(
                 });
                 let quad = out.push(page_quad(doc, alpha, plan.params, plan.grad, plan.extra));
                 out.draws.push(Item::of(Draw::Adjust { quad, table }));
+            }
+            NodeKind::Filter(filter) => {
+                // A filter that is a function of one pixel and of where
+                // that pixel sits on the page is an adjustment in every
+                // way this backend cares about: it rewrites what is
+                // composited below it, from the same copy taken aside,
+                // in the same pass. The ones that read a neighbourhood
+                // are declined by `filter_of` and stay the CPU's.
+                let params = filter_of(filter)?;
+                let quad = out.push(page_quad(doc, alpha, params.0, params.1, [0.0; 3]));
+                out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
             }
             _ => return None,
         }
@@ -2011,6 +2035,36 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             ],
             table: None,
         },
+    })
+}
+
+/// What a filter's quad carries, or `None` for one this backend does not
+/// draw.
+///
+/// Blur, sharpen and pixelate each read a *neighbourhood* rather than a
+/// pixel: they want the surface under them sampled many times over, at
+/// offsets, which is passes of its own rather than the single copy-aside
+/// everything here works from. Until that exists they are the CPU's.
+fn filter_of(filter: &chitrakar_doc::Filter) -> Option<([f32; 4], [f32; 4])> {
+    use chitrakar_doc::Filter as F;
+    Some(match filter {
+        F::Vignette {
+            amount,
+            radius,
+            softness,
+        } => ([14.0, *amount, *radius, *softness], [0.0; 4]),
+        F::Noise {
+            amount,
+            grain,
+            mono,
+            seed,
+        } => (
+            [15.0, *amount, *grain, if *mono { 1.0 } else { 0.0 }],
+            // A seed is a whole 32 bits and a vertex carries floats, so
+            // it travels as two halves that a float holds exactly.
+            [(seed & 0xffff) as f32, (seed >> 16) as f32, 0.0, 0.0],
+        ),
+        F::GaussianBlur { .. } | F::Sharpen { .. } | F::Pixelate { .. } => return None,
     })
 }
 
@@ -4113,6 +4167,204 @@ mod tests {
             (weighed.get(10, 20).r - weighed.get(30, 20).r).abs() > 0.02,
             "and inside it, half inverted: {:?}",
             weighed.get(10, 20)
+        );
+    }
+
+    /// Filter layers. Two of the five are a function of one pixel and of
+    /// where that pixel is on the page, so they ride the same copy-aside
+    /// an adjustment does; the other three read a neighbourhood, and the
+    /// page goes back to the CPU for them.
+    #[test]
+    fn the_filters_that_read_one_pixel_are_drawn_the_way_the_cpu_draws_them() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let two_bands = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "dark",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.35,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "light",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.7,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(0.0, 20.0),
+            );
+            doc
+        };
+        let with = |filter: F| {
+            let mut doc = two_bands();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            doc
+        };
+
+        for filter in [
+            F::Vignette {
+                amount: 0.8,
+                radius: 0.2,
+                softness: 0.6,
+            },
+            F::Vignette {
+                amount: -0.5,
+                radius: 0.0,
+                softness: 0.0,
+            },
+            F::Noise {
+                amount: 0.5,
+                grain: 3.0,
+                mono: true,
+                seed: 0x9e37_79b9,
+            },
+            F::Noise {
+                amount: 0.4,
+                grain: 1.5,
+                mono: false,
+                seed: 7,
+            },
+        ] {
+            let doc = with(filter.clone());
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{filter:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            // Grain is a hash of the cell a pixel is in, so a shader that
+            // mixed its bits differently would not be close — it would be
+            // a different field of specks. This is a tight number on
+            // purpose.
+            assert!(
+                mean < 0.004,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            let bare = chitrakar_render::render(&two_bands()).unwrap();
+            let moved = |x: u32, y: u32| {
+                let (a, b) = (drawn.get(x, y), bare.get(x, y));
+                (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+            };
+            // A vignette leaves the middle alone and takes the corners,
+            // which is the whole point of it; grain is everywhere.
+            let (near, far) = (moved(30, 20), moved(2, 2));
+            assert!(far > 0.01, "{filter:?} reaches the corner: {far}");
+            if matches!(filter, F::Vignette { .. }) {
+                assert!(
+                    near < far,
+                    "{filter:?} holds the middle: {near} against {far}"
+                );
+            }
+        }
+
+        // The three that read a neighbourhood are still handed back.
+        for filter in [
+            F::GaussianBlur { sigma: 3.0 },
+            F::Sharpen {
+                sigma: 2.0,
+                amount: 0.5,
+            },
+            F::Pixelate { size: 6.0 },
+        ] {
+            assert!(
+                !GpuRenderer::can_render(&with(filter.clone())),
+                "{filter:?} reads a neighbourhood and belongs to the CPU"
+            );
+        }
+
+        // And a filter carrying a blend mode goes back too: the CPU
+        // renderer writes a filter straight into what it read and never
+        // looks at the mode, so a surface of its own here would be a
+        // different picture.
+        let mut doc = with(F::Vignette {
+            amount: 0.8,
+            radius: 0.2,
+            softness: 0.4,
+        });
+        let id = doc.children_of(doc.root()).unwrap()[2];
+        doc.apply(Command::SetBlendMode {
+            id,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        assert!(!GpuRenderer::can_render(&doc));
+
+        // Opacity and a mask weigh a filter exactly as they weigh an
+        // adjustment: half of it is half the difference it makes, and
+        // outside the mask there is none.
+        let mut doc = with(F::Vignette {
+            amount: 1.0,
+            radius: 0.0,
+            softness: 0.0,
+        });
+        let id = doc.children_of(doc.root()).unwrap()[2];
+        doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        let weighed = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&weighed, &reference);
+        assert!(
+            mean < 0.004,
+            "weighed by opacity and mask: mean {mean:.5} (worst {worst:.3})"
+        );
+        let bare = chitrakar_render::render(&two_bands()).unwrap();
+        assert!(
+            (weighed.get(45, 2).r - bare.get(45, 2).r).abs() < 0.002,
+            "the corner outside the mask is untouched"
+        );
+        // Inside it, taken down by half of what the vignette asked for.
+        // The corner sits 0.668 of the way out with nothing held back
+        // and no easing, so the reading is 1 − 1.0 × 0.5 × 0.668.
+        let ratio = weighed.get(14, 2).r / bare.get(14, 2).r;
+        assert!(
+            (ratio - 0.666).abs() < 0.01,
+            "and the corner inside it is taken down by half: {ratio}"
         );
     }
 

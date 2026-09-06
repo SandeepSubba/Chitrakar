@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~316),
+- **Verify before committing:** `cargo test --workspace` (~317),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -746,8 +746,13 @@ without reading anything else.*
   reads what is under it is isolated too, because that is what decides
   what "under it" means, and the CPU renderer asks the same question
   (`chitrakar_render::reads_backdrop`), so both give the adjustment the
-  same page to work on. It declines
-  anything else — effects, filters, ink authored
+  same page to work on. A filter layer that is a function of one pixel and of where
+  that pixel sits on the page — a vignette, a field of grain — is an
+  adjustment in every way this backend cares about, and rides the same
+  machinery; the grain is the CPU's own hash, arithmetic for arithmetic,
+  so both renderers speck a page the same way. It declines
+  anything else — effects, the filters that read a *neighbourhood*
+  (blur, sharpen, pixelate), ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
   back to the CPU. Its tests render the same page both ways and compare: mean channel
@@ -777,10 +782,11 @@ without reading anything else.*
   to the bit.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is filters
-     and live effects, which read a *neighbourhood* rather than a pixel
-     and so want passes of their own rather than the copy-aside
-     everything else uses (see docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is blur,
+     sharpen and pixelate, which read a *neighbourhood* rather than a
+     pixel and so want passes of their own rather than the copy-aside
+     everything else uses, and live effects, which are the same problem
+     read off a layer's own silhouette (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

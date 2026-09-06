@@ -717,13 +717,79 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     if weight <= 0.0 || was.a <= 0.0 {
         return was;
     }
+    let kind = i32(in.mode);
+    if kind >= 14 {
+        return filtered(kind, in.params, in.grad, in.page, was, weight);
+    }
     // Straight alpha in, premultiplied out, which is where the
     // adjustments are stated.
     let straight = was.rgb / was.a;
-    let kind = i32(in.mode);
     var out = adjusted(kind, in.params, in.grad, straight);
     if kind >= 10 {
         out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
     }
     return vec4f(mix(was.rgb, out * was.a, weight), was.a);
+}
+
+// The two filters that are a function of one pixel and of where that
+// pixel is on the page — the rest read a neighbourhood, which wants
+// passes of its own, and are still the CPU's.
+//
+// Both are stated on the premultiplied value the surface already holds,
+// and both fold the layer's weight into their own strength rather than
+// mixing the result against the original. That is what the CPU does,
+// and the two are not the same reading: a grain shift that clips is
+// clipped after it has been weakened, not before.
+fn filtered(kind: i32, p: vec4f, g: vec4f, at: vec2f, was: vec4f, weight: f32) -> vec4f {
+    if kind == 14 {
+        // Measured from the page's own middle in the page's own units,
+        // so panning slides the picture under the darkening rather than
+        // carrying the darkening along with it.
+        let mid = page.size * 0.5;
+        let far = max(length(mid), 1e-3);
+        let inner = clamp(p.z, 0.0, 0.999);
+        let ease = clamp(p.w, 0.0, 1.0);
+        let d = length(at - mid) / far;
+        let t = clamp((d - inner) / (1.0 - inner), 0.0, 1.0);
+        // Softness eases the shoulder: none of it is a straight ramp
+        // from where it begins, all of it a curve with no edge anywhere.
+        let fall = t + (t * t * (3.0 - 2.0 * t) - t) * ease;
+        let gain = max(1.0 - p.y * weight * fall, 0.0);
+        // Premultiplied, so scaling the three channels and leaving
+        // alpha alone darkens the colour without touching what is or is
+        // not covered.
+        return vec4f(was.rgb * gain, was.a);
+    }
+    // Grain. One speck is `p.z` page pixels across, so it grows with the
+    // picture rather than staying the size of a screen pixel, and it is
+    // a function of where the speck is and of the seed alone — nothing
+    // carried from the pixel before — which is what lets it be a live
+    // layer rather than something baked once.
+    let w = p.y * weight;
+    let cell = vec2i(floor(at / max(p.z, 1e-3)));
+    let seed = u32(g.x) + u32(g.y) * 65536u;
+    let one = (speck(cell, seed) - 0.5) * w;
+    // Every channel moved together is film grain; each moved on its own
+    // is a sensor's noise.
+    var shift = vec3f(one, one, one);
+    if p.w == 0.0 {
+        shift = vec3f(one, (speck(cell, seed + 1u) - 0.5) * w, (speck(cell, seed + 2u) - 0.5) * w);
+    }
+    // Premultiplied, so a shift is a share of the pixel's own alpha and
+    // a clear pixel stays clear.
+    return vec4f(clamp(was.rgb + shift * was.a, vec3f(0.0), vec3f(was.a)), was.a);
+}
+
+// A cheap integer hash: multiply, mix the halves, repeat. Good enough
+// that neighbouring cells look unrelated, which is all grain asks. The
+// CPU renderer's, arithmetic for arithmetic, so both grain the same page
+// the same way.
+fn speck(cell: vec2i, seed: u32) -> f32 {
+    var h = (bitcast<u32>(cell.x) * 0x8da6b343u) ^ (bitcast<u32>(cell.y) * 0xd8163841u) ^ seed;
+    h = h ^ (h >> 15u);
+    h = h * 0x2c1b3c6du;
+    h = h ^ (h >> 12u);
+    h = h * 0x29715aebu;
+    h = h ^ (h >> 16u);
+    return f32(h) / 4294967295.0;
 }
