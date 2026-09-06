@@ -157,6 +157,10 @@ enum Draw {
         quad: std::ops::Range<u32>,
         texture: usize,
     },
+    /// An adjustment layer: the quad over the page whose fragment reads
+    /// what is under it — from the copy a blend reads too — and writes
+    /// the adjusted answer back over it.
+    Adjust { quad: std::ops::Range<u32> },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -183,6 +187,8 @@ pub struct GpuRenderer {
     /// blend mode, which the fragment works out in full and writes over
     /// what was there.
     blend: wgpu::RenderPipeline,
+    /// An adjustment layer, rewriting what is composited below it.
+    adjust: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
     /// instead of a flat colour.
     shape_gradient: wgpu::RenderPipeline,
@@ -466,6 +472,35 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // An adjustment layer: the same quad again, its fragment reading
+        // what is under it and writing the answer back over it.
+        let adjust = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("adjust"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_adjust"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes"),
             layout: Some(&pipeline_layout),
@@ -602,6 +637,7 @@ impl GpuRenderer {
             cover,
             image,
             blend,
+            adjust,
             shape_gradient,
             cover_gradient,
             union,
@@ -832,7 +868,7 @@ impl GpuRenderer {
         // begins.
         let blending = passes
             .iter()
-            .any(|p| p.lay.as_ref().is_some_and(|l| l.blend != BlendMode::Normal));
+            .any(|p| p.lay.as_ref().is_some_and(Opening::reads_under));
         let under = blending.then(|| {
             let backdrop = make(
                 "backdrop",
@@ -867,9 +903,10 @@ impl GpuRenderer {
             // brought back. Every other pass throws it away, as the one
             // pass a page without groups needs always did.
             let again = passes[n + 1..].iter().any(|p| p.target == step.target);
-            // Take the copy a blend will read before the pass starts.
+            // Take the copy before the pass starts, for what will read
+            // what is already there.
             if let (Some(laid), Some((backdrop, _))) = (&step.lay, &under) {
-                if laid.blend != BlendMode::Normal {
+                if laid.reads_under() {
                     encoder.copy_texture_to_texture(
                         wgpu::ImageCopyTexture {
                             texture: resolved(step.target),
@@ -932,16 +969,31 @@ impl GpuRenderer {
                 // A group's surface comes down first, over whatever was
                 // already on this one.
                 if let Some(laid) = &step.lay {
-                    match (&under, laid.blend) {
-                        (Some((_, backdrop)), blend) if blend != BlendMode::Normal => {
-                            pass.set_pipeline(&self.blend);
-                            pass.set_bind_group(3, backdrop, &[]);
-                        }
-                        _ => pass.set_pipeline(&self.image),
+                    if let Some((_, backdrop)) = &under {
+                        pass.set_bind_group(3, backdrop, &[]);
                     }
-                    pass.set_bind_group(1, &surfaces[laid.from - 1].2, &[]);
-                    pass.set_bind_group(2, laid.mask.map_or(&self.open, |at| &textures[at]), &[]);
-                    pass.draw(laid.quad.clone(), 0..1);
+                    let (quad, mask) = match laid {
+                        Opening::Lay {
+                            from,
+                            quad,
+                            mask,
+                            blend,
+                        } => {
+                            if *blend == BlendMode::Normal || under.is_none() {
+                                pass.set_pipeline(&self.image);
+                            } else {
+                                pass.set_pipeline(&self.blend);
+                            }
+                            pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
+                            (quad, mask)
+                        }
+                        Opening::Adjust { quad, mask } => {
+                            pass.set_pipeline(&self.adjust);
+                            (quad, mask)
+                        }
+                    };
+                    pass.set_bind_group(2, mask.map_or(&self.open, |at| &textures[at]), &[]);
+                    pass.draw(quad.clone(), 0..1);
                 }
                 for item in &scene.draws[step.items.clone()] {
                     // A masked layer holds its fragments to the coverage
@@ -997,9 +1049,9 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &textures[*texture], &[]);
                             pass.draw(quad.clone(), 0..1);
                         }
-                        // The two markers are where the passes were cut;
-                        // nothing of them is left to draw here.
-                        Draw::Open | Draw::Close { .. } => {}
+                        // The three that cut a pass are drawn as its
+                        // opening, above; nothing of them is left here.
+                        Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } => {}
                     }
                 }
             }
@@ -1188,9 +1240,16 @@ fn collect(
         //
         // A masked *leaf* is not one of them: its mask is a coverage its
         // own fragments can be multiplied by, exactly.
+        // A group holding something that reads what is under it — an
+        // adjustment, another blend — is isolated too, because that is
+        // what decides what "under it" means: the CPU renderer asks the
+        // same question, so both give the adjustment the same page to
+        // work on.
         let alone = node.blend != BlendMode::Normal
             || (matches!(node.kind, NodeKind::Group)
-                && (node.opacity < 1.0 || node.mask.is_some()));
+                && (node.opacity < 1.0
+                    || node.mask.is_some()
+                    || chitrakar_render::reads_backdrop(doc, child).ok()?));
         if alone {
             out.draws.push(Item::of(Draw::Open));
         }
@@ -1265,13 +1324,27 @@ fn collect(
                 let color = premultiplied_color(spec.fill, alpha)?;
                 text(spec, t, color, out)?;
             }
+            NodeKind::Adjustment(adj) => {
+                // An adjustment rewrites what is composited below it,
+                // weighted by its own opacity and its mask. It reads
+                // that from the copy a blend reads, which means a pass
+                // of its own, which `plan` cuts for it.
+                let (params, grad) = adjustment_of(adj)?;
+                let quad = out.push(page_quad(doc, alpha, params, grad));
+                out.draws.push(Item::of(Draw::Adjust { quad }));
+            }
             _ => return None,
         }
         if alone {
             // The mask and the opacity go on the quad that lays the
             // surface down, not on what was drawn into it.
             mark = (out.vertices.len(), out.draws.len());
-            let quad = out.push(page_quad(doc, node.opacity * opacity, node.blend));
+            let quad = out.push(page_quad(
+                doc,
+                node.opacity * opacity,
+                [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
+                [0.0; 4],
+            ));
             out.draws.push(Item::of(Draw::Close {
                 quad,
                 blend: node.blend,
@@ -1311,10 +1384,10 @@ fn mask_texture(
     let (bx0, by0, bx1, by1) = match chitrakar_render::node_bounds(doc, id).ok()? {
         chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
         // A layer that reaches nowhere has nothing for a mask to hold
-        // back; one that reaches everywhere is not a leaf this backend
-        // draws.
+        // back; one that reaches everywhere — an adjustment — wants the
+        // whole page.
         chitrakar_render::Bounds::None => return Some((None, NO_MASK)),
-        chitrakar_render::Bounds::Everything => return None,
+        chitrakar_render::Bounds::Everything => (0.0, 0.0, page.0 as f32, page.1 as f32),
     };
     // A pixel of margin: the quads are grown by a device pixel so an
     // edge is not cut short, and the coverage has to reach as far.
@@ -1782,6 +1855,49 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
     }
 }
 
+/// The parameters an adjustment is stated by, laid out the way the
+/// shader reads them: which adjustment it is, then up to seven numbers.
+/// `None` for the ones this backend has not learnt — a curve and a
+/// gradient map are read off tables, and the two that speak in bands of
+/// colour want the whole HSL round trip, so they wait.
+fn adjustment_of(adj: &chitrakar_doc::Adjustment) -> Option<([f32; 4], [f32; 4])> {
+    use chitrakar_doc::Adjustment as A;
+    Some(match adj {
+        A::Exposure { stops } => ([1.0, *stops, 0.0, 0.0], [0.0; 4]),
+        A::BrightnessContrast {
+            brightness,
+            contrast,
+        } => ([2.0, *brightness, *contrast, 0.0], [0.0; 4]),
+        A::HueSaturation {
+            hue_degrees,
+            saturation,
+            lightness,
+        } => ([3.0, *hue_degrees, *saturation, *lightness], [0.0; 4]),
+        A::Levels {
+            in_black,
+            in_white,
+            gamma,
+            out_black,
+            out_white,
+        } => (
+            [4.0, *in_black, *in_white, *gamma],
+            [*out_black, *out_white, 0.0, 0.0],
+        ),
+        A::WhiteBalance { temperature, tint } => ([5.0, *temperature, *tint, 0.0], [0.0; 4]),
+        A::Vibrance { amount } => ([6.0, *amount, 0.0, 0.0], [0.0; 4]),
+        A::BlackAndWhite { red, green, blue } => ([7.0, *red, *green, *blue], [0.0; 4]),
+        A::Invert { amount } => ([8.0, *amount, 0.0, 0.0], [0.0; 4]),
+        A::ShadowsHighlights {
+            shadows,
+            highlights,
+        } => ([9.0, *shadows, *highlights, 0.0], [0.0; 4]),
+        A::Curves { .. }
+        | A::GradientMap { .. }
+        | A::SelectiveHsl { .. }
+        | A::ColorBalance { .. } => return None,
+    })
+}
+
 /// Which arm of the shader's `blended` a mode is. The order is the
 /// shader's; Normal is zero and never reaches it, since a layer that
 /// composites normally is laid down by the plain image pipeline.
@@ -1814,19 +1930,40 @@ struct Pass {
     /// depth of nesting.
     target: usize,
     clear: bool,
-    lay: Option<Laid>,
+    lay: Option<Opening>,
     items: std::ops::Range<usize>,
 }
 
-/// A finished group's surface, coming back down onto the one under it.
-struct Laid {
-    from: usize,
-    quad: std::ops::Range<u32>,
-    mask: Option<usize>,
-    /// How it meets what is under it. Anything but `Normal` needs a copy
-    /// of that to read, since a pass cannot sample what it is drawing
-    /// into.
-    blend: BlendMode,
+/// What a pass does before its own items: something that reads the
+/// surface it is drawing onto, which is why the pass had to start here
+/// at all.
+enum Opening {
+    /// A finished group's surface, coming back down onto the one under
+    /// it. Anything but a `Normal` blend reads what is under it, and a
+    /// pass cannot sample what it is drawing into, so that is read from
+    /// a copy taken first.
+    Lay {
+        from: usize,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+        blend: BlendMode,
+    },
+    /// An adjustment layer, which reads everything composited below it
+    /// and writes the answer back over it — always from the copy.
+    Adjust {
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
+}
+
+impl Opening {
+    /// Whether it wants the copy of what is already on the surface.
+    fn reads_under(&self) -> bool {
+        match self {
+            Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
+            Opening::Adjust { .. } => true,
+        }
+    }
 }
 
 /// Cut the items into passes at every `Open` and `Close`. A pass has one
@@ -1842,29 +1979,41 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
     let mut stack = vec![0usize];
     let (mut start, mut clear, mut lay) = (0usize, true, None);
     for (i, item) in draws.iter().enumerate() {
-        let (open, close) = match &item.draw {
-            Draw::Open => (true, None),
-            Draw::Close { quad, blend } => (false, Some((quad.clone(), *blend))),
+        // Only the three that change what the pass is drawing on, or
+        // want to read it, cut it.
+        match &item.draw {
+            Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } => {}
             _ => continue,
-        };
+        }
         passes.push(Pass {
             target: *stack.last().unwrap(),
             clear,
             lay: lay.take(),
             items: start..i,
         });
-        if open {
-            stack.push(stack.len());
-            clear = true;
-        } else {
-            let from = stack.pop().unwrap_or(0);
-            clear = false;
-            lay = close.map(|(quad, blend)| Laid {
-                from,
-                quad,
-                mask: item.mask,
-                blend,
-            });
+        match &item.draw {
+            Draw::Open => {
+                stack.push(stack.len());
+                clear = true;
+            }
+            Draw::Close { quad, blend } => {
+                let from = stack.pop().unwrap_or(0);
+                clear = false;
+                lay = Some(Opening::Lay {
+                    from,
+                    quad: quad.clone(),
+                    mask: item.mask,
+                    blend: *blend,
+                });
+            }
+            Draw::Adjust { quad } => {
+                clear = false;
+                lay = Some(Opening::Adjust {
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
+            }
+            _ => unreachable!("only the three above cut a pass"),
         }
         start = i + 1;
     }
@@ -1881,14 +2030,14 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
 /// that covers it: what lays an isolated group's surface back down.
 /// `alpha` is the group's own opacity, which the image fragment reads
 /// off the colour the way a placed picture's does.
-fn page_quad(doc: &Document, alpha: f32, blend: BlendMode) -> Vec<Vertex> {
+fn page_quad(doc: &Document, alpha: f32, params: [f32; 4], grad: [f32; 4]) -> Vec<Vertex> {
     let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
     let corner = |u: f32, v: f32| Vertex {
         doc: [u * w, v * h],
         local: [u, v],
-        params: [blend_index(blend) as f32, 0.0, 0.0, 0.0],
+        params,
         color: [0.0, 0.0, 0.0, alpha],
-        grad: [0.0; 4],
+        grad,
         mask: NO_MASK,
     };
     vec![
@@ -3640,6 +3789,232 @@ mod tests {
             (held.get(70, 50).r - reference.get(70, 50).r).abs() < 0.01,
             "outside the mask nothing of the group is left: {:?}",
             held.get(70, 50)
+        );
+    }
+
+    /// Adjustment layers: each rewrites what is composited below it, and
+    /// each is held against the CPU's own answer. The ones stated by a
+    /// table — a curve, a gradient map — and the two that speak in bands
+    /// of colour are not here yet, and the page goes back for them.
+    #[test]
+    fn adjustment_layers_rewrite_the_page_the_way_the_cpu_does() {
+        use chitrakar_doc::Adjustment as A;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let known = [
+            A::Exposure { stops: 0.8 },
+            A::BrightnessContrast {
+                brightness: 0.15,
+                contrast: 0.4,
+            },
+            A::HueSaturation {
+                hue_degrees: 40.0,
+                saturation: 0.3,
+                lightness: 0.05,
+            },
+            A::Levels {
+                in_black: 0.1,
+                in_white: 0.85,
+                gamma: 1.4,
+                out_black: 0.05,
+                out_white: 0.95,
+            },
+            A::WhiteBalance {
+                temperature: 0.4,
+                tint: -0.2,
+            },
+            A::Vibrance { amount: 0.7 },
+            A::BlackAndWhite {
+                red: 0.5,
+                green: 0.3,
+                blue: 0.2,
+            },
+            A::Invert { amount: 1.0 },
+            A::ShadowsHighlights {
+                shadows: 0.6,
+                highlights: 0.5,
+            },
+        ];
+        for adj in known {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "dark",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.35,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "light",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.7,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(0.0, 20.0),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::adjustment("adj", adj.clone())),
+            })
+            .unwrap();
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{adj:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{adj:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            // It did something, and to both halves of the page.
+            let bare = chitrakar_render::render(&{
+                let mut without = doc.clone();
+                let id = without.children_of(root).unwrap()[2];
+                without.apply(Command::RemoveNode { id }).unwrap();
+                without
+            })
+            .unwrap();
+            let moved = |x: u32, y: u32| {
+                let (a, b) = (drawn.get(x, y), bare.get(x, y));
+                (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+            };
+            assert!(
+                moved(30, 10) > 0.01 && moved(30, 30) > 0.01,
+                "{adj:?} reaches both halves: {} and {}",
+                moved(30, 10),
+                moved(30, 30)
+            );
+        }
+
+        // Its opacity and its mask weigh it, and half of it is half of
+        // the difference it makes.
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "under",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.4,
+                    g: 0.5,
+                    b: 0.6,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment("half", A::Invert { amount: 1.0 })),
+        })
+        .unwrap();
+        let adj = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetOpacity {
+            id: adj,
+            opacity: 0.5,
+        })
+        .unwrap();
+        doc.apply(Command::SetMask {
+            id: adj,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        let weighed = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&weighed, &reference);
+        assert!(
+            mean < 0.004,
+            "weighed by opacity and mask: mean {mean:.5} (worst {worst:.3})"
+        );
+        assert!(
+            (weighed.get(30, 20).r - 0.133).abs() < 0.02,
+            "outside the mask it is untouched: {:?}",
+            weighed.get(30, 20)
+        );
+        assert!(
+            (weighed.get(10, 20).r - weighed.get(30, 20).r).abs() > 0.02,
+            "and inside it, half inverted: {:?}",
+            weighed.get(10, 20)
+        );
+
+        // A curve is stated by a table this backend has not learnt, so
+        // the page goes back rather than coming out wrong.
+        let mut curved = Document::new(20, 20, ColorMode::Rgb);
+        let rect = add(
+            &mut curved,
+            filled(
+                "r",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            Transform::default(),
+        );
+        let _ = rect;
+        let root = curved.root();
+        curved
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "curve",
+                    A::Curves {
+                        points: vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]],
+                        red: Vec::new(),
+                        green: Vec::new(),
+                        blue: Vec::new(),
+                    },
+                )),
+            })
+            .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&curved),
+            "a curve is still the CPU's"
         );
     }
 

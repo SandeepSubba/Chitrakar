@@ -293,7 +293,7 @@ pub fn ancestor_space(doc: &Document, id: NodeId) -> Transform {
 /// than Normal read the backdrop, and so do adjustment and filter layers;
 /// a nested group that isolates itself does not, because it hands back a
 /// composite either way.
-fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
+pub fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
     for &child in doc.children_of(group)? {
         let node = doc.node(child)?;
         if node.blend != BlendMode::Normal {

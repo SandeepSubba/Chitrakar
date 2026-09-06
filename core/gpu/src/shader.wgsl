@@ -194,8 +194,12 @@ struct ImageOut {
     @location(2) page: vec2f,
     @location(3) @interpolate(flat) mask: vec4f,
     // Which blend mode brings this down onto what is under it, for the
-    // one quad that lays an isolated layer's surface back on the page.
+    // one quad that lays an isolated layer's surface back on the page —
+    // or, for an adjustment layer's quad, which adjustment it is and
+    // what it was asked for.
     @location(4) @interpolate(flat) mode: f32,
+    @location(5) @interpolate(flat) params: vec4f,
+    @location(6) @interpolate(flat) grad: vec4f,
 };
 
 @group(1) @binding(0) var image: texture_2d<f32>;
@@ -207,6 +211,7 @@ fn vs_image(
     @location(1) uv: vec2f,
     @location(2) params: vec4f,
     @location(3) color: vec4f,
+    @location(4) grad: vec4f,
     @location(5) mask: vec4f,
 ) -> ImageOut {
     var out: ImageOut;
@@ -216,6 +221,8 @@ fn vs_image(
     out.page = doc;
     out.mask = mask;
     out.mode = params.x;
+    out.params = params;
+    out.grad = grad;
     return out;
 }
 
@@ -451,4 +458,116 @@ fn fs_blend(in: ImageOut) -> @location(0) vec4f {
         (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
         sa + da * (1.0 - sa),
     );
+}
+
+// An adjustment layer rewrites everything composited below it, weighted
+// by its own opacity and by its mask. It reads what is under it the way
+// a blend does — from a copy taken before the pass — and writes the
+// answer over what was there.
+//
+// The arithmetic is the CPU renderer's, arm for arm: some of it works in
+// linear light and some on the values a device shows, and which is which
+// is a decision that belongs to the adjustment rather than to the
+// renderer drawing it.
+fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
+    switch kind {
+        // Exposure: stops, which is a gain.
+        case 1: {
+            return c * pow(2.0, p.y);
+        }
+        // Brightness and contrast, about the middle.
+        case 2: {
+            return clamp((c + vec3f(p.y) - vec3f(0.5)) * (1.0 + p.z) + vec3f(0.5), vec3f(0.0), vec3f(1.0));
+        }
+        // Hue rotation (the feColorMatrix one), then saturation about
+        // the pixel's own luminance, then a lightness offset.
+        case 3: {
+            let a = radians(p.y);
+            let sn = sin(a);
+            let cs = cos(a);
+            let m0 = vec3f(0.213 + cs * 0.787 - sn * 0.213, 0.715 - cs * 0.715 - sn * 0.715, 0.072 - cs * 0.072 + sn * 0.928);
+            let m1 = vec3f(0.213 - cs * 0.213 + sn * 0.143, 0.715 + cs * 0.285 + sn * 0.140, 0.072 - cs * 0.072 - sn * 0.283);
+            let m2 = vec3f(0.213 - cs * 0.213 - sn * 0.787, 0.715 - cs * 0.715 + sn * 0.715, 0.072 + cs * 0.928 + sn * 0.072);
+            let turned = vec3f(dot(m0, c), dot(m1, c), dot(m2, c));
+            let l = dot(vec3f(0.2126, 0.7152, 0.0722), turned);
+            return clamp(vec3f(l) + (turned - vec3f(l)) * (1.0 + p.z) + vec3f(p.w), vec3f(0.0), vec3f(1.0));
+        }
+        // Levels: an input range, a gamma, an output range.
+        case 4: {
+            let span = max(p.z - p.y, 1e-3);
+            let e = 1.0 / max(p.w, 0.05);
+            let v = pow(clamp((c - vec3f(p.y)) / span, vec3f(0.0), vec3f(1.0)), vec3f(e));
+            return clamp(vec3f(q.x) + v * (q.y - q.x), vec3f(0.0), vec3f(1.0));
+        }
+        // White balance: a gain per channel, half the slider's travel at
+        // each end so the extremes still hold a picture.
+        case 5: {
+            let warm = clamp(p.y, -1.0, 1.0) * 0.5;
+            let mag = clamp(p.z, -1.0, 1.0) * 0.5;
+            return clamp(c * vec3f(1.0 + warm, 1.0 - mag, 1.0 - warm), vec3f(0.0), vec3f(1.0));
+        }
+        // Vibrance: saturation weighted by how much colour there is
+        // already, measured as a fraction of the pixel's own brightness.
+        case 6: {
+            let l = dot(vec3f(0.2126, 0.7152, 0.0722), c);
+            let top = max(c.r, max(c.g, c.b));
+            var sat = 0.0;
+            if top > 1e-6 {
+                sat = (top - min(c.r, min(c.g, c.b))) / top;
+            }
+            let s = 1.0 + p.y * (1.0 - clamp(sat, 0.0, 1.0));
+            return clamp(vec3f(l) + (c - vec3f(l)) * s, vec3f(0.0), vec3f(1.0));
+        }
+        // Black and white: a recipe, normalized by its own total.
+        case 7: {
+            var w = vec3f(p.y, p.z, p.w);
+            let total = w.r + w.g + w.b;
+            if abs(total) < 1e-4 {
+                w = vec3f(0.2126, 0.7152, 0.0722);
+            } else {
+                w = w / total;
+            }
+            return vec3f(clamp(dot(c, w), 0.0, 1.0));
+        }
+        // Inverted on the values a device shows: linear 0.5 shows as 188
+        // and would come back a near-black rather than itself.
+        case 8: {
+            let k = clamp(p.y, 0.0, 1.0);
+            let s = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let f = s + (vec3f(1.0) - s - s) * k;
+            return vec3f(to_light(f.r), to_light(f.g), to_light(f.b));
+        }
+        // Shadows and highlights: each end pulls as the cube of the
+        // distance from the other, and what moves is the brightness —
+        // the colour comes along with it.
+        case 9: {
+            let l = clamp(dot(vec3f(0.2126, 0.7152, 0.0722), c), 0.0, 1.0);
+            let s = to_shown(l);
+            let lo = clamp(p.y, -1.0, 1.0);
+            let hi = clamp(p.z, -1.0, 1.0);
+            let moved = 0.5 * (lo * (1.0 - s) * (1.0 - s) * (1.0 - s) - hi * s * s * s);
+            let want = to_light(clamp(s + moved, 0.0, 1.0));
+            if l <= 1e-6 {
+                return vec3f(want);
+            }
+            return c * (want / l);
+        }
+        default: {
+            return c;
+        }
+    }
+}
+
+@fragment
+fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
+    let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    let weight = in.alpha * mask_cover(in.page, in.mask);
+    if weight <= 0.0 || was.a <= 0.0 {
+        return was;
+    }
+    // Straight alpha in, premultiplied out, which is where the
+    // adjustments are stated.
+    let straight = was.rgb / was.a;
+    let done = adjusted(i32(in.mode), in.params, in.grad, straight) * was.a;
+    return vec4f(mix(was.rgb, done, weight), was.a);
 }

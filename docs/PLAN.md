@@ -649,7 +649,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~312),
+- **Verify before committing:** `cargo test --workspace` (~313),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -720,9 +720,22 @@ without reading anything else.*
   the passes run in order and it is spent before the next begins. Every
   mode is held against the CPU's own answer, and where there is no layer
   the answer is what was already there, so the rest of the page comes
-  through untouched. It declines
+  through untouched. An adjustment layer works the same way and reads the
+  same copy: it rewrites everything composited below it, weighted by its
+  own opacity and its mask, with the arithmetic stated arm for arm as
+  the CPU states it — some of it in linear light, some on the values a
+  device shows, which is a decision that belongs to the adjustment
+  rather than to the renderer drawing it. Nine of them so far (exposure,
+  brightness/contrast, hue/saturation, levels, white balance, vibrance,
+  black and white, invert, shadows and highlights); the ones stated by a
+  table — curves, gradient map — and the two that speak in bands of
+  colour hand the page back for now. A group holding something that
+  reads what is under it is isolated too, because that is what decides
+  what "under it" means, and the CPU renderer asks the same question
+  (`chitrakar_render::reads_backdrop`), so both give the adjustment the
+  same page to work on. It declines
   anything else — effects, filters,
-  adjustments, ink authored
+  the four adjustments above, ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
   back to the CPU. Its tests render the same page both ways and compare: mean channel
@@ -735,10 +748,11 @@ without reading anything else.*
   there too.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is
-     adjustments and filters, which read what is under them the way a
-     blend does and so want the same copy-aside a blend already takes
-     (see docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is the
+     four adjustments stated by a table or in bands of colour, then
+     filters and live effects, which read a *neighbourhood* rather than
+     a pixel and so want a pass of their own rather than the copy-aside
+     the rest use (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each
