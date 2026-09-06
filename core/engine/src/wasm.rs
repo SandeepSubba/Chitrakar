@@ -622,10 +622,29 @@ impl WasmSession {
         serde_json::to_string(&self.inner.selection()).unwrap_or_else(|_| "null".into())
     }
 
-    /// Give a layer the region picked out of the page as its mask.
-    pub fn mask_from_selection(&mut self, id: f64) -> Result<(), JsError> {
+    /// Give a layer the region picked out of the page as its mask, or —
+    /// with `hide` — everything but that region, which is what deleting
+    /// a selection means, done without cutting anything out.
+    pub fn mask_from_selection(&mut self, id: f64, hide: bool) -> Result<(), JsError> {
         self.inner
-            .mask_from_selection(NodeId(id as u64))
+            .mask_from_selection(NodeId(id as u64), hide)
+            .map_err(to_js)
+    }
+
+    /// Take the page in to what is picked out.
+    pub fn crop_to_selection(&mut self) -> Result<(), JsError> {
+        self.inner.crop_to_selection().map_err(to_js)
+    }
+
+    /// Turn what is picked out into a shape layer of its own, in the
+    /// colour given as an AuthoredColor's JSON — the same way every
+    /// other colour crosses this boundary. Returns the new layer's id.
+    pub fn fill_selection(&mut self, color_json: &str) -> Result<f64, JsError> {
+        let color =
+            serde_json::from_str(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        self.inner
+            .fill_selection(color)
+            .map(|id| id.0 as f64)
             .map_err(to_js)
     }
 

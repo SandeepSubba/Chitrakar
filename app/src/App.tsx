@@ -1428,13 +1428,38 @@ export function App() {
   /** Hand the region to the picked layer as its mask. This is what a
    * selection is for in a non-destructive editor: nothing is cut out,
    * the layer is simply held to the part of it that was picked. */
-  const maskFromSelection = () => {
+  const maskFromSelection = (hide: boolean) => {
     if (!session || selected === null) return;
     try {
-      session.mask_from_selection(selected);
+      session.mask_from_selection(selected, hide);
       refresh(session);
     } catch (err) {
       alert(`Mask: ${err}`);
+    }
+  };
+  /** The region as a shape layer of its own, in the fill colour. A lasso
+   * is the only way to draw some of these shapes at all. */
+  const fillSelection = () => {
+    if (!session) return;
+    try {
+      const paint = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+      const id = session.fill_selection(JSON.stringify(paint)) as number;
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Fill: ${err}`);
+    }
+  };
+  const cropToSelection = () => {
+    if (!session) return;
+    try {
+      session.crop_to_selection();
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Crop: ${err}`);
     }
   };
 
@@ -5876,8 +5901,17 @@ export function App() {
             <MenuItem icon="lasso" onClick={pickNothing}>
               Pick out nothing
             </MenuItem>
-            <MenuItem icon="mask" onClick={maskFromSelection}>
+            <MenuItem icon="fill" onClick={fillSelection}>
+              Fill what is picked
+            </MenuItem>
+            <MenuItem icon="mask" onClick={() => maskFromSelection(false)}>
               Mask this layer with what is picked
+            </MenuItem>
+            <MenuItem icon="trash" onClick={() => maskFromSelection(true)}>
+              Hide what is picked, from this layer
+            </MenuItem>
+            <MenuItem icon="crop" onClick={cropToSelection}>
+              Crop the page to what is picked
             </MenuItem>
           </MenuButton>
 

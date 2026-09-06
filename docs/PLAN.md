@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~325),
+- **Verify before committing:** `cargo test --workspace` (~326),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~849 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~856 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -930,8 +930,17 @@ without reading anything else.*
   page with a marquee in hand and every layer otherwise, since the tool
   in hand is the clearest signal of which of the two "select all" is
   meant; both are in the Edit menu either way, beside "pick out the rest
-  instead" and the one that is the point of all of it — mask this layer
-  with what is picked.
+  instead" and the four things a region is good for. Mask this layer
+  with what is picked, and its opposite — hide what is picked, which is
+  what deleting a selection means done by holding the layer to
+  everything *but* the region, so the layer is whole underneath and the
+  region can be changed its mind about. Fill it, which turns the region
+  into a shape layer of its own: a layer like any other afterwards, and
+  for a lasso the only way to draw that shape at all (inverted, it fills
+  the rest of the page — the page's own rectangle with the region as a
+  hole, which is what an even-odd path means by a ring inside a ring).
+  And crop the page to it, which is the resize the crop tool already
+  does with the region standing in for the rectangle.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

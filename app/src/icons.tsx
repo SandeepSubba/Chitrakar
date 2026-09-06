@@ -59,6 +59,7 @@ export type IconName =
   | "eye"
   | "eyeOff"
   | "mask"
+  | "fill"
   | "group-layer"
   | "adjust"
   | "filter"
@@ -159,6 +160,12 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   move: <path d="M5 3l14 8-6 1.6L10.5 19z" />,
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
+  fill: (
+    <>
+      <path d="M4 13.5 11 6.5l6.5 6.5-7 7z" />
+      <path d="M20 16.5c0 1.1-.7 2-1.7 2s-1.8-.9-1.8-2 1.8-3 1.8-3 1.7 1.9 1.7 3z" />
+    </>
+  ),
   // The three that pick a region out of the page. Dashed, because that
   // is what a selection looks like once it is made, and because it is
   // the one thing that tells them apart from the shapes they echo.

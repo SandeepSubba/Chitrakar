@@ -2600,10 +2600,18 @@ impl Session {
     /// the page's space and a mask in the space its layer is placed in,
     /// so it is carried across; the two are the same kind of thing
     /// either side of that.
-    pub fn mask_from_selection(&mut self, id: NodeId) -> Result<(), EngineError> {
-        let Some(selection) = self.doc.selection().cloned() else {
+    pub fn mask_from_selection(&mut self, id: NodeId, hide: bool) -> Result<(), EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
+        // The other way round: hold the layer to everything *but* what
+        // is picked, which is what deleting a selection means in an
+        // editor that cuts pixels out — done here by hiding them, so
+        // the layer is whole underneath and the region can be changed
+        // its mind about.
+        if hide {
+            selection.invert = !selection.invert;
+        }
         let parent = chitrakar_render::ancestor_space(&self.doc, id);
         let det = parent.a * parent.d - parent.b * parent.c;
         if det.abs() < 1e-9 {
@@ -2648,8 +2656,129 @@ impl Session {
                 id,
                 mask: Some(Box::new(mask)),
             },
-            Some("Mask from selection".into()),
+            Some(if hide {
+                "Hide what is picked".into()
+            } else {
+                "Mask from selection".into()
+            }),
         )
+    }
+
+    /// The page-space box round what is picked out.
+    pub fn selection_bounds(&self) -> Option<[f32; 4]> {
+        let rings = Self::region_rings(self.doc.selection()?).ok()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        x0.is_finite().then_some([x0, y0, x1, y1])
+    }
+
+    /// Take the page in to what is picked out.
+    ///
+    /// The same crop the tool draws, with the region standing in for the
+    /// rectangle: which is the use for a marquee that wants no new
+    /// machinery at all, since a crop is a resize and the region already
+    /// knows the box it fits in.
+    pub fn crop_to_selection(&mut self) -> Result<(), EngineError> {
+        let Some([x0, y0, x1, y1]) = self.selection_bounds() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let page = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        let (x0, y0) = (x0.max(0.0).floor(), y0.max(0.0).floor());
+        let (x1, y1) = (x1.min(page.0).ceil(), y1.min(page.1).ceil());
+        let (w, h) = ((x1 - x0) as i64, (y1 - y0) as i64);
+        if w < 1 || h < 1 {
+            return Err(EngineError::BadCommand(
+                "what is picked out is not on the page".into(),
+            ));
+        }
+        self.apply_labeled(
+            Command::ResizeCanvas {
+                width: w as u32,
+                height: h as u32,
+                dx: -x0,
+                dy: -y0,
+            },
+            Some("Crop to what is picked".into()),
+        )
+    }
+
+    /// Turn what is picked out into a shape layer of its own, in `color`.
+    ///
+    /// Filling a region in an editor that cuts pixels would put paint on
+    /// a layer. Here it makes the region into artwork — a shape with the
+    /// outline that was picked — which is a layer like any other
+    /// afterwards: moved, recoloured, given a gradient, taken away.
+    /// A lasso is the only way to draw some of these shapes at all.
+    pub fn fill_selection(
+        &mut self,
+        color: chitrakar_color::AuthoredColor,
+    ) -> Result<NodeId, EngineError> {
+        let Some(mask) = self.doc.selection() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let inverted = mask.invert;
+        let mut rings = Self::region_rings(&chitrakar_doc::Mask {
+            invert: false,
+            ..mask.clone()
+        })?;
+        // The rest of the page instead: the page's own rectangle with
+        // what was picked as a hole in it. Paths here fill even-odd, so
+        // a ring inside a ring is a hole and nothing else has to say so.
+        if inverted {
+            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+            rings.insert(0, vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]);
+        }
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+        }
+        if !x0.is_finite() {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        }
+        // Anchors sit relative to the layer's own origin, like every
+        // other path, so the transform carries the position.
+        let mut rings = rings
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| [p[0] - x0, p[1] - y0])
+                    .collect::<Vec<[f32; 2]>>()
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+        let points = rings.next().expect("checked above");
+        let mut node = Node::vector(
+            "Filled region",
+            VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rings.collect(),
+            },
+        );
+        node.transform = Transform::translation(x0, y0);
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(color);
+        }
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        let id = self.doc.peek_next_id();
+        self.apply_labeled(
+            Command::AddNode {
+                parent,
+                index,
+                node: Box::new(node),
+            },
+            Some("Fill what is picked".into()),
+        )?;
+        Ok(id)
     }
 
     /// Set the opacity of several layers as one undo step.
@@ -6113,7 +6242,7 @@ mod tests {
                 transform: Transform::translation(35.0, 15.0),
             })
             .unwrap();
-        session.mask_from_selection(inner).unwrap();
+        session.mask_from_selection(inner, false).unwrap();
         assert_eq!(
             session.history_labels().0.last().map(String::as_str),
             Some("Mask from selection")
@@ -6135,6 +6264,123 @@ mod tests {
                 if want { "inside" } else { "outside" }
             );
         }
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// The three other things a picked region is good for.
+    ///
+    /// An editor that cuts pixels out would fill a selection with paint,
+    /// delete what is inside it, and crop to it. None of those needs to
+    /// destroy anything: filling makes the region into a shape layer,
+    /// deleting holds the layer to everything *but* the region, and
+    /// cropping is the resize the crop tool already does with the
+    /// region standing in for the rectangle.
+    #[test]
+    fn a_picked_region_fills_hides_and_crops() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.7,
+            b: 0.3,
+            a: 1.0,
+        };
+        let picked = |s: &mut Session| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        };
+
+        // Filling: the region becomes a shape layer, in that colour,
+        // covering exactly what was picked.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        assert!(
+            session.fill_selection(ink).is_err(),
+            "nothing picked out is nothing to fill"
+        );
+        picked(&mut session);
+        let id = session.fill_selection(ink).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Fill what is picked")
+        );
+        let page = session.render().unwrap();
+        assert!(page.get(40, 25).a > 0.9, "the region is filled");
+        assert!(page.get(5, 25).a < 0.1, "and nothing outside it is");
+        let b = session.bounds_of(id).unwrap();
+        assert!(
+            (b[0] - 20.0).abs() < 0.6 && (b[1] - 10.0).abs() < 0.6,
+            "the layer sits where the region was: {b:?}"
+        );
+
+        // Inverted, filling paints the rest of the page instead: the
+        // page's own rectangle with what was picked as a hole in it,
+        // which is what an even-odd path means by a ring inside a ring.
+        session.pick_inverse().unwrap();
+        session.fill_selection(ink).unwrap();
+        let page = session.render().unwrap();
+        assert!(page.get(5, 25).a > 0.9, "the rest of the page is filled");
+        assert!(
+            page.get(100, 70).a > 0.9,
+            "including the far corner from it"
+        );
+
+        // Hiding: the layer is held to everything but the region, which
+        // is deleting without anything being cut out — the layer is
+        // whole underneath and the region can be changed its mind about.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let cover = add_rect(&mut session, "cover", 120.0, 80.0);
+        picked(&mut session);
+        session.mask_from_selection(cover, true).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Hide what is picked")
+        );
+        let page = session.render().unwrap();
+        assert!(page.get(40, 25).a < 0.1, "what was picked is hidden");
+        assert!(page.get(5, 25).a > 0.9, "and the rest of the layer shows");
+        session.undo().unwrap();
+        assert!(
+            session.render().unwrap().get(40, 25).a > 0.9,
+            "and one undo hands it back whole"
+        );
+
+        // Cropping: the page comes in to the region, and what was inside
+        // it is where it was on the smaller page.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let mark = add_rect(&mut session, "mark", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: mark,
+                transform: Transform::translation(30.0, 20.0),
+            })
+            .unwrap();
+        picked(&mut session);
+        session.crop_to_selection().unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (40, 30),
+            "the page is the size of what was picked"
+        );
+        let b = session.bounds_of(mark).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.6 && (b[1] - 10.0).abs() < 0.6,
+            "and the mark moved with the page: {b:?}"
+        );
+        // What is picked travels with the page like everything else, so
+        // after the crop it is the whole of the new page.
+        assert_eq!(
+            session.selection_bounds().map(|b| [b[0], b[1], b[2], b[3]]),
+            Some([0.0, 0.0, 40.0, 30.0])
+        );
         assert_cache_matches_fresh(&mut session);
     }
 

@@ -7636,6 +7636,58 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
 
+  // Hiding is the same thing the other way round: what deleting a
+  // selection means, done by holding the layer to everything but the
+  // region rather than by cutting anything out. A fresh region first —
+  // the one above was left inside out.
+  await page.keyboard.press("m");
+  await page.waitForTimeout(150);
+  await region(60, 60, 180, 200);
+  await pickTool("Move");
+  await page.mouse.click(...at(200, 150));
+  await page.waitForTimeout(200);
+  await menuClick("Edit", "Hide what is picked, from this layer");
+  await page.waitForTimeout(450);
+  assert(!(await isRed(120, 130)), "what is picked is hidden");
+  assert(await isRed(300, 250), "and the rest of the layer shows");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // Filling turns the region into a shape layer of its own — which for
+  // a lasso is the only way to draw that shape at all.
+  const rows = await page.locator(".panel ul li .layer-name").count();
+  await setColor("Fill colour", "#2244dd");
+  await menuClick("Edit", "Fill what is picked");
+  await page.waitForTimeout(450);
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rows + 1,
+    "filling made a layer of it",
+  );
+  const [, , blue] = await canvasPixel(120, 130);
+  assert(blue > 150, `and it is the fill colour (${blue})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // Cropping takes the page in to the region.
+  // The page runs 400 across by 300 down and the region 120 by 140, so
+  // a page that was wider than tall comes out taller than wide.
+  const shape = async () => {
+    const box = await page.locator("#engine-page").boundingBox();
+    return box.width / box.height;
+  };
+  const wasShape = await shape();
+  assert(wasShape > 1, `the page starts wider than it is tall (${wasShape})`);
+  await menuClick("Edit", "Crop the page to what is picked");
+  await page.waitForTimeout(500);
+  const nowShape = await shape();
+  assert(nowShape < 1, `and the crop leaves it taller than wide (${nowShape})`);
+  assert(
+    (await page.locator(".ants").count()) === 1,
+    "with the region carried through the crop like everything else",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+
   await menuClick("Edit", "Pick out nothing");
   await page.waitForTimeout(300);
   assert(
