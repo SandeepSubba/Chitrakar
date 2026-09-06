@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~320),
+- **Verify before committing:** `cargo test --workspace` (~321),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~807 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~811 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -821,6 +821,14 @@ without reading anything else.*
   document (the app's call sites all do), because only the first
   preview's inverse is kept, so the test repeats a command only where
   repeating it is a restatement.
+- **A group and something inside it, both picked:** the panel lists
+  both, so it is an easy selection to end up with, and every operation
+  that treats a selection as one thing was acting on the inner layer
+  twice — an arrow key moved it two pixels for every one asked, and a
+  flip flipped it back to where it started. A layer inside a picked
+  group is already travelling with the group, so moving, flipping and
+  aligning now leave it out (`Session::without_nested`, and the same
+  question the panel already asked before deleting or duplicating).
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

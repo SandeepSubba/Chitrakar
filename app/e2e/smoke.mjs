@@ -7127,6 +7127,76 @@ assert(
   assert((await rows()) === 2, "one undo brings the frame and its layer back");
 }
 
+// 9ah. A layer inside a picked group travels with the group, so acting
+// on it again acts on it twice. Ctrl-clicking a group and then something
+// inside it is an easy selection to end up with — the panel lists both —
+// and an arrow key moved the inner layer two pixels for every one asked.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await setColor("Fill colour", "#cc3333");
+  await rect(40, 40, 120, 120);
+  await rect(200, 40, 280, 120);
+  await pickTool("Move");
+  await page.mouse.click(...at(80, 80));
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(240, 80));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(250);
+  await page.click('[aria-label="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(400);
+  const rowNames = await page
+    .locator(".panel ul li .layer-name")
+    .allTextContents();
+  assert(
+    rowNames.some((n) => n.startsWith("Group")),
+    `the two rects are in a group now (${rowNames.join(", ")})`,
+  );
+
+  // Ctrl-click one rect's own row so both the group and something inside
+  // it are picked, then nudge ten pixels.
+  await page
+    .locator(".panel ul li", { hasText: "Rect 1" })
+    .first()
+    .click({ modifiers: ["Control"] });
+  await page.waitForTimeout(250);
+  const picked = await page
+    .locator(".panel ul li.selected, .panel ul li.multi")
+    .count();
+  assert(picked === 2, `the group and one of its rects are picked (${picked})`);
+
+  // The first column of the rect's row that is the fill itself, rather
+  // than page white or a selection outline drawn over it.
+  const edge = async () => {
+    for (let x = 20; x < 200; x += 1) {
+      const [r, g, bl] = await canvasPixel(x, 80);
+      if (r > 150 && g < 120 && bl < 120) return x;
+    }
+    return -1;
+  };
+  const was = await edge();
+  assert(was > 30 && was < 60, `the rects start near x=40 (${was})`);
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.waitForTimeout(400);
+  const now = await edge();
+  assert(
+    Math.abs(now - was - 10) <= 1,
+    `ten pixels asked for, ten moved (${was} to ${now})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+}
+
 // 9af. A document larger than can be made: the dialog used to clamp the
 // number inside the field as it was typed, so asking for 30000 got you
 // 8192 with nothing said — and, since every keystroke was clamped, no

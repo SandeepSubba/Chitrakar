@@ -3665,8 +3665,11 @@ export function App() {
       ? multiSel
       : [selected, ...multiSel.filter((id) => id !== selected)];
   /** What a move, an alignment or a flip acts on: a locked layer is
-   * picked and read like any other, but nothing shifts it. */
-  const movableSelection = selectionSet.filter(
+   * picked and read like any other, but nothing shifts it, and a layer
+   * inside a picked group is already travelling with the group — acting
+   * on it again moves it twice, which is a nudge of two pixels for every
+   * one asked and a flip that flips it back. */
+  const movableSelection = withoutNested(selectionSet).filter(
     (id) => !layers.find((l) => l.id === id)?.locked,
   );
 

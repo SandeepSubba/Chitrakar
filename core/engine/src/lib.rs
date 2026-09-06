@@ -2187,7 +2187,32 @@ impl Session {
     /// node's transform is written in its parent's, so each move is carried
     /// back through the ancestors before it is applied. Nodes may therefore
     /// come from different groups.
+    /// The ids with any that sits inside another of them left out.
+    ///
+    /// A layer inside a group travels with the group. An operation that
+    /// treats a selection as one thing — moving it, flipping it,
+    /// aligning it — would then act on that layer twice, which puts it
+    /// where neither the group nor the layer was asked to go: a nudge
+    /// of one pixel moves it two, and a flip flips it back. So every one
+    /// of them asks this first.
+    fn without_nested(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        ids.iter()
+            .copied()
+            .filter(|id| {
+                let mut at = self.doc.parent_of(*id);
+                while let Some(up) = at {
+                    if ids.contains(&up) {
+                        return false;
+                    }
+                    at = self.doc.parent_of(up);
+                }
+                true
+            })
+            .collect()
+    }
+
     pub fn align_nodes(&mut self, ids: &[NodeId], mode: &str) -> Result<(), EngineError> {
+        let ids = &self.without_nested(ids)[..];
         if ids.len() < 2 {
             return Err(EngineError::BadCommand(
                 "aligning needs at least two layers".into(),
@@ -2432,6 +2457,7 @@ impl Session {
     /// parent's space, so the document-space mirror is carried through
     /// the ancestors and back.
     pub fn flip_nodes(&mut self, ids: &[NodeId], horizontal: bool) -> Result<(), EngineError> {
+        let ids = &self.without_nested(ids)[..];
         let boxes: Vec<(NodeId, [f32; 4])> = ids
             .iter()
             .filter_map(|id| self.bounds_of(*id).map(|b| (*id, b)))
@@ -5325,6 +5351,84 @@ mod tests {
         // silently doing nothing.
         assert!(session.align_nodes(&[a], "left").is_err());
         assert!(session.align_nodes(&[a, b], "sideways").is_err());
+    }
+
+    /// A layer inside a picked group is already travelling with it, so
+    /// acting on it again acts on it twice.
+    ///
+    /// Ctrl-clicking a group and then something inside it is an easy
+    /// selection to end up with — the panel lists both — and what it did
+    /// was flip the inner layer twice, which is not flipping it at all,
+    /// and nudge it two pixels for every one asked. Every operation that
+    /// treats the selection as one thing now leaves the inner one out.
+    #[test]
+    fn a_layer_inside_a_picked_group_is_not_moved_twice() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        let other = add_rect(&mut session, "other", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(100.0, 10.0),
+            })
+            .unwrap();
+
+        // Flipping the group and the loose layer about their shared box
+        // puts the inner rect where the loose one was and back again.
+        let alone = {
+            let mut only = Session::from_document(session.document().clone());
+            only.flip_nodes(&[group, other], true).unwrap();
+            only.bounds_of(inner).unwrap()
+        };
+        session.flip_nodes(&[group, inner, other], true).unwrap();
+        let with_child = session.bounds_of(inner).unwrap();
+        assert!(
+            (alone[0] - with_child[0]).abs() < 1e-3,
+            "picking the child as well changed where the group's flip put it: \
+             {with_child:?} against {alone:?}"
+        );
+        assert!(
+            (with_child[0] - 100.0).abs() < 1e-3,
+            "and that is the far side of the shared box: {with_child:?}"
+        );
+
+        // The same for alignment: a group aligned left takes its contents
+        // with it, and the contents are not aligned again on their own.
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        let other = add_rect(&mut session, "other", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(100.0, 60.0),
+            })
+            .unwrap();
+        session.align_nodes(&[group, inner, other], "left").unwrap();
+        let (a, b) = (
+            session.bounds_of(inner).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (a[0] - b[0]).abs() < 1e-3 && (a[0] - 10.0).abs() < 1e-3,
+            "the group went to the left edge once, not twice: {a:?} against {b:?}"
+        );
+        // A group and nothing but what is inside it is one thing, and
+        // aligning one thing means nothing.
+        assert!(session.align_nodes(&[group, inner], "left").is_err());
     }
 
     #[test]
