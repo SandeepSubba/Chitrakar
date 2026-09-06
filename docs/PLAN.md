@@ -613,6 +613,16 @@ without reading anything else.*
   channel a curve had not been drawn for.
   Resolving it there is also where a CMYK document's stops meet its
   press profile, which is the last place the document is to hand.
+  A blend is the dearest thing left on the page: it crosses that curve
+  nine times a pixel — six going in and three back — and a probe beside
+  the page one says what a single pixel of it costs, away from the
+  rasterizing around it. Two changes took a full-page multiply at A4
+  300dpi from 1.24 s to 0.97 s (86 ns a pixel to 63): the three channels
+  on each side are divided by the same alpha, so that is two reciprocals
+  and six multiplies rather than six divisions; and the transfer table's
+  length is part of its type, so the index — held to the last entry
+  before either end of the span is read — is provably inside it and the
+  nine reads cost no bounds check.
   A placed photo shown smaller than
   its own resolution is box-filtered over the texels each device pixel
   really covers (up to four taps an axis), so shrinking one settles

@@ -1647,22 +1647,30 @@ const CURVE_STEPS: usize = 4096;
 /// The display transfer curve, tabulated both ways.
 struct Transfer {
     /// Linear light to what a device shows.
-    to_shown: Box<[f32]>,
+    to_shown: Box<Curve>,
     /// And back.
-    to_linear: Box<[f32]>,
+    to_linear: Box<Curve>,
 }
+
+/// A tabulated transfer curve. Its length is part of its type, so the
+/// index worked out below is provably inside it and reading an entry
+/// costs no check — nine entries a pixel is where a blended page spends
+/// most of what it spends.
+type Curve = [f32; CURVE_STEPS + 1];
 
 fn transfer() -> &'static Transfer {
     static TABLES: std::sync::OnceLock<Transfer> = std::sync::OnceLock::new();
     TABLES.get_or_init(|| {
         let at = |i: usize| i as f32 / CURVE_STEPS as f32;
+        let mut to_shown = Box::new([0.0f32; CURVE_STEPS + 1]);
+        let mut to_linear = Box::new([0.0f32; CURVE_STEPS + 1]);
+        for i in 0..=CURVE_STEPS {
+            to_shown[i] = chitrakar_color::linear_to_srgb(at(i));
+            to_linear[i] = chitrakar_color::srgb_to_linear(at(i));
+        }
         Transfer {
-            to_shown: (0..=CURVE_STEPS)
-                .map(|i| chitrakar_color::linear_to_srgb(at(i)))
-                .collect(),
-            to_linear: (0..=CURVE_STEPS)
-                .map(|i| chitrakar_color::srgb_to_linear(at(i)))
-                .collect(),
+            to_shown,
+            to_linear,
         }
     })
 }
@@ -1719,9 +1727,11 @@ fn shown_value(v: f32) -> f32 {
     on_curve(&transfer().to_shown, v.clamp(0.0, 1.0))
 }
 
-fn on_curve(table: &[f32], v: f32) -> f32 {
+fn on_curve(table: &Curve, v: f32) -> f32 {
     let x = v.clamp(0.0, 1.0) * CURVE_STEPS as f32;
-    let i = x as usize;
+    // Held to the table's own last entry before either is read, so the
+    // compiler can see both are inside it and leave the check out.
+    let i = (x as usize).min(CURVE_STEPS);
     let f = x - i as f32;
     let a = table[i];
     let b = table[(i + 1).min(CURVE_STEPS)];
@@ -1730,12 +1740,25 @@ fn on_curve(table: &[f32], v: f32) -> f32 {
 
 /// The channels a blend function sees: unpremultiplied and in the
 /// display encoding, which is the space the spec is written in.
-fn shown(table: &[f32], v: f32, a: f32) -> f32 {
+fn shown(table: &Curve, v: f32, a: f32) -> f32 {
+    straight(table, v, recip(a))
+}
+
+/// One over `a`, or nothing at all when there is no `a` — the shape a
+/// blend wants, since it divides three channels by the same alpha and a
+/// division is the dearest arithmetic on the path.
+fn recip(a: f32) -> f32 {
     if a > 0.0 {
-        on_curve(table, (v / a).clamp(0.0, 1.0))
+        1.0 / a
     } else {
         0.0
     }
+}
+
+/// A premultiplied channel as the value a device shows, given one over
+/// its own alpha.
+fn straight(table: &Curve, v: f32, inv: f32) -> f32 {
+    on_curve(table, (v * inv).clamp(0.0, 1.0))
 }
 
 fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> LinearRgba {
@@ -1744,8 +1767,12 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     // the tables live behind costs more than reading from them.
     let t = transfer();
     let (to, from) = (&t.to_shown, &t.to_linear);
+    // Straight alpha is what a blend reads, and dividing by it is six
+    // divisions a pixel — two reciprocals and six multiplies instead,
+    // which on eight million pixels is a fifth of what the blend costs.
+    let (si, di) = (recip(sa), recip(da));
     let mix = |s: f32, d: f32| {
-        let blended = on_curve(from, f(shown(to, s, sa), shown(to, d, da)).clamp(0.0, 1.0));
+        let blended = on_curve(from, f(straight(to, s, si), straight(to, d, di)));
         // W3C compositing: result = (1-da)*s + (1-sa)*d + sa*da*B
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
@@ -1767,19 +1794,20 @@ fn non_separable(
     let (sa, da) = (src.a, dst.a);
     let t = transfer();
     let (to, from) = (&t.to_shown, &t.to_linear);
+    let (si, di) = (recip(sa), recip(da));
     let s = [
-        shown(to, src.r, sa),
-        shown(to, src.g, sa),
-        shown(to, src.b, sa),
+        straight(to, src.r, si),
+        straight(to, src.g, si),
+        straight(to, src.b, si),
     ];
     let d = [
-        shown(to, dst.r, da),
-        shown(to, dst.g, da),
-        shown(to, dst.b, da),
+        straight(to, dst.r, di),
+        straight(to, dst.g, di),
+        straight(to, dst.b, di),
     ];
     let b = f(s, d);
     let mix = |i: usize, s: f32, d: f32| {
-        let blended = on_curve(from, b[i].clamp(0.0, 1.0));
+        let blended = on_curve(from, b[i]);
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
     LinearRgba {
@@ -5624,6 +5652,58 @@ mod tests {
             let _ = render(&doc).unwrap();
             println!("A4 at 300dpi, {mode:?} over a full page: {:?}", t.elapsed());
         }
+    }
+
+    /// What one pixel of a blend costs, away from the rasterizing that
+    /// surrounds it — which is where the page probe's figures actually
+    /// go, and the only way to tell whether a change to the arithmetic
+    /// was worth making. The lookup figure beside it is the floor: a
+    /// separable blend crosses the transfer curve nine times, and this
+    /// says what two of those crossings cost.
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn blend_pixel_timing_probe() {
+        let n = 2480usize * 3508;
+        let src = LinearRgba {
+            r: 0.25,
+            g: 0.3,
+            b: 0.35,
+            a: 1.0,
+        };
+        let dst = LinearRgba {
+            r: 0.4,
+            g: 0.2,
+            b: 0.6,
+            a: 1.0,
+        };
+        for mode in [BlendMode::Normal, BlendMode::Multiply, BlendMode::Color] {
+            let t = std::time::Instant::now();
+            let mut acc = 0.0f32;
+            for i in 0..n {
+                // Varied, so nothing can be hoisted out of the loop.
+                let s = LinearRgba {
+                    r: src.r + (i & 15) as f32 * 0.001,
+                    ..src
+                };
+                acc += blend_pixel(s, dst, mode).r;
+            }
+            let e = t.elapsed();
+            println!(
+                "{mode:?}: {:.1} ns a pixel ({acc})",
+                e.as_nanos() as f64 / n as f64
+            );
+        }
+        let t = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for i in 0..n {
+            let v = (i & 1023) as f32 / 1023.0;
+            let tt = transfer();
+            acc += on_curve(&tt.to_shown, v) + on_curve(&tt.to_linear, v);
+        }
+        println!(
+            "two crossings of the curve: {:.1} ns ({acc})",
+            t.elapsed().as_nanos() as f64 / n as f64
+        );
     }
 
     /// What a gradient map costs over a full page. Its ramp is worked
