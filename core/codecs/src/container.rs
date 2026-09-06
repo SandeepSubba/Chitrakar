@@ -308,6 +308,93 @@ mod tests {
             .is_empty());
     }
 
+    /// The same document saves to the same bytes.
+    ///
+    /// A `.chitra` is a manifest and one file per resource, and both used
+    /// to come out in whatever order a hash map handed them over — which
+    /// is a fresh order every run, so a document saved twice was two
+    /// different files holding the same work. Nothing read one wrongly;
+    /// nothing could compare two either, and a version control system
+    /// saw a change where there was none.
+    ///
+    /// A hash map's order is stable *within* one run, so this cannot
+    /// catch the symptom by saving twice here. It asks the thing that
+    /// makes the symptom impossible instead: that what goes on the page
+    /// is in order.
+    #[test]
+    fn a_saved_document_is_written_in_an_order() {
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let root = doc.root();
+        // Enough nodes that a hash map would have something to shuffle,
+        // and ids well past ten so that "in order" and "in the order the
+        // strings sort" are different answers.
+        for i in 0..14 {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(Node::group(&format!("layer {i}"))),
+            })
+            .unwrap();
+        }
+        for i in 0..4u8 {
+            let px: Vec<u8> = (0..16).map(|n| n as u8 ^ i).collect();
+            doc.add_resource(2, 2, px);
+        }
+
+        let text = serde_json::to_string(&doc).unwrap();
+        // The keys of an object, in the order they were written.
+        let order = |key: &str| -> Vec<String> {
+            let at = text
+                .find(&format!("\"{key}\":{{"))
+                .expect("the object is there");
+            let body = &text[at + key.len() + 4..];
+            let mut depth = 0i32;
+            let mut keys = Vec::new();
+            let mut chars = body.char_indices();
+            while let Some((i, c)) = chars.next() {
+                match c {
+                    '{' => depth += 1,
+                    '}' if depth == 0 => break,
+                    '}' => depth -= 1,
+                    '"' if depth == 0 => {
+                        let rest = &body[i + 1..];
+                        let end = rest.find('"').expect("a closing quote");
+                        keys.push(rest[..end].to_string());
+                        for _ in 0..end + 1 {
+                            chars.next();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            keys
+        };
+
+        let nodes = order("nodes");
+        assert_eq!(nodes.len(), 15, "the root and fourteen layers: {nodes:?}");
+        let mut want: Vec<u64> = nodes.iter().map(|k| k.parse().unwrap()).collect();
+        let written = want.clone();
+        want.sort();
+        assert_eq!(written, want, "the nodes are written in order of their ids");
+        assert!(
+            written.contains(&12)
+                && written.iter().position(|&n| n == 2) < written.iter().position(|&n| n == 12),
+            "in order of the number rather than of the text: {written:?}"
+        );
+
+        let kids = order("children");
+        let mut sorted: Vec<u64> = kids.iter().map(|k| k.parse().unwrap()).collect();
+        let as_written = sorted.clone();
+        sorted.sort();
+        assert_eq!(as_written, sorted, "and so are their children");
+
+        // The resources, and with them the files the container writes.
+        let names: Vec<&String> = doc.resources().map(|(id, _)| id).collect();
+        let mut want = names.clone();
+        want.sort();
+        assert_eq!(names, want, "the resources are handed out in order");
+    }
+
     #[test]
     fn a_document_of_everything_survives_the_round_trip() {
         let mut doc = Document::new(120, 120, ColorMode::Rgb);

@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~330),
+- **Verify before committing:** `cargo test --workspace` (~331),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~871 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -978,6 +978,17 @@ without reading anything else.*
   to whatever happens to be picked *now* would spill the instant the
   selection changed. Nothing is baked: the whole stroke is there under
   the clip, and taking the clip off gives it back.
+- **The same document saves to the same bytes:** a `.chitra` is a
+  manifest and one file per resource, and both came out in whatever
+  order a hash map handed them over — a fresh order every run, since the
+  seed is. Nothing read a file wrongly, but a document saved twice was
+  two files holding the same work: nothing could compare them, and a
+  version control system saw a change where there was none. The maps
+  stay hash maps, which is what the lookups want; what goes on the page
+  is sorted (`in_order`, and resources are a `BTreeMap` since the
+  container writes a file per entry in that order). A hash map's order
+  is stable within one run, so the test cannot catch the symptom by
+  saving twice — it asks the thing that makes the symptom impossible.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

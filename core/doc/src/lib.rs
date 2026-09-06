@@ -18,7 +18,27 @@ pub use node::{
 
 use chitrakar_color::ColorMode;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+/// Write a map with its keys in order.
+///
+/// A `HashMap` hands out its entries in whatever order its seed gives,
+/// and that seed is fresh every run — so a document serialized twice
+/// came out with its nodes in a different order each time, and a
+/// `.chitra` saved twice was two different files holding the same work.
+/// Nothing read it wrongly, but nothing could compare two saves either.
+/// The map stays a hash map, which is what the lookups want; only what
+/// goes on the page is ordered.
+fn in_order<K, V, S>(map: &HashMap<K, V>, out: S) -> Result<S::Ok, S::Error>
+where
+    K: Ord + std::hash::Hash + serde::Serialize,
+    V: serde::Serialize,
+    S: serde::Serializer,
+{
+    let mut pairs: Vec<(&K, &V)> = map.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    out.collect_map(pairs)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
@@ -106,14 +126,20 @@ pub struct DocumentMeta {
 pub struct Document {
     pub meta: DocumentMeta,
     root: NodeId,
+    #[serde(serialize_with = "in_order")]
     nodes: HashMap<NodeId, Node>,
+    #[serde(serialize_with = "in_order")]
     children: HashMap<NodeId, Vec<NodeId>>,
     next_id: u64,
     /// Immutable, content-addressed pixel sources referenced by RasterRef
     /// nodes. Dimensions serialize with the manifest; the bytes live as
     /// separate files in the .chitra container and are restored on load.
+    ///
+    /// Ordered rather than hashed: the container writes one file per
+    /// resource, in the order this hands them out, and a file written in
+    /// a different order every run is a different file every run.
     #[serde(default)]
-    resources: HashMap<String, Resource>,
+    resources: BTreeMap<String, Resource>,
     /// CMYK press profile bytes (stored as profiles/cmyk.icc in the
     /// container) and the parsed transform. Authored CMYK values render
     /// through this when set; the naive preview formula otherwise.
@@ -185,7 +211,7 @@ impl Document {
             nodes,
             children,
             next_id: 1,
-            resources: HashMap::new(),
+            resources: BTreeMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
             guides: Vec::new(),
