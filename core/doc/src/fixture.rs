@@ -356,6 +356,19 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetGuides {
             guides: vec![Guide::Horizontal(4.0), Guide::Vertical(40.0)],
         },
+        Command::SetSelection {
+            selection: Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 24.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(9.0, 11.0),
+                },
+                invert: false,
+            })),
+        },
         Command::SetSwatches {
             swatches: vec![Swatch {
                 name: "ink".into(),

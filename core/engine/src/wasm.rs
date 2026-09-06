@@ -521,6 +521,87 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Pick a region out of the page: a box, an ellipse or a freehand
+    /// outline, in page coordinates.
+    ///
+    /// `how` is "replace", or one of "union", "subtract", "intersect"
+    /// and "exclude" — the same names the shape combinations go by,
+    /// because adding to a selection is a union of outlines and the same
+    /// code does it. A lasso arrives as `points`, a marquee as a box or
+    /// an ellipse of `width` by `height` at `(x, y)`.
+    pub fn pick_region(
+        &mut self,
+        kind: &str,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        points: Vec<f64>,
+        how: &str,
+    ) -> Result<(), JsError> {
+        let shape = match kind {
+            "rect" => crate::VectorShape::Rect {
+                width: width as f32,
+                height: height as f32,
+                radius: 0.0,
+            },
+            "ellipse" => crate::VectorShape::Ellipse {
+                rx: width as f32 / 2.0,
+                ry: height as f32 / 2.0,
+            },
+            "path" => crate::VectorShape::Path {
+                points: points
+                    .chunks_exact(2)
+                    .map(|p| [p[0] as f32, p[1] as f32])
+                    .collect(),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            other => return Err(JsError::new(&format!("unknown region kind {other:?}"))),
+        };
+        // An ellipse is placed by its middle and a box by its corner, so
+        // the caller gives the box either way and this puts the middle
+        // where it belongs.
+        let at = match kind {
+            "ellipse" => crate::Transform::translation(
+                x as f32 + width as f32 / 2.0,
+                y as f32 + height as f32 / 2.0,
+            ),
+            "path" => crate::Transform::default(),
+            _ => crate::Transform::translation(x as f32, y as f32),
+        };
+        self.inner.pick_region(shape, at, how).map_err(to_js)
+    }
+
+    /// Pick out the whole page.
+    pub fn pick_all(&mut self) -> Result<(), JsError> {
+        self.inner.pick_all().map_err(to_js)
+    }
+
+    /// Let go of what is picked out. False when nothing was.
+    pub fn pick_none(&mut self) -> Result<bool, JsError> {
+        self.inner.pick_none().map_err(to_js)
+    }
+
+    /// Swap what is picked out for what is not. False when nothing is.
+    pub fn pick_inverse(&mut self) -> Result<bool, JsError> {
+        self.inner.pick_inverse().map_err(to_js)
+    }
+
+    /// What is picked out of the page, as a mask's JSON, or "null".
+    pub fn selection_json(&self) -> String {
+        serde_json::to_string(&self.inner.selection()).unwrap_or_else(|_| "null".into())
+    }
+
+    /// Give a layer the region picked out of the page as its mask.
+    pub fn mask_from_selection(&mut self, id: f64) -> Result<(), JsError> {
+        self.inner
+            .mask_from_selection(NodeId(id as u64))
+            .map_err(to_js)
+    }
+
     /// Scope an adjustment or filter to one layer: the layer and the new
     /// node (as AddNode's node JSON) go into a group together. Returns the
     /// group's id.

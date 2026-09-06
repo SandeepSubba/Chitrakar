@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~322),
+- **Verify before committing:** `cargo test --workspace` (~325),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~836 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -897,6 +897,28 @@ without reading anything else.*
   run answer differently where an edit lands exactly on one of them — a
   start is attached to the character after it, an end to the character
   before — and both were being moved by the same rule.
+- **A region picked out of the page:** a selection, kept in the document
+  as a [`Mask`] over the page — because that is what it is, and because
+  that is what it is *for*. This editor is non-destructive: a selection
+  here is not a stencil pixels are cut through, it is a region to hand
+  to a layer, so "mask this layer with what I picked out" is the same
+  value carried into another space rather than a conversion. `invert`
+  gives the inverse selection for nothing; a region brushed by hand is a
+  mask kind that already exists. It travels with the page — a quarter
+  turn stands it on its end with everything else — and it is a
+  `SetSelection` command like any other, so undo, redo and the audits
+  all cover it without being told.
+  Adding to, taking from and keeping the overlap of a selection are the
+  *shape combinations the editor already had*: shift-dragging a second
+  box round a selection is a union of outlines, and the same code does
+  it. That arithmetic declines edges that overlap exactly rather than
+  guessing, which is right for two shapes on the page and maddening for
+  a marquee — a box dragged to take a bite out of a selection shares an
+  edge whenever the drag starts on the same snap line — so on that one
+  answer it asks again with the incoming region moved a five-hundredth
+  of a pixel, an eighth of a per cent of the spacing between the samples
+  a coverage is taken with. Still to come: the tools that draw one, and
+  the marching ants.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

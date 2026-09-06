@@ -130,6 +130,22 @@ pub struct Document {
     /// once and reached for rather than typed again. Additive.
     #[serde(default)]
     swatches: Vec<Swatch>,
+    /// The part of the page that is picked out: a region in page
+    /// coordinates, not a layer and not artwork.
+    ///
+    /// It is a [`Mask`] because that is exactly what it is — a coverage
+    /// over the page — and because that is what it is *for*. This editor
+    /// is non-destructive: a selection here is not a stencil that pixels
+    /// are cut through, it is a region to hand to a layer, so "mask this
+    /// layer with what I picked out" is the same value moved rather than
+    /// a conversion. `invert` gives the inverse selection for nothing,
+    /// and a painted selection — a region brushed by hand — is a mask
+    /// kind that already exists.
+    ///
+    /// Additive: a document written before selections had one loads with
+    /// nothing picked out, which is what it had.
+    #[serde(default)]
+    selection: Option<Box<Mask>>,
 }
 
 /// One colour in the document's palette. Authored like any other colour,
@@ -174,6 +190,7 @@ impl Document {
             cmyk_cms: None,
             guides: Vec::new(),
             swatches: Vec::new(),
+            selection: None,
         }
     }
 
@@ -266,6 +283,11 @@ impl Document {
         &self.swatches
     }
 
+    /// The region picked out of the page, if any.
+    pub fn selection(&self) -> Option<&Mask> {
+        self.selection.as_deref()
+    }
+
     pub fn root(&self) -> NodeId {
         self.root
     }
@@ -329,6 +351,25 @@ impl Document {
     /// which falls out of where two of the guide's own points land
     /// rather than out of a table of which becomes which.
     fn map_page(&mut self, m: Transform) {
+        /// A coverage carried through a page transform. Written once
+        /// because two things want it: a layer's mask, and the region
+        /// picked out of the page, which is a mask over the page in
+        /// exactly the same sense.
+        fn carry_mask(mask: &mut Mask, m: Transform) {
+            match &mut mask.kind {
+                MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
+                    *transform = m.compose(*transform);
+                }
+                MaskKind::Painted { strokes } => {
+                    for stroke in strokes {
+                        for p in &mut stroke.points {
+                            *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+                        }
+                    }
+                }
+            }
+        }
+
         // A vector rather than a point: how far a thing reaches, not
         // where it is, so the map's shift is no part of it.
         let along = |dx: f32, dy: f32| (m.a * dx + m.c * dy, m.b * dx + m.d * dy);
@@ -344,18 +385,7 @@ impl Document {
             // the part of the page it used to cover — which, for a page
             // that moved out from under it, is the whole layer.
             if let Some(mask) = &mut node.mask {
-                match &mut mask.kind {
-                    MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
-                        *transform = m.compose(*transform);
-                    }
-                    MaskKind::Painted { strokes } => {
-                        for stroke in strokes {
-                            for p in &mut stroke.points {
-                                *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
-                            }
-                        }
-                    }
-                }
+                carry_mask(mask, m);
             }
             // An effect's offset is written in that same space. A page
             // turned a quarter round with the light left where it was
@@ -381,6 +411,13 @@ impl Document {
         // wrong one for anything else: a page straightened by seven
         // degrees turned every vertical guide into a horizontal one, at a
         // position that meant nothing.
+        // What is picked out of the page is written in the page's own
+        // space, so it travels with the page: a selection left behind by
+        // a quarter turn would pick out a different part of the picture
+        // than the one it was drawn round.
+        if let Some(selection) = &mut self.selection {
+            carry_mask(selection, m);
+        }
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
         let (w, h) = (self.meta.width as f32 / 2.0, self.meta.height as f32 / 2.0);
         for guide in &mut self.guides {
@@ -762,6 +799,10 @@ impl Document {
                 let prev = std::mem::replace(&mut self.swatches, swatches);
                 Ok(Command::SetSwatches { swatches: prev })
             }
+            Command::SetSelection { selection } => {
+                let prev = std::mem::replace(&mut self.selection, selection);
+                Ok(Command::SetSelection { selection: prev })
+            }
             Command::SetEffects { id, effects } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = std::mem::replace(&mut node.effects, effects);
@@ -976,6 +1017,13 @@ pub enum Command {
     /// Replace the document's palette, the same whole-list way.
     SetSwatches {
         swatches: Vec<Swatch>,
+    },
+    /// Replace the region picked out of the page — `None` for nothing
+    /// picked out. Whole-value, so picking, adding to, taking from and
+    /// dropping a selection are all the one command with the one
+    /// obvious inverse.
+    SetSelection {
+        selection: Option<Box<Mask>>,
     },
     /// Change the page's size, shifting every top-level layer by
     /// `(dx, dy)` so a crop keeps the picture where it was. Its own

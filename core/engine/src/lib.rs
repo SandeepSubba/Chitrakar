@@ -15,7 +15,9 @@ pub mod wasm;
 use serde::Serialize;
 
 pub use chitrakar_color::ColorMode;
-pub use chitrakar_doc::{Command, Document, History, Node, NodeId, NodeKind, Transform};
+pub use chitrakar_doc::{
+    Command, Document, History, Node, NodeId, NodeKind, Transform, VectorShape,
+};
 
 /// How far a duplicate or a paste is nudged from its original, in document
 /// units.
@@ -270,6 +272,11 @@ impl Session {
             // Nor does the palette: it is what colours are picked from,
             // not anything the page draws.
             | Command::SetSwatches { .. }
+            // Nor what is picked out of the page. The marching ants are
+            // the app's to draw over the frame, not the renderer's to
+            // put in it — a selection is a region to hand to a layer,
+            // and nothing about the picture changes when it moves.
+            | Command::SetSelection { .. }
             | Command::SetLocked { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
@@ -551,6 +558,13 @@ impl Session {
                     "Clear guides".into()
                 } else {
                     format!("{} guides", guides.len())
+                }
+            }
+            Command::SetSelection { selection } => {
+                if selection.is_none() {
+                    "Deselect".into()
+                } else {
+                    "Select".into()
                 }
             }
             Command::SetSwatches { swatches } => {
@@ -2375,6 +2389,267 @@ impl Session {
             return Ok(());
         }
         self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
+    }
+
+    /// The region picked out of the page, as the shape it is made of.
+    ///
+    /// A selection here is a coverage over the page, kept as a mask,
+    /// because this is a non-destructive editor: what a selection is
+    /// *for* is being handed to a layer, an adjustment or a filter as
+    /// the region it works on. Nothing is cut out of anything.
+    pub fn selection(&self) -> Option<&chitrakar_doc::Mask> {
+        self.doc.selection()
+    }
+
+    /// Whether a shape picked out of the page has any area in it, which
+    /// is what tells a drag apart from a click.
+    ///
+    /// Counting corners is not the question: a box dragged out to no
+    /// width still has four of them, and a click is exactly that.
+    fn worth_picking(shape: &VectorShape) -> bool {
+        chitrakar_render::shape_rings(shape).iter().any(|ring| {
+            let mut twice = 0.0f32;
+            for i in 0..ring.len() {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                twice += p[0] * q[1] - q[0] * p[1];
+            }
+            twice.abs() / 2.0 > 0.25
+        })
+    }
+
+    /// Pick a region out of the page, or add it to, take it from, or
+    /// keep only its overlap with what is picked already.
+    ///
+    /// `how` is "replace", or one of the names the shape combinations go
+    /// by — "union", "subtract", "intersect", "exclude" — which is not a
+    /// coincidence: adding to a selection with shift held *is* a union
+    /// of outlines, and the code that does it for two shapes on the page
+    /// does it here.
+    pub fn pick_region(
+        &mut self,
+        shape: VectorShape,
+        transform: Transform,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        if !Self::worth_picking(&shape) {
+            return Err(EngineError::BadCommand("nothing was picked out".into()));
+        }
+        let fresh = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector { shape, transform },
+            invert: false,
+        };
+        if how == "replace" {
+            return self.apply_labeled(
+                Command::SetSelection {
+                    selection: Some(Box::new(fresh)),
+                },
+                Some("Select".into()),
+            );
+        }
+        let op = chitrakar_render::boolean::BoolOp::from_name(how)
+            .ok_or_else(|| EngineError::BadCommand(format!("unknown way to pick: {how:?}")))?;
+        // Nothing picked out yet: adding to it is picking it, and taking
+        // it away or keeping the overlap leaves nothing either way.
+        let Some(current) = self.doc.selection().cloned() else {
+            return match op {
+                chitrakar_render::boolean::BoolOp::Union
+                | chitrakar_render::boolean::BoolOp::Exclude => self.apply_labeled(
+                    Command::SetSelection {
+                        selection: Some(Box::new(fresh)),
+                    },
+                    Some("Select".into()),
+                ),
+                _ => Ok(()),
+            };
+        };
+        let want = Self::region_rings(&current)?;
+        let have = Self::region_rings(&fresh)?;
+        // Outline arithmetic declines edges that touch or overlap
+        // exactly rather than guessing what was meant — which is right
+        // for two shapes on the page, and would be maddening here: a box
+        // dragged to take a bite out of a selection shares an edge with
+        // it whenever the drag starts on the same snap line, which is
+        // most of the time.
+        //
+        // So on that one answer, ask again with the incoming region
+        // moved by a five-hundredth of a pixel. A coverage is sampled on
+        // a grid four to the pixel, so that is a hundred-and-twenty-
+        // eighth of the spacing between samples: it can move one sample
+        // in sixteen, on the pixels an edge actually crosses, and only
+        // where an edge lay within that of a sample point. What it
+        // cannot do is turn a bite into an error message.
+        let nudged = || {
+            let d = 1.0 / 512.0;
+            have.iter()
+                .map(|ring| ring.iter().map(|p| [p[0] + d, p[1] + d]).collect())
+                .collect::<Vec<Vec<[f32; 2]>>>()
+        };
+        let combined = chitrakar_render::boolean::combine(&want, &have, op)
+            .or_else(|| chitrakar_render::boolean::combine(&want, &nudged(), op))
+            .ok_or_else(|| {
+                EngineError::BadCommand(
+                    "these regions cannot be combined — their edges overlap exactly".into(),
+                )
+            })?;
+        let selection = Self::region_of(combined).map(Box::new);
+        self.apply_labeled(
+            Command::SetSelection { selection },
+            Some(match op {
+                chitrakar_render::boolean::BoolOp::Subtract => "Take from selection".into(),
+                chitrakar_render::boolean::BoolOp::Intersect => "Keep the overlap".into(),
+                _ => "Add to selection".into(),
+            }),
+        )
+    }
+
+    /// A region's outlines in page coordinates.
+    ///
+    /// Only a shape has outlines. A region brushed by hand or read off a
+    /// picture is a coverage with no edge to combine, and an inverted
+    /// one is the whole page minus a shape — neither is something the
+    /// outline arithmetic can take, so both say so rather than guess.
+    fn region_rings(mask: &chitrakar_doc::Mask) -> Result<Vec<Vec<[f32; 2]>>, EngineError> {
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
+            return Err(EngineError::BadCommand(
+                "this selection has no outline to combine with".into(),
+            ));
+        };
+        if mask.invert {
+            return Err(EngineError::BadCommand(
+                "an inverted selection has no outline to combine with".into(),
+            ));
+        }
+        let t = *transform;
+        Ok(chitrakar_render::shape_rings(shape)
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Outlines in page coordinates back into a region, or `None` where
+    /// the combination left nothing at all.
+    fn region_of(rings: Vec<Vec<[f32; 2]>>) -> Option<chitrakar_doc::Mask> {
+        let mut rings = rings.into_iter().filter(|r| r.len() >= 3);
+        let first = rings.next()?;
+        let subpaths: Vec<Vec<[f32; 2]>> = rings.collect();
+        Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Path {
+                    points: first,
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+        })
+    }
+
+    /// Pick out the whole page.
+    pub fn pick_all(&mut self) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        self.pick_region(
+            VectorShape::Rect {
+                width: w,
+                height: h,
+                radius: 0.0,
+            },
+            Transform::default(),
+            "replace",
+        )
+    }
+
+    /// Let go of what is picked out. Nothing to let go of is not an
+    /// error and records nothing: pressing Escape twice should not fill
+    /// the history with nothing happening.
+    pub fn pick_none(&mut self) -> Result<bool, EngineError> {
+        if self.doc.selection().is_none() {
+            return Ok(false);
+        }
+        self.apply_labeled(
+            Command::SetSelection { selection: None },
+            Some("Deselect".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Swap what is picked out for what is not.
+    pub fn pick_inverse(&mut self) -> Result<bool, EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        selection.invert = !selection.invert;
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(selection)),
+            },
+            Some("Inverse selection".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Give a layer the region picked out of the page as its mask.
+    ///
+    /// This is what a selection is for here. The region is written in
+    /// the page's space and a mask in the space its layer is placed in,
+    /// so it is carried across; the two are the same kind of thing
+    /// either side of that.
+    pub fn mask_from_selection(&mut self, id: NodeId) -> Result<(), EngineError> {
+        let Some(selection) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        let det = parent.a * parent.d - parent.b * parent.c;
+        if det.abs() < 1e-9 {
+            return Err(EngineError::BadCommand(
+                "this layer sits in a space with no thickness".into(),
+            ));
+        }
+        // The page's space seen from the layer's parent.
+        let (a, b, c, d) = (
+            parent.d / det,
+            -parent.b / det,
+            -parent.c / det,
+            parent.a / det,
+        );
+        let into = Transform {
+            a,
+            b,
+            c,
+            d,
+            e: -(a * parent.e + c * parent.f),
+            f: -(b * parent.e + d * parent.f),
+        };
+        let mut mask = selection;
+        match &mut mask.kind {
+            chitrakar_doc::MaskKind::Vector { transform, .. }
+            | chitrakar_doc::MaskKind::Raster { transform, .. } => {
+                *transform = into.compose(*transform);
+            }
+            chitrakar_doc::MaskKind::Painted { strokes } => {
+                for stroke in strokes {
+                    for p in &mut stroke.points {
+                        *p = [
+                            into.a * p[0] + into.c * p[1] + into.e,
+                            into.b * p[0] + into.d * p[1] + into.f,
+                        ];
+                    }
+                }
+            }
+        }
+        self.apply_labeled(
+            Command::SetMask {
+                id,
+                mask: Some(Box::new(mask)),
+            },
+            Some("Mask from selection".into()),
+        )
     }
 
     /// Set the opacity of several layers as one undo step.
@@ -5696,6 +5971,265 @@ mod tests {
             at[0].abs() < 1e-3,
             "one thing aligns to the page's own left edge: {at:?}"
         );
+    }
+
+    /// A region picked out of the page, and what picking it is for.
+    ///
+    /// A selection here is a coverage over the page kept as a mask,
+    /// because this editor is non-destructive: nothing is cut out of
+    /// anything, and what a selection is *for* is being handed to a
+    /// layer as the region it works on. Which makes "mask this layer
+    /// with what I picked out" the same value moved into another space
+    /// rather than a conversion.
+    #[test]
+    fn a_region_picked_out_of_the_page_becomes_a_layer_s_mask() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        assert!(session.selection().is_none(), "nothing is picked to start");
+        assert!(
+            !session.pick_none().unwrap(),
+            "and letting go of nothing does nothing"
+        );
+        assert!(
+            !session.pick_inverse().unwrap(),
+            "so does turning it inside out"
+        );
+        assert!(
+            session.history_labels().0.is_empty(),
+            "none of which is worth an entry in history"
+        );
+
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(session.selection().is_some(), "a region is picked out");
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Select")
+        );
+        // A drag that never moved picks nothing out rather than a region
+        // of no width.
+        assert!(session
+            .pick_region(rect(0.0, 40.0), Transform::default(), "replace")
+            .is_err());
+
+        // Adding to it, taking from it and keeping the overlap are the
+        // shape combinations the editor already has: shift-dragging a
+        // second box round a selection *is* a union of outlines.
+        let area = |s: &Session| {
+            let mask = s.selection().expect("something is picked out");
+            let cover = chitrakar_render::mask_plane_over(
+                s.document(),
+                mask,
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 200,
+                    y1: 100,
+                },
+                (200, 100),
+            );
+            cover.iter().sum::<f32>()
+        };
+        let one = area(&session);
+        assert!(
+            (one - 60.0 * 40.0).abs() < 60.0,
+            "the box picks out its own area: {one}"
+        );
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(100.0, 20.0),
+                "union",
+            )
+            .unwrap();
+        let two = area(&session);
+        assert!(
+            (two - 2.0 * 60.0 * 40.0).abs() < 120.0,
+            "a second box clear of the first doubles it: {two}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Add to selection")
+        );
+        session
+            .pick_region(
+                rect(30.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "subtract",
+            )
+            .unwrap();
+        let less = area(&session);
+        assert!(
+            (less - (two - 30.0 * 40.0)).abs() < 120.0,
+            "and taking a half-box out takes its area with it: {less}"
+        );
+
+        // Inside out: what was picked is not, and what was not is.
+        session.pick_inverse().unwrap();
+        let outside = area(&session);
+        assert!(
+            (outside - (200.0 * 100.0 - less)).abs() < 200.0,
+            "the inverse is the rest of the page: {outside} against {less}"
+        );
+        session.pick_inverse().unwrap();
+        assert!(
+            (area(&session) - less).abs() < 1.0,
+            "and twice over is where it started"
+        );
+
+        // The whole page, and then nothing.
+        session.pick_all().unwrap();
+        assert!(
+            (area(&session) - 200.0 * 100.0).abs() < 1.0,
+            "the whole page is a region like any other"
+        );
+        assert!(session.pick_none().unwrap());
+        assert!(session.selection().is_none(), "and then nothing is picked");
+
+        // What it is for. A layer inside a moved group takes the region
+        // in its own space, so it covers the same part of the page.
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 200.0, 100.0);
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(35.0, 15.0),
+            })
+            .unwrap();
+        session.mask_from_selection(inner).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Mask from selection")
+        );
+        // The layer covers the whole page and is now held to the region,
+        // so what is drawn is exactly what was picked out — wherever the
+        // group happens to sit.
+        let page = session.render().unwrap();
+        for (x, y, want) in [
+            (50u32, 40u32, true),
+            (10, 40, false),
+            (50, 10, false),
+            (150, 40, false),
+        ] {
+            assert_eq!(
+                page.get(x, y).a > 0.5,
+                want,
+                "at {x},{y} the layer is {} the region picked out",
+                if want { "inside" } else { "outside" }
+            );
+        }
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// What is picked out of the page travels with the page.
+    ///
+    /// A selection is written in the page's own coordinates, so a page
+    /// that turns, mirrors or is given more room has to take it along —
+    /// left behind, it would pick out a different part of the picture
+    /// than the one it was drawn round. The same thing a guide, a mask
+    /// and a shadow's offset each need, and for the same reason.
+    #[test]
+    fn what_is_picked_out_turns_with_the_page() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        // A box in the page's top-left quarter.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        // Where the region actually covers, as the page sees it.
+        let box_of = |s: &Session| {
+            let mask = s.selection().expect("something is picked out");
+            let (w, h) = (s.document().meta.width, s.document().meta.height);
+            let cover = chitrakar_render::mask_plane_over(
+                s.document(),
+                mask,
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                },
+                (w, h),
+            );
+            let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+            for y in 0..h {
+                for x in 0..w {
+                    if cover[(y * w + x) as usize] > 0.5 {
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x + 1);
+                        y1 = y1.max(y + 1);
+                    }
+                }
+            }
+            (x0, y0, x1, y1)
+        };
+        assert_eq!(box_of(&session), (10, 10, 50, 30), "where it was drawn");
+
+        // A quarter turn stands the page on its end and the region with
+        // it: what was 10..50 across and 10..30 down on a 200x100 page is
+        // 70..90 across and 10..50 down on the 100x200 page.
+        session.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (100, 200)
+        );
+        assert_eq!(box_of(&session), (70, 10, 90, 50), "carried round the turn");
+        session.apply(Command::TurnCanvas { quarters: 3 }).unwrap();
+        assert_eq!(box_of(&session), (10, 10, 50, 30), "and back again");
+
+        // A mirror crosses it to the other side.
+        session
+            .apply(Command::MirrorCanvas { across_x: true })
+            .unwrap();
+        assert_eq!(
+            box_of(&session),
+            (150, 10, 190, 30),
+            "crossed with the page"
+        );
+        session
+            .apply(Command::MirrorCanvas { across_x: true })
+            .unwrap();
+
+        // And room added at the top left moves it along with everything
+        // else on the page.
+        session
+            .apply(Command::ResizeCanvas {
+                width: 240,
+                height: 140,
+                dx: 40.0,
+                dy: 40.0,
+            })
+            .unwrap();
+        assert_eq!(box_of(&session), (50, 50, 90, 70), "moved with the picture");
     }
 
     /// One layer aligns to what it sits in: its frame, or the page.
