@@ -3444,6 +3444,110 @@ pub struct LayerInfo {
 mod tests {
     use super::*;
 
+    /// A gesture is the same command, told in two halves.
+    ///
+    /// Every drag in the editor goes through preview/commit/cancel: the
+    /// document updates on every pointer move so the user sees it, and
+    /// history records one entry when the mouse comes up, or none at all
+    /// if Escape comes first. Two things have to hold for that to be
+    /// true, and neither is checked by the command's own test.
+    ///
+    /// Committing has to leave the document exactly where applying the
+    /// command plainly would, with one entry in history rather than one
+    /// per pointer move. Cancelling has to leave it exactly where it
+    /// started, with none — and it has to leave the *page* where it
+    /// started too, because a cancel that repaints too little is how
+    /// Escape leaves a smear of the abandoned drag on screen.
+    #[test]
+    fn every_gesture_commits_or_cancels_like_the_command_it_previews() {
+        let f = chitrakar_doc::fixture::everything();
+        use chitrakar_doc::fixture::{came_back, state};
+        for cmd in chitrakar_doc::fixture::every_command(&f) {
+            let label = format!("{cmd:?}");
+            let short = &label[..label.len().min(60)];
+            let before = state(&f.doc);
+
+            // Committed: the same document the plain command leaves, and
+            // one step of history for the whole gesture however many
+            // moves it took.
+            // A gesture is more than one edit: a drag restates the
+            // whole thing on every pointer move, always from where the
+            // document was when the drag began. So preview each of
+            // these twice wherever asking twice is a restatement —
+            // which is the Set… family, the one drags are made of — and
+            // once where it is not, since adding a node twice adds two.
+            let repeatable = {
+                let mut once = f.doc.clone();
+                once.apply(cmd.clone()).unwrap();
+                let after = state(&once);
+                once.apply(cmd.clone()).is_ok_and(|_| state(&once) == after)
+            };
+            let mut plain = Session::from_document(f.doc.clone());
+            plain.apply(cmd.clone()).unwrap();
+            let mut gesture = Session::from_document(f.doc.clone());
+            gesture.preview(cmd.clone()).unwrap();
+            if repeatable {
+                gesture.preview(cmd.clone()).unwrap();
+            }
+            assert!(gesture.commit_preview(), "{short} was a gesture");
+            // Straightening the page is the one command that cannot be
+            // exact — it re-fits the page to the turned artwork — so it
+            // is asked to be near instead.
+            let exact = chitrakar_doc::fixture::exact(&cmd);
+            if let Err(what) =
+                came_back(&state(gesture.document()), &state(plain.document()), exact)
+            {
+                panic!("{short} committed to somewhere else than applying it: {what}");
+            }
+            assert!(
+                gesture.undo().unwrap() && !gesture.undo().unwrap(),
+                "{short} recorded one step for the gesture, not two"
+            );
+
+            // Cancelled: back where it started, in the document and on
+            // the page, with nothing in history to undo.
+            let mut gesture = Session::from_document(f.doc.clone());
+            gesture.render_cached().expect("the page draws");
+            gesture.preview(cmd.clone()).unwrap();
+            if repeatable {
+                gesture.preview(cmd).unwrap();
+            }
+            assert!(gesture.cancel_preview().unwrap(), "{short} was cancelled");
+            if let Err(what) = came_back(&state(gesture.document()), &before, exact) {
+                panic!("{short} cancelled to somewhere else than where it started: {what}");
+            }
+            assert!(
+                !gesture.undo().unwrap(),
+                "{short} left a cancelled gesture in history"
+            );
+            let smeared = gesture.render_cached().unwrap().0.clone();
+            let mut clean = Session::from_document(gesture.document().clone());
+            let want = clean.render_cached().unwrap().0.clone();
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..want.height {
+                for x in 0..want.width {
+                    let (a, b) = (smeared.get(x, y), want.get(x, y));
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 0.002,
+                "{short} left {},{} of the abandoned drag on screen: {:?} against {:?}",
+                worst.1,
+                worst.2,
+                smeared.get(worst.1, worst.2),
+                want.get(worst.1, worst.2)
+            );
+        }
+    }
+
     /// Every command repaints every pixel it changes — and so does
     /// undoing it, and redoing it.
     ///

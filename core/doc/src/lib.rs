@@ -1114,61 +1114,17 @@ mod tests {
         // added and taken away again is not byte for byte where it
         // started: the next id it will use has moved on. Everything else
         // has to be, and the id may only ever go forwards.
-        // Compared as values rather than as text: the nodes live in a
-        // hash map, whose written order says nothing about what is in it.
         let state = |doc: &Document| {
-            let mut v = serde_json::to_value(doc).expect("a document serializes");
-            let next = v["next_id"].as_u64().expect("a document says its next id");
-            v["next_id"] = serde_json::Value::Null;
-            (v, next)
+            let next = serde_json::to_value(doc).expect("a document serializes")["next_id"]
+                .as_u64()
+                .expect("a document says its next id");
+            (fixture::state(doc), next)
         };
-        /// Which part of the document came back different, for a message
-        /// that says something without printing the whole of it.
-        fn differing(a: &serde_json::Value, b: &serde_json::Value) -> String {
-            match (a.as_object(), b.as_object()) {
-                (Some(x), Some(y)) => x
-                    .keys()
-                    .filter(|k| x.get(*k) != y.get(*k))
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                _ => "the whole document".into(),
-            }
-        }
-        /// Two documents the same to within `tol` on every number in
-        /// them, and exactly the same in everything else.
-        fn close(a: &serde_json::Value, b: &serde_json::Value, tol: f64) -> bool {
-            use serde_json::Value as V;
-            match (a, b) {
-                (V::Number(x), V::Number(y)) => match (x.as_f64(), y.as_f64()) {
-                    (Some(x), Some(y)) => (x - y).abs() <= tol,
-                    _ => x == y,
-                },
-                (V::Array(x), V::Array(y)) => {
-                    x.len() == y.len() && x.iter().zip(y).all(|(x, y)| close(x, y, tol))
-                }
-                (V::Object(x), V::Object(y)) => {
-                    x.len() == y.len()
-                        && x.iter()
-                            .all(|(k, v)| y.get(k).is_some_and(|w| close(v, w, tol)))
-                }
-                _ => a == b,
-            }
-        }
-        /// Which of the two kinds of command this is: the one that
-        /// cannot be exact, and all the rest.
-        enum Kind {
-            Straighten,
-            Exact,
-        }
         let (before, first_id) = state(&doc);
         for cmd in each {
             let mut copy = doc.clone();
             let label = format!("{cmd:?}");
-            let cmd_kind = match cmd {
-                Command::StraightenCanvas { .. } => Kind::Straighten,
-                _ => Kind::Exact,
-            };
+            let exact = fixture::exact(&cmd);
             let inverse = copy
                 .apply(cmd)
                 .unwrap_or_else(|e| panic!("{label} could not be applied: {e:?}"));
@@ -1178,7 +1134,7 @@ mod tests {
             );
             copy.apply(inverse)
                 .unwrap_or_else(|e| panic!("{label}'s inverse would not apply: {e:?}"));
-            let (mut after, next_id) = state(&copy);
+            let (after, next_id) = state(&copy);
             // A page turned by anything but a quarter cannot be turned
             // back bit for bit — a sine and its cosine do not multiply
             // out to exactly one — and an axis-aligned guide cannot
@@ -1186,25 +1142,9 @@ mod tests {
             // where it crosses the middle of the page rather than
             // exactly where it was. Everything else is exact, and this
             // is the one command allowed either.
-            if matches!(cmd_kind, Kind::Straighten) {
-                let mut want = before.clone();
-                let (had, has) = (want["guides"].take(), after["guides"].take());
-                assert!(
-                    close(&after, &want, 1e-5),
-                    "{label} did not undo to within a float of where it started: {}",
-                    differing(&after, &want)
-                );
-                assert!(
-                    close(&has, &had, 1.0),
-                    "{label} left a guide somewhere else entirely: {has} against {had}"
-                );
-                continue;
+            if let Err(what) = fixture::came_back(&after, &before, exact) {
+                panic!("{label} did not undo to where it started: {what}");
             }
-            assert!(
-                after == before,
-                "{label} did not undo to where it started: {}",
-                differing(&after, &before)
-            );
             assert!(
                 next_id >= first_id,
                 "{label} handed an id back to be used twice"

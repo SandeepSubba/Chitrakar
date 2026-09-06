@@ -309,3 +309,95 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         ]),
     ]
 }
+
+/// Whether a command can be undone bit for bit.
+///
+/// A page turned by anything but a quarter cannot be turned back
+/// exactly — a sine and its cosine do not multiply out to one — and an
+/// axis-aligned guide cannot record a tilt at all, so it comes back on
+/// its own axis where it crosses the middle of the page. That is the
+/// one command allowed to be near rather than exact.
+pub fn exact(cmd: &Command) -> bool {
+    !matches!(cmd, Command::StraightenCanvas { .. })
+}
+
+/// A document as a value, with the id counter set aside: an id is never
+/// handed out twice, so a document that has had something added and
+/// taken away again is not byte for byte where it started even though
+/// everything in it is.
+///
+/// Compared as a value rather than as text — the nodes live in a hash
+/// map, whose written order says nothing about what is in it.
+pub fn state(doc: &Document) -> serde_json::Value {
+    let mut v = serde_json::to_value(doc).expect("a document serializes");
+    v["next_id"] = serde_json::Value::Null;
+    v
+}
+
+/// Two documents the same to within `tol` on every number in them, and
+/// exactly the same in everything else.
+pub fn close(a: &serde_json::Value, b: &serde_json::Value, tol: f64) -> bool {
+    use serde_json::Value as V;
+    match (a, b) {
+        (V::Number(x), V::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= tol,
+            _ => x == y,
+        },
+        (V::Array(x), V::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| close(x, y, tol))
+        }
+        (V::Object(x), V::Object(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .all(|(k, v)| y.get(k).is_some_and(|w| close(v, w, tol)))
+        }
+        _ => a == b,
+    }
+}
+
+/// Which part of a document came back different, for a message that says
+/// something without printing the whole of it.
+pub fn differing(a: &serde_json::Value, b: &serde_json::Value) -> String {
+    match (a.as_object(), b.as_object()) {
+        (Some(x), Some(y)) => x
+            .keys()
+            .filter(|k| x.get(*k) != y.get(*k))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "the whole document".into(),
+    }
+}
+
+/// Whether a document came back to where it started.
+///
+/// Exact means exact: every command but one puts every field back bit
+/// for bit. The one that cannot — [`exact`] names it — is allowed its
+/// numbers to within a float, and its guides to within a page pixel,
+/// since an axis-aligned guide cannot record a tilt and comes back on
+/// its own axis where it crosses the middle of the page.
+///
+/// `Err` carries what differed, for a message that says something
+/// without printing the whole document.
+pub fn came_back(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    exact: bool,
+) -> Result<(), String> {
+    if exact {
+        return if got == want {
+            Ok(())
+        } else {
+            Err(differing(got, want))
+        };
+    }
+    let (mut got, mut want) = (got.clone(), want.clone());
+    let (has, had) = (got["guides"].take(), want["guides"].take());
+    if !close(&got, &want, 1e-5) {
+        return Err(differing(&got, &want));
+    }
+    if !close(&has, &had, 1.0) {
+        return Err(format!("a guide left somewhere else: {has} against {had}"));
+    }
+    Ok(())
+}

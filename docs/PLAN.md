@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~319),
+- **Verify before committing:** `cargo test --workspace` (~320),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -798,6 +798,21 @@ without reading anything else.*
   shared list — `chitrakar_doc::fixture` (feature `fixture`, a dev
   dependency) — so a new `Command` is added to it once and both tests
   start asking about it.
+- **And every gesture, the same way:** every drag goes through
+  preview/commit/cancel — the document updates on each pointer move so
+  the user sees it, and history records one entry when the mouse comes
+  up or none at all if Escape comes first.
+  `every_gesture_commits_or_cancels_like_the_command_it_previews` asks
+  both halves of every command in the fixture: committing lands exactly
+  where applying it plainly would, with one entry in history rather than
+  one per move; cancelling lands exactly where it started, with none,
+  and leaves the *page* where it started too — a cancel that repaints
+  too little is how Escape leaves a smear of an abandoned drag on
+  screen. It also writes down the engine's actual contract, which was
+  nowhere: a preview restates the whole edit from the pre-gesture
+  document (the app's call sites all do), because only the first
+  preview's inverse is kept, so the test repeats a command only where
+  repeating it is a restatement.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live
