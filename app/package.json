@@ -8,7 +8,9 @@
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test:e2e": "node e2e/smoke.mjs"
+    "test:e2e": "node e2e/smoke.mjs",
+    "test:unit": "node e2e/runs.test.mjs",
+    "test": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {
     "react": "^18.3.1",

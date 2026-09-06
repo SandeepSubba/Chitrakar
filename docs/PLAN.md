@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~322),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~834 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~836 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -886,6 +886,17 @@ without reading anything else.*
   the part that matters for the next run — closes the browser and the
   port, where before a failed run held 8123 and every run after it died
   on EADDRINUSE about nothing to do with the test.
+- **Styling that stays on the letters it was put on:** a text block's
+  runs are byte ranges, a textarea counts UTF-16, and every keystroke
+  puts the whole list through `shiftRuns`. It now has unit tests of its
+  own — `app/e2e/runs.test.mjs`, no browser, transpiled by the esbuild
+  vite already brings — mostly a property over random strings and random
+  edits with emoji and accents in the alphabet. That found the bug the
+  function's own docstring says it exists to prevent: typing a word in
+  front of a bold one made the new word bold as well. The two ends of a
+  run answer differently where an edit lands exactly on one of them — a
+  start is attached to the character after it, an end to the character
+  before — and both were being moved by the same rule.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

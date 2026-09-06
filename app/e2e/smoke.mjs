@@ -2266,6 +2266,24 @@ assert(
       moved[0] > third[0] * 0.8,
       `the red is still on all four letters (${third} -> ${moved})`,
     );
+    // Text typed in *front* of a coloured word is not coloured. The two
+    // ends of a run answer differently where an edit lands exactly on
+    // one of them: a start is attached to the character after it, an
+    // end to the character before. Treating both the same made the new
+    // word take the styling of the one it was typed in front of.
+    const before = addedRed(await paintRed(4, 8), none);
+    await setText("xx aa aaaa");
+    await page.waitForTimeout(400);
+    const after = addedRed(await redColumns(), none);
+    assert(
+      after[0] < before[0] * 1.3,
+      `typing in front does not colour what was typed (${before} -> ${after})`,
+    );
+    assert(
+      after[1] > before[1] + 4,
+      `and the red moved along with its own letters (${before} -> ${after})`,
+    );
+
     // Leave the block plain and nothing selected, so what follows is
     // testing the block's own styling and not a leftover run.
     await select(0, 0);

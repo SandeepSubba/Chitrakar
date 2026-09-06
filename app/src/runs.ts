@@ -155,8 +155,19 @@ export function shiftRuns(before: string, after: string, runs: StyleRun[]): Styl
 
   const cutEnd = b.length - tail;
   const delta = a.length - b.length;
-  const move = (i: number) => (i <= head ? i : i >= cutEnd ? i + delta : head);
+  // The two ends of a run answer differently where the edit lands
+  // exactly on one of them, and it is only text *inserted* there that
+  // can tell them apart. A start is attached to the character after it,
+  // so text typed at a run's start belongs before the run and pushes it
+  // along; an end is attached to the character before it, so text typed
+  // at a run's end belongs after the run and leaves it where it is.
+  //
+  // Treating both ends the same is how typing a word in front of a bold
+  // one made the new word bold as well — which is the thing this
+  // function exists to prevent.
+  const moveStart = (i: number) => (i < head ? i : i >= cutEnd ? i + delta : head);
+  const moveEnd = (i: number) => (i <= head ? i : i >= cutEnd ? i + delta : head);
   return runs
-    .map((r) => ({ ...r, start: move(r.start), end: move(r.end) }))
+    .map((r) => ({ ...r, start: moveStart(r.start), end: moveEnd(r.end) }))
     .filter((r) => r.end > r.start);
 }

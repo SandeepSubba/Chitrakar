@@ -46,6 +46,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
 cd app && npm run build                     # wasm + typecheck + bundle
+cd app && npm test                          # unit tests, then the browser suite
 cd shells/tauri/src-tauri && ../../../app/node_modules/.bin/tauri dev    # desktop
 ```
 
@@ -53,7 +54,15 @@ CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
 license-clean to commit.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~834 pixel-level
+`app/e2e/runs.test.mjs` unit-tests `src/runs.ts` — the byte arithmetic
+behind styling part of a text block — without a browser: `npm run
+test:unit` in `app/`, a second or two, and it is where a change to runs
+should be tried first. It transpiles the TypeScript with the esbuild
+that vite already brings, so there is nothing to install. Most of it is
+a property over random strings and random edits, with emoji and accents
+in the alphabet on purpose.
+
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~836 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
