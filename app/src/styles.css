@@ -1545,6 +1545,16 @@ body {
   white-space: nowrap;
 }
 
+/* A dialog saying what it is about to do differently from what was
+   asked. Not an error — nothing has gone wrong yet — so it reads as a
+   remark, not an alarm. */
+.modal-note {
+  margin: 0.1rem 0 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: #ffd9a0;
+}
+
 /* The lock sits beside the eye and is built like it; an unlocked one is
    faint until the row is hovered, a locked one always shows. */
 .lock-toggle {

@@ -6844,6 +6844,49 @@ assert(
   );
 }
 
+// 9ae. A document larger than can be made: the dialog used to clamp the
+// number inside the field as it was typed, so asking for 30000 got you
+// 8192 with nothing said — and, since every keystroke was clamped, no
+// way to type a big number at all. It now keeps what was asked for and
+// says what it is going to do instead.
+{
+  await menuClick("File", "New document\u2026");
+  await page.waitForTimeout(150);
+  const dialog = page.locator('[role="dialog"][aria-label="New document"]');
+  const note = dialog.locator(".modal-note");
+  assert((await note.count()) === 0, "an ordinary size is remarked on by nothing");
+
+  await page.locator('input[aria-label="Width"]').fill("30000");
+  await page.locator('input[aria-label="Height"]').fill("100");
+  await page.waitForTimeout(150);
+  assert(
+    await page.locator('input[aria-label="Width"]').inputValue() === "30000",
+    "the field keeps the number that was typed",
+  );
+  assert((await note.count()) === 1, "and the dialog says something about it");
+  const said = await note.innerText();
+  assert(
+    said.includes("8192") && said.includes("8192 \u00d7 100"),
+    `saying what will be made instead (${said})`,
+  );
+  // The millimetre reading under the resolution describes the document
+  // that will exist, not the one that was asked for.
+  const mm = await dialog.locator(".hint").innerText();
+  const wide = Number(mm.split("\u00d7")[0].replace(/[^0-9.]/g, ""));
+  assert(
+    Math.abs(wide - (8192 / 72) * 25.4) < 2,
+    `the size in millimetres is the clamped one (${mm})`,
+  );
+
+  await page.click("text=Create");
+  await page.waitForTimeout(700);
+  const chip = await page.locator(".doc-chip").innerText();
+  assert(
+    chip.includes("8192\u00d7100"),
+    `and that is the document made (${chip})`,
+  );
+}
+
 // 9ad. Work that has not been saved is said so, and is not thrown away
 // without asking. The draft kept in the browser is a net for a crash,
 // not for this: starting another document overwrites it a breath later.

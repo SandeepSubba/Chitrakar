@@ -517,7 +517,15 @@ without reading anything else.*
   or Display P3 is offered outright, since most of what Apple ships is
   P3 and few people have the .icc to hand. Files: `.chitra` save/open; export PNG (at 1x, 2x or 3x, or of just
   the selection — rendered at that size, not upsampled), JPEG, SVG,
-  CMYK TIFF, PDF. Desktop app packages (deb verified locally; CI builds
+  CMYK TIFF, PDF. Every one of those goes through one helper, so a save
+  or an export that cannot be made says which one and why rather than
+  quietly producing no file — a failure that says nothing looks exactly
+  like a browser that refused the download. The New-document dialog is
+  honest about its ceiling the same way: the fields keep the number that
+  was typed, and if a side is over 8192 the dialog says what it will
+  make instead (it used to clamp inside the field on every keystroke,
+  so asking for 30000 got 8192 with nothing said, and a big number could
+  not be typed at all). Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
 - **Renderer performance:** the transform inverse is solved once per shape
   (`Inverse`), not per coverage sample — a boundary pixel asks for up to
@@ -619,7 +627,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~304),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~771 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~777 browser
   assertions). Both suites self-skip CMYK-profile steps unless
   `CHITRAKAR_TEST_CMYK_ICC` points at a CMYK .icc. The toolchain is pinned
   in `rust-toolchain.toml` and CI installs from it, so the clippy that runs

@@ -4778,25 +4778,50 @@ export function App() {
   const fileName = () =>
     docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
 
+  /** Every path that writes a file goes through here. Making the bytes
+   * can fail — a picture too big to hold at that multiple, a profile
+   * that will not load — and a failure that says nothing looks exactly
+   * like a browser that quietly refused the download. So each one is
+   * named, and says so. Answers whether the file was actually made. */
+  const saveAs = (
+    what: string,
+    name: string,
+    type: string,
+    make: () => Uint8Array,
+  ): boolean => {
+    try {
+      download(make(), name, type);
+      return true;
+    } catch (err) {
+      alert(`${what} failed: ${err}`);
+      return false;
+    }
+  };
+
   const saveFile = () => {
     if (!session) return;
-    download(session.save(), `${fileName()}.chitra`, "application/zip");
-    setSavedAt(history.past.length);
+    const written = saveAs(
+      "Save",
+      `${fileName()}.chitra`,
+      "application/zip",
+      () => session.save(),
+    );
+    if (written) setSavedAt(history.past.length);
   };
 
   const exportPng = () => {
     if (!session) return;
-    download(session.export_png(), `${fileName()}.png`, "image/png");
+    saveAs("PNG export", `${fileName()}.png`, "image/png", () =>
+      session.export_png(),
+    );
   };
 
   /** PNG at a multiple of the document's size — the @2x/@3x a screen
    * asset wants, re-solved rather than upsampled. */
   const exportPngAt = (scale: number) => {
     if (!session) return;
-    download(
+    saveAs("PNG export", `${fileName()}@${scale}x.png`, "image/png", () =>
       session.export_png_at(scale, 0, 0, 0, 0),
-      `${fileName()}@${scale}x.png`,
-      "image/png",
     );
   };
 
@@ -4806,15 +4831,9 @@ export function App() {
     const box = unionBounds(selectionSet);
     if (!box) return;
     const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
-    try {
-      download(
-        session.export_png_at(1, x, y, w, h),
-        `${fileName()}-selection.png`,
-        "image/png",
-      );
-    } catch (err) {
-      alert(`Export: ${err}`);
-    }
+    saveAs("PNG export", `${fileName()}-selection.png`, "image/png", () =>
+      session.export_png_at(1, x, y, w, h),
+    );
   };
 
   /** Every frame on the page, each as its own PNG at its own size —
@@ -4843,17 +4862,17 @@ export function App() {
     if (!session) return;
     const boards = layers.filter((l) => l.kind === "artboard");
     if (boards.length === 0) return;
-    try {
-      for (const board of boards) {
-        const at = frameScale(board.id as NodeId);
-        download(
-          session.export_artboard_png(board.id, at),
-          frameFile(board.name, at),
-          "image/png",
-        );
-      }
-    } catch (err) {
-      alert(`Export: ${err}`);
+    for (const board of boards) {
+      const at = frameScale(board.id as NodeId);
+      const made = saveAs(
+        "PNG export",
+        frameFile(board.name, at),
+        "image/png",
+        () => session.export_artboard_png(board.id, at),
+      );
+      // One frame that will not come out stops the set: a page of
+      // half-written files is worse than a page that says why.
+      if (!made) return;
     }
   };
 
@@ -4863,62 +4882,46 @@ export function App() {
     if (!session || selected === null) return;
     const board = layers.find((l) => l.id === selected);
     if (!board || board.kind !== "artboard") return;
-    try {
-      const at = frameScale(board.id as NodeId);
-      download(
-        session.export_artboard_png(board.id, at),
-        frameFile(board.name, at),
-        "image/png",
-      );
-    } catch (err) {
-      alert(`Export: ${err}`);
-    }
+    const at = frameScale(board.id as NodeId);
+    saveAs("PNG export", frameFile(board.name, at), "image/png", () =>
+      session.export_artboard_png(board.id, at),
+    );
   };
 
   const exportJpeg = () => {
     if (!session) return;
-    download(session.export_jpeg(92), `${fileName()}.jpg`, "image/jpeg");
+    saveAs("JPEG export", `${fileName()}.jpg`, "image/jpeg", () =>
+      session.export_jpeg(92),
+    );
   };
 
   const exportPdf = () => {
     if (!session) return;
-    try {
-      download(session.export_pdf(), `${fileName()}.pdf`, "application/pdf");
-    } catch (err) {
-      alert(`PDF export: ${err}`);
-    }
+    saveAs("PDF export", `${fileName()}.pdf`, "application/pdf", () =>
+      session.export_pdf(),
+    );
   };
 
   /** Every frame as a page of one PDF, in the order they sit on the
    * document — a brochure laid out as artboards comes out a brochure. */
   const exportPdfFrames = () => {
     if (!session) return;
-    try {
-      download(
-        session.export_pdf_frames(),
-        `${fileName()}-pages.pdf`,
-        "application/pdf",
-      );
-    } catch (err) {
-      alert(`PDF export: ${err}`);
-    }
+    saveAs("PDF export", `${fileName()}-pages.pdf`, "application/pdf", () =>
+      session.export_pdf_frames(),
+    );
   };
 
   const exportTiff = () => {
     if (!session) return;
-    try {
-      download(session.export_cmyk_tiff(), `${fileName()}.tif`, "image/tiff");
-    } catch (err) {
-      alert(`CMYK TIFF export: ${err}`);
-    }
+    saveAs("CMYK TIFF export", `${fileName()}.tif`, "image/tiff", () =>
+      session.export_cmyk_tiff(),
+    );
   };
 
   const exportSvg = () => {
     if (!session) return;
-    download(
+    saveAs("SVG export", `${fileName()}.svg`, "image/svg+xml", () =>
       new TextEncoder().encode(session.export_svg()),
-      `${fileName()}.svg`,
-      "image/svg+xml",
     );
   };
 
@@ -7591,6 +7594,12 @@ function KeysDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** The largest side a new document can have. The renderer works in
+ * premultiplied f32, so a square of this is already 1 GB of canvas; past
+ * it the browser's allocator is the one saying no, and it says it far
+ * less clearly than we can. */
+const MAX_SIDE = 8192;
+
 /** New-document dialog: presets for the sizes people actually start from,
  * and the two fields underneath for everything else. Colour mode is chosen
  * here because it decides how every fill in the document is authored, and
@@ -7607,14 +7616,27 @@ function NewDocDialog({
   const [dpi, setDpi] = useState(72);
   const [mode, setMode] = useState("rgb");
 
+  // What will actually be made. A side larger than the ceiling used to
+  // be clamped inside the field as you typed, so asking for 30000 got
+  // you 8192 with nothing said and no way to type past the limit at
+  // all. Now the field keeps what was asked for and the dialog says
+  // what it is going to do about it.
+  const madeW = Math.min(w, MAX_SIDE);
+  const madeH = Math.min(h, MAX_SIDE);
+  const clamped = w > MAX_SIDE || h > MAX_SIDE;
+  const create = useCallback(
+    () => onCreate(madeW, madeH, mode === "cmyk", dpi),
+    [madeW, madeH, mode, dpi, onCreate],
+  );
+
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
-      if (e.key === "Enter") onCreate(w, h, mode === "cmyk", dpi);
+      if (e.key === "Enter") create();
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [w, h, mode, dpi, onCreate, onCancel]);
+  }, [create, onCancel]);
 
   const size = (label: string, value: number, set: (v: number) => void) => (
     <label className="row">
@@ -7622,11 +7644,8 @@ function NewDocDialog({
       <input
         type="number"
         min={1}
-        max={8192}
         value={value}
-        onChange={(e) =>
-          set(Math.max(1, Math.min(8192, Math.round(Number(e.target.value)))))
-        }
+        onChange={(e) => set(Math.max(1, Math.round(Number(e.target.value))))}
         aria-label={label}
       />
     </label>
@@ -7662,6 +7681,12 @@ function NewDocDialog({
         </div>
         {size("Width", w, setW)}
         {size("Height", h, setH)}
+        {clamped && (
+          <p className="modal-note" role="status">
+            The largest document is {MAX_SIDE} × {MAX_SIDE} pixels — this one
+            will be made {madeW} × {madeH}.
+          </p>
+        )}
         <label className="row">
           Resolution
           <input
@@ -7677,7 +7702,7 @@ function NewDocDialog({
             aria-label="Resolution"
           />
           <span className="hint">
-            dpi · {inUnits(w, "mm", dpi)} × {inUnits(h, "mm", dpi)} mm
+            dpi · {inUnits(madeW, "mm", dpi)} × {inUnits(madeH, "mm", dpi)} mm
           </span>
         </label>
         <label className="row">
@@ -7695,10 +7720,7 @@ function NewDocDialog({
           <button className="mask-button" onClick={onCancel}>
             Cancel
           </button>
-          <button
-            className="mask-button primary"
-            onClick={() => onCreate(w, h, mode === "cmyk", dpi)}
-          >
+          <button className="mask-button primary" onClick={create}>
             Create
           </button>
         </div>
