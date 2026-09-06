@@ -923,7 +923,13 @@ fn render_child(
         let plane = if node.kind.holds_children() {
             None
         } else {
-            MaskRef::plane_for(node.mask.as_ref(), parent, clip, (dst.width, dst.height))
+            MaskRef::plane_over(
+                Some(doc),
+                node.mask.as_ref(),
+                parent,
+                clip,
+                (dst.width, dst.height),
+            )
         };
         let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
         match &node.kind {
@@ -994,7 +1000,8 @@ fn render_child(
                 }
                 if node.mask.is_some() {
                     let shifted = window.compose(parent);
-                    let plane = MaskRef::plane_for(
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
                         node.mask.as_ref(),
                         shifted,
                         inner,
@@ -1086,7 +1093,8 @@ fn render_child(
                 }
                 if node.mask.is_some() {
                     let shifted_parent = window.compose(parent);
-                    let plane = MaskRef::plane_for(
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
                         node.mask.as_ref(),
                         shifted_parent,
                         inner,
@@ -1150,7 +1158,8 @@ fn render_child(
                 if node.mask.is_some() {
                     // The mask is read in the window's coordinates too.
                     let shifted = window.compose(parent);
-                    let plane = MaskRef::plane_for(
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
                         node.mask.as_ref(),
                         shifted,
                         inner,
@@ -2275,10 +2284,12 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
         return Vec::new();
     }
     let at = |x: usize, y: usize| inside[y * w + x];
-    // Directed boundary edges, from each corner to the next. A corner is
-    // an integer point, so it keys exactly.
-    let mut from: std::collections::HashMap<(u32, u32), Vec<(u32, u32)>> =
-        std::collections::HashMap::new();
+    // Directed boundary edges, from each corner to the next, kept in
+    // order so the same pixels always trace to the same rings — a map
+    // that iterates differently each run would give a different answer
+    // each run, and this one is compared against a picture.
+    let mut from: std::collections::BTreeMap<(u32, u32), Vec<(u32, u32)>> =
+        std::collections::BTreeMap::new();
     let mut edge = |a: (u32, u32), b: (u32, u32)| from.entry(a).or_default().push(b);
     for y in 0..h {
         for x in 0..w {
@@ -2302,14 +2313,49 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
             }
         }
     }
+    // Which way an edge goes, as a quarter turn clockwise from the last:
+    // +x, +y, -x, -y.
+    let heading = |a: (u32, u32), b: (u32, u32)| -> usize {
+        if b.0 > a.0 {
+            0
+        } else if b.1 > a.1 {
+            1
+        } else if b.0 < a.0 {
+            2
+        } else {
+            3
+        }
+    };
     let mut rings = Vec::new();
     while let Some((&start, _)) = from.iter().find(|(_, next)| !next.is_empty()) {
         let mut ring: Vec<(u32, u32)> = vec![start];
         let mut at_point = start;
+        // The direction the walk arrived by, which decides what it does
+        // where two of them meet.
+        let mut came: Option<usize> = None;
         loop {
-            let Some(next) = from.get_mut(&at_point).and_then(Vec::pop) else {
+            let Some(out) = from.get_mut(&at_point) else {
                 break;
             };
+            if out.is_empty() {
+                break;
+            }
+            // Where two pixels touch at a corner, four edges meet there
+            // and the walk has to choose. Turning as far clockwise as it
+            // can keeps the inside of the ring on its right the whole
+            // way round, which is what makes two pixels touching at a
+            // corner two rings rather than one pinched figure of eight.
+            // Taking whichever edge came to hand made that a coin toss —
+            // and one that landed differently from run to run.
+            let pick = match came {
+                None => 0,
+                Some(d) => {
+                    let rank = |b: &(u32, u32)| (heading(at_point, *b) + 4 - (d + 1)) % 4;
+                    (0..out.len()).min_by_key(|&i| rank(&out[i])).unwrap_or(0)
+                }
+            };
+            let next = out.remove(pick);
+            came = Some(heading(at_point, next));
             if next == start {
                 break;
             }
@@ -3651,12 +3697,104 @@ impl<'a> MaskRef<'a> {
         clip: ClipRect,
         surface: (u32, u32),
     ) -> Option<MaskPlane> {
-        match mask.map(|m| &m.kind) {
-            Some(MaskKind::Painted { strokes }) => {
-                Some(paint_plane(strokes, parent, clip, surface))
-            }
-            _ => None,
+        Self::plane_over(None, mask, parent, clip, surface)
+    }
+
+    /// The coverage a mask needs worked out ahead of being read pixel by
+    /// pixel: a painted one, which is strokes rather than a formula, and
+    /// any mask with a softened edge, which is a neighbourhood and so
+    /// cannot be answered one pixel at a time.
+    ///
+    /// A raster mask reads its pixels out of the document, so softening
+    /// one needs the document; nothing else does, and the caller that
+    /// has one passes it.
+    fn plane_over(
+        doc: Option<&Document>,
+        mask: Option<&Mask>,
+        parent: Transform,
+        clip: ClipRect,
+        surface: (u32, u32),
+    ) -> Option<MaskPlane> {
+        let m = mask?;
+        if let MaskKind::Painted { strokes } = &m.kind {
+            let plane = paint_plane(strokes, parent, clip, surface);
+            return Some(match feather_of(m, parent) {
+                Some(sigma) => softened(plane, sigma),
+                None => plane,
+            });
         }
+        let sigma = feather_of(m, parent)?;
+        // Worked out over more than is asked for, since the softening
+        // pulls in coverage from outside the region being drawn: without
+        // the margin the edge of a dirty rectangle would fade to nothing
+        // and show as a seam.
+        let pad = (sigma * 3.0).ceil() as u32 + 1;
+        let grown = ClipRect {
+            x0: clip.x0.saturating_sub(pad),
+            y0: clip.y0.saturating_sub(pad),
+            x1: (clip.x1 + pad).min(surface.0),
+            y1: (clip.y1 + pad).min(surface.1),
+        };
+        let hard = Mask {
+            feather: 0.0,
+            ..m.clone()
+        };
+        let read = MaskRef::new(Some(&hard), parent);
+        let (w, h) = (
+            grown.x1.saturating_sub(grown.x0),
+            grown.y1.saturating_sub(grown.y0),
+        );
+        let mut cover = Vec::with_capacity((w * h) as usize);
+        for y in grown.y0..grown.y1 {
+            for x in grown.x0..grown.x1 {
+                cover.push(match doc {
+                    Some(doc) => coverage_at(doc, read, x, y),
+                    // Without a document a raster mask has no pixels to
+                    // read; the rest answer from their own geometry.
+                    None => bare_coverage(read, x, y),
+                });
+            }
+        }
+        Some(softened(MaskPlane { clip: grown, cover }, sigma))
+    }
+}
+
+/// How far a mask's edge is softened, in device pixels, or `None` for
+/// the hard edge a shape has. The figure is written in the mask's own
+/// units, so whatever scales that space scales the softening with it.
+fn feather_of(mask: &Mask, parent: Transform) -> Option<f32> {
+    let sigma = mask.feather * max_scale(parent);
+    (sigma > 0.01).then_some(sigma)
+}
+
+/// A plane blurred by `sigma`, which is what softening an edge is.
+fn softened(mut plane: MaskPlane, sigma: f32) -> MaskPlane {
+    let (w, h) = (
+        plane.clip.x1.saturating_sub(plane.clip.x0),
+        plane.clip.y1.saturating_sub(plane.clip.y0),
+    );
+    blur::blur_plane(&mut plane.cover, w, h, sigma);
+    plane
+}
+
+/// A mask's coverage without a document to read a picture out of: every
+/// kind but a raster one answers from its own geometry.
+fn bare_coverage(m: MaskRef<'_>, x: u32, y: u32) -> f32 {
+    let Some(mask) = m.mask else {
+        return 1.0;
+    };
+    let c = match &mask.kind {
+        MaskKind::Vector { shape, .. } => match m.inv {
+            Some(inv) => pixel_coverage(shape, None, m.t, inv, x, y),
+            None => 0.0,
+        },
+        MaskKind::Painted { .. } => m.plane.map_or(1.0, |p| p.at(x, y)),
+        MaskKind::Raster { .. } => 0.0,
+    };
+    if mask.invert {
+        1.0 - c
+    } else {
+        c
     }
 }
 
@@ -3664,6 +3802,13 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     let Some(mask) = m.mask else {
         return 1.0;
     };
+    // A softened edge is a neighbourhood, so it was worked out into a
+    // plane ahead of this and is only read here. Inverting has already
+    // happened, on the hard coverage the plane was blurred from — which
+    // is the same answer either way round, and one blur rather than two.
+    if mask.feather > 0.0 {
+        return m.plane.map_or(1.0, |p| p.at(x, y));
+    }
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
         MaskKind::Vector { shape, .. } => match m.inv {
@@ -3720,7 +3865,7 @@ pub fn mask_plane_over(
     clip: ClipRect,
     surface: (u32, u32),
 ) -> Vec<f32> {
-    let plane = MaskRef::plane_for(Some(mask), parent, clip, surface);
+    let plane = MaskRef::plane_over(Some(doc), Some(mask), parent, clip, surface);
     let m = MaskRef::new(Some(mask), parent).with_plane(plane.as_ref());
     let mut out = Vec::with_capacity(
         ((clip.x1.saturating_sub(clip.x0)) * (clip.y1.saturating_sub(clip.y0))) as usize,
@@ -5629,6 +5774,139 @@ fn hit_in_group(
 
 #[cfg(test)]
 mod tests {
+
+    /// A mask's edge, softened.
+    ///
+    /// The one thing a mask's edge can be asked for that its shape
+    /// cannot say. A region picked out of a photograph almost never
+    /// wants the edge the marquee drew, and a layer masked into another
+    /// wants to be let into it rather than stamped on it.
+    #[test]
+    fn a_feathered_mask_lets_its_edge_fade() {
+        let page = |feather: f32| {
+            let mut doc = Document::new(80, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "sheet",
+                VectorShape::Rect {
+                    width: 80.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 40.0,
+                            height: 40.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::default(),
+                    },
+                    invert: false,
+                    feather,
+                })),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        // Hard: the mask's edge is the mask's edge, one pixel wide.
+        let hard = page(0.0);
+        assert!(hard.get(38, 20).a > 0.99, "inside the mask");
+        assert!(hard.get(42, 20).a < 0.01, "and outside it");
+
+        // Soft: the same edge fades over several pixels, and the fade
+        // runs the right way round.
+        let soft = page(4.0);
+        let at = |x: u32| soft.get(x, 20).a;
+        assert!(at(30) > 0.95, "well inside, still whole");
+        assert!(at(50) < 0.05, "well outside, still nothing");
+        assert!(
+            (at(40) - 0.5).abs() < 0.15,
+            "and half way at the edge itself: {}",
+            at(40)
+        );
+        for x in 32..48 {
+            assert!(
+                at(x) >= at(x + 1) - 1e-4,
+                "the fade only ever falls: {} then {} at {x}",
+                at(x),
+                at(x + 1)
+            );
+        }
+        assert!(
+            at(36) < 0.98 && at(44) > 0.02,
+            "it is a fade rather than a step moved along: {} {}",
+            at(36),
+            at(44)
+        );
+
+        // Inverted, the same edge fades the other way — inverting
+        // happens on the hard coverage the softening is worked from, so
+        // it is one blur rather than two and the two agree at the edge.
+        let mut doc = Document::new(80, 40, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect(
+                "sheet",
+                80.0,
+                40.0,
+                AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 40.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: true,
+                feather: 4.0,
+            })),
+        })
+        .unwrap();
+        let other = render(&doc).unwrap();
+        assert!(other.get(30, 20).a < 0.05, "inside is now the hidden part");
+        assert!(other.get(50, 20).a > 0.95, "and outside the shown one");
+        assert!(
+            (other.get(40, 20).a + soft.get(40, 20).a - 1.0).abs() < 0.02,
+            "the two meet at the edge: {} and {}",
+            other.get(40, 20).a,
+            soft.get(40, 20).a
+        );
+    }
 
     /// The outline of a set of pixels, traced along the pixel edges.
     ///
@@ -7558,6 +7836,7 @@ mod tests {
                     strokes: Vec::new(),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -8322,6 +8601,7 @@ mod tests {
             mask: Some(Box::new(chitrakar_doc::Mask {
                 kind: chitrakar_doc::MaskKind::Painted { strokes: vec![rub] },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -10447,6 +10727,7 @@ mod tests {
                 transform: Transform::translation(cx - rx, cy - ry),
             },
             invert,
+            feather: 0.0,
         }
     }
 
@@ -10714,6 +10995,7 @@ mod tests {
                     },
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();

@@ -3517,6 +3517,7 @@ mod tests {
                     transform: Transform::translation(25.0, 25.0),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -3541,6 +3542,7 @@ mod tests {
                     transform: Transform::translation(75.0, 15.0),
                 },
                 invert: true,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -3629,6 +3631,7 @@ mod tests {
                         }],
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             })
             .unwrap();
@@ -3702,6 +3705,7 @@ mod tests {
                         transform: Transform::translation(5.0, 5.0),
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             })
             .unwrap();
@@ -3753,6 +3757,7 @@ mod tests {
                         transform: Transform::translation(20.0, 20.0),
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             })
             .unwrap();
@@ -3828,6 +3833,7 @@ mod tests {
                         transform: Transform::translation(x, 0.0),
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             })
             .unwrap();
@@ -4218,6 +4224,7 @@ mod tests {
                     transform: Transform::translation(12.0, 12.0),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -4404,6 +4411,7 @@ mod tests {
                     transform: Transform::default(),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -4589,6 +4597,7 @@ mod tests {
                     transform: Transform::default(),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -4766,6 +4775,7 @@ mod tests {
                     transform: Transform::default(),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();

@@ -1221,6 +1221,10 @@ export function App() {
   /** How far the wand's colour may stray from the one it was clicked on:
    * 0 is exactly that colour and 1 is the whole page. */
   const [wandTolerance, setWandTolerance] = useState(0.12);
+  /** How far the edge of the next region picked is softened over. Kept
+   * here rather than read off the document so it carries from one
+   * region to the next, the way a brush size does. */
+  const [selectionFeather, setSelectionFeather] = useState(0);
   /** The outline of what is picked out, in page coordinates, as the
    * engine flattens it — asked for rather than worked out again here,
    * since a rounded box, an ellipse and a freehand path each flatten
@@ -2462,6 +2466,7 @@ export function App() {
           : "replace";
       try {
         session.pick_similar(x, y, wandTolerance, how);
+        if (selectionFeather > 0) session.feather_selection(selectionFeather);
         refresh(session);
       } catch (err) {
         alert(`Select: ${err}`);
@@ -2963,6 +2968,9 @@ export function App() {
           new Float64Array(shape.points ?? []),
           how,
         );
+        // The softness carries from one region to the next, the way a
+        // brush size does, rather than having to be set again each time.
+        if (selectionFeather > 0) session.feather_selection(selectionFeather);
         refresh(session);
       } catch (err) {
         alert(`Select: ${err}`);
@@ -6494,6 +6502,28 @@ export function App() {
               </button>
             ),
           )}
+          {/* How far the edge of what is picked is softened over. Shown
+              while a region-picking tool is in hand, since that is when
+              it is being decided — and it is the same number the mask
+              panel shows, set before the region is handed to a layer
+              rather than after. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <input
+              className="tool-number"
+              type="number"
+              min={0}
+              max={200}
+              step={1}
+              value={Math.round(selectionFeather)}
+              title="How far the edge is softened over, in page pixels"
+              aria-label="Selection feather"
+              onChange={(e) => {
+                const want = Math.max(0, Number(e.target.value));
+                setSelectionFeather(want);
+                if (session?.feather_selection(want)) refresh(session);
+              }}
+            />
+          )}
           {/* How far the wand's colour may stray. Only while it is the
               tool in hand, like the sides box below. */}
           {tool === "Wand" && (
@@ -7980,6 +8010,45 @@ export function App() {
                   >
                     Remove
                   </button>
+                </label>
+              )}
+              {/* How far the mask's edge is softened over. A region
+                  picked out of a photograph almost never wants the edge
+                  the marquee drew, and a layer masked into another wants
+                  to be let into it rather than stamped on it. Dragged,
+                  so it previews as one history entry like every other
+                  slider here. */}
+              {selectedMask !== null && (
+                <label className="row">
+                  Feather
+                  <input
+                    type="range"
+                    min={0}
+                    max={40}
+                    step={0.5}
+                    value={selectedMask.feather ?? 0}
+                    aria-label="Mask feather"
+                    onChange={(e) =>
+                      preview({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: {
+                            ...selectedMask!,
+                            feather: Number(e.target.value),
+                          },
+                        },
+                      })
+                    }
+                    onPointerUp={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                    onBlur={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                  />
+                  <span className="num">
+                    {Math.round(selectedMask.feather ?? 0)}
+                  </span>
                 </label>
               )}
             </div>

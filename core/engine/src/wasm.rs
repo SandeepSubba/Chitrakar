@@ -600,6 +600,11 @@ impl WasmSession {
         self.inner.pick_none().map_err(to_js)
     }
 
+    /// Soften the edge of what is picked out, in page pixels.
+    pub fn feather_selection(&mut self, feather: f64) -> Result<bool, JsError> {
+        self.inner.feather_selection(feather as f32).map_err(to_js)
+    }
+
     /// Swap what is picked out for what is not. False when nothing is.
     pub fn pick_inverse(&mut self) -> Result<bool, JsError> {
         self.inner.pick_inverse().map_err(to_js)

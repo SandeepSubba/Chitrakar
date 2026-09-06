@@ -1672,6 +1672,7 @@ mod tests {
                 transform: Transform::default(),
             },
             invert: false,
+            feather: 0.0,
         };
         history
             .apply(

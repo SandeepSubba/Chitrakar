@@ -1322,6 +1322,7 @@ mod tests {
                     }],
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();

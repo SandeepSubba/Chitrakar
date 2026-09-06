@@ -188,6 +188,10 @@ export type MaskKind =
 export interface Mask {
   kind: MaskKind;
   invert: boolean;
+  /** How far the edge is softened over, in the mask's own units. Zero is
+   * the hard edge a shape has. Additive: a mask written before this had
+   * one, which is what its absence means. */
+  feather?: number;
 }
 
 /** A live effect drawn around a layer, from the layer's own composite.

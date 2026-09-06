@@ -7695,6 +7695,61 @@ assert(
     "and picking out nothing leaves no ants",
   );
 
+  // 9al4. A softened edge. The one thing a mask's edge can be asked for
+  // that its shape cannot say — and since a region here becomes a mask,
+  // softening the region and softening the mask are the same number.
+  await newDocument(300, 200, "rgb");
+  const f = await page.locator("#engine-page").boundingBox();
+  const fat = (x, y) => [f.x + (x / 300) * f.width, f.y + (y / 200) * f.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#dddddd");
+  await pickTool("Rect");
+  await page.mouse.move(...fat(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...fat(300, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...fat(60, 40));
+  await page.mouse.down();
+  await page.mouse.move(...fat(240, 160), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const soften = page.locator('input[aria-label="Selection feather"]');
+  assert(
+    await soften.isVisible(),
+    "with a region picked, the softness of its edge is offered",
+  );
+  await soften.fill("10");
+  await soften.dispatchEvent("change");
+  await page.waitForTimeout(400);
+
+  await pickTool("Move");
+  await page.mouse.click(...fat(150, 100));
+  await page.waitForTimeout(250);
+  await menuClick("Edit", "Mask this layer with what is picked");
+  await page.waitForTimeout(450);
+  // Across the region's own edge at x=60: whole well inside, nothing
+  // well outside, and part way through in between — which a hard edge
+  // never is.
+  const alpha = async (x) => (await canvasPixel(x, 100))[3];
+  const [inside, edge, outside] = [
+    await alpha(90),
+    await alpha(60),
+    await alpha(30),
+  ];
+  assert(inside > 240, `whole well inside the region (${inside})`);
+  assert(outside < 15, `and nothing well outside it (${outside})`);
+  assert(
+    edge > 60 && edge < 200,
+    `with the edge itself part way through (${edge})`,
+  );
+  assert(
+    (await alpha(50)) < edge && (await alpha(70)) > edge,
+    "and the fade running the right way round",
+  );
+
   // 9al3. The wand: the run of pixels round a click that look like it.
   // It reads the page as it is drawn, so what it picks out is what the
   // eye would have called one thing.

@@ -252,6 +252,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             transform: Transform::translation(2.0, 3.0),
         },
         invert: true,
+        feather: 0.0,
     });
     vec![
         Command::AddNode {
@@ -368,6 +369,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     transform: Transform::translation(9.0, 11.0),
                 },
                 invert: false,
+                feather: 0.0,
             })),
         },
         Command::SetSwatches {

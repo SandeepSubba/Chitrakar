@@ -426,6 +426,7 @@ mod tests {
                     }],
                 },
                 invert: false,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -585,6 +586,7 @@ mod tests {
                     transform: chitrakar_doc::Transform::translation(50.0, 40.0),
                 },
                 invert: true,
+                feather: 0.0,
             })),
         })
         .unwrap();
@@ -610,6 +612,7 @@ mod tests {
                         transform: chitrakar_doc::Transform::default(),
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             }),
             on_mask: false,

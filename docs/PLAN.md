@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~328),
+- **Verify before committing:** `cargo test --workspace` (~330),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~866 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~871 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -931,7 +931,25 @@ without reading anything else.*
   region is a handful of points rather than four per pixel. From there
   it is a region like any other — added to, taken from, filled, handed
   to a layer — which is the whole reason for tracing rather than keeping
-  a coverage. Shift while dragging adds
+  a coverage. Where two pixels touch only at a corner, four edges meet
+  there and the walk turns as far clockwise as it can: that keeps the
+  inside on its right the whole way round, and makes them two rings
+  rather than one pinched figure of eight. Taking whichever edge came to
+  hand made that a coin toss that landed differently from run to run.
+- **A mask's edge, softened:** `Mask::feather`, the one thing an edge can
+  be asked for that its shape cannot say — a region picked out of a
+  photograph almost never wants the edge the marquee drew, and a layer
+  masked into another wants to be let into it rather than stamped on it.
+  A softened edge is a neighbourhood, so it cannot be answered a pixel
+  at a time: the coverage is worked out into a plane over more than is
+  being drawn (without the margin a dirty rectangle's own edge would
+  fade and show as a seam), blurred by the same box radius the picture
+  blur uses so a feather and a blur filter of the same sigma soften
+  alike, and read from there. Inverting happens on the hard coverage the
+  blur is worked from, which is the same answer either way round and one
+  blur rather than two. Selections carry it too, and the number is the
+  same one the mask panel shows — set before the region is handed to a
+  layer rather than after. Shift while dragging adds
   to what is picked out and alt takes from it (both together keep the
   overlap), a click with neither lets go, and marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture

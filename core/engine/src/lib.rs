@@ -1683,6 +1683,7 @@ impl Session {
                             strokes: Vec::new(),
                         },
                         invert: false,
+                        feather: 0.0,
                     })),
                 })?;
                 Ok(true)
@@ -2443,6 +2444,7 @@ impl Session {
         let fresh = chitrakar_doc::Mask {
             kind: chitrakar_doc::MaskKind::Vector { shape, transform },
             invert: false,
+            feather: 0.0,
         };
         if how == "replace" {
             return self.apply_labeled(
@@ -2554,6 +2556,7 @@ impl Session {
                 transform: Transform::default(),
             },
             invert: false,
+            feather: 0.0,
         })
     }
 
@@ -2659,6 +2662,30 @@ impl Session {
         self.apply_labeled(
             Command::SetSelection { selection: None },
             Some("Deselect".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Soften the edge of what is picked out, in page pixels.
+    ///
+    /// A region is handed to a layer as its mask, and a mask's edge is
+    /// where a selection's softness lives — so this is the same number
+    /// the mask panel shows, set before the handing over rather than
+    /// after.
+    pub fn feather_selection(&mut self, feather: f32) -> Result<bool, EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        let want = feather.max(0.0);
+        if (selection.feather - want).abs() < 1e-4 {
+            return Ok(false);
+        }
+        selection.feather = want;
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(selection)),
+            },
+            Some("Soften the edge".into()),
         )?;
         Ok(true)
     }
@@ -2834,6 +2861,7 @@ impl Session {
         let inverted = mask.invert;
         let mut rings = Self::region_rings(&chitrakar_doc::Mask {
             invert: false,
+            feather: 0.0,
             ..mask.clone()
         })?;
         // The rest of the page instead: the page's own rectangle with
@@ -5102,6 +5130,7 @@ mod tests {
                             transform: Transform::default(),
                         },
                         invert: false,
+                        feather: 0.0,
                     })),
                 })
                 .unwrap();
@@ -8959,6 +8988,7 @@ mod save_probe {
                         transform: chitrakar_doc::Transform::default(),
                     },
                     invert: false,
+                    feather: 0.0,
                 })),
             })
             .unwrap();

@@ -21,6 +21,54 @@ pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32) {
     }
 }
 
+/// The same blur over a plain grid of numbers — a mask's coverage rather
+/// than a picture's pixels.
+///
+/// Written against the same box radius the picture blur uses, so a
+/// feathered edge and a blur filter of the same sigma soften by the same
+/// amount. Edges clamp, which for a coverage means the value at the edge
+/// carries on outwards rather than fading into nothing that was never
+/// worked out.
+pub fn blur_plane(cover: &mut [f32], width: u32, height: u32, sigma: f32) {
+    let (w, h) = (width as usize, height as usize);
+    if sigma <= 0.01 || w == 0 || h == 0 || cover.len() < w * h {
+        return;
+    }
+    let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
+    let radius = ((d.max(1) / 2).max(1)) as usize;
+    let mut line = vec![0.0f32; w.max(h)];
+    for _ in 0..3 {
+        for horizontal in [true, false] {
+            let (lanes, len) = if horizontal { (h, w) } else { (w, h) };
+            if len == 0 {
+                continue;
+            }
+            let norm = 1.0 / (2 * radius + 1) as f32;
+            for lane in 0..lanes {
+                for (i, slot) in line[..len].iter_mut().enumerate() {
+                    *slot = cover[if horizontal {
+                        lane * w + i
+                    } else {
+                        i * w + lane
+                    }];
+                }
+                let read = |i: isize| line[i.clamp(0, len as isize - 1) as usize];
+                let r = radius as isize;
+                let mut sum: f32 = (-r..=r).map(read).sum();
+                for i in 0..len {
+                    let at = if horizontal {
+                        lane * w + i
+                    } else {
+                        i * w + lane
+                    };
+                    cover[at] = sum * norm;
+                    sum += read(i as isize + r + 1) - read(i as isize - r);
+                }
+            }
+        }
+    }
+}
+
 /// Copy of a region's pixels, for filters that need the pre-blur original.
 pub fn snapshot(surface: &Surface, clip: ClipRect) -> Vec<LinearRgba> {
     let (w, h) = (clip.x1 - clip.x0, clip.y1 - clip.y0);

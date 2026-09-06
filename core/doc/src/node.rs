@@ -1000,6 +1000,18 @@ pub struct Mask {
     pub kind: MaskKind,
     /// Flip coverage: masked-out becomes masked-in.
     pub invert: bool,
+    /// How far the edge is softened over, in the mask's own units.
+    ///
+    /// Zero is the hard edge a shape has. Anything else blurs the
+    /// coverage, which is the one thing a mask's edge can be asked for
+    /// that its shape cannot say: a region picked out of a photograph
+    /// almost never wants the edge the marquee drew, and a layer masked
+    /// into another wants to be let into it rather than stamped on it.
+    ///
+    /// Additive: a mask written before this had a hard edge, which is
+    /// what zero means.
+    #[serde(default)]
+    pub feather: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
