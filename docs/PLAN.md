@@ -649,7 +649,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~310),
+- **Verify before committing:** `cargo test --workspace` (~312),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -710,9 +710,19 @@ without reading anything else.*
   is laid down the moment its contents are finished and nothing reads it
   after. The multisampled attachment is kept only when its surface is
   drawn on again, so a page without such a group costs exactly what it
-  did. It declines
+  did. A layer with a blend mode is drawn on one of those surfaces for
+  the same reason and brought down by a fragment that works out the
+  whole answer — all sixteen modes the W3C spec names, on the values a
+  device shows, exactly as the CPU compositor reads them — and writes it
+  over what was there rather than blending into it. What it is coming
+  down onto is read from a copy taken just before the pass, since a pass
+  cannot sample what it is drawing into; one copy serves the page, since
+  the passes run in order and it is spent before the next begins. Every
+  mode is held against the CPU's own answer, and where there is no layer
+  the answer is what was already there, so the rest of the page comes
+  through untouched. It declines
   anything else — effects, filters,
-  adjustments, blend modes, ink authored
+  adjustments, ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
   back to the CPU. Its tests render the same page both ways and compare: mean channel
@@ -725,11 +735,10 @@ without reading anything else.*
   there too.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is blend
-     modes, adjustments and effects — all three read what is under them,
-     which the surfaces a group that composites as a unit is already
-     drawn on are most of the way towards (see
-     docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is
+     adjustments and filters, which read what is under them the way a
+     blend does and so want the same copy-aside a blend already takes
+     (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

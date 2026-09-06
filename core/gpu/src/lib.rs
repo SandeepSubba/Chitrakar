@@ -161,10 +161,14 @@ enum Draw {
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
     Open,
-    /// That surface laid over the one under it, at the group's own
-    /// opacity and held to the group's own mask — which is the item's,
-    /// so the one quad carries it rather than each of the children.
-    Close { quad: std::ops::Range<u32> },
+    /// That surface laid over the one under it, at the layer's own
+    /// opacity, held to its mask — which is the item's, so the one quad
+    /// carries it rather than each of the children — and brought down
+    /// by its blend mode.
+    Close {
+        quad: std::ops::Range<u32>,
+        blend: BlendMode,
+    },
 }
 
 /// A device, a queue and the pipelines that draw every shape.
@@ -175,6 +179,10 @@ pub struct GpuRenderer {
     stencil: wgpu::RenderPipeline,
     cover: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    /// A layer's own surface brought down onto what is under it by a
+    /// blend mode, which the fragment works out in full and writes over
+    /// what was there.
+    blend: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
     /// instead of a flat colour.
     shape_gradient: wgpu::RenderPipeline,
@@ -256,7 +264,14 @@ impl GpuRenderer {
         // ask which groups the pipeline it is about to use expects.
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("page"),
-            bind_group_layouts: &[&layout, &texture_layout, &texture_layout],
+            bind_group_layouts: &[
+                &layout,
+                &texture_layout,
+                &texture_layout,
+                // What a layer with a blend mode reads: a copy of what
+                // is already on the surface it is coming down onto.
+                &texture_layout,
+            ],
             push_constant_ranges: &[],
         });
         // Bilinear, clamped: the texels are premultiplied linear, so the
@@ -420,6 +435,37 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // The same quad as an image, brought down by a blend mode
+        // rather than laid over: the fragment works out the whole
+        // answer, backdrop included, so it replaces what is there
+        // instead of blending into it.
+        let blend = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blend"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_blend"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes"),
             layout: Some(&pipeline_layout),
@@ -555,6 +601,7 @@ impl GpuRenderer {
             stencil,
             cover,
             image,
+            blend,
             shape_gradient,
             cover_gradient,
             union,
@@ -740,7 +787,9 @@ impl GpuRenderer {
                 "group",
                 1,
                 wgpu::TextureFormat::Rgba16Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
             );
             let flat_view = flat.create_view(&Default::default());
             let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -770,6 +819,44 @@ impl GpuRenderer {
                 n => (&surfaces[n - 1].0, &surfaces[n - 1].1),
             }
         };
+        let resolved = |at: usize| -> &wgpu::Texture {
+            match at {
+                0 => &texture,
+                n => &surfaces[n - 1].3,
+            }
+        };
+        // A blend has to read what is already on the surface it is
+        // coming down onto, and a pass cannot sample what it is drawing
+        // into — so what is there is copied aside first. One is enough:
+        // the passes run in order, and the copy is spent before the next
+        // begins.
+        let blending = passes
+            .iter()
+            .any(|p| p.lay.as_ref().is_some_and(|l| l.blend != BlendMode::Normal));
+        let under = blending.then(|| {
+            let backdrop = make(
+                "backdrop",
+                1,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            );
+            let backdrop_view = backdrop.create_view(&Default::default());
+            let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("backdrop"),
+                layout: &self.texture_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&backdrop_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            (backdrop, read)
+        });
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for (n, step) in passes.iter().enumerate() {
@@ -780,6 +867,26 @@ impl GpuRenderer {
             // brought back. Every other pass throws it away, as the one
             // pass a page without groups needs always did.
             let again = passes[n + 1..].iter().any(|p| p.target == step.target);
+            // Take the copy a blend will read before the pass starts.
+            if let (Some(laid), Some((backdrop, _))) = (&step.lay, &under) {
+                if laid.blend != BlendMode::Normal {
+                    encoder.copy_texture_to_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: resolved(step.target),
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        wgpu::ImageCopyTexture {
+                            texture: backdrop,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        size,
+                    );
+                }
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("page"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -819,12 +926,19 @@ impl GpuRenderer {
                 pass.set_bind_group(0, &bind, &[]);
                 pass.set_bind_group(1, &self.open, &[]);
                 pass.set_bind_group(2, &self.open, &[]);
+                pass.set_bind_group(3, &self.open, &[]);
                 pass.set_vertex_buffer(0, quads.slice(..));
                 pass.set_stencil_reference(0);
                 // A group's surface comes down first, over whatever was
                 // already on this one.
                 if let Some(laid) = &step.lay {
-                    pass.set_pipeline(&self.image);
+                    match (&under, laid.blend) {
+                        (Some((_, backdrop)), blend) if blend != BlendMode::Normal => {
+                            pass.set_pipeline(&self.blend);
+                            pass.set_bind_group(3, backdrop, &[]);
+                        }
+                        _ => pass.set_pipeline(&self.image),
+                    }
                     pass.set_bind_group(1, &surfaces[laid.from - 1].2, &[]);
                     pass.set_bind_group(2, laid.mask.map_or(&self.open, |at| &textures[at]), &[]);
                     pass.draw(laid.quad.clone(), 0..1);
@@ -1058,36 +1172,38 @@ fn collect(
         if !node.visible || node.opacity <= 0.0 {
             continue;
         }
-        // Anything that needs a surface of its own, or reads what is
-        // under it, belongs to the CPU for now.
-        if !node.effects.is_empty() || node.blend != BlendMode::Normal {
+        // A live effect still belongs to the CPU.
+        if !node.effects.is_empty() {
             return None;
         }
         let t = parent.compose(node.transform);
+        // What composites as a unit before it meets what is under it: a
+        // layer with a blend mode, which has to see the whole of what it
+        // is coming down onto; a group that is less than opaque, whose
+        // contents meet each other at full strength before the result is
+        // taken down together; a group with a mask, since holding each
+        // child to it would take the coverage twice where two of them
+        // overlap. Each of those is drawn on a surface of its own, and
+        // the surface is what lands.
+        //
+        // A masked *leaf* is not one of them: its mask is a coverage its
+        // own fragments can be multiplied by, exactly.
+        let alone = node.blend != BlendMode::Normal
+            || (matches!(node.kind, NodeKind::Group)
+                && (node.opacity < 1.0 || node.mask.is_some()));
+        if alone {
+            out.draws.push(Item::of(Draw::Open));
+        }
+        // What the layer itself is drawn at: its own opacity, unless it
+        // is going on a surface of its own, where the opacity belongs to
+        // the quad that brings the surface back.
+        let alpha = if alone { 1.0 } else { node.opacity * opacity };
         // Where the layer's own drawing starts, so the mask can be put
         // on everything the layer turns into and nothing else.
         let mut mark = (out.vertices.len(), out.draws.len());
         match &node.kind {
             NodeKind::Group => {
-                // A group that is less than opaque, or that carries a
-                // mask, composites as a unit before it meets what is
-                // under it: laid over that at its opacity, held to its
-                // mask. Holding each child to the mask instead would
-                // take the coverage twice where two of them overlap,
-                // and taking each child's opacity down would show them
-                // through each other. So it goes on a surface of its
-                // own, and the surface is what lands.
-                if node.opacity >= 1.0 && node.mask.is_none() {
-                    collect(doc, child, t, opacity, out)?;
-                } else {
-                    out.draws.push(Item::of(Draw::Open));
-                    collect(doc, child, t, 1.0, out)?;
-                    // The mask goes on the quad that lays the surface
-                    // down, not on what was drawn into it.
-                    mark = (out.vertices.len(), out.draws.len());
-                    let quad = out.push(page_quad(doc, node.opacity * opacity));
-                    out.draws.push(Item::of(Draw::Close { quad }));
-                }
+                collect(doc, child, t, if alone { 1.0 } else { opacity }, out)?;
             }
             NodeKind::Vector {
                 shape,
@@ -1102,7 +1218,7 @@ fn collect(
                 stroke.as_ref(),
                 gradient.as_ref(),
                 t,
-                node.opacity * opacity,
+                alpha,
                 out,
             )?,
             NodeKind::Raster(raster) => {
@@ -1134,7 +1250,6 @@ fn collect(
                         at
                     }
                 };
-                let alpha = node.opacity * opacity;
                 let size = [res.width as f32, res.height as f32];
                 // The quad is the image's own box; its local coordinates
                 // are the texture's, so the vertex shader passes them
@@ -1147,10 +1262,20 @@ fn collect(
                 out.draws.push(Item::of(Draw::Image { quad, texture: at }));
             }
             NodeKind::Text(spec) => {
-                let color = premultiplied_color(spec.fill, node.opacity * opacity)?;
+                let color = premultiplied_color(spec.fill, alpha)?;
                 text(spec, t, color, out)?;
             }
             _ => return None,
+        }
+        if alone {
+            // The mask and the opacity go on the quad that lays the
+            // surface down, not on what was drawn into it.
+            mark = (out.vertices.len(), out.draws.len());
+            let quad = out.push(page_quad(doc, node.opacity * opacity, node.blend));
+            out.draws.push(Item::of(Draw::Close {
+                quad,
+                blend: node.blend,
+            }));
         }
         // The mask, once, over everything the layer drew: the CPU
         // renderer rasterizes the coverage and the fragments read it.
@@ -1657,6 +1782,30 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
     }
 }
 
+/// Which arm of the shader's `blended` a mode is. The order is the
+/// shader's; Normal is zero and never reaches it, since a layer that
+/// composites normally is laid down by the plain image pipeline.
+fn blend_index(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::ColorDodge => 6,
+        BlendMode::ColorBurn => 7,
+        BlendMode::HardLight => 8,
+        BlendMode::SoftLight => 9,
+        BlendMode::Difference => 10,
+        BlendMode::Exclusion => 11,
+        BlendMode::Hue => 12,
+        BlendMode::Saturation => 13,
+        BlendMode::Color => 14,
+        BlendMode::Luminosity => 15,
+    }
+}
+
 /// One pass: the surface it draws on, whether that surface starts bare,
 /// a group's surface to lay down before anything else, and the run of
 /// items to draw.
@@ -1674,6 +1823,10 @@ struct Laid {
     from: usize,
     quad: std::ops::Range<u32>,
     mask: Option<usize>,
+    /// How it meets what is under it. Anything but `Normal` needs a copy
+    /// of that to read, since a pass cannot sample what it is drawing
+    /// into.
+    blend: BlendMode,
 }
 
 /// Cut the items into passes at every `Open` and `Close`. A pass has one
@@ -1691,7 +1844,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
     for (i, item) in draws.iter().enumerate() {
         let (open, close) = match &item.draw {
             Draw::Open => (true, None),
-            Draw::Close { quad } => (false, Some(quad.clone())),
+            Draw::Close { quad, blend } => (false, Some((quad.clone(), *blend))),
             _ => continue,
         };
         passes.push(Pass {
@@ -1706,10 +1859,11 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
         } else {
             let from = stack.pop().unwrap_or(0);
             clear = false;
-            lay = close.map(|quad| Laid {
+            lay = close.map(|(quad, blend)| Laid {
                 from,
                 quad,
                 mask: item.mask,
+                blend,
             });
         }
         start = i + 1;
@@ -1727,12 +1881,12 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
 /// that covers it: what lays an isolated group's surface back down.
 /// `alpha` is the group's own opacity, which the image fragment reads
 /// off the colour the way a placed picture's does.
-fn page_quad(doc: &Document, alpha: f32) -> Vec<Vertex> {
+fn page_quad(doc: &Document, alpha: f32, blend: BlendMode) -> Vec<Vertex> {
     let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
     let corner = |u: f32, v: f32| Vertex {
         doc: [u * w, v * h],
         local: [u, v],
-        params: [0.0; 4],
+        params: [blend_index(blend) as f32, 0.0, 0.0, 0.0],
         color: [0.0, 0.0, 0.0, alpha],
         grad: [0.0; 4],
         mask: NO_MASK,
@@ -3258,6 +3412,237 @@ mod tests {
         );
     }
 
+    /// All sixteen blend modes, each over the same backdrop, against
+    /// what the CPU makes of them. A blended layer is drawn on a surface
+    /// of its own and brought down by a fragment that works out the
+    /// whole answer — the backdrop read from a copy, since a pass cannot
+    /// sample what it is drawing into.
+    #[test]
+    fn every_blend_mode_meets_the_page_the_way_the_cpu_does() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let modes = [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::HardLight,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ];
+        for mode in modes {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            // A backdrop of two tones, so a mode that reads the backdrop
+            // has something to read, and a source over both of them.
+            add(
+                &mut doc,
+                filled(
+                    "dark",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.35,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "light",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.7,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(0.0, 20.0),
+            );
+            let over = add(
+                &mut doc,
+                filled(
+                    "over",
+                    VectorShape::Rect {
+                        width: 40.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.25,
+                        b: 0.45,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(10.0, 5.0),
+            );
+            doc.apply(Command::SetBlendMode {
+                id: over,
+                blend: mode,
+            })
+            .unwrap();
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{mode:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{mode:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            // And the blend did something: over the dark half and over
+            // the light half the layer comes out as two different
+            // colours, which is what having a backdrop means. (Two modes
+            // take only the source's own colour there, so they are
+            // allowed to agree with themselves.)
+            let (a, b) = (drawn.get(20, 12), drawn.get(20, 28));
+            let apart = (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+            assert!(
+                apart > 0.02,
+                "{mode:?} reads the backdrop: {a:?} against {b:?}"
+            );
+            // Off the layer, the page is untouched: a blend replaces
+            // what is there with the answer, and the answer where there
+            // is no source is what was there.
+            let bare = drawn.get(55, 12);
+            let cpu = reference.get(55, 12);
+            assert!(
+                (bare.r - cpu.r).abs() < 0.01 && (bare.a - cpu.a).abs() < 0.01,
+                "{mode:?} leaves the rest of the page alone: {bare:?} against {cpu:?}"
+            );
+        }
+    }
+
+    /// A blend on a group, and a blended layer that carries a mask:
+    /// the group's contents meet each other first and the result is what
+    /// blends, and the mask holds the quad that brings it down.
+    #[test]
+    fn a_blend_can_sit_on_a_group_or_carry_a_mask() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "page",
+                VectorShape::Rect {
+                    width: 80.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.3,
+                    g: 0.5,
+                    b: 0.7,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let pair = doc.children_of(root).unwrap()[1];
+        for (i, at) in [4.0f32, 20.0].iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: pair,
+                index: i,
+                node: filled(
+                    "in",
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    if i == 0 { RED } else { BLUE },
+                ),
+            })
+            .unwrap();
+            let id = doc.children_of(pair).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(*at, 10.0),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::SetOpacity {
+            id: doc.children_of(pair).unwrap()[1],
+            opacity: 0.6,
+        })
+        .unwrap();
+        doc.apply(Command::SetBlendMode {
+            id: pair,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc), "a blend on a group is drawn");
+        let (mean, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "a blended group: mean {mean:.5} (worst {worst:.3})"
+        );
+
+        // And the same group held to a mask as well: the mask rides on
+        // the quad that brings the blended surface down.
+        doc.apply(Command::SetMask {
+            id: pair,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 18.0, ry: 18.0 },
+                    transform: Transform::translation(12.0, 12.0),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc));
+        let held = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&held, &reference);
+        assert!(
+            mean < 0.004,
+            "blended and masked: mean {mean:.5} (worst {worst:.3})"
+        );
+        // Outside the mask the page is its own colour again, and the
+        // two renderers agree there to the pixel.
+        assert!(
+            (held.get(70, 50).r - reference.get(70, 50).r).abs() < 0.01,
+            "outside the mask nothing of the group is left: {:?}",
+            held.get(70, 50)
+        );
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -3273,9 +3658,9 @@ mod tests {
         );
         assert!(GpuRenderer::can_render(&doc));
 
-        // A live effect, a blend mode, ink authored for a press: each on
-        // its own is enough to hand the page back. A stroke is not —
-        // that one it draws.
+        // A live effect, or ink authored for a press: either on its own
+        // is enough to hand the page back. A stroke is not — that one it
+        // draws, and nor is a blend mode any more.
         let mut with_stroke = doc.clone();
         with_stroke
             .apply(Command::SetKind {
@@ -3299,15 +3684,6 @@ mod tests {
             })
             .unwrap();
         assert!(GpuRenderer::can_render(&with_stroke));
-
-        let mut blended = doc.clone();
-        blended
-            .apply(Command::SetBlendMode {
-                id,
-                blend: BlendMode::Multiply,
-            })
-            .unwrap();
-        assert!(!GpuRenderer::can_render(&blended));
 
         let mut with_effect = doc.clone();
         with_effect

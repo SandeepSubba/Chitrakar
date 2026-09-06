@@ -193,6 +193,9 @@ struct ImageOut {
     @location(1) @interpolate(flat) alpha: f32,
     @location(2) page: vec2f,
     @location(3) @interpolate(flat) mask: vec4f,
+    // Which blend mode brings this down onto what is under it, for the
+    // one quad that lays an isolated layer's surface back on the page.
+    @location(4) @interpolate(flat) mode: f32,
 };
 
 @group(1) @binding(0) var image: texture_2d<f32>;
@@ -202,6 +205,7 @@ struct ImageOut {
 fn vs_image(
     @location(0) doc: vec2f,
     @location(1) uv: vec2f,
+    @location(2) params: vec4f,
     @location(3) color: vec4f,
     @location(5) mask: vec4f,
 ) -> ImageOut {
@@ -211,6 +215,7 @@ fn vs_image(
     out.alpha = color.a;
     out.page = doc;
     out.mask = mask;
+    out.mode = params.x;
     return out;
 }
 
@@ -285,4 +290,165 @@ fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
     return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5))
         * in.color.a
         * mask_cover(in.page, in.mask);
+}
+
+// A layer that composites with a blend mode is drawn on a surface of its
+// own and brought down here: the surface is the source, a copy of what
+// was already on the page is the backdrop, and the two are brought
+// together the way the W3C compositing spec says — on the values a
+// device shows rather than in linear light, which is the same choice the
+// CPU renderer made and what makes a page look the same in the engine as
+// in the SVG and PDF it exports.
+@group(3) @binding(0) var backdrop: texture_2d<f32>;
+@group(3) @binding(1) var backdrop_sampler: sampler;
+
+fn to_shown(v: f32) -> f32 {
+    if v <= 0.0031308 {
+        return v * 12.92;
+    }
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+fn to_light(v: f32) -> f32 {
+    if v <= 0.04045 {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+// Premultiplied linear to straight, shown values: what a blend reads.
+fn shown3(c: vec3f, a: f32) -> vec3f {
+    if a <= 0.0 {
+        return vec3f(0.0, 0.0, 0.0);
+    }
+    let s = clamp(c / a, vec3f(0.0), vec3f(1.0));
+    return vec3f(to_shown(s.r), to_shown(s.g), to_shown(s.b));
+}
+
+fn screen1(s: f32, d: f32) -> f32 {
+    return s + d - s * d;
+}
+
+fn hard_light1(s: f32, d: f32) -> f32 {
+    if s <= 0.5 {
+        return d * 2.0 * s;
+    }
+    return screen1(2.0 * s - 1.0, d);
+}
+
+fn soft_light1(s: f32, d: f32) -> f32 {
+    var dd = sqrt(d);
+    if d <= 0.25 {
+        dd = ((16.0 * d - 12.0) * d + 4.0) * d;
+    }
+    if s <= 0.5 {
+        return d - (1.0 - 2.0 * s) * d * (1.0 - d);
+    }
+    return d + (2.0 * s - 1.0) * (dd - d);
+}
+
+fn dodge1(s: f32, d: f32) -> f32 {
+    if d <= 0.0 {
+        return 0.0;
+    }
+    if s >= 1.0 {
+        return 1.0;
+    }
+    return min(d / (1.0 - s), 1.0);
+}
+
+fn burn1(s: f32, d: f32) -> f32 {
+    if d >= 1.0 {
+        return 1.0;
+    }
+    if s <= 0.0 {
+        return 0.0;
+    }
+    return 1.0 - min((1.0 - d) / s, 1.0);
+}
+
+// W3C's own weights for the four that take one part of a colour and
+// leave the rest — not the renderer's luminance, because the spec says
+// so and matching it is what keeps the engine and the exporters agreeing.
+fn w3c_lum(c: vec3f) -> f32 {
+    return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
+}
+
+fn clip_colour(c: vec3f) -> vec3f {
+    let l = w3c_lum(c);
+    let n = min(c.r, min(c.g, c.b));
+    let x = max(c.r, max(c.g, c.b));
+    var out = c;
+    if n < 0.0 && l - n > 1e-6 {
+        out = vec3f(l) + (out - vec3f(l)) * l / (l - n);
+    }
+    if x > 1.0 && x - l > 1e-6 {
+        out = vec3f(l) + (out - vec3f(l)) * (1.0 - l) / (x - l);
+    }
+    return out;
+}
+
+fn set_lum(c: vec3f, l: f32) -> vec3f {
+    return clip_colour(c + vec3f(l - w3c_lum(c)));
+}
+
+fn saturation_of(c: vec3f) -> f32 {
+    return max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b));
+}
+
+// Stretch a colour's channels to a given saturation, keeping which
+// channel is which: the middle one lands where it sat between the two
+// others.
+fn set_sat(c: vec3f, s: f32) -> vec3f {
+    let hi = max(c.r, max(c.g, c.b));
+    let lo = min(c.r, min(c.g, c.b));
+    if hi <= lo {
+        return vec3f(0.0, 0.0, 0.0);
+    }
+    let mid = (c.r + c.g + c.b) - hi - lo;
+    let scaled = (mid - lo) * s / (hi - lo);
+    // Put the three back where they came from, by value.
+    var out = vec3f(0.0, 0.0, 0.0);
+    out.r = select(select(scaled, s, c.r == hi), 0.0, c.r == lo);
+    out.g = select(select(scaled, s, c.g == hi), 0.0, c.g == lo);
+    out.b = select(select(scaled, s, c.b == hi), 0.0, c.b == lo);
+    return out;
+}
+
+fn blended(mode: i32, s: vec3f, d: vec3f) -> vec3f {
+    switch mode {
+        case 1: { return s * d; }
+        case 2: { return vec3f(screen1(s.r, d.r), screen1(s.g, d.g), screen1(s.b, d.b)); }
+        case 3: { return vec3f(hard_light1(d.r, s.r), hard_light1(d.g, s.g), hard_light1(d.b, s.b)); }
+        case 4: { return min(s, d); }
+        case 5: { return max(s, d); }
+        case 6: { return vec3f(dodge1(s.r, d.r), dodge1(s.g, d.g), dodge1(s.b, d.b)); }
+        case 7: { return vec3f(burn1(s.r, d.r), burn1(s.g, d.g), burn1(s.b, d.b)); }
+        case 8: { return vec3f(hard_light1(s.r, d.r), hard_light1(s.g, d.g), hard_light1(s.b, d.b)); }
+        case 9: { return vec3f(soft_light1(s.r, d.r), soft_light1(s.g, d.g), soft_light1(s.b, d.b)); }
+        case 10: { return abs(s - d); }
+        case 11: { return s + d - 2.0 * s * d; }
+        case 12: { return set_lum(set_sat(s, saturation_of(d)), w3c_lum(d)); }
+        case 13: { return set_lum(set_sat(d, saturation_of(s)), w3c_lum(d)); }
+        case 14: { return set_lum(s, w3c_lum(d)); }
+        case 15: { return set_lum(d, w3c_lum(s)); }
+        default: { return s; }
+    }
+}
+
+@fragment
+fn fs_blend(in: ImageOut) -> @location(0) vec4f {
+    let src = textureSampleLevel(image, image_sampler, in.uv, 0.0)
+        * in.alpha
+        * mask_cover(in.page, in.mask);
+    let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    let sa = src.a;
+    let da = dst.a;
+    let b = clamp(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0), vec3f(1.0));
+    let light = vec3f(to_light(b.r), to_light(b.g), to_light(b.b));
+    // W3C compositing: (1-da)*s + (1-sa)*d + sa*da*B, all premultiplied.
+    return vec4f(
+        (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
+        sa + da * (1.0 - sa),
+    );
 }
