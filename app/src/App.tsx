@@ -3520,23 +3520,53 @@ export function App() {
     setRenaming(null);
   };
 
+  /** The picked layers with any that sit inside another of them left
+   * out. Removing a group takes what is in it along, so asking to
+   * remove both would fail on the second and roll the whole entry back;
+   * duplicating both would put the inner one down twice. */
+  const withoutNested = (ids: NodeId[]): NodeId[] => {
+    const up = new Map(
+      layers.map((l) => [l.id as NodeId, l.parent as NodeId]),
+    );
+    const picked = new Set(ids);
+    return ids.filter((id) => {
+      for (let at = up.get(id); at !== undefined; at = up.get(at)) {
+        if (picked.has(at)) return false;
+      }
+      return true;
+    });
+  };
+
+  /** What is picked is what goes: every one of them, in one history
+   * entry. Only the primary used to, which made Delete with three
+   * layers picked take one away and leave the picking in a state that
+   * matched nothing on the canvas. */
   const deleteSelected = () => {
-    if (selected === null) return;
-    run({ RemoveNode: { id: selected } });
+    const ids = withoutNested(selectionSet);
+    if (ids.length === 0) return;
+    const cmds = ids.map((id) => ({ RemoveNode: { id } }) as Command);
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
     setSelected(null);
+    setMultiSel([]);
   };
 
   const copySelected = () => {
-    if (!session || selected === null) return;
-    session.copy_node(selected);
+    if (!session || selectionSet.length === 0) return;
+    try {
+      session.copy_nodes(new Float64Array(selectionSet));
+    } catch (err) {
+      alert(`Copy: ${err}`);
+    }
   };
 
   const pasteClipboard = () => {
     if (!session) return;
-    const id = session.paste();
-    if (id === undefined) return;
-    setSelected(id);
-    setMultiSel([]);
+    const ids = Array.from(session.paste()) as NodeId[];
+    if (ids.length === 0) return;
+    // Everything pasted is picked, which is what makes pasting a set of
+    // layers and dragging them somewhere one gesture rather than three.
+    setSelected(ids[0]);
+    setMultiSel(ids.slice(1));
     refresh(session);
   };
 
@@ -4513,11 +4543,16 @@ export function App() {
   /** Copy the selected layer and its contents, and select the copy — the
    * copy is what you want to move next. */
   const duplicateSelected = () => {
-    if (!session || selected === null) return;
+    const ids = withoutNested(selectionSet);
+    if (!session || ids.length === 0) return;
     try {
-      const copy = session.duplicate_node(selected);
-      setSelected(copy);
-      setMultiSel([]);
+      const copies = Array.from(
+        session.duplicate_nodes(new Float64Array(ids), true),
+      ) as NodeId[];
+      // The copies are what is picked afterwards, all of them: a
+      // duplicate is usually about to be moved somewhere.
+      setSelected(copies[0] ?? null);
+      setMultiSel(copies.slice(1));
       refresh(session);
     } catch (err) {
       alert(`Duplicate: ${err}`);
@@ -4764,12 +4799,35 @@ export function App() {
    * at that end is left alone rather than recorded as a move to where it
    * already is. */
   const orderSelected = (toFront: boolean) => {
-    if (!selectedLayer) return;
-    const index = toFront ? Math.max(0, selectedLayer.sibling_count - 1) : 0;
-    if (index === selectedLayer.index) return;
-    run({
-      MoveNode: { id: selectedLayer.id, parent: selectedLayer.parent, index },
-    });
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds: Command[] = [];
+    const rows = layers.filter((l) => ids.includes(l.id as NodeId));
+    for (const parent of new Set(rows.map((l) => l.parent))) {
+      const run_ = rows
+        .filter((l) => l.parent === parent)
+        .sort((a, b) => a.index - b.index);
+      // Already sitting together at that end, in that order: nothing to
+      // record, which is what keeps pressing it twice from filling the
+      // history with moves to where things already are.
+      const top = run_[0].sibling_count - run_.length;
+      if (run_.every((row, i) => row.index === (toFront ? top + i : i))) {
+        continue;
+      }
+      // Each in turn to the end, so the run comes out in the order it
+      // went in: bottom-first towards the front, top-first towards the
+      // back.
+      for (const row of toFront ? run_ : [...run_].reverse()) {
+        cmds.push({
+          MoveNode: {
+            id: row.id,
+            parent: row.parent,
+            index: toFront ? Math.max(0, row.sibling_count - 1) : 0,
+          },
+        });
+      }
+    }
+    if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
   /** Opacity and blend reach every picked layer, not only the one whose

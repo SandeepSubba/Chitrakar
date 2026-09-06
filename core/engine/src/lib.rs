@@ -34,7 +34,9 @@ struct ClipNode {
 
 #[derive(Clone)]
 struct Clipboard {
-    root: ClipNode,
+    /// Everything that was copied, in the order the document held it, so
+    /// a paste rebuilds the stack rather than inverting it.
+    roots: Vec<ClipNode>,
     resources: Vec<(u32, u32, Vec<u8>)>,
 }
 
@@ -2008,11 +2010,48 @@ impl Session {
 
     /// Put a node and everything under it on the clipboard, pixels included.
     pub fn copy_node(&self, id: NodeId) -> Result<(), EngineError> {
-        let root = self.clip_of(id)?;
+        self.copy_nodes(&[id])
+    }
+
+    /// The same for several at once: what is picked is what is copied,
+    /// and a paste puts the lot back in the order they were in.
+    pub fn copy_nodes(&self, ids: &[NodeId]) -> Result<(), EngineError> {
+        let picked = self.in_document_order(ids);
+        if picked.is_empty() {
+            return Err(EngineError::BadCommand("nothing to copy".into()));
+        }
+        let roots = picked
+            .iter()
+            .map(|id| self.clip_of(*id))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut resources = Vec::new();
-        self.collect_resources(&root, &mut resources);
-        CLIPBOARD.with(|c| *c.borrow_mut() = Some(Clipboard { root, resources }));
+        for root in &roots {
+            self.collect_resources(root, &mut resources);
+        }
+        CLIPBOARD.with(|c| *c.borrow_mut() = Some(Clipboard { roots, resources }));
         Ok(())
+    }
+
+    /// The picked nodes in the order the document holds them, leaving out
+    /// any that sit inside another of them: copying a group *and* one of
+    /// its children should not put that child down twice.
+    fn in_document_order(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        self.walk_for(self.doc.root(), ids, &mut out);
+        out
+    }
+
+    fn walk_for(&self, at: NodeId, want: &[NodeId], out: &mut Vec<NodeId>) {
+        let Ok(children) = self.doc.children_of(at) else {
+            return;
+        };
+        for child in children.iter().copied() {
+            if want.contains(&child) {
+                out.push(child);
+            } else {
+                self.walk_for(child, want, out);
+            }
+        }
     }
 
     fn clip_of(&self, id: NodeId) -> Result<ClipNode, EngineError> {
@@ -2050,11 +2089,12 @@ impl Session {
     }
 
     /// Paste the clipboard into `parent` (the root when None), nudged clear
-    /// of wherever it was copied from. One undo step; `Ok(None)` when there
-    /// is nothing to paste.
-    pub fn paste(&mut self, parent: Option<NodeId>) -> Result<Option<NodeId>, EngineError> {
+    /// of wherever it was copied from. One undo step whatever was copied;
+    /// an empty answer when there is nothing to paste. The layers come
+    /// back in the order they were in, bottom first.
+    pub fn paste(&mut self, parent: Option<NodeId>) -> Result<Vec<NodeId>, EngineError> {
         let Some(clip) = CLIPBOARD.with(|c| c.borrow().clone()) else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         // Restore pixels first: content-addressed ids mean this is a no-op
         // when pasting back into the document the copy came from.
@@ -2065,10 +2105,18 @@ impl Session {
         let index = self.doc.children_of(parent)?.len();
         let mut next = self.doc.peek_next_id().0;
         let mut cmds = Vec::new();
-        let id = Self::emit_clip(&clip.root, parent, index, true, &mut next, &mut cmds);
-        let label = format!("Paste {}", clip.root.node.name);
+        let ids: Vec<NodeId> = clip
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(n, root)| Self::emit_clip(root, parent, index + n, true, &mut next, &mut cmds))
+            .collect();
+        let label = match clip.roots.as_slice() {
+            [only] => format!("Paste {}", only.node.name),
+            many => format!("Paste {} layers", many.len()),
+        };
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
-        Ok(Some(id))
+        Ok(ids)
     }
 
     fn emit_clip(
@@ -4844,7 +4892,11 @@ mod tests {
 
         let mut b = Session::new(64, 64, ColorMode::Rgb);
         assert_eq!(b.document().resources().count(), 0);
-        let pasted = b.paste(None).unwrap().expect("clipboard had content");
+        let pasted = *b
+            .paste(None)
+            .unwrap()
+            .first()
+            .expect("clipboard had content");
         assert_eq!(b.document().node(pasted).unwrap().name, "pair");
         assert_eq!(
             b.document().children_of(pasted).unwrap().len(),
@@ -4872,7 +4924,55 @@ mod tests {
         b.undo().unwrap();
         assert!(b.document().node(pasted).is_err());
         assert!(crate::clipboard_has_content());
-        assert!(b.paste(None).unwrap().is_some(), "paste is repeatable");
+        assert!(!b.paste(None).unwrap().is_empty(), "paste is repeatable");
+    }
+
+    /// What is picked is what is copied: several layers go on the
+    /// clipboard together, come back in the order they were in, and a
+    /// group copied along with something inside it does not put that
+    /// thing down twice.
+    #[test]
+    fn the_clipboard_carries_everything_that_was_picked() {
+        let mut a = Session::new(64, 64, ColorMode::Rgb);
+        let lower = add_rect(&mut a, "lower", 8.0, 8.0);
+        let middle = add_rect(&mut a, "middle", 8.0, 8.0);
+        let upper = add_rect(&mut a, "upper", 8.0, 8.0);
+        // Handed over in no particular order: the document's own order is
+        // what a paste has to rebuild.
+        a.copy_nodes(&[upper, lower, middle]).unwrap();
+
+        let mut b = Session::new(64, 64, ColorMode::Rgb);
+        let pasted = b.paste(None).unwrap();
+        assert_eq!(pasted.len(), 3, "all three came across");
+        let names: Vec<String> = pasted
+            .iter()
+            .map(|id| b.document().node(*id).unwrap().name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["lower", "middle", "upper"],
+            "in the order they were in"
+        );
+        let root_b = b.document().root();
+        assert_eq!(b.document().children_of(root_b).unwrap(), pasted);
+
+        // One undo step for the lot, not three.
+        b.undo().unwrap();
+        assert!(
+            b.document().children_of(root_b).unwrap().is_empty(),
+            "one undo takes the whole paste back"
+        );
+
+        // A group and one of its own children, both picked: the child
+        // travels inside the group and is not laid down beside it.
+        let pair = a.group_nodes(&[lower, middle], "pair").unwrap();
+        let inside = a.document().children_of(pair).unwrap()[0];
+        a.copy_nodes(&[pair, inside]).unwrap();
+        let mut c = Session::new(64, 64, ColorMode::Rgb);
+        let once = c.paste(None).unwrap();
+        assert_eq!(once.len(), 1, "the group, and only the group");
+        assert_eq!(c.document().node(once[0]).unwrap().name, "pair");
+        assert_eq!(c.document().children_of(once[0]).unwrap().len(), 2);
     }
 
     #[test]

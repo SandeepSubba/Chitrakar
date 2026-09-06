@@ -128,7 +128,12 @@ without reading anything else.*
   values a device shows rather than over linear light, which is what
   makes a page look the same in the engine as in the SVG and PDF it
   exports, duplicate/copy/cut/paste (subtree and pixels included, across
-  documents), copy and paste a layer's look on its own — what it is
+  documents) — every one of those reaches everything picked rather than
+  the layer the panel happens to be showing, in one history entry, and
+  what lands is what is picked afterwards, since a paste or a duplicate
+  is usually about to be moved somewhere; the clipboard carries the
+  layers in the order the document held them, leaving out any that
+  travel inside another of them — copy and paste a layer's look on its own — what it is
   painted with, what hangs off it and how it sits on what is under it,
   but never its shape — onto any number of layers in one entry,
   delete, align and distribute a multi-selection, combine
@@ -636,9 +641,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~307),
+- **Verify before committing:** `cargo test --workspace` (~308),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~787 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~803 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both

@@ -6844,7 +6844,7 @@ assert(
   );
 }
 
-// 9af. Colour balance: the three ranges of tone pushed along the
+// 9ad. Colour balance: the three ranges of tone pushed along the
 // opponent pairs. Warming the highlights leaves the shadows where they
 // are, which is the whole point of having ranges — and with the
 // brightness held, the colour moves without the picture lifting.
@@ -6951,7 +6951,147 @@ assert(
   );
 }
 
-// 9ae. A document larger than can be made: the dialog used to clamp the
+// 9ae. What the menus offer a selection they do to the selection. Every
+// one of duplicate, delete, copy, cut and the two ordering entries used
+// to reach only the layer the panel happened to be showing, which with
+// three picked took one away and left the picking describing nothing.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await rect("#cc3333", 20, 40, 100, 140);
+  await rect("#33aa55", 150, 40, 230, 140);
+  await rect("#3366cc", 280, 40, 360, 140);
+  const rows = () => page.locator(".panel ul li .layer-name").count();
+  const picked = () =>
+    page.locator(".panel ul li.selected, .panel ul li.multi").count();
+  const names = () =>
+    page.locator(".panel ul li .layer-name").allTextContents();
+  const shiftClick = async (x, y) => {
+    await page.keyboard.down("Shift");
+    await page.mouse.click(...at(x, y));
+    await page.keyboard.up("Shift");
+    await page.waitForTimeout(250);
+  };
+  assert((await rows()) === 3, "three to work on");
+
+  await pickTool("Move");
+  await page.mouse.click(...at(60, 90));
+  await shiftClick(190, 90);
+  assert((await picked()) === 2, "two picked");
+
+  // Duplicate reaches both, and the copies are what is picked after.
+  await page.keyboard.press("Control+d");
+  await page.waitForTimeout(400);
+  assert((await rows()) === 5, `duplicate copies both (${await rows()})`);
+  assert((await picked()) === 2, "and the two copies are what is picked");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 3, "one undo takes both copies back");
+
+  // Delete reaches both, in one entry.
+  await page.mouse.click(...at(60, 90));
+  await shiftClick(190, 90);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(400);
+  assert((await rows()) === 1, `delete takes both away (${await rows()})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 3, "and one undo brings both back");
+
+  // Copy and paste carry both, and what lands is what is picked.
+  await page.mouse.click(...at(60, 90));
+  await shiftClick(190, 90);
+  await page.keyboard.press("Control+c");
+  await page.waitForTimeout(200);
+  // Through the menu rather than Ctrl+V: the shortcut goes by way of the
+  // system clipboard, which by this point in the suite is holding the
+  // PNG an earlier block put there, and the in-app clipboard is what is
+  // being tested here.
+  await page.click('.menu-label:text-is("Edit")');
+  await page.waitForTimeout(120);
+  // By its shortcut, which is the one thing in that menu that says
+  // "Ctrl+V": the word Paste is also in "Paste style", and a row's text
+  // carries its hint.
+  await page.locator(".menu-item", { hasText: "Ctrl+V" }).click();
+  await page.waitForTimeout(400);
+  assert((await rows()) === 5, `paste puts both down (${await rows()})`);
+  assert((await picked()) === 2, "and both are picked");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 3, "one undo for the whole paste");
+
+  // Bring to front carries both, keeping the order they were in. The
+  // panel lists topmost first, so the two named layers end up on top.
+  const before = await names();
+  await page.mouse.click(...at(60, 90));
+  await shiftClick(190, 90);
+  const moving = [before[2], before[1]]; // the lower two, topmost first
+  await menuClick("Edit", "Bring to front");
+  await page.waitForTimeout(400);
+  const after = await names();
+  assert(
+    after[0] === moving[1] && after[1] === moving[0],
+    `both came to the front, in the order they were in (${before} -> ${after})`,
+  );
+  // Asked again with them already there, nothing is recorded: the undo
+  // below is the move itself rather than a move to where they already
+  // were.
+  await menuClick("Edit", "Bring to front");
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await names()).join() === before.join(),
+    `and one undo puts the order back (${await names()})`,
+  );
+
+  // A layer inside a frame, and the frame, both picked: removing the
+  // frame takes what is in it along, so asking for both would fail on
+  // the second and roll the whole entry back. What travels inside
+  // something else that is going is left out of the ask.
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  await pickTool("Frame");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 240), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await rect("#cc3333", 80, 80, 180, 180);
+  assert((await rows()) === 2, "a frame with something in it");
+  await page.locator(".panel ul li", { hasText: "Artboard" }).first().click();
+  await page.waitForTimeout(150);
+  await page.keyboard.down("Shift");
+  await page
+    .locator(".panel ul li .layer-name", { hasText: "Rect" })
+    .first()
+    .click();
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(200);
+  assert((await picked()) === 2, "both picked, one inside the other");
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(400);
+  assert(
+    (await rows()) === 0,
+    `and both go, without the entry rolling back (${await rows()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 2, "one undo brings the frame and its layer back");
+}
+
+// 9af. A document larger than can be made: the dialog used to clamp the
 // number inside the field as it was typed, so asking for 30000 got you
 // 8192 with nothing said — and, since every keystroke was clamped, no
 // way to type a big number at all. It now keeps what was asked for and
@@ -6994,7 +7134,7 @@ assert(
   );
 }
 
-// 9ad. Work that has not been saved is said so, and is not thrown away
+// 9ag. Work that has not been saved is said so, and is not thrown away
 // without asking. The draft kept in the browser is a net for a crash,
 // not for this: starting another document overwrites it a breath later.
 {

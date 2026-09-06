@@ -538,12 +538,19 @@ impl WasmSession {
         self.inner.copy_node(NodeId(id as u64)).map_err(to_js)
     }
 
-    /// Paste the clipboard into the root; returns the new node's id, or
-    /// undefined when the clipboard is empty.
-    pub fn paste(&mut self) -> Result<Option<f64>, JsError> {
+    /// Put several layers and their subtrees on the clipboard, in the
+    /// order the document holds them.
+    pub fn copy_nodes(&self, ids: Vec<f64>) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner.copy_nodes(&ids).map_err(to_js)
+    }
+
+    /// Paste the clipboard into the root; returns the new layers' ids,
+    /// bottom first, and nothing at all when the clipboard is empty.
+    pub fn paste(&mut self) -> Result<Vec<f64>, JsError> {
         self.inner
             .paste(None)
-            .map(|id| id.map(|i| i.0 as f64))
+            .map(|ids| ids.into_iter().map(|i| i.0 as f64).collect())
             .map_err(to_js)
     }
 
