@@ -7133,6 +7133,138 @@ assert(
   assert((await rows()) === 2, "one undo brings the frame and its layer back");
 }
 
+// 9ai. Several layers picked resize as one. The handles used to sit on
+// the box of whichever layer the panel happened to be showing and scale
+// that one alone, which is the one operation a multi-selection could not
+// do — it could be moved, aligned, flipped and deleted as a set.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await rect("#cc3333", 40, 40, 100, 100);
+  await rect("#3366cc", 200, 40, 260, 100);
+  await pickTool("Move");
+  await page.mouse.click(...at(70, 70));
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(230, 70));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(300);
+
+  // The box the handles sit on is the one round both, so the south-east
+  // grip is at the far corner of the pair rather than of either.
+  const se = await page.locator(".handle.se").boundingBox();
+  const far = at(260, 100);
+  assert(
+    Math.abs(se.x + se.width / 2 - far[0]) < 12 &&
+      Math.abs(se.y + se.height / 2 - far[1]) < 12,
+    "the grip sits on the corner of the pair, not of one of them",
+  );
+
+  // Whether a colour is at a document point.
+  const isRed = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return r > 150 && g < 120 && bl < 120;
+  };
+  const isBlue = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return bl > 130 && r < 130;
+  };
+  assert(await isRed(70, 70), "red where it was drawn");
+  assert(await isBlue(230, 70), "blue where it was drawn");
+
+  // Halve the pair about its own north-west corner: shift frees the
+  // proportions, so drag the grip to the middle of the box.
+  await page.mouse.move(se.x + se.width / 2, se.y + se.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(150, 70), { steps: 8 });
+  await page.keyboard.up("Shift");
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+
+  // Both moved: the far one came in with the box rather than staying put.
+  assert(!(await isBlue(230, 70)), "the blue one was scaled too, not left");
+  assert(await isRed(50, 50), "the near one is still under the anchor");
+  const blueNow = await (async () => {
+    for (let x = 100; x < 200; x += 1) if (await isBlue(x, 55)) return x;
+    return -1;
+  })();
+  assert(blueNow > 100, `the blue one came in to ${blueNow}`);
+
+  // One undo takes the whole resize back, not one layer of it.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(await isBlue(230, 70), "one undo puts both back");
+  assert(await isRed(70, 70), "including the near one");
+
+  // And the case the arithmetic exists for: a layer whose transform is
+  // written against a moved group's space. One scale is stated in the
+  // document and put back into each layer's own space — get that wrong
+  // and the inner one flies off rather than coming in with the box.
+  await rect("#33aa55", 200, 160, 260, 220);
+  await pickTool("Move");
+  await page.mouse.click(...at(230, 70));
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(230, 190));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(250);
+  await page.click(
+    '[aria-label="Group selected layers (ctrl-click to select several)"]',
+  );
+  await page.waitForTimeout(400);
+  // Move the group forty across, so what is inside it is written against
+  // a space that is not the document's — and far enough that scaling in
+  // the wrong space misses by twenty pixels rather than by rounding.
+  for (let i = 0; i < 4; i += 1) {
+    await page.keyboard.press("Shift+ArrowRight");
+    await page.waitForTimeout(120);
+  }
+  await page.waitForTimeout(300);
+  const isGreen = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return g > 130 && r < 130 && bl < 130;
+  };
+  assert(await isGreen(270, 190), "the group moved forty across");
+
+  // Pick the loose red rect and the green one inside the group, and
+  // halve the box round them about its north-west corner. The pair runs
+  // 40..300 across and 40..220 down, so the green one's left edge — 240
+  // in the document — lands at 40 + (240 − 40) / 2 = 140. Scaled in the
+  // group's space instead of the document's it would land at 160.
+  await page.mouse.click(...at(70, 70));
+  await page
+    .locator(".panel ul li", { hasText: "Rect 3" })
+    .first()
+    .click({ modifiers: ["Control"] });
+  await page.waitForTimeout(250);
+  const grip = await page.locator(".handle.se").boundingBox();
+  await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(170, 130), { steps: 8 });
+  await page.keyboard.up("Shift");
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const greenNow = await (async () => {
+    for (let x = 100; x < 320; x += 1) if (await isGreen(x, 125)) return x;
+    return -1;
+  })();
+  assert(
+    Math.abs(greenNow - 140) <= 6,
+    `the layer inside the moved group came in with the box (${greenNow})`,
+  );
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

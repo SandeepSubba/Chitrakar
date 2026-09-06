@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~321),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~813 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~823 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -831,7 +831,14 @@ without reading anything else.*
   question the panel already asked before deleting or duplicating).
   What is picked is also visible on the canvas now: every picked layer
   is outlined, the extras dashed and at two-thirds strength, with the
-  resize handles and the rotation knob staying on the one they act on.
+  resize handles moving to the box round the lot: several layers scale
+  together about it, which was the one thing a multi-selection could not
+  do — it could already be moved, aligned, flipped, ordered and deleted
+  as a set. The scale is stated once in the document and put back into
+  each layer's own space (`P⁻¹ · S · P · T0`), so a layer that is turned,
+  or sits inside a group that is, comes in with the box rather than
+  flying off. The rotation knob stays off a shared box: it would turn the
+  one layer the panel is showing and leave the rest where they were.
   Three layers picked used to draw one box, so nothing on the artwork
   said what a drag or a Delete was about to take.
 - **Next up (rough priority):**

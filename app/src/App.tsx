@@ -86,6 +86,15 @@ function composeT(outer: Transform, inner: Transform): Transform {
   };
 }
 
+/** The transform that undoes `t`, or null where it collapses a dimension
+ * and nothing can. */
+function invertT(t: Transform): Transform | null {
+  const det = t.a * t.d - t.b * t.c;
+  if (Math.abs(det) < 1e-9) return null;
+  const [a, b, c, d] = [t.d / det, -t.b / det, -t.c / det, t.a / det];
+  return { a, b, c, d, e: -(a * t.e + c * t.f), f: -(b * t.e + d * t.f) };
+}
+
 /** A path's handles, padded to one per anchor so callers can index freely.
  * Stored empty when nothing is curved, which is what keeps older files (and
  * plain polylines) free of the field entirely. */
@@ -755,6 +764,11 @@ interface HandleDrag {
   /** Lines the dragged corner can catch on, as for a move. */
   snapX?: number[];
   snapY?: number[];
+  /** Several layers resizing as one. The box is the upright one round
+   * the lot, in the document's own space, and each layer carries the
+   * space its transform is written in so a document-space scale can be
+   * put back into it. */
+  many?: { id: NodeId; t0: Transform; p: Transform; pinv: Transform }[];
 }
 
 interface PanDrag {
@@ -2891,6 +2905,34 @@ export function App() {
   const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
     if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
+    // Several picked: the whole lot scales about the box round them, so
+    // each layer's own transform and the space it is written in travel
+    // with the drag. A frame among them scales like anything else —
+    // only a frame on its own is resized rather than scaled.
+    if (manyBox) {
+      const many = movableSelection
+        .map((id) => {
+          const p = toTransform(session.parent_space_of(id));
+          const pinv = invertT(p);
+          return pinv
+            ? { id, t0: toTransform(session.transform_of(id)), p, pinv }
+            : null;
+        })
+        .filter((m): m is NonNullable<typeof m> => m !== null);
+      if (many.length === 0) return;
+      const [snapX, snapY] = snapTargets(movableSelection);
+      handleDragRef.current = {
+        corner,
+        id: selected,
+        t0: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        b0: manyBox,
+        snapX,
+        snapY,
+        many,
+      };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
     const [snapX, snapY] = snapTargets([selected]);
     const kind: NodeKind | null =
       selectedLayer?.kind === "artboard"
@@ -2939,7 +2981,11 @@ export function App() {
     // Resize happens in the layer's own space: bring the cursor there,
     // hold the opposite corner still, and scale about it. Doing it in
     // document space would stretch a rotated layer along the wrong axes.
-    const [dx, dy] = layerPoint({ clientX: px, clientY: py }, drag.id, true);
+    // Several picked, and the box is the document's own: the point is
+    // already in the space the box is written in.
+    const [dx, dy] = drag.many
+      ? [px, py]
+      : layerPoint({ clientX: px, clientY: py }, drag.id, true);
     const t = drag.t0;
     const det = t.a * t.d - t.b * t.c;
     if (Math.abs(det) < 1e-9) return;
@@ -3005,6 +3051,21 @@ export function App() {
 
     // T' = T0 . scale(sx, sy) about (fx, fy), composed in local space.
     const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
+    if (drag.many) {
+      // One scale, written in the document, put back into each layer's
+      // own space: T' = P⁻¹ . S . P . T0. That is what carries a scale
+      // of the box round everything into a layer that is turned, or
+      // sits inside a group that is.
+      const S: Transform = { a: sx, b: 0, c: 0, d: sy, e: tx, f: ty };
+      const cmds = drag.many.map((m) => ({
+        SetTransform: {
+          id: m.id,
+          transform: composeT(m.pinv, composeT(S, composeT(m.p, m.t0))),
+        },
+      }));
+      preview(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+      return;
+    }
     preview({
       SetTransform: {
         id: drag.id,
@@ -4376,6 +4437,28 @@ export function App() {
       to(lb[0], lb[3]),
     ];
   };
+  /** The document-space box round everything picked, when more than one
+   * layer is. Several layers resize as one about it — each carries its
+   * own turn and its own group, so the box the handles sit on is the
+   * upright one round the lot rather than any single layer's axes. */
+  const manyBox = ((): [number, number, number, number] | null => {
+    if (!session || movableSelection.length < 2) return null;
+    let box: [number, number, number, number] | null = null;
+    for (const id of movableSelection) {
+      const b = session.bounds_of(id);
+      if (b.length !== 4) continue;
+      const [x0, y0, x1, y1] = [b[0], b[1], b[0] + b[2], b[1] + b[3]];
+      box = box
+        ? [
+            Math.min(box[0], x0),
+            Math.min(box[1], y0),
+            Math.max(box[2], x1),
+            Math.max(box[3], y1),
+          ]
+        : [x0, y0, x1, y1];
+    }
+    return box;
+  })();
   /** Maps a point in the selected layer's own space to screen. */
   let selToScreen: ((x: number, y: number) => [number, number]) | null = null;
   /** The selected layer's parent space — the space its own transform, and
@@ -4404,6 +4487,23 @@ export function App() {
         toScreen(lb[0], lb[3]),
       ];
     }
+  }
+  /** With more than one layer picked the handles sit on the box round
+   * the lot instead, and resize all of it. Everything else about the
+   * selection — the mask's grips, a gradient's, the geometry fields —
+   * goes on describing the one layer whose properties the panel shows,
+   * so only the quad changes here. */
+  if (manyBox) {
+    const to = (x: number, y: number): [number, number] => [
+      view.x + x * view.zoom,
+      view.y + y * view.zoom,
+    ];
+    selQuad = [
+      to(manyBox[0], manyBox[1]),
+      to(manyBox[2], manyBox[1]),
+      to(manyBox[2], manyBox[3]),
+      to(manyBox[0], manyBox[3]),
+    ];
   }
 
   let selectedKind: NodeKind | null = null;
@@ -6665,8 +6765,11 @@ export function App() {
               </svg>
               {/* The knob sits off the top edge along the box's own normal,
                   so it stays above the layer however the layer is turned.
-                  A locked layer has none: nothing about it turns. */}
-              {grabbable &&
+                  A locked layer has none: nothing about it turns, and
+                  neither does a box round several — it would turn the one
+                  the panel is showing and leave the rest where they
+                  were. */}
+              {grabbable && !manyBox &&
                 (() => {
                   const [tl, tr, , bl] = selQuad;
                   const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
