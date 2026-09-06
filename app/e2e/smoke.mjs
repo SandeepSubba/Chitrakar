@@ -7265,6 +7265,61 @@ assert(
   );
 }
 
+// 9aj. A page that shrinks has to give back the screen the bigger one
+// was using. The engine composites into a window the size of the view,
+// not of the page, so the window does not change when the page does —
+// and "repaint the whole page" repaints the *new* page, leaving whatever
+// the old one had drawn beyond it standing on screen. Cropping to a
+// selection, undoing a canvas growth, turning a landscape page upright:
+// all the same shape of thing.
+{
+  await newDocument(400, 300, "rgb");
+  const at = await page.locator("#engine-page").boundingBox();
+  const [ux, uy] = [at.width / 400, at.height / 300];
+  const inked = (x, y) => canvasPixel(x, y).then((px) => px[3] > 128);
+
+  // Room to the right and below, anchored top left.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  await page.locator('input[aria-label="Canvas width"]').fill("800");
+  await page.locator('input[aria-label="Canvas height"]').fill("600");
+  await page.click('button[aria-label="Anchor left top"]');
+  await page.click('button[aria-label="Resize the page"]');
+  await page.waitForTimeout(400);
+
+  // A mark out in the new room, where the smaller page never reached.
+  const now = await page.locator("#engine-page").boundingBox();
+  const [vx, vy] = [now.width / 800, now.height / 600];
+  await setColor("Fill colour", "#cc3333");
+  await pickTool("Rect");
+  await page.mouse.move(now.x + 560 * vx, now.y + 420 * vy);
+  await page.mouse.down();
+  await page.mouse.move(now.x + 700 * vx, now.y + 540 * vy, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(await inked(620, 470), "a mark out where only the bigger page goes");
+
+  // Back to the page it was, anchored the same way. The mark is off the
+  // page now, so nothing of it should be on screen.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  await page.locator('input[aria-label="Canvas width"]').fill("400");
+  await page.locator('input[aria-label="Canvas height"]').fill("300");
+  await page.click('button[aria-label="Anchor left top"]');
+  await page.click('button[aria-label="Resize the page"]');
+  await page.waitForTimeout(500);
+  assert(
+    !(await inked(620, 470)),
+    "the smaller page gave back the screen the bigger one was using",
+  );
+  assert(
+    !(await inked(450, 320)),
+    "and nothing of it is left just beyond the new edge either",
+  );
+  void ux;
+  void uy;
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

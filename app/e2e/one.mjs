@@ -33,8 +33,10 @@ if (!want) {
 const src = readFileSync(join(here, "smoke.mjs"), "utf8");
 
 /** Where each block starts: a comment at the left margin opening with
- * the block's number. */
-const heads = [...src.matchAll(/^\/\/ (\d+[a-z]*)\. .*$/gm)];
+ * the block's number. Numbers and letters alternate freely once a block
+ * has been split a few times — 9j4 sits between 9j and 9k — so the
+ * pattern asks only that it begin with a digit. */
+const heads = [...src.matchAll(/^\/\/ (\d[\da-z]*)\. .*$/gm)];
 if (heads.length === 0) throw new Error("no blocks found in smoke.mjs");
 
 const hit =

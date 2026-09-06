@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~321),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~823 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~826 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -798,7 +798,17 @@ without reading anything else.*
   that actually moved has to lie inside the region the session *named*,
   since the app uploads that rectangle to the canvas and nothing else —
   a pixel that changed outside it stays on screen as it was, however
-  correctly the engine drew it into its own buffer. Both this and the
+  correctly the engine drew it into its own buffer. It runs the whole
+  list twice: once on the page at its own resolution, which is what an
+  export does, and once through a zoomed, panned viewport that does not
+  begin on a whole document pixel, which is what the app shows. The
+  second pass found a real one: when the page changes size, the surface
+  does not — a viewport is the window's size, not the page's — so
+  "repaint the whole page" repainted the *new* page and left whatever
+  the old, larger one had drawn beyond it standing on screen. A page
+  that changes size now invalidates the whole surface. The app masks it
+  today because every size change it offers re-fits the view, which
+  invalidates everything anyway; the audit is what holds it. Both this and the
   inverse audit read one shared list — `chitrakar_doc::fixture` (feature
   `fixture`, a dev dependency) — so a new `Command` is added to it once
   and every audit starts asking about it. Its document is a group of two

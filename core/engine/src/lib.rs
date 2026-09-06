@@ -438,9 +438,20 @@ impl Session {
                 | Command::RestoreSubtree { .. }
                 | Command::Batch(_)
         );
+        let was_sized = (self.doc.meta.width, self.doc.meta.height);
         let inverse = self.doc.apply(cmd)?;
         if structural {
             self.note_copies();
+        }
+        // A page that changed size changed what the surface is showing,
+        // not just what is on it. "Everything" is the *new* page, and
+        // where the old one reached further — which is what a viewport
+        // makes possible, since the surface is the window's size rather
+        // than the page's and does not itself change — that further part
+        // keeps the pixels the old page left there. So the whole surface
+        // goes, however the region works out.
+        if (self.doc.meta.width, self.doc.meta.height) != was_sized {
+            self.stale_all = true;
         }
         let post_target = Self::command_target(&inverse);
         let post = self
@@ -3692,10 +3703,20 @@ mod tests {
         /// canvas and nothing else, so a pixel that changed outside it
         /// stays on screen as it was however correctly the engine drew
         /// it into its own buffer.
-        fn same(kept: &mut Session, was: &Surface, label: &str, step: &str) -> Surface {
+        #[allow(clippy::type_complexity)]
+        fn same(
+            kept: &mut Session,
+            was: &Surface,
+            label: &str,
+            step: &str,
+            view: Option<(f32, f32, f32, u32, u32)>,
+        ) -> Surface {
             let (patched, dirty) = kept.render_cached().unwrap();
             let (patched, dirty) = (patched.clone(), dirty);
             let mut fresh = Session::from_document(kept.document().clone());
+            if let Some((scale, x, y, w, h)) = view {
+                fresh.set_viewport(scale, x, y, w, h);
+            }
             let whole = fresh.render_cached().unwrap().0.clone();
             assert_eq!(
                 (patched.width, patched.height),
@@ -3741,20 +3762,40 @@ mod tests {
             }
             patched
         }
-        for cmd in chitrakar_doc::fixture::every_command(&f) {
-            let label = format!("{cmd:?}");
-            let short = &label[..label.len().min(60)];
-            // A session that has already drawn the page, and so from
-            // here on repaints only what it is told went stale.
-            let mut kept = Session::from_document(f.doc.clone());
-            let was = kept.render_cached().expect("the page draws").0.clone();
-            kept.apply(cmd)
-                .unwrap_or_else(|e| panic!("{short} could not be applied: {e:?}"));
-            let was = same(&mut kept, &was, short, "applied");
-            kept.undo().expect("it undoes");
-            let was = same(&mut kept, &was, short, "undone");
-            kept.redo().expect("it redoes");
-            same(&mut kept, &was, short, "redone");
+        // Twice over: the whole page at its own resolution, which is
+        // what an export does, and then through a viewport that is
+        // zoomed and panned and does not begin on a whole document
+        // pixel, which is what the app actually shows. The dirty region
+        // is computed in document pixels and carried into the view's,
+        // and that carrying is exactly where a pixel goes missing.
+        for view in [None, Some((1.75f32, -23.5f32, -11.25f32, 120u32, 90u32))] {
+            let start = |doc: Document| {
+                let mut s = Session::from_document(doc);
+                if let Some((scale, x, y, w, h)) = view {
+                    s.set_viewport(scale, x, y, w, h);
+                }
+                s
+            };
+            let where_ = if view.is_some() {
+                "through a viewport"
+            } else {
+                "on the whole page"
+            };
+            for cmd in chitrakar_doc::fixture::every_command(&f) {
+                let label = format!("{cmd:?} {where_}");
+                let short = &label[..label.len().min(72)];
+                // A session that has already drawn the page, and so from
+                // here on repaints only what it is told went stale.
+                let mut kept = start(f.doc.clone());
+                let was = kept.render_cached().expect("the page draws").0.clone();
+                kept.apply(cmd)
+                    .unwrap_or_else(|e| panic!("{short} could not be applied: {e:?}"));
+                let was = same(&mut kept, &was, short, "applied", view);
+                kept.undo().expect("it undoes");
+                let was = same(&mut kept, &was, short, "undone", view);
+                kept.redo().expect("it redoes");
+                same(&mut kept, &was, short, "redone", view);
+            }
         }
     }
     use chitrakar_color::AuthoredColor;
