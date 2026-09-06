@@ -135,6 +135,9 @@ function seedHandles(
 
 const TOOLS = [
   "Move",
+  "Select",
+  "Select ellipse",
+  "Lasso",
   "Frame",
   "Rect",
   "Ellipse",
@@ -154,12 +157,25 @@ const TOOLS = [
  * one last used sits in it and the rest are a press away, the way a
  * rail with more tools than room has always done it. */
 const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star"] as const;
+/** The tools that pick a region out of the page rather than draw
+ * anything, sharing one slot the way the shapes do. What they make is a
+ * selection: not a layer, not artwork — a region to hand to a layer as
+ * the part of it that shows. */
+const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso"] as const;
+/** What each of them asks the engine for. */
+const REGION_KIND: Record<string, string> = {
+  Select: "rect",
+  "Select ellipse": "ellipse",
+  Lasso: "path",
+};
 /** One letter per tool, the convention every editor shares. `v` for Move
  * because that is where the muscle memory is; `m` too, since the tool is
  * called Move here. */
 const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
   v: "Move",
-  m: "Move",
+  // `m` for the marquee, which is where that muscle memory is; Move
+  // keeps `v`, which is where its own is.
+  m: "Select",
   f: "Frame",
   r: "Rect",
   e: "Ellipse",
@@ -225,6 +241,9 @@ const KIND_ICONS: Record<string, IconName> = {
 
 const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
   Move: "V",
+  Select: "M",
+  "Select ellipse": "M",
+  Lasso: "M",
   Frame: "F",
   Rect: "R",
   Ellipse: "E",
@@ -242,6 +261,9 @@ const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
 
 const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
   Move: "move",
+  Select: "marquee",
+  "Select ellipse": "marqueeEllipse",
+  Lasso: "lasso",
   Frame: "frame",
   Rect: "rect",
   Ellipse: "ellipse",
@@ -595,7 +617,7 @@ interface ToolDrag {
   /** Move tool: every layer travelling with the drag, each with its own
    * starting transform, since each sits in its own parent space. */
   moving?: { id: NodeId; t0: Transform }[];
-  /** Brush: the stroke so far, in document coordinates. */
+  /** Brush, and the lasso: the path so far, in document coordinates. */
   stroke?: [number, number][];
   /** Brush: a width multiplier per recorded sample. */
   widths?: number[];
@@ -771,6 +793,56 @@ interface HandleDrag {
   many?: { id: NodeId; t0: Transform; p: Transform; pinv: Transform }[];
 }
 
+/** A region as the engine is asked for it: the box it fits in, plus the
+ * points themselves when it is a freehand outline. */
+interface Region {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  points?: number[];
+}
+
+/** What a select drag has picked out so far, or null while it is still
+ * a click.
+ *
+ * `square` holds a box to its own proportions — shift, the same key that
+ * squares off a shape being drawn — and alt draws it from its middle.
+ * A lasso is its own outline and takes neither.
+ */
+function regionOutline(drag: ToolDrag, square: boolean): Region | null {
+  if (drag.tool === "Lasso") {
+    const pts = drag.stroke ?? [];
+    if (pts.length < 3) return null;
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      w: Math.max(...xs) - Math.min(...xs),
+      h: Math.max(...ys) - Math.min(...ys),
+      points: pts.flat(),
+    };
+  }
+  let [w, h] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+  if (square) {
+    const side = Math.max(Math.abs(w), Math.abs(h));
+    w = Math.sign(w || 1) * side;
+    h = Math.sign(h || 1) * side;
+  }
+  const [x, y] = drag.fromCentre
+    ? [drag.startX - w, drag.startY - h]
+    : [drag.startX, drag.startY];
+  const [ww, hh] = drag.fromCentre ? [w * 2, h * 2] : [w, h];
+  const box = {
+    x: Math.min(x, x + ww),
+    y: Math.min(y, y + hh),
+    w: Math.abs(ww),
+    h: Math.abs(hh),
+  };
+  return box.w < 0.5 || box.h < 0.5 ? null : box;
+}
+
 interface PanDrag {
   pointerX: number;
   pointerY: number;
@@ -834,6 +906,14 @@ export function App() {
     // However a shape tool was taken up — off the rail, out of the
     // group, or by its letter — it is the one the slot then holds.
     if (SHAPE_TOOLS.includes(tool as never)) setShapeTool(tool);
+  }, [tool]);
+  const [selectTool, setSelectTool] =
+    useState<(typeof SELECT_TOOLS)[number]>("Select");
+  const [selectsOpen, setSelectsOpen] = useState(false);
+  useEffect(() => {
+    if (SELECT_TOOLS.includes(tool as never)) {
+      setSelectTool(tool as (typeof SELECT_TOOLS)[number]);
+    }
   }, [tool]);
   /** Where the toolbar has been carried to, or `null` while it is still
    * against the left edge. Remembered across visits, since where someone
@@ -1128,11 +1208,28 @@ export function App() {
   >(null);
   /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
   const [multiSel, setMultiSel] = useState<NodeId[]>([]);
+  /** The region being dragged out, while it is being dragged. Only the
+   * overlay wants it: the engine is not told until the pointer comes up,
+   * so a drag costs no history and no repaint. */
+  const [regionDrag, setRegionDrag] = useState<Region | null>(null);
+  /** The outline of what is picked out, in page coordinates, as the
+   * engine flattens it — asked for rather than worked out again here,
+   * since a rounded box, an ellipse and a freehand path each flatten
+   * differently and two answers would show as ants off the edge. */
+  const [antRings, setAntRings] = useState<[number, number][][]>([]);
   const groupCount = useRef(0);
 
   const refresh = useCallback(
     (s: WasmSession) => {
       setSaveTick((n) => n + 1);
+      // What is picked out, as the engine flattens it. Read on every
+      // refresh because a page that turns carries the region round with
+      // it: the ants have to follow.
+      try {
+        setAntRings(JSON.parse(s.selection_outline_json()) as [number, number][][]);
+      } catch {
+        setAntRings([]);
+      }
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext("2d")!;
@@ -1311,6 +1408,36 @@ export function App() {
   const setPalette = (next: Swatch[]) =>
     run({ SetSwatches: { swatches: next } });
 
+  /** Pick the whole page out as a region, rather than picking every
+   * layer — which is what the same words mean two lines up. */
+  const pickWholePage = () => {
+    if (!session) return;
+    try {
+      session.pick_all();
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${err}`);
+    }
+  };
+  const pickNothing = () => {
+    if (session?.pick_none()) refresh(session);
+  };
+  const pickInverse = () => {
+    if (session?.pick_inverse()) refresh(session);
+  };
+  /** Hand the region to the picked layer as its mask. This is what a
+   * selection is for in a non-destructive editor: nothing is cut out,
+   * the layer is simply held to the part of it that was picked. */
+  const maskFromSelection = () => {
+    if (!session || selected === null) return;
+    try {
+      session.mask_from_selection(selected);
+      refresh(session);
+    } catch (err) {
+      alert(`Mask: ${err}`);
+    }
+  };
+
   const selectAll = useCallback(() => {
     const top = layers.filter((l) => l.depth === 0).map((l) => l.id as NodeId);
     if (top.length === 0) return;
@@ -1454,11 +1581,33 @@ export function App() {
           return;
         }
         cancelGesture();
+        // Escape lets go of the region first when there is one and a
+        // marquee is in hand: that is what the key was last used for,
+        // and the layers being picked is not what the user is looking
+        // at.
+        if (SELECT_TOOLS.includes(tool as never) && session?.pick_none()) {
+          refresh(session);
+          return;
+        }
         deselect();
       }
       if (!typing && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
-        selectAll();
+        // Two things are called selecting everything, and the tool in
+        // hand says which is meant: with a marquee up it is the page
+        // that gets picked out, and otherwise it is every layer. Both
+        // are in the Edit menu, so neither is only reachable this way.
+        if (SELECT_TOOLS.includes(tool as never)) pickWholePage();
+        else selectAll();
+      }
+      if (
+        !typing &&
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        e.key.toLowerCase() === "i"
+      ) {
+        e.preventDefault();
+        pickInverse();
       }
       // "?" opens the sheet of shortcuts, and closes it again.
       if (!typing && e.key === "?") {
@@ -2267,6 +2416,23 @@ export function App() {
       setTool("Move");
       return;
     }
+    if (SELECT_TOOLS.includes(tool as never)) {
+      // Picking a region out of the page: a box, an ellipse or a
+      // freehand outline. Nothing is drawn and no layer is made — what
+      // comes out is a region to hand to a layer.
+      toolDragRef.current = {
+        tool,
+        startX: x,
+        startY: y,
+        lastX: x,
+        lastY: y,
+        moved: false,
+        fromCentre: e.altKey && tool !== "Lasso",
+        stroke: [[x, y]],
+      };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
     if (tool === "Pen") {
       // Clicking the first anchor again closes the path.
       const closeRadius = 8 / view.zoom;
@@ -2468,6 +2634,24 @@ export function App() {
       setMarquee(band.band);
       return;
     }
+    {
+      const drag = toolDragRef.current;
+      if (drag && SELECT_TOOLS.includes(drag.tool as never)) {
+        const [x, y] = docPoint(e);
+        drag.lastX = x;
+        drag.lastY = y;
+        drag.moved = true;
+        // A lasso keeps every sample; a box keeps only where it is now.
+        if (drag.tool === "Lasso") {
+          const last = drag.stroke?.[drag.stroke.length - 1];
+          if (!last || Math.hypot(x - last[0], y - last[1]) > 0.75 / view.zoom) {
+            drag.stroke?.push([x, y]);
+          }
+        }
+        setRegionDrag(regionOutline(drag, e.shiftKey));
+        return;
+      }
+    }
     const painting = paintingRef.current;
     if (painting && session) {
       const [px, py] = docPoint(e);
@@ -2639,7 +2823,9 @@ export function App() {
     refresh(session);
   };
 
-  const onCanvasPointerUp = () => {
+  // The release carries the modifier keys, and a select drag reads them:
+  // shift adds to what is picked out, alt takes from it.
+  const onCanvasPointerUp = (e?: React.PointerEvent) => {
     if (pinchRef.current) return;
     const level = levelRef.current;
     if (level) {
@@ -2694,6 +2880,43 @@ export function App() {
     setGuides({ x: [], y: [] });
     setCropRect(null);
     if (!drag || !session) return;
+
+    if (SELECT_TOOLS.includes(drag.tool as never)) {
+      setRegionDrag(null);
+      // Shift adds to what is picked out, alt takes from it, and both
+      // together keep only the overlap — the modifiers every editor
+      // uses, and the shape combinations this one already had.
+      const [shift, alt] = [e?.shiftKey ?? false, e?.altKey ?? false];
+      const how = shift
+        ? alt
+          ? "intersect"
+          : "union"
+        : alt
+          ? "subtract"
+          : "replace";
+      const shape = regionOutline(drag, shift);
+      if (!shape) {
+        // A click rather than a drag: with nothing added or taken away,
+        // it means let go of what is picked out.
+        if (how === "replace" && session.pick_none()) refresh(session);
+        return;
+      }
+      try {
+        session.pick_region(
+          REGION_KIND[drag.tool],
+          shape.x,
+          shape.y,
+          shape.w,
+          shape.h,
+          new Float64Array(shape.points ?? []),
+          how,
+        );
+        refresh(session);
+      } catch (err) {
+        alert(`Select: ${err}`);
+      }
+      return;
+    }
 
     if (drag.tool === "Move") {
       // The document already holds the previewed position; seal the gesture.
@@ -5636,6 +5859,26 @@ export function App() {
             <MenuItem icon="check" onClick={deselect} hint="Esc">
               Deselect
             </MenuItem>
+            <hr />
+            {/* A region picked out of the page, rather than the layers
+                picked in the panel. The two are different things and the
+                menu says so by keeping them apart. */}
+            <MenuItem icon="marquee" onClick={pickWholePage}>
+              Pick out the whole page
+            </MenuItem>
+            <MenuItem
+              icon="marqueeEllipse"
+              onClick={pickInverse}
+              hint="Ctrl+Shift+I"
+            >
+              Pick out the rest instead
+            </MenuItem>
+            <MenuItem icon="lasso" onClick={pickNothing}>
+              Pick out nothing
+            </MenuItem>
+            <MenuItem icon="mask" onClick={maskFromSelection}>
+              Mask this layer with what is picked
+            </MenuItem>
           </MenuButton>
 
           <MenuButton
@@ -6073,8 +6316,64 @@ export function App() {
           </button>
           {/* Every tool but the shapes, which share the one slot that
               Rect's place in the list marks out. */}
-          {TOOLS.filter((t) => t === "Rect" || !SHAPE_TOOLS.includes(t as never)).map((t) =>
-            t === "Rect" ? (
+          {TOOLS.filter(
+            (t) =>
+              t === "Rect" ||
+              t === "Select" ||
+              !(
+                SHAPE_TOOLS.includes(t as never) || SELECT_TOOLS.includes(t as never)
+              ),
+          ).map((t) =>
+            t === "Select" ? (
+              // The three that pick a region share this slot, the way
+              // the shapes share theirs.
+              <div className="tool-group" key="selects">
+                <button
+                  className={
+                    SELECT_TOOLS.includes(tool as never) ? "tool active" : "tool"
+                  }
+                  onClick={() => {
+                    setTool(selectTool);
+                    setPenPoints([]);
+                  }}
+                  title={`${selectTool} (${TOOL_HINT[selectTool]})`}
+                  aria-label={selectTool}
+                >
+                  <Icon name={TOOL_ICONS[selectTool]} size={20} />
+                </button>
+                <button
+                  className="tool-more"
+                  aria-label="More ways to select"
+                  aria-expanded={selectsOpen}
+                  title="The other ways to pick a region"
+                  onClick={() => setSelectsOpen((open) => !open)}
+                />
+                {selectsOpen && (
+                  <div
+                    className="tool-flyout"
+                    role="group"
+                    aria-label="Ways to select"
+                  >
+                    {SELECT_TOOLS.map((s) => (
+                      <button
+                        key={s}
+                        className={s === tool ? "tool active" : "tool"}
+                        onClick={() => {
+                          setSelectTool(s);
+                          setTool(s);
+                          setPenPoints([]);
+                          setSelectsOpen(false);
+                        }}
+                        title={`${s} (${TOOL_HINT[s]})`}
+                        aria-label={s}
+                      >
+                        <Icon name={TOOL_ICONS[s]} size={20} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : t === "Rect" ? (
               // The shape tools share this slot: the one last used sits
               // in it, and the rest are behind the corner.
               <div className="tool-group" key="shapes">
@@ -6779,6 +7078,58 @@ export function App() {
                 <polygon points={q!.map((p) => p.join(",")).join(" ")} />
               </svg>
             ))}
+          {/* The marching ants: what is picked out of the page, and what
+              is being dragged out at this moment. Two strokes over each
+              other — a pale one under a dark dashed one — so the edge
+              reads on a dark picture and on a light one, which one
+              colour cannot do. */}
+          {antRings.length > 0 && (
+            <svg className="ants" aria-label="What is picked out">
+              {antRings.map((ring, i) => (
+                <polygon
+                  key={i}
+                  points={ring
+                    .map(
+                      (p) =>
+                        `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
+                    )
+                    .join(" ")}
+                />
+              ))}
+            </svg>
+          )}
+          {regionDrag && (
+            <svg className="ants drawing" aria-hidden="true">
+              {regionDrag.points ? (
+                <polygon
+                  points={(() => {
+                    const pts = regionDrag.points;
+                    const out = [];
+                    for (let i = 0; i + 1 < pts.length; i += 2) {
+                      out.push(
+                        `${view.x + pts[i] * view.zoom},${view.y + pts[i + 1] * view.zoom}`,
+                      );
+                    }
+                    return out.join(" ");
+                  })()}
+                />
+              ) : SELECT_TOOLS.includes(tool as never) && tool === "Select ellipse" ? (
+                <ellipse
+                  cx={view.x + (regionDrag.x + regionDrag.w / 2) * view.zoom}
+                  cy={view.y + (regionDrag.y + regionDrag.h / 2) * view.zoom}
+                  rx={(regionDrag.w / 2) * view.zoom}
+                  ry={(regionDrag.h / 2) * view.zoom}
+                />
+              ) : (
+                <rect
+                  x={view.x + regionDrag.x * view.zoom}
+                  y={view.y + regionDrag.y * view.zoom}
+                  width={regionDrag.w * view.zoom}
+                  height={regionDrag.h * view.zoom}
+                />
+              )}
+            </svg>
+          )}
           {selQuad && (
             <>
               <svg className="sel-outline" aria-hidden="true">
@@ -7833,7 +8184,10 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+Shift+], Ctrl+Shift+[", "Bring to the front, send to the back"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
-      ["Ctrl+A", "Select all"],
+      ["Ctrl+A", "Select all — the page with a marquee in hand, else every layer"],
+      ["M", "Pick a region out of the page (again for the ellipse and the lasso)"],
+      ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
+      ["Ctrl+Shift+I", "Pick out the rest instead"],
       ["Delete", "Delete the picked layers"],
       ["?", "This sheet"],
     ],

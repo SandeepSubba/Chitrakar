@@ -6594,7 +6594,9 @@ assert(
     page.locator(".panel ul li.selected, .panel ul li.multi").count();
   for (const [key, tool] of [
     ["v", "Move"],
-    ["m", "Move"],
+    // `m` is the marquee, where that muscle memory is; Move keeps `v`,
+    // where its own is.
+    ["m", "Select"],
     ["f", "Frame"],
     ["r", "Rect"],
     ["e", "Ellipse"],
@@ -7519,6 +7521,127 @@ assert(
   await page.waitForTimeout(400);
   const [back] = await spanAt(70);
   assert(back > 260, `two undos put it back where it was drawn (${back})`);
+}
+
+// 9al. Picking a region out of the page. Not a layer and not artwork: a
+// region, which in a non-destructive editor is a thing you hand to a
+// layer as the part of it that shows. Marching ants say where it is,
+// shift adds to it, and "mask this layer with what is picked" is what it
+// was all for.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#cc3333");
+  await pickTool("Rect");
+  await page.mouse.move(...at(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...at(380, 280), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const isRed = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return r > 150 && g < 120 && bl < 120;
+  };
+  assert(await isRed(200, 150), "a layer covering most of the page");
+
+  // The marquee is on the rail under its own letter.
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.getAttribute('button[aria-label="Select"]', "class")).includes(
+      "active",
+    ),
+    "M picks up the marquee",
+  );
+  assert(
+    (await page.locator(".ants").count()) === 0,
+    "and nothing is picked out yet",
+  );
+
+  const region = async (x0, y0, x1, y1, mods = []) => {
+    for (const k of mods) await page.keyboard.down(k);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 8 });
+    await page.mouse.up();
+    for (const k of mods) await page.keyboard.up(k);
+    await page.waitForTimeout(350);
+  };
+  // Every ring, not just the first: a region made of two boxes clear of
+  // each other is two rings, and reading one of them would say the
+  // second box had not been added.
+  const antBox = async () => {
+    const polys = await page.$$eval(".ants polygon", (els) =>
+      els.map((el) => el.getAttribute("points")),
+    );
+    const pts = polys
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  };
+
+  await region(60, 60, 180, 200);
+  assert((await page.locator(".ants").count()) === 1, "the ants are drawn");
+  const one = await antBox();
+  const wide = one[2] - one[0];
+  assert(wide > 0, `the ants have a width (${one})`);
+
+  // Shift adds a second box clear of the first: the region round both is
+  // wider than the region round one.
+  await region(240, 60, 340, 200, ["Shift"]);
+  const two = await antBox();
+  assert(
+    two[2] - two[0] > wide * 1.6,
+    `shift added the second box to what is picked (${one} -> ${two})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  const back = await antBox();
+  assert(
+    Math.abs(back[2] - back[0] - wide) < 3,
+    `and one undo takes the addition back (${back})`,
+  );
+
+  // What it is all for: the layer is held to the region, so the page
+  // outside it goes.
+  await pickTool("Move");
+  await page.mouse.click(...at(200, 150));
+  await page.waitForTimeout(250);
+  await menuClick("Edit", "Mask this layer with what is picked");
+  await page.waitForTimeout(450);
+  assert(await isRed(120, 130), "the layer still shows inside the region");
+  assert(!(await isRed(300, 250)), "and is held back everywhere outside it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(await isRed(300, 250), "one undo hands the layer back");
+
+  // Picking out the rest instead swaps the two.
+  await menuClick("Edit", "Pick out the rest instead");
+  await page.waitForTimeout(300);
+  await page.mouse.click(...at(200, 150));
+  await page.waitForTimeout(200);
+  await menuClick("Edit", "Mask this layer with what is picked");
+  await page.waitForTimeout(450);
+  assert(
+    !(await isRed(120, 130)),
+    "inverted, the region it was is now the part held back",
+  );
+  assert(await isRed(300, 250), "and the rest of the page shows");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".ants").count()) === 0,
+    "and picking out nothing leaves no ants",
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting

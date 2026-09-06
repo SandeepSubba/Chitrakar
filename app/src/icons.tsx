@@ -5,6 +5,9 @@
 
 export type IconName =
   | "move"
+  | "marquee"
+  | "marqueeEllipse"
+  | "lasso"
   | "rect"
   | "ellipse"
   | "pen"
@@ -156,6 +159,22 @@ const PATHS: Record<IconName, JSX.Element> = {
   ),
   move: <path d="M5 3l14 8-6 1.6L10.5 19z" />,
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
+  // The three that pick a region out of the page. Dashed, because that
+  // is what a selection looks like once it is made, and because it is
+  // the one thing that tells them apart from the shapes they echo.
+  marquee: <rect x="3.5" y="5.5" width="17" height="13" strokeDasharray="3 2" />,
+  marqueeEllipse: (
+    <ellipse cx="12" cy="12" rx="8.5" ry="6.5" strokeDasharray="3 2" />
+  ),
+  lasso: (
+    <>
+      <path
+        d="M12 4c4.4 0 8 2.4 8 5.4S16.4 15 12 15s-8-2.5-8-5.6S7.6 4 12 4z"
+        strokeDasharray="3 2"
+      />
+      <path d="M8.4 14.2c-.6 2.1-.2 3.6.9 4.4" />
+    </>
+  ),
   ellipse: <ellipse cx="12" cy="12" rx="8" ry="6" />,
   pen: (
     <>

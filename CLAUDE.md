@@ -62,7 +62,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~836 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~849 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -74,6 +74,16 @@ puts the browser and the port away, so the next run does not die on
 EADDRINUSE about something else; a screenshot lands in `e2e/out/`. Env:
 `CHITRAKAR_CHROMIUM` (browser path override), `CHITRAKAR_TEST_CMYK_ICC`
 (enables the press-profile/proofing steps).
+
+## Selections
+
+A selection is a region picked out of the page, kept in the document as a
+`Mask` (`Document::selection`, `Command::SetSelection`). It is not a
+stencil pixels are cut through — this editor is non-destructive — it is a
+region handed to a layer as the part of it that shows, which is why it is
+a mask and why `Session::mask_from_selection` is a carry between spaces
+rather than a conversion. Add/subtract/intersect go through the shape
+booleans in `chitrakar_render::boolean`.
 
 ## Claude Code plugin
 

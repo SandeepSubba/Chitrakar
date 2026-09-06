@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~325),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~836 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~849 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -917,8 +917,21 @@ without reading anything else.*
   edge whenever the drag starts on the same snap line — so on that one
   answer it asks again with the incoming region moved a five-hundredth
   of a pixel, an eighth of a per cent of the spacing between the samples
-  a coverage is taken with. Still to come: the tools that draw one, and
-  the marching ants.
+  a coverage is taken with.
+  Three tools draw one, sharing a rail slot the way the shapes do: a box
+  marquee, an ellipse and a lasso, under `M`. Shift while dragging adds
+  to what is picked out and alt takes from it (both together keep the
+  overlap), a click with neither lets go, and marching ants — a pale
+  stroke under a dark dashed one, so the edge reads on a dark picture
+  and a light one — say where it is. The ants are drawn from the
+  outline the *engine* flattens, not one worked out again in the app: a
+  rounded box, an ellipse and a freehand path each flatten differently,
+  and two answers would show as ants off the edge. `Ctrl+A` means the
+  page with a marquee in hand and every layer otherwise, since the tool
+  in hand is the clearest signal of which of the two "select all" is
+  meant; both are in the Edit menu either way, beside "pick out the rest
+  instead" and the one that is the point of all of it — mask this layer
+  with what is picked.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

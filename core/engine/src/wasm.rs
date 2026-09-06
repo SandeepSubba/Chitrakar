@@ -590,6 +590,33 @@ impl WasmSession {
         self.inner.pick_inverse().map_err(to_js)
     }
 
+    /// The outline of what is picked out, in page coordinates: a flat
+    /// list of rings, each a flat list of x, y.
+    ///
+    /// The app draws the marching ants from this rather than working the
+    /// outline out again from the shape — a rounded box, an ellipse and
+    /// a freehand path each flatten to a polygon differently, and having
+    /// two answers to that would show as ants that do not sit on the
+    /// edge the region actually has.
+    pub fn selection_outline_json(&self) -> String {
+        let Some(mask) = self.inner.selection() else {
+            return "[]".into();
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
+            return "[]".into();
+        };
+        let t = *transform;
+        let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                    .collect()
+            })
+            .collect();
+        serde_json::to_string(&rings).unwrap_or_else(|_| "[]".into())
+    }
+
     /// What is picked out of the page, as a mask's JSON, or "null".
     pub fn selection_json(&self) -> String {
         serde_json::to_string(&self.inner.selection()).unwrap_or_else(|_| "null".into())
