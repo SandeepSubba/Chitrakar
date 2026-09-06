@@ -367,16 +367,31 @@ impl Document {
                 }
             }
         }
+        // A guide is a line, so it maps as a line: a point on it and the
+        // direction it runs in. Which way it comes out is the direction's
+        // to say — anything the map turns by less than half a right angle
+        // stays on the axis it was on — and where it comes out is where
+        // it crosses the middle of the page it now belongs to, which is
+        // as near as an axis-aligned line can stay to a slanted one.
+        //
+        // Asking whether the two ends of a mapped guide share an x was
+        // the same question for a quarter turn and a mirror, and the
+        // wrong one for anything else: a page straightened by seven
+        // degrees turned every vertical guide into a horizontal one, at a
+        // position that meant nothing.
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
+        let (w, h) = (self.meta.width as f32 / 2.0, self.meta.height as f32 / 2.0);
         for guide in &mut self.guides {
-            let (p, q) = match *guide {
-                Guide::Vertical(v) => (at(v, 0.0), at(v, 1.0)),
-                Guide::Horizontal(v) => (at(0.0, v), at(1.0, v)),
+            let (p, d) = match *guide {
+                Guide::Vertical(v) => (at(v, 0.0), along(0.0, 1.0)),
+                Guide::Horizontal(v) => (at(0.0, v), along(1.0, 0.0)),
             };
-            *guide = if (p.0 - q.0).abs() < 1e-4 {
-                Guide::Vertical(p.0)
+            *guide = if d.1.abs() >= d.0.abs() {
+                // Where it crosses the middle row. A line this nearly
+                // upright has a `d.1` to divide by.
+                Guide::Vertical(p.0 + d.0 * (h - p.1) / d.1)
             } else {
-                Guide::Horizontal(p.1)
+                Guide::Horizontal(p.1 + d.1 * (w - p.0) / d.0)
             };
         }
     }
@@ -1074,6 +1089,402 @@ mod tests {
                 radius: 0.0,
             },
         ))
+    }
+
+    /// Every command's inverse puts the document back exactly as it was.
+    ///
+    /// That is the invariant the whole editor rests on — undo is the
+    /// inverse stack, nothing else — and it was only ever tested one
+    /// command at a time, which is how a new one gets added with an
+    /// inverse nobody checks. Here it is asked of every kind at once,
+    /// against a document with something of everything in it, and the
+    /// comparison is the serialized document, so a field that quietly
+    /// fails to come back is caught rather than a field somebody
+    /// remembered to look at.
+    #[test]
+    fn every_command_undoes_to_exactly_where_it_started() {
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        let root = doc.root();
+        // Something of everything: a group with two children, a loose
+        // shape, a guide, a swatch.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        for (i, name) in ["under", "over"].iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: i,
+                node: rect(name),
+            })
+            .unwrap();
+        }
+        let (under, over) = {
+            let kids = doc.children_of(group).unwrap();
+            (kids[0], kids[1])
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::paint("painted")),
+        })
+        .unwrap();
+        let painted = doc.children_of(root).unwrap()[1];
+        let stroke = PaintStroke {
+            points: vec![[1.0, 2.0], [8.0, 9.0]],
+            radii: vec![3.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.25,
+            erase: false,
+            source: [0.0; 2],
+            heal: false,
+        };
+        doc.apply(Command::AddStroke {
+            id: painted,
+            index: 0,
+            stroke: Box::new(stroke.clone()),
+            on_mask: false,
+        })
+        .unwrap();
+        doc.apply(Command::SetGuides {
+            guides: vec![Guide::Vertical(12.0)],
+        })
+        .unwrap();
+
+        let mask = Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx: 5.0, ry: 4.0 },
+                transform: Transform::translation(2.0, 3.0),
+            },
+            invert: true,
+        });
+        let each: Vec<Command> = vec![
+            Command::AddNode {
+                parent: group,
+                index: 1,
+                node: rect("added"),
+            },
+            Command::RemoveNode { id: over },
+            Command::SetOpacity {
+                id: over,
+                opacity: 0.25,
+            },
+            Command::SetVisible {
+                id: over,
+                visible: false,
+            },
+            Command::SetLocked {
+                id: over,
+                locked: true,
+            },
+            Command::SetClipped {
+                id: over,
+                clipped: true,
+            },
+            Command::SetPinning {
+                id: over,
+                pinned: Pinning {
+                    x: Pin::End,
+                    y: Pin::Stretch,
+                },
+            },
+            Command::SetBlendMode {
+                id: over,
+                blend: BlendMode::Multiply,
+            },
+            Command::SetTransform {
+                id: over,
+                transform: Transform {
+                    a: 1.5,
+                    b: 0.25,
+                    c: -0.25,
+                    d: 1.5,
+                    e: 7.0,
+                    f: -3.0,
+                },
+            },
+            Command::SetKind {
+                id: over,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 3.0, ry: 6.0 },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.5,
+                        b: 1.0,
+                        a: 0.75,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            },
+            Command::AddStroke {
+                id: painted,
+                index: 1,
+                stroke: Box::new(stroke.clone()),
+                on_mask: false,
+            },
+            Command::RemoveStroke {
+                id: painted,
+                index: 0,
+                on_mask: false,
+            },
+            Command::SetStroke {
+                id: painted,
+                index: 0,
+                stroke: Box::new(PaintStroke {
+                    softness: 0.75,
+                    erase: true,
+                    ..stroke.clone()
+                }),
+                on_mask: false,
+            },
+            Command::SetName {
+                id: over,
+                name: "renamed".into(),
+            },
+            Command::SetMask {
+                id: under,
+                mask: Some(mask.clone()),
+            },
+            Command::SetEffects {
+                id: under,
+                effects: vec![Effect::Outline {
+                    width: 2.0,
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.5,
+                }],
+            },
+            Command::SetGuides {
+                guides: vec![Guide::Horizontal(4.0), Guide::Vertical(40.0)],
+            },
+            Command::SetSwatches {
+                swatches: vec![Swatch {
+                    name: "ink".into(),
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.4,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                }],
+            },
+            Command::ResizeCanvas {
+                width: 120,
+                height: 90,
+                dx: 7.0,
+                dy: -4.0,
+            },
+            Command::MirrorCanvas { across_x: true },
+            Command::MirrorCanvas { across_x: false },
+            Command::StraightenCanvas {
+                degrees: 7.5,
+                width: 61,
+                height: 44,
+            },
+            Command::TurnCanvas { quarters: 1 },
+            Command::TurnCanvas { quarters: 2 },
+            Command::MoveNode {
+                id: under,
+                parent: root,
+                index: 0,
+            },
+            Command::Batch(vec![
+                Command::SetOpacity {
+                    id: under,
+                    opacity: 0.1,
+                },
+                Command::SetName {
+                    id: painted,
+                    name: "batched".into(),
+                },
+                Command::MoveNode {
+                    id: over,
+                    parent: root,
+                    index: 2,
+                },
+            ]),
+        ];
+
+        // An id is never handed out twice — a stale reference must never
+        // find a different node — so a document that has had something
+        // added and taken away again is not byte for byte where it
+        // started: the next id it will use has moved on. Everything else
+        // has to be, and the id may only ever go forwards.
+        // Compared as values rather than as text: the nodes live in a
+        // hash map, whose written order says nothing about what is in it.
+        let state = |doc: &Document| {
+            let mut v = serde_json::to_value(doc).expect("a document serializes");
+            let next = v["next_id"].as_u64().expect("a document says its next id");
+            v["next_id"] = serde_json::Value::Null;
+            (v, next)
+        };
+        /// Which part of the document came back different, for a message
+        /// that says something without printing the whole of it.
+        fn differing(a: &serde_json::Value, b: &serde_json::Value) -> String {
+            match (a.as_object(), b.as_object()) {
+                (Some(x), Some(y)) => x
+                    .keys()
+                    .filter(|k| x.get(*k) != y.get(*k))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                _ => "the whole document".into(),
+            }
+        }
+        /// Two documents the same to within `tol` on every number in
+        /// them, and exactly the same in everything else.
+        fn close(a: &serde_json::Value, b: &serde_json::Value, tol: f64) -> bool {
+            use serde_json::Value as V;
+            match (a, b) {
+                (V::Number(x), V::Number(y)) => match (x.as_f64(), y.as_f64()) {
+                    (Some(x), Some(y)) => (x - y).abs() <= tol,
+                    _ => x == y,
+                },
+                (V::Array(x), V::Array(y)) => {
+                    x.len() == y.len() && x.iter().zip(y).all(|(x, y)| close(x, y, tol))
+                }
+                (V::Object(x), V::Object(y)) => {
+                    x.len() == y.len()
+                        && x.iter()
+                            .all(|(k, v)| y.get(k).is_some_and(|w| close(v, w, tol)))
+                }
+                _ => a == b,
+            }
+        }
+        /// Which of the two kinds of command this is: the one that
+        /// cannot be exact, and all the rest.
+        enum Kind {
+            Straighten,
+            Exact,
+        }
+        let (before, first_id) = state(&doc);
+        for cmd in each {
+            let mut copy = doc.clone();
+            let label = format!("{cmd:?}");
+            let cmd_kind = match cmd {
+                Command::StraightenCanvas { .. } => Kind::Straighten,
+                _ => Kind::Exact,
+            };
+            let inverse = copy
+                .apply(cmd)
+                .unwrap_or_else(|e| panic!("{label} could not be applied: {e:?}"));
+            assert!(
+                state(&copy).0 != before,
+                "{label} changed nothing, so its inverse proves nothing"
+            );
+            copy.apply(inverse)
+                .unwrap_or_else(|e| panic!("{label}'s inverse would not apply: {e:?}"));
+            let (mut after, next_id) = state(&copy);
+            // A page turned by anything but a quarter cannot be turned
+            // back bit for bit — a sine and its cosine do not multiply
+            // out to exactly one — and an axis-aligned guide cannot
+            // record a tilt at all, so it comes back on its own axis
+            // where it crosses the middle of the page rather than
+            // exactly where it was. Everything else is exact, and this
+            // is the one command allowed either.
+            if matches!(cmd_kind, Kind::Straighten) {
+                let mut want = before.clone();
+                let (had, has) = (want["guides"].take(), after["guides"].take());
+                assert!(
+                    close(&after, &want, 1e-5),
+                    "{label} did not undo to within a float of where it started: {}",
+                    differing(&after, &want)
+                );
+                assert!(
+                    close(&has, &had, 1.0),
+                    "{label} left a guide somewhere else entirely: {has} against {had}"
+                );
+                continue;
+            }
+            assert!(
+                after == before,
+                "{label} did not undo to where it started: {}",
+                differing(&after, &before)
+            );
+            assert!(
+                next_id >= first_id,
+                "{label} handed an id back to be used twice"
+            );
+        }
+    }
+
+    /// A guide is a line, and a page that moves carries it along as one.
+    /// A quarter turn stands it on its end, a mirror reflects it, and a
+    /// straighten leaves it on the axis it was on — which is what asking
+    /// the mapped *direction* answers, where asking whether the two ends
+    /// of it still share an x turned every vertical guide horizontal the
+    /// moment the page was turned by anything but a right angle.
+    #[test]
+    fn a_guide_keeps_the_axis_the_page_leaves_it_on() {
+        let upright = |doc: &Document| match doc.guides() {
+            [Guide::Vertical(v)] => *v,
+            other => panic!("expected one upright guide, got {other:?}"),
+        };
+
+        // A straighten of a few degrees: still upright, still about where
+        // it was.
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        doc.apply(Command::SetGuides {
+            guides: vec![Guide::Vertical(12.0)],
+        })
+        .unwrap();
+        let (w, h) = straightened_size(80, 60, 7.5);
+        doc.apply(Command::StraightenCanvas {
+            degrees: 7.5,
+            width: w,
+            height: h,
+        })
+        .unwrap();
+        // Still upright, and still the same way over from the middle of
+        // the page — which is what a turn about the middle leaves it,
+        // give or take the tilt it cannot record: a line 28 across from
+        // the centre, tilted by seven and a half degrees, crosses the
+        // middle row 28/cos of that away.
+        let after = upright(&doc);
+        let across = (doc.meta.width as f32 / 2.0 - after).abs();
+        let want = 28.0 / 7.5f32.to_radians().cos();
+        assert!(
+            (across - want).abs() < 0.5,
+            "a straightened page keeps its guide where it was: {across} across, wanted {want}"
+        );
+
+        // A quarter turn lays it down, at the page's new coordinates.
+        let mut turned = Document::new(80, 60, ColorMode::Rgb);
+        turned
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(12.0)],
+            })
+            .unwrap();
+        turned.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        match turned.guides() {
+            [Guide::Horizontal(v)] => assert_eq!(*v, 12.0, "and lands where the turn put it"),
+            other => panic!("a quarter turn lays a guide down: {other:?}"),
+        }
+
+        // And a mirror leaves it upright, on the other side of the page.
+        let mut flipped = Document::new(80, 60, ColorMode::Rgb);
+        flipped
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(12.0)],
+            })
+            .unwrap();
+        flipped
+            .apply(Command::MirrorCanvas { across_x: true })
+            .unwrap();
+        assert_eq!(upright(&flipped), 68.0);
     }
 
     /// A copy that could reach itself would have nothing to draw, so the

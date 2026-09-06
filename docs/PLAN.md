@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~314),
+- **Verify before committing:** `cargo test --workspace` (~316),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -758,6 +758,23 @@ without reading anything else.*
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
+- **Every command's inverse is checked by machine:**
+  `every_command_undoes_to_exactly_where_it_started` builds a document
+  with a group, shapes, a paint layer, a stroke and a guide, then walks
+  one instance of *every* `Command` variant: apply it to a clone, apply
+  the inverse it returned, and compare the two documents as JSON. It is
+  the test that notices a new command whose inverse was written by eye,
+  and it found one on the way in — mapping a guide through a page
+  transform asked whether the two ends of the mapped guide shared an x,
+  which is the same question for a quarter turn and a mirror and the
+  wrong one for anything else: a page straightened by seven degrees
+  turned every vertical guide horizontal, at a position that meant
+  nothing. A guide is now carried as a line — a point and a direction —
+  and the mapped direction picks the axis while the crossing of the new
+  page's middle picks the position (`a_guide_keeps_the_axis_the_page_leaves_it_on`).
+  `StraightenCanvas` is the one command the audit lets be inexact,
+  because it re-fits the page to the turned artwork and cannot be undone
+  to the bit.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it first is filters
