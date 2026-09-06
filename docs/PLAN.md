@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~318),
+- **Verify before committing:** `cargo test --workspace` (~319),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -783,6 +783,21 @@ without reading anything else.*
   `StraightenCanvas` is the one command the audit lets be inexact,
   because it re-fits the page to the turned artwork and cannot be undone
   to the bit.
+- **Every command repaints what it changes:** the engine draws the page
+  once and afterwards repaints only the region a command is computed to
+  have dirtied. Getting that wrong does not fail loudly — it leaves a
+  stripe of the last frame on screen, in the one place the user was
+  looking. `every_command_repaints_every_pixel_it_changes` asks it of
+  all of them the way a user would notice: draw the page, apply the
+  command, and compare what the session repainted against the same
+  document drawn from nothing; then undo and redo, since an inverse is
+  a different command with a region of its own. The engine already
+  keeps a couple of pixels of margin, so a region one or two pixels too
+  small is absorbed; three is caught, and a region that forgot a whole
+  node is far more than three. Both this and the inverse audit read one
+  shared list — `chitrakar_doc::fixture` (feature `fixture`, a dev
+  dependency) — so a new `Command` is added to it once and both tests
+  start asking about it.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

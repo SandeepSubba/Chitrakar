@@ -26,6 +26,7 @@ use chitrakar_doc::{
 };
 
 /// A linear-light, premultiplied float pixel buffer.
+#[derive(Clone)]
 pub struct Surface {
     pub width: u32,
     pub height: u32,

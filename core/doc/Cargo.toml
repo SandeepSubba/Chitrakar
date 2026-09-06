@@ -11,3 +11,9 @@ chitrakar-color.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# The shared fixture — a document with something of everything in it and
+# one instance of every command — for the crates whose tests ask a
+# question of all of them at once.
+fixture = []
