@@ -200,6 +200,9 @@ struct ImageOut {
     @location(4) @interpolate(flat) mode: f32,
     @location(5) @interpolate(flat) params: vec4f,
     @location(6) @interpolate(flat) grad: vec4f,
+    /// Three more numbers, for the one adjustment with more to say than
+    /// the two above can carry.
+    @location(7) @interpolate(flat) extra: vec3f,
 };
 
 @group(1) @binding(0) var image: texture_2d<f32>;
@@ -223,6 +226,7 @@ fn vs_image(
     out.mode = params.x;
     out.params = params;
     out.grad = grad;
+    out.extra = color.rgb;
     return out;
 }
 
@@ -558,6 +562,154 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
     }
 }
 
+// A table an adjustment is stated by, read the way the CPU reads its
+// own: the first and last texels are the ends, so a value maps onto
+// their centres and the sampler fills in between.
+fn table_at(t: f32) -> vec4f {
+    let n = f32(textureDimensions(image).x);
+    let u = (clamp(t, 0.0, 1.0) * (n - 1.0) + 0.5) / n;
+    return textureSampleLevel(image, image_sampler, vec2f(u, 0.5), 0.0);
+}
+
+// A colour's hue, saturation and lightness, with the hue in sixths of
+// the wheel — red at 0, yellow at 1, round to magenta at 5 — which is
+// the order a colour panel's bands are always in, and what the bands of
+// a selective adjustment are numbered by.
+fn to_hsl(c: vec3f) -> vec3f {
+    let hi = max(c.r, max(c.g, c.b));
+    let lo = min(c.r, min(c.g, c.b));
+    let light = (hi + lo) * 0.5;
+    let chroma = hi - lo;
+    if chroma <= 1e-6 {
+        return vec3f(0.0, 0.0, light);
+    }
+    let sat = clamp(chroma / max(1.0 - abs(2.0 * light - 1.0), 1e-6), 0.0, 1.0);
+    var hue = (c.r - c.g) / chroma + 4.0;
+    if hi == c.r {
+        hue = (c.g - c.b) / chroma;
+    } else if hi == c.g {
+        hue = (c.b - c.r) / chroma + 2.0;
+    }
+    return vec3f(hue - 6.0 * floor(hue / 6.0), sat, light);
+}
+
+fn from_hsl(hsl: vec3f) -> vec3f {
+    let chroma = (1.0 - abs(2.0 * hsl.z - 1.0)) * hsl.y;
+    let h = hsl.x - 6.0 * floor(hsl.x / 6.0);
+    let x = chroma * (1.0 - abs((h - 2.0 * floor(h / 2.0)) - 1.0));
+    let sixth = i32(h);
+    var rgb = vec3f(chroma, 0.0, x);
+    switch sixth {
+        case 0: { rgb = vec3f(chroma, x, 0.0); }
+        case 1: { rgb = vec3f(x, chroma, 0.0); }
+        case 2: { rgb = vec3f(0.0, chroma, x); }
+        case 3: { rgb = vec3f(0.0, x, chroma); }
+        case 4: { rgb = vec3f(x, 0.0, chroma); }
+        default: {}
+    }
+    return clamp(rgb + vec3f(hsl.z - chroma * 0.5), vec3f(0.0), vec3f(1.0));
+}
+
+// The four stated by a table or in bands of colour, which have more to
+// say than the vertex can carry: the table is bound where a picture's
+// pixels would be.
+fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
+    switch kind {
+        // Curves: a master curve every channel goes through, and a curve
+        // of its own for each after it, on the values a device shows. A
+        // channel that was never drawn carries the straight line, so
+        // there is nothing to ask about.
+        case 10: {
+            let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let master = vec3f(table_at(shown.r).r, table_at(shown.g).r, table_at(shown.b).r);
+            let own = vec3f(table_at(master.r).g, table_at(master.g).b, table_at(master.b).a);
+            return vec3f(to_light(own.r), to_light(own.g), to_light(own.b));
+        }
+        // A gradient map: every tone replaced by the colour at its own
+        // place along a ramp. Where a tone sits is its brightness as a
+        // device shows it — the middle of the ramp should land on the
+        // tones that look middling, and linear light's middle shows as a
+        // light grey. The ramp's colours are premultiplied by their own
+        // alpha; the pixel keeps the alpha it had, so that is divided
+        // back out.
+        case 11: {
+            let lum = to_shown(clamp(dot(vec3f(0.2126, 0.7152, 0.0722), c), 0.0, 1.0));
+            let ramp = table_at(lum);
+            if ramp.a <= 0.0 {
+                return c;
+            }
+            return ramp.rgb / ramp.a;
+        }
+        // Hue, saturation and lightness asked of one band of colour at a
+        // time. A pixel belongs to the bands its own hue falls between,
+        // by how near it is to each; the weights are a triangle a band
+        // wide, so they add to one and no colour sits in a seam.
+        case 12: {
+            let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let hsl = to_hsl(shown);
+            var d = vec3f(0.0);
+            for (var i = 0; i < 6; i = i + 1) {
+                let away = abs(hsl.x - f32(i));
+                let w = max(1.0 - min(away, 6.0 - away), 0.0);
+                d = d + w * table_at(f32(i) / 5.0).rgb;
+            }
+            if hsl.y <= 1e-4 || (d.r == 0.0 && d.g == 0.0 && d.b == 0.0) {
+                return c;
+            }
+            // How much of the change a pixel takes is how much colour it
+            // has, though a third of full saturation already takes all
+            // of it: a pale sky is still a sky.
+            let take = clamp(hsl.y * 3.0, 0.0, 1.0);
+            let moved = from_hsl(vec3f(
+                hsl.x + d.r * 0.5 * take,
+                clamp(hsl.y * (1.0 + d.g * take), 0.0, 1.0),
+                clamp(hsl.z + d.b * 0.5 * take, 0.0, 1.0),
+            ));
+            return vec3f(to_light(moved.r), to_light(moved.g), to_light(moved.b));
+        }
+        // Colour balance: the three ranges of tone pushed along the
+        // three opponent pairs, the range read from the pixel's own
+        // lightness so a shift moves a colour rather than pulling it
+        // apart.
+        case 13: {
+            let lo3 = vec3f(p.y, p.z, p.w);
+            let mid3 = vec3f(q.x, q.y, q.z);
+            let hi3 = vec3f(q.w, e.x, e.y);
+            if all(lo3 == vec3f(0.0)) && all(mid3 == vec3f(0.0)) && all(hi3 == vec3f(0.0)) {
+                return c;
+            }
+            let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let light = (max(shown.r, max(shown.g, shown.b)) + min(shown.r, min(shown.g, shown.b))) * 0.5;
+            let ramp = 0.25;
+            let edge = 0.333;
+            let scale = 0.7;
+            let wlo = clamp((light - edge) / -ramp + 0.5, 0.0, 1.0) * scale;
+            let whi = clamp((light + edge - 1.0) / ramp + 0.5, 0.0, 1.0) * scale;
+            let wmid = clamp((light - edge) / ramp + 0.5, 0.0, 1.0)
+                * clamp((light + edge - 1.0) / -ramp + 0.5, 0.0, 1.0)
+                * scale;
+            let moved = clamp(
+                shown + wlo * clamp(lo3, vec3f(-1.0), vec3f(1.0))
+                    + wmid * clamp(mid3, vec3f(-1.0), vec3f(1.0))
+                    + whi * clamp(hi3, vec3f(-1.0), vec3f(1.0)),
+                vec3f(0.0),
+                vec3f(1.0),
+            );
+            var out = moved;
+            if e.z > 0.5 {
+                // The colour that was asked for, at the lightness the
+                // pixel already had.
+                let now = to_hsl(moved);
+                out = from_hsl(vec3f(now.x, now.y, to_hsl(shown).z));
+            }
+            return vec3f(to_light(out.r), to_light(out.g), to_light(out.b));
+        }
+        default: {
+            return c;
+        }
+    }
+}
+
 @fragment
 fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
@@ -568,6 +720,10 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // Straight alpha in, premultiplied out, which is where the
     // adjustments are stated.
     let straight = was.rgb / was.a;
-    let done = adjusted(i32(in.mode), in.params, in.grad, straight) * was.a;
-    return vec4f(mix(was.rgb, done, weight), was.a);
+    let kind = i32(in.mode);
+    var out = adjusted(kind, in.params, in.grad, straight);
+    if kind >= 10 {
+        out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
+    }
+    return vec4f(mix(was.rgb, out * was.a, weight), was.a);
 }

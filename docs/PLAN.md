@@ -649,7 +649,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~313),
+- **Verify before committing:** `cargo test --workspace` (~314),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~807 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -725,17 +725,19 @@ without reading anything else.*
   own opacity and its mask, with the arithmetic stated arm for arm as
   the CPU states it — some of it in linear light, some on the values a
   device shows, which is a decision that belongs to the adjustment
-  rather than to the renderer drawing it. Nine of them so far (exposure,
-  brightness/contrast, hue/saturation, levels, white balance, vibrance,
-  black and white, invert, shadows and highlights); the ones stated by a
-  table — curves, gradient map — and the two that speak in bands of
-  colour hand the page back for now. A group holding something that
+  rather than to the renderer drawing it. All thirteen of them: the nine
+  stated by a handful of numbers ride on the quad, and the three read off
+  a table — the curves, the gradient map's ramp, the six bands of a
+  selective adjustment — read the table the CPU renderer itself builds,
+  uploaded beside the quad, so neither renderer can read a table the
+  other did not write (which is also how a CMYK document's press profile
+  reaches a gradient map, since only the prepared ramp knows it). A group
+  holding something that
   reads what is under it is isolated too, because that is what decides
   what "under it" means, and the CPU renderer asks the same question
   (`chitrakar_render::reads_backdrop`), so both give the adjustment the
   same page to work on. It declines
-  anything else — effects, filters,
-  the four adjustments above, ink authored
+  anything else — effects, filters, ink authored
   for a press (a gradient stop included), and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
   back to the CPU. Its tests render the same page both ways and compare: mean channel
@@ -748,11 +750,10 @@ without reading anything else.*
   there too.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it first is the
-     four adjustments stated by a table or in bands of colour, then
-     filters and live effects, which read a *neighbourhood* rather than
-     a pixel and so want a pass of their own rather than the copy-aside
-     the rest use (see docs/spikes/gpu-rendering.md).
+     viewport present from it; what is left to teach it first is filters
+     and live effects, which read a *neighbourhood* rather than a pixel
+     and so want passes of their own rather than the copy-aside
+     everything else uses (see docs/spikes/gpu-rendering.md).
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

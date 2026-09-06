@@ -160,7 +160,12 @@ enum Draw {
     /// An adjustment layer: the quad over the page whose fragment reads
     /// what is under it — from the copy a blend reads too — and writes
     /// the adjusted answer back over it.
-    Adjust { quad: std::ops::Range<u32> },
+    Adjust {
+        quad: std::ops::Range<u32>,
+        /// The scene texture it is read off, for the ones stated by a
+        /// table rather than by a handful of numbers.
+        table: Option<usize>,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -987,8 +992,11 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
                             (quad, mask)
                         }
-                        Opening::Adjust { quad, mask } => {
+                        Opening::Adjust { quad, mask, table } => {
                             pass.set_pipeline(&self.adjust);
+                            if let Some(at) = table {
+                                pass.set_bind_group(1, &textures[*at], &[]);
+                            }
                             (quad, mask)
                         }
                     };
@@ -1329,9 +1337,14 @@ fn collect(
                 // weighted by its own opacity and its mask. It reads
                 // that from the copy a blend reads, which means a pass
                 // of its own, which `plan` cuts for it.
-                let (params, grad) = adjustment_of(adj)?;
-                let quad = out.push(page_quad(doc, alpha, params, grad));
-                out.draws.push(Item::of(Draw::Adjust { quad }));
+                let plan = adjustment_of(doc, adj)?;
+                let table = plan.table.map(|img| {
+                    let at = out.textures.len();
+                    out.textures.push(img);
+                    at
+                });
+                let quad = out.push(page_quad(doc, alpha, plan.params, plan.grad, plan.extra));
+                out.draws.push(Item::of(Draw::Adjust { quad, table }));
             }
             _ => return None,
         }
@@ -1344,6 +1357,7 @@ fn collect(
                 node.opacity * opacity,
                 [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
                 [0.0; 4],
+                [0.0; 3],
             ));
             out.draws.push(Item::of(Draw::Close {
                 quad,
@@ -1860,42 +1874,154 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
 /// `None` for the ones this backend has not learnt — a curve and a
 /// gradient map are read off tables, and the two that speak in bands of
 /// colour want the whole HSL round trip, so they wait.
-fn adjustment_of(adj: &chitrakar_doc::Adjustment) -> Option<([f32; 4], [f32; 4])> {
+fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adjusting> {
     use chitrakar_doc::Adjustment as A;
+    let plain = |params: [f32; 4], grad: [f32; 4]| Adjusting {
+        params,
+        grad,
+        extra: [0.0; 3],
+        table: None,
+    };
     Some(match adj {
-        A::Exposure { stops } => ([1.0, *stops, 0.0, 0.0], [0.0; 4]),
+        A::Exposure { stops } => plain([1.0, *stops, 0.0, 0.0], [0.0; 4]),
         A::BrightnessContrast {
             brightness,
             contrast,
-        } => ([2.0, *brightness, *contrast, 0.0], [0.0; 4]),
+        } => plain([2.0, *brightness, *contrast, 0.0], [0.0; 4]),
         A::HueSaturation {
             hue_degrees,
             saturation,
             lightness,
-        } => ([3.0, *hue_degrees, *saturation, *lightness], [0.0; 4]),
+        } => plain([3.0, *hue_degrees, *saturation, *lightness], [0.0; 4]),
         A::Levels {
             in_black,
             in_white,
             gamma,
             out_black,
             out_white,
-        } => (
+        } => plain(
             [4.0, *in_black, *in_white, *gamma],
             [*out_black, *out_white, 0.0, 0.0],
         ),
-        A::WhiteBalance { temperature, tint } => ([5.0, *temperature, *tint, 0.0], [0.0; 4]),
-        A::Vibrance { amount } => ([6.0, *amount, 0.0, 0.0], [0.0; 4]),
-        A::BlackAndWhite { red, green, blue } => ([7.0, *red, *green, *blue], [0.0; 4]),
-        A::Invert { amount } => ([8.0, *amount, 0.0, 0.0], [0.0; 4]),
+        A::WhiteBalance { temperature, tint } => plain([5.0, *temperature, *tint, 0.0], [0.0; 4]),
+        A::Vibrance { amount } => plain([6.0, *amount, 0.0, 0.0], [0.0; 4]),
+        A::BlackAndWhite { red, green, blue } => plain([7.0, *red, *green, *blue], [0.0; 4]),
+        A::Invert { amount } => plain([8.0, *amount, 0.0, 0.0], [0.0; 4]),
         A::ShadowsHighlights {
             shadows,
             highlights,
-        } => ([9.0, *shadows, *highlights, 0.0], [0.0; 4]),
-        A::Curves { .. }
-        | A::GradientMap { .. }
-        | A::SelectiveHsl { .. }
-        | A::ColorBalance { .. } => return None,
+        } => plain([9.0, *shadows, *highlights, 0.0], [0.0; 4]),
+        // The three read off tables the CPU renderer builds, so neither
+        // renderer can read a table the other did not write.
+        A::Curves {
+            points,
+            red,
+            green,
+            blue,
+        } => {
+            let line: Vec<f32> = (0..=256).map(|i| i as f32 / 256.0).collect();
+            let of = |pts: &Vec<[f32; 2]>| {
+                if pts.len() >= 2 {
+                    chitrakar_render::curve_lut(pts)
+                } else {
+                    line.clone()
+                }
+            };
+            let (master, r, g, b) = (of(points), of(red), of(green), of(blue));
+            let mut texels = Vec::with_capacity(master.len() * 4);
+            for i in 0..master.len() {
+                for v in [master[i], r[i], g[i], b[i]] {
+                    texels.push(f32_to_f16(v));
+                }
+            }
+            Adjusting {
+                params: [10.0, 0.0, 0.0, 0.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
+                table: Some(Image {
+                    width: master.len() as u32,
+                    height: 1,
+                    channels: 4,
+                    texels,
+                }),
+            }
+        }
+        A::GradientMap { .. } => {
+            // The prepared ramp is the one that knows a CMYK document's
+            // press profile, which is why it is asked for rather than
+            // the stops themselves.
+            let Some(chitrakar_render::Prepared::Ramp(ramp)) = chitrakar_render::prepare(doc, adj)
+            else {
+                // Fewer than two stops is not a ramp: nothing to map
+                // through, and the picture is left as it is.
+                return Some(plain([0.0; 4], [0.0; 4]));
+            };
+            let steps = chitrakar_render::RampLut::steps();
+            let mut texels = Vec::with_capacity((steps + 1) * 4);
+            for i in 0..=steps {
+                let c = ramp.at(i as f32 / steps as f32);
+                for v in [c.r, c.g, c.b, c.a] {
+                    texels.push(f32_to_f16(v));
+                }
+            }
+            Adjusting {
+                params: [11.0, 0.0, 0.0, 0.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
+                table: Some(Image {
+                    width: (steps + 1) as u32,
+                    height: 1,
+                    channels: 4,
+                    texels,
+                }),
+            }
+        }
+        A::SelectiveHsl { bands } => {
+            let mut texels = Vec::with_capacity(6 * 4);
+            for i in 0..6 {
+                let band = bands.get(i).copied().unwrap_or([0.0; 3]);
+                for v in [band[0], band[1], band[2], 0.0] {
+                    texels.push(f32_to_f16(v));
+                }
+            }
+            Adjusting {
+                params: [12.0, 0.0, 0.0, 0.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
+                table: Some(Image {
+                    width: 6,
+                    height: 1,
+                    channels: 4,
+                    texels,
+                }),
+            }
+        }
+        A::ColorBalance {
+            shadows,
+            midtones,
+            highlights,
+            preserve_luminosity,
+        } => Adjusting {
+            params: [13.0, shadows[0], shadows[1], shadows[2]],
+            grad: [midtones[0], midtones[1], midtones[2], highlights[0]],
+            extra: [
+                highlights[1],
+                highlights[2],
+                if *preserve_luminosity { 1.0 } else { 0.0 },
+            ],
+            table: None,
+        },
     })
+}
+
+/// What an adjustment is stated by: the numbers the vertex carries, and
+/// the table the fragment reads where there is more to say than seven
+/// numbers can hold.
+struct Adjusting {
+    params: [f32; 4],
+    grad: [f32; 4],
+    extra: [f32; 3],
+    table: Option<Image>,
 }
 
 /// Which arm of the shader's `blended` a mode is. The order is the
@@ -1949,10 +2075,13 @@ enum Opening {
         blend: BlendMode,
     },
     /// An adjustment layer, which reads everything composited below it
-    /// and writes the answer back over it — always from the copy.
+    /// and writes the answer back over it — always from the copy — and,
+    /// where it is stated by a table rather than by a handful of
+    /// numbers, reads that where a picture's pixels would be.
     Adjust {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
+        table: Option<usize>,
     },
 }
 
@@ -2006,11 +2135,12 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     blend: *blend,
                 });
             }
-            Draw::Adjust { quad } => {
+            Draw::Adjust { quad, table } => {
                 clear = false;
                 lay = Some(Opening::Adjust {
                     quad: quad.clone(),
                     mask: item.mask,
+                    table: *table,
                 });
             }
             _ => unreachable!("only the three above cut a pass"),
@@ -2030,13 +2160,19 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
 /// that covers it: what lays an isolated group's surface back down.
 /// `alpha` is the group's own opacity, which the image fragment reads
 /// off the colour the way a placed picture's does.
-fn page_quad(doc: &Document, alpha: f32, params: [f32; 4], grad: [f32; 4]) -> Vec<Vertex> {
+fn page_quad(
+    doc: &Document,
+    alpha: f32,
+    params: [f32; 4],
+    grad: [f32; 4],
+    extra: [f32; 3],
+) -> Vec<Vertex> {
     let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
     let corner = |u: f32, v: f32| Vertex {
         doc: [u * w, v * h],
         local: [u, v],
         params,
-        color: [0.0, 0.0, 0.0, alpha],
+        color: [extra[0], extra[1], extra[2], alpha],
         grad,
         mask: NO_MASK,
     };
@@ -3978,12 +4114,145 @@ mod tests {
             "and inside it, half inverted: {:?}",
             weighed.get(10, 20)
         );
+    }
 
-        // A curve is stated by a table this backend has not learnt, so
-        // the page goes back rather than coming out wrong.
-        let mut curved = Document::new(20, 20, ColorMode::Rgb);
-        let rect = add(
-            &mut curved,
+    /// The four adjustments with more to say than a handful of numbers:
+    /// three read off a table the CPU renderer builds — the curves, the
+    /// ramp, the bands — and the fourth carries ten numbers on the quad.
+    #[test]
+    fn the_adjustments_stated_by_a_table_read_the_cpu_s_own() {
+        use chitrakar_doc::Adjustment as A;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let told = [
+            A::Curves {
+                // A master curve that lifts the middle, and a red curve
+                // after it that pulls its own back down: both have to
+                // land, in that order.
+                points: vec![[0.0, 0.0], [0.5, 0.72], [1.0, 1.0]],
+                red: vec![[0.0, 0.0], [0.5, 0.32], [1.0, 1.0]],
+                green: Vec::new(),
+                blue: Vec::new(),
+            },
+            A::GradientMap {
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.1,
+                            g: 0.0,
+                            b: 0.3,
+                            a: 1.0,
+                        },
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: AuthoredColor::Srgb {
+                            r: 1.0,
+                            g: 0.85,
+                            b: 0.2,
+                            a: 1.0,
+                        },
+                    },
+                ],
+            },
+            A::SelectiveHsl {
+                // The blues deepened, the greens left alone.
+                bands: vec![
+                    [0.0; 3],
+                    [0.0; 3],
+                    [0.0; 3],
+                    [0.0; 3],
+                    [0.2, 0.8, -0.1],
+                    [0.0; 3],
+                ],
+            },
+            A::ColorBalance {
+                shadows: [-0.4, 0.0, 0.5],
+                midtones: [0.2, -0.1, 0.0],
+                highlights: [0.5, 0.0, -0.4],
+                preserve_luminosity: true,
+            },
+            A::ColorBalance {
+                shadows: [-0.4, 0.0, 0.5],
+                midtones: [0.2, -0.1, 0.0],
+                highlights: [0.5, 0.0, -0.4],
+                preserve_luminosity: false,
+            },
+        ];
+        for adj in told {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "dark",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.35,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "light",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.7,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(0.0, 20.0),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::adjustment("adj", adj.clone())),
+            })
+            .unwrap();
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{adj:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{adj:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            for (x, y) in [(30u32, 10u32), (30, 30)] {
+                let (a, b) = (drawn.get(x, y), reference.get(x, y));
+                assert!(
+                    (a.r - b.r).abs() < 0.02
+                        && (a.g - b.g).abs() < 0.02
+                        && (a.b - b.b).abs() < 0.02,
+                    "{adj:?} at {x},{y}: {a:?} against {b:?}"
+                );
+            }
+        }
+
+        // A gradient map with nothing to map through leaves the picture
+        // as it is, on both.
+        let mut bare = Document::new(20, 20, ColorMode::Rgb);
+        add(
+            &mut bare,
             filled(
                 "r",
                 VectorShape::Rect {
@@ -3995,27 +4264,22 @@ mod tests {
             ),
             Transform::default(),
         );
-        let _ = rect;
-        let root = curved.root();
-        curved
-            .apply(Command::AddNode {
-                parent: root,
-                index: 1,
-                node: Box::new(Node::adjustment(
-                    "curve",
-                    A::Curves {
-                        points: vec![[0.0, 0.0], [0.5, 0.75], [1.0, 1.0]],
-                        red: Vec::new(),
-                        green: Vec::new(),
-                        blue: Vec::new(),
-                    },
-                )),
-            })
-            .unwrap();
-        assert!(
-            !GpuRenderer::can_render(&curved),
-            "a curve is still the CPU's"
+        let root = bare.root();
+        bare.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "empty",
+                A::GradientMap { stops: Vec::new() },
+            )),
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&bare));
+        let (mean, _) = difference(
+            &gpu.render(&bare).unwrap(),
+            &chitrakar_render::render(&bare).unwrap(),
         );
+        assert!(mean < 0.001, "a ramp with no stops changes nothing: {mean}");
     }
 
     #[test]

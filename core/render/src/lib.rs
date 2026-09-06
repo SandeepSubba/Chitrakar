@@ -4882,8 +4882,13 @@ impl RampLut {
         Some(Self { table })
     }
 
+    /// How many entries it holds, plus the one at the very end.
+    pub fn steps() -> usize {
+        RAMP_STEPS
+    }
+
     /// The colour at `t`, between the entries either side of it.
-    fn at(&self, t: f32) -> LinearRgba {
+    pub fn at(&self, t: f32) -> LinearRgba {
         let x = t.clamp(0.0, 1.0) * RAMP_STEPS as f32;
         let i = x as usize;
         let f = x - i as f32;
