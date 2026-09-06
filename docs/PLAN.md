@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~321),
+- **Verify before committing:** `cargo test --workspace` (~322),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~826 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -808,7 +808,22 @@ without reading anything else.*
   the old, larger one had drawn beyond it standing on screen. A page
   that changes size now invalidates the whole surface. The app masks it
   today because every size change it offers re-fits the view, which
-  invalidates everything anyway; the audit is what holds it. Both this and the
+  invalidates everything anyway; the audit is what holds it. A third
+  pass runs zoomed *out*, where a document pixel is smaller than a
+  device one; nothing was wrong there, and the gesture audit's Escape
+  check moved into a viewport too, with the same answer.
+- **And the one thing drawn while it is looked at:** extending a brush
+  stroke dirties only what changed between the old stroke and the new,
+  since repainting the whole of a long one on every pointer sample is
+  what would make it crawl. That is a bounds computation of its own,
+  it runs on every sample anybody paints, and a region a pixel short
+  does not show up later — it shows up as a gap in the line under the
+  cursor. `a_brush_repaints_the_whole_stroke_it_is_drawing` draws one
+  the way a hand does, turning back over itself with the radius
+  swelling, and after every sample compares the repainted page against
+  the same document drawn from nothing — on a layer and on a mask, with
+  ink and with an eraser, through a viewport. Dropping one point from
+  the changed box fails it. Both this and the
   inverse audit read one shared list — `chitrakar_doc::fixture` (feature
   `fixture`, a dev dependency) — so a new `Command` is added to it once
   and every audit starts asking about it. Its document is a group of two

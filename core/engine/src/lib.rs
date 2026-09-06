@@ -3500,6 +3500,94 @@ mod tests {
         worst
     }
 
+    /// A brush repaints the stroke it is drawing, all of it.
+    ///
+    /// Extending a stroke dirties only what changed between the old
+    /// stroke and the new one — repainting the whole of a long stroke on
+    /// every pointer sample is what would make a long one crawl. That
+    /// optimisation is a bounds computation of its own
+    /// (`changed_bounds`), it runs on every sample of every stroke
+    /// anybody draws, and a stroke is the one thing in this editor that
+    /// is drawn *while* being looked at: a region a pixel short does not
+    /// show up later, it shows up as a gap in the line under the cursor.
+    ///
+    /// So draw one the way a hand does — a path that turns back over
+    /// itself, with the radius swelling and shrinking — and after every
+    /// sample compare the page the session repainted against the same
+    /// document drawn from nothing. Through a viewport, because that is
+    /// what is on screen while it happens.
+    #[test]
+    fn a_brush_repaints_the_whole_stroke_it_is_drawing() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.95,
+            g: 0.3,
+            b: 0.1,
+            a: 1.0,
+        };
+        // A hand's path: out, back over itself, and round again, so the
+        // new tail keeps landing on ground the stroke has already
+        // covered rather than only on bare page.
+        let path: Vec<(f32, f32, f32)> = (0..24)
+            .map(|i| {
+                let t = i as f32 / 4.0;
+                (
+                    20.0 + 18.0 * t.cos() + 2.2 * t,
+                    30.0 + 14.0 * (t * 1.7).sin(),
+                    3.0 + 2.5 * (t * 0.9).sin(),
+                )
+            })
+            .collect();
+
+        for on_mask in [false, true] {
+            for erase in [false, true] {
+                let f = chitrakar_doc::fixture::everything();
+                let mut kept = Session::from_document(f.doc.clone());
+                // The mask has to exist before a brush can work on it.
+                let layer = if on_mask {
+                    assert!(kept.ensure_painted_mask(f.over).unwrap());
+                    f.over
+                } else {
+                    f.painted
+                };
+                kept.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                kept.render_cached().expect("the page draws");
+                let (x, y, r) = path[0];
+                kept.paint_begin(layer, x, y, r, ink, 0.35, erase, on_mask)
+                    .unwrap();
+                for (n, &(x, y, r)) in path.iter().enumerate().skip(1) {
+                    kept.paint_extend(x, y, r).unwrap();
+                    let (drawn, dirty) = kept.render_cached().unwrap();
+                    let (drawn, dirty) = (drawn.clone(), dirty);
+                    let mut fresh = Session::from_document(kept.document().clone());
+                    fresh.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                    let whole = fresh.render_cached().unwrap().0.clone();
+                    let worst = apart(&drawn, &whole);
+                    assert!(
+                        worst.0 < 0.002,
+                        "sample {n} (mask {on_mask}, erase {erase}) left {},{} \
+                         unpainted: {:?} against {:?}, having said {dirty:?} was stale",
+                        worst.1,
+                        worst.2,
+                        drawn.get(worst.1, worst.2),
+                        whole.get(worst.1, worst.2)
+                    );
+                }
+                // The whole of it goes when the gesture is abandoned.
+                assert!(kept.cancel_preview().unwrap());
+                let after = kept.render_cached().unwrap().0.clone();
+                let mut bare = Session::from_document(kept.document().clone());
+                bare.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                let worst = apart(&after, &bare.render_cached().unwrap().0.clone());
+                assert!(
+                    worst.0 < 0.002,
+                    "an abandoned stroke (mask {on_mask}, erase {erase}) left {},{}",
+                    worst.1,
+                    worst.2
+                );
+            }
+        }
+    }
+
     /// A gesture is the same command, told in two halves.
     ///
     /// Every drag in the editor goes through preview/commit/cancel: the
@@ -3571,8 +3659,13 @@ mod tests {
             );
 
             // Cancelled: back where it started, in the document and on
-            // the page, with nothing in history to undo.
+            // the page, with nothing in history to undo. Asked through
+            // a zoomed, panned viewport, because that is what the app
+            // is showing while a drag is in flight — an Escape that
+            // repaints too little leaves the smear there, not in an
+            // export.
             let mut gesture = Session::from_document(f.doc.clone());
+            gesture.set_viewport(1.75, -23.5, -11.25, 120, 90);
             gesture.render_cached().expect("the page draws");
             gesture.preview(cmd.clone()).unwrap();
             if repeatable {
@@ -3588,6 +3681,7 @@ mod tests {
             );
             let smeared = gesture.render_cached().unwrap().0.clone();
             let mut clean = Session::from_document(gesture.document().clone());
+            clean.set_viewport(1.75, -23.5, -11.25, 120, 90);
             let want = clean.render_cached().unwrap().0.clone();
             let mut worst = (0.0f32, 0u32, 0u32);
             for y in 0..want.height {
@@ -3768,7 +3862,15 @@ mod tests {
         // pixel, which is what the app actually shows. The dirty region
         // is computed in document pixels and carried into the view's,
         // and that carrying is exactly where a pixel goes missing.
-        for view in [None, Some((1.75f32, -23.5f32, -11.25f32, 120u32, 90u32))] {
+        for view in [
+            None,
+            // Zoomed in and panned, on a fraction of a document pixel.
+            Some((1.75f32, -23.5f32, -11.25f32, 120u32, 90u32)),
+            // And zoomed out, where a document pixel is smaller than a
+            // device one and a region that rounds the wrong way loses a
+            // whole row of the page rather than a row of itself.
+            Some((0.4f32, 6.5f32, 3.25f32, 60u32, 44u32)),
+        ] {
             let start = |doc: Document| {
                 let mut s = Session::from_document(doc);
                 if let Some((scale, x, y, w, h)) = view {
