@@ -3734,10 +3734,31 @@ export function App() {
     (id) => !layers.find((l) => l.id === id)?.locked,
   );
 
-  /** Align or distribute everything picked. Enabled only with two or more,
-   * which is the only case where either word means anything. */
+  /** What one layer's alignment is measured against: the frame it sits
+   * in, or the page. Only the word, for what the buttons say — the
+   * engine works out the box. */
+  const alignGround = (): string => {
+    const [id] = movableSelection;
+    if (id === undefined) return "page";
+    const up = new Map(layers.map((l) => [l.id as NodeId, l]));
+    for (
+      let at = up.get(id)?.parent as NodeId | undefined;
+      at !== undefined;
+      at = up.get(at)?.parent as NodeId | undefined
+    ) {
+      if (up.get(at)?.kind === "artboard") return "frame";
+    }
+    return "page";
+  };
+
+  /** Align or distribute everything picked. Two or more line up with
+   * each other; one on its own lines up with what it sits in, since it
+   * has nothing else to line up with and centring one thing on the page
+   * is the alignment most often asked for. Spacing evenly is a statement
+   * about the gaps between layers, so it still wants two. */
   const alignSelection = (mode: string) => {
-    if (!session || movableSelection.length < 2) return;
+    const least = mode.startsWith("distribute") ? 2 : 1;
+    if (!session || movableSelection.length < least) return;
     try {
       session.align_nodes(new Float64Array(movableSelection), mode);
       refresh(session);
@@ -7065,18 +7086,26 @@ export function App() {
               <Icon name="trash" size={16} />
             </button>
           </div>
-          {selectionSet.length >= 2 && (
+          {selectionSet.length >= 1 && (
             <div className="align-bar" role="group" aria-label="Align layers">
-              {ALIGN_BUTTONS.map(([mode, icon, label]) => (
-                <button
-                  key={mode}
-                  onClick={() => alignSelection(mode)}
-                  title={label}
-                  aria-label={label}
-                >
-                  <Icon name={icon} size={16} />
-                </button>
-              ))}
+              {ALIGN_BUTTONS.map(([mode, icon, label]) => {
+                // With one layer picked the buttons say what it will be
+                // lined up with, since there is no other layer on screen
+                // to make that obvious.
+                const spread = mode.startsWith("distribute");
+                const alone = selectionSet.length < 2;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => alignSelection(mode)}
+                    disabled={spread && alone}
+                    title={alone && !spread ? `${label} to the ${alignGround()}` : label}
+                    aria-label={label}
+                  >
+                    <Icon name={icon} size={16} />
+                  </button>
+                );
+              })}
             </div>
           )}
           {selectionSet.length >= 2 && (

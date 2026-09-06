@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~322),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~826 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~834 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -870,6 +870,13 @@ without reading anything else.*
   one layer the panel is showing and leave the rest where they were.
   Three layers picked used to draw one box, so nothing on the artwork
   said what a drag or a Delete was about to take.
+- **One layer aligns to what it sits in:** lining a layer up with the
+  others it is picked with is what two or more mean; one on its own has
+  no others, and "centre this on the page" — the alignment most often
+  asked for — was an error saying it needed at least two layers. One
+  picked now lines up with the frame it is inside, or the page when it
+  is in none, and the buttons say which. Spacing evenly still wants two,
+  since it is a statement about the gaps between layers.
 - **Next up (rough priority):**
   1. Wire the GPU backend into the engine behind a feature and let the
      viewport present from it; what is left to teach it is live

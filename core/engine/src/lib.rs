@@ -2222,11 +2222,49 @@ impl Session {
             .collect()
     }
 
+    /// The box a lone layer is aligned against: the frame it sits in, or
+    /// the page.
+    ///
+    /// Aligning one thing to the others it is picked with is what two or
+    /// more mean. One on its own has no others, and the answer everybody
+    /// wants — centre this on the page — was an error message.
+    fn ground_of(&self, id: NodeId) -> [f32; 4] {
+        let page = [
+            0.0,
+            0.0,
+            self.doc.meta.width as f32,
+            self.doc.meta.height as f32,
+        ];
+        let mut at = self.doc.parent_of(id);
+        while let Some(up) = at {
+            if matches!(
+                self.doc.node(up).map(|n| &n.kind),
+                Ok(NodeKind::Artboard { .. })
+            ) {
+                return match self.bounds_of(up) {
+                    Some(b) => [b[0], b[1], b[0] + b[2], b[1] + b[3]],
+                    None => page,
+                };
+            }
+            at = self.doc.parent_of(up);
+        }
+        page
+    }
+
     pub fn align_nodes(&mut self, ids: &[NodeId], mode: &str) -> Result<(), EngineError> {
         let ids = &self.without_nested(ids)[..];
-        if ids.len() < 2 {
+        // Spacing evenly is a statement about the gaps between layers,
+        // so it needs layers to have gaps between; the rest is a
+        // statement about edges, and one layer has edges.
+        let spreading = mode == "distribute-h" || mode == "distribute-v";
+        if ids.is_empty() || (spreading && ids.len() < 2) {
             return Err(EngineError::BadCommand(
-                "aligning needs at least two layers".into(),
+                if spreading {
+                    "spacing layers evenly needs at least two of them"
+                } else {
+                    "nothing to align"
+                }
+                .into(),
             ));
         }
         // [x0, y0, x1, y1] per node, in document space.
@@ -2236,19 +2274,26 @@ impl Session {
                 boxes.push((*id, [b[0], b[1], b[0] + b[2], b[1] + b[3]]));
             }
         }
-        if boxes.len() < 2 {
+        if boxes.is_empty() || (spreading && boxes.len() < 2) {
             return Err(EngineError::BadCommand("nothing to align".into()));
         }
-        let union = boxes
-            .iter()
-            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
-                [
-                    acc[0].min(b[0]),
-                    acc[1].min(b[1]),
-                    acc[2].max(b[2]),
-                    acc[3].max(b[3]),
-                ]
-            });
+        // What the alignment is measured against: the box round
+        // everything picked, or — for one layer, which has nothing to be
+        // picked out of — the frame it sits in, or the page.
+        let union = if boxes.len() > 1 {
+            boxes
+                .iter()
+                .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
+                    [
+                        acc[0].min(b[0]),
+                        acc[1].min(b[1]),
+                        acc[2].max(b[2]),
+                        acc[3].max(b[3]),
+                    ]
+                })
+        } else {
+            self.ground_of(boxes[0].0)
+        };
 
         // Wanted document-space movement per node.
         let mut deltas: Vec<(NodeId, f32, f32)> = Vec::new();
@@ -5556,9 +5601,11 @@ mod tests {
             "distributing twice is a no-op"
         );
 
-        // Two layers minimum, and unknown modes are refused rather than
+        // Spacing evenly is a statement about the gaps between layers,
+        // so it wants two of them; unknown modes are refused rather than
         // silently doing nothing.
-        assert!(session.align_nodes(&[a], "left").is_err());
+        assert!(session.align_nodes(&[a], "distribute-h").is_err());
+        assert!(session.align_nodes(&[], "left").is_err());
         assert!(session.align_nodes(&[a, b], "sideways").is_err());
     }
 
@@ -5635,9 +5682,85 @@ mod tests {
             (a[0] - b[0]).abs() < 1e-3 && (a[0] - 10.0).abs() < 1e-3,
             "the group went to the left edge once, not twice: {a:?} against {b:?}"
         );
-        // A group and nothing but what is inside it is one thing, and
-        // aligning one thing means nothing.
-        assert!(session.align_nodes(&[group, inner], "left").is_err());
+        // A group and nothing but what is inside it is one thing, so it
+        // is aligned to the page rather than to itself.
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        session.align_nodes(&[group, inner], "left").unwrap();
+        let at = session.bounds_of(inner).unwrap();
+        assert!(
+            at[0].abs() < 1e-3,
+            "one thing aligns to the page's own left edge: {at:?}"
+        );
+    }
+
+    /// One layer aligns to what it sits in: its frame, or the page.
+    ///
+    /// Aligning a layer to the others it is picked with is what two or
+    /// more mean. One on its own has no others — and "centre this on the
+    /// page", which is the commonest alignment anybody asks for, was an
+    /// error message saying it needed at least two layers.
+    #[test]
+    fn one_layer_aligns_to_the_page_it_is_on() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let loose = add_rect(&mut session, "loose", 20.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: loose,
+                transform: Transform::translation(130.0, 70.0),
+            })
+            .unwrap();
+
+        session.align_nodes(&[loose], "center-h").unwrap();
+        let b = session.bounds_of(loose).unwrap();
+        assert!(
+            (b[0] - 90.0).abs() < 1e-3,
+            "centred across a 200-wide page: {b:?}"
+        );
+        assert!((b[1] - 70.0).abs() < 1e-3, "and not moved down: {b:?}");
+        session.align_nodes(&[loose], "bottom").unwrap();
+        let b = session.bounds_of(loose).unwrap();
+        assert!(
+            (b[1] + b[3] - 100.0).abs() < 1e-3,
+            "and sat on the page's own bottom: {b:?}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Align (bottom)")
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // A layer in a frame aligns to the frame, not to the page: the
+        // frame is the page as far as anything inside it is concerned,
+        // which is what a frame is for.
+        let frame = session
+            .add_artboard("Artboard 1", 40.0, 20.0, 60.0, 50.0, None)
+            .unwrap();
+        let inside = add_rect(&mut session, "inside", 10.0, 10.0);
+        session
+            .apply(Command::MoveNode {
+                id: inside,
+                parent: frame,
+                index: 0,
+            })
+            .unwrap();
+        session.align_nodes(&[inside], "right").unwrap();
+        let b = session.bounds_of(inside).unwrap();
+        assert!(
+            (b[0] + b[2] - 100.0).abs() < 1e-3,
+            "against the frame's right edge at 40 + 60, not the page's at 200: {b:?}"
+        );
+        session.align_nodes(&[inside], "middle-v").unwrap();
+        let b = session.bounds_of(inside).unwrap();
+        assert!(
+            (b[1] + b[3] / 2.0 - 45.0).abs() < 1e-3,
+            "and the frame's own middle at 20 + 50 / 2: {b:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
     }
 
     #[test]

@@ -1358,16 +1358,26 @@ assert(
 {
   await page.locator(".panel ul li", { hasText: "Path" }).first().click();
   await page.waitForTimeout(150);
+  // One layer has the bar too — it lines up with the page — but nothing
+  // to space evenly against.
   assert(
-    (await page.locator(".align-bar").count()) === 0,
-    "one layer offers nothing to align",
+    (await page.locator(".align-bar:not(.combine-bar) button").count()) === 8,
+    "one layer offers alignment, against the page",
+  );
+  assert(
+    (await page
+      .locator(".align-bar:not(.combine-bar) button[disabled]")
+      .count()) === 2,
+    "with the two that space evenly held back",
   );
   await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
     modifiers: ["Control"],
   });
   await page.waitForTimeout(200);
   assert(
-    (await page.locator(".align-bar:not(.combine-bar) button").count()) === 8,
+    (await page
+      .locator(".align-bar:not(.combine-bar) button:not([disabled])")
+      .count()) === 8,
     "a multi-selection offers align and distribute",
   );
   // Where the two paths' left edges are before and after.
@@ -3900,8 +3910,12 @@ assert(
     (await inkCount(100, 100, 300, 250)) === rectInk,
     "aligning a selection leaves its locked layer where it was",
   );
-  for (let i = 0; i < 5; i++) {
-    await page.keyboard.press("Control+z"); // align, lock ×3, the ellipse
+  // Six: the alignment above records an entry now — one unlocked layer
+  // lines up with the page, where it used to be told that aligning
+  // needed two layers and do nothing at all — and then align, lock ×3,
+  // the ellipse.
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press("Control+z");
     await page.waitForTimeout(120);
   }
 
@@ -7318,6 +7332,82 @@ assert(
   );
   void ux;
   void uy;
+}
+
+// 9ak. One layer aligns to what it sits in. Lining a layer up with the
+// others it is picked with is what two or more mean; one on its own has
+// no others, and "centre this on the page" — the alignment most often
+// asked for — was a bar that did not appear at all.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await setColor("Fill colour", "#cc3333");
+  await pickTool("Rect");
+  await page.mouse.move(...at(280, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(360, 100), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.mouse.click(...at(320, 70));
+  await page.waitForTimeout(250);
+
+  const bar = page.locator('[aria-label="Align layers"]');
+  assert(await bar.isVisible(), "the align bar is there with one layer picked");
+  assert(
+    await page
+      .locator('button[aria-label="Space evenly across"]')
+      .isDisabled(),
+    "but spacing evenly is not offered: there are no gaps to space",
+  );
+  assert(
+    (await page.locator('button[aria-label="Align left edges"]').getAttribute("title")) ===
+      "Align left edges to the page",
+    "and the buttons say what it will be lined up with",
+  );
+
+  // Where the ink is on a row, so a move across can be read off.
+  const spanAt = async (y) => {
+    let from = -1;
+    let to = -1;
+    for (let x = 0; x < 400; x += 2) {
+      const [r, g, bl] = await canvasPixel(x, y);
+      const ink = r > 150 && g < 120 && bl < 120;
+      if (ink && from < 0) from = x;
+      if (ink) to = x;
+    }
+    return [from, to];
+  };
+  const [x0] = await spanAt(70);
+  assert(x0 > 260, `the rect starts out to the right (${x0})`);
+
+  await page.click('button[aria-label="Align horizontal centres"]');
+  await page.waitForTimeout(400);
+  const [cx0, cx1] = await spanAt(70);
+  const middle = (cx0 + cx1) / 2;
+  assert(
+    Math.abs(middle - 200) <= 4,
+    `centred on a 400-wide page (${cx0}..${cx1}, middle ${middle})`,
+  );
+
+  await page.click('button[aria-label="Align bottom edges"]');
+  await page.waitForTimeout(400);
+  const low = await (async () => {
+    for (let y = 299; y > 0; y -= 1) {
+      const [r, g, bl] = await canvasPixel(200, y);
+      if (r > 150 && g < 120 && bl < 120) return y;
+    }
+    return -1;
+  })();
+  assert(low > 293, `and sat on the page's own bottom (${low})`);
+
+  // One undo per alignment, and both are undone.
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  const [back] = await spanAt(70);
+  assert(back > 260, `two undos put it back where it was drawn (${back})`);
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting
