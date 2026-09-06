@@ -471,6 +471,26 @@ impl Session {
     /// Human-readable label for a command, read against the current document
     /// (before the command applies, so names refer to the edited node).
     fn describe(&self, cmd: &Command) -> String {
+        /// The word a command would be described by, for the ones a
+        /// batch is likely to be made of; `None` for those a count would
+        /// read oddly on.
+        fn verb_of(cmd: &Command) -> Option<&'static str> {
+            Some(match cmd {
+                Command::RemoveNode { .. } => "Delete",
+                Command::AddNode { .. } => "Add",
+                Command::MoveNode { .. } => "Reorder",
+                Command::SetTransform { .. } => "Move",
+                Command::SetOpacity { .. } => "Opacity of",
+                Command::SetBlendMode { .. } => "Blend of",
+                Command::SetKind { .. } => "Edit",
+                Command::SetVisible { visible: true, .. } => "Show",
+                Command::SetVisible { visible: false, .. } => "Hide",
+                Command::SetLocked { locked: true, .. } => "Lock",
+                Command::SetLocked { locked: false, .. } => "Unlock",
+                _ => return None,
+            })
+        }
+
         let name = |id: &NodeId| {
             self.doc
                 .node(*id)
@@ -548,7 +568,21 @@ impl Session {
                 3 => "Turn the page left".into(),
                 _ => "Leave the page as it is".into(),
             },
-            Command::Batch(_) => "Multiple edits".into(),
+            // A batch of one kind of edit over several layers is that
+            // edit, said with a number — "Delete 3 layers" rather than
+            // "Multiple edits", which tells the history panel's reader
+            // nothing at all. A batch of different kinds still has no
+            // better name than that.
+            Command::Batch(cmds) => match cmds.as_slice() {
+                [] => "Multiple edits".into(),
+                [only] => self.describe(only),
+                many => match verb_of(&many[0]) {
+                    Some(verb) if many.iter().all(|c| verb_of(c) == Some(verb)) => {
+                        format!("{verb} {} layers", many.len())
+                    }
+                    _ => "Multiple edits".into(),
+                },
+            },
         }
     }
 
@@ -4925,6 +4959,51 @@ mod tests {
         assert!(b.document().node(pasted).is_err());
         assert!(crate::clipboard_has_content());
         assert!(!b.paste(None).unwrap().is_empty(), "paste is repeatable");
+    }
+
+    /// A batch of one kind of edit over several layers is named after
+    /// that edit and how many it touched, since "Multiple edits" is
+    /// what a history panel says when it has nothing to say.
+    #[test]
+    fn a_batch_of_one_kind_of_edit_says_which_and_how_many() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let c = add_rect(&mut session, "c", 8.0, 8.0);
+        session
+            .apply(Command::Batch(vec![
+                Command::RemoveNode { id: a },
+                Command::RemoveNode { id: b },
+            ]))
+            .unwrap();
+        assert_eq!(
+            session.history_labels().0.last().unwrap(),
+            "Delete 2 layers"
+        );
+
+        // One of them is that one, named as it always was.
+        session
+            .apply(Command::Batch(vec![Command::SetVisible {
+                id: c,
+                visible: false,
+            }]))
+            .unwrap();
+        assert_eq!(session.history_labels().0.last().unwrap(), "Hide c");
+
+        // A mixture has no better name than the old one.
+        session
+            .apply(Command::Batch(vec![
+                Command::SetVisible {
+                    id: c,
+                    visible: true,
+                },
+                Command::SetOpacity {
+                    id: c,
+                    opacity: 0.5,
+                },
+            ]))
+            .unwrap();
+        assert_eq!(session.history_labels().0.last().unwrap(), "Multiple edits");
     }
 
     /// What is picked is what is copied: several layers go on the

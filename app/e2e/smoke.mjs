@@ -7011,20 +7011,22 @@ assert(
 
   // Copy and paste carry both, and what lands is what is picked.
   await page.mouse.click(...at(60, 90));
+  await page.waitForTimeout(200);
+  // With a picture already on the system clipboard, which a paste used
+  // to prefer however old it was: copy a layer here and Ctrl+V would
+  // put that picture down again instead. Copying here takes the system
+  // clipboard with it now, so the layers win.
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.click('.menu-label:text-is("Edit")');
+  await page.waitForTimeout(150);
+  await page.locator(".menu-item", { hasText: "Copy as image" }).click();
+  await page.waitForTimeout(400);
+  await page.mouse.click(...at(60, 90));
   await shiftClick(190, 90);
   await page.keyboard.press("Control+c");
-  await page.waitForTimeout(200);
-  // Through the menu rather than Ctrl+V: the shortcut goes by way of the
-  // system clipboard, which by this point in the suite is holding the
-  // PNG an earlier block put there, and the in-app clipboard is what is
-  // being tested here.
-  await page.click('.menu-label:text-is("Edit")');
-  await page.waitForTimeout(120);
-  // By its shortcut, which is the one thing in that menu that says
-  // "Ctrl+V": the word Paste is also in "Paste style", and a row's text
-  // carries its hint.
-  await page.locator(".menu-item", { hasText: "Ctrl+V" }).click();
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Control+v");
+  await page.waitForTimeout(500);
   assert((await rows()) === 5, `paste puts both down (${await rows()})`);
   assert((await picked()) === 2, "and both are picked");
   await page.keyboard.press("Control+z");
@@ -7054,6 +7056,40 @@ assert(
   assert(
     (await names()).join() === before.join(),
     `and one undo puts the order back (${await names()})`,
+  );
+
+  // Raise and lower carry the whole selection too, a step at a time,
+  // and a run of layers stays a run: the pair nearest the top holds
+  // against the top rather than swapping places with each other. Its
+  // own document, so what the steps before it left cannot come into it.
+  await newDocument(400, 300, "rgb");
+  await rect("#cc3333", 20, 40, 100, 140);
+  await rect("#33aa55", 150, 40, 230, 140);
+  await rect("#3366cc", 280, 40, 360, 140);
+  await pickTool("Move");
+  await page.mouse.click(...at(60, 90));
+  await shiftClick(190, 90);
+  assert((await picked()) === 2, "the lower two picked");
+  // The panel lists topmost first, so the two lower ones are its last
+  // two rows and the third is on top of them.
+  const order = await names();
+  await page.click('button[aria-label="Raise layer"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await names()).join() === [order[1], order[2], order[0]].join(),
+    `both rose a step, over the one above them (${order} -> ${await names()})`,
+  );
+  // Against the top there is nowhere to go, and the button says so
+  // rather than swapping the pair round between themselves.
+  assert(
+    await page.locator('button[aria-label="Raise layer"]').isDisabled(),
+    "with the pair at the top the button is done",
+  );
+  await page.click('button[aria-label="Lower layer"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await names()).join() === order.join(),
+    `and lower brings them back a step (${await names()})`,
   );
 
   // A layer inside a frame, and the frame, both picked: removing the

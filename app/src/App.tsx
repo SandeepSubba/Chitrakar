@@ -3556,7 +3556,22 @@ export function App() {
       session.copy_nodes(new Float64Array(selectionSet));
     } catch (err) {
       alert(`Copy: ${err}`);
+      return;
     }
+    // And take the system clipboard with it. A picture copied in another
+    // application sits there until that application lets go of it, and a
+    // paste prefers a picture to the layers copied here — so without
+    // this, one old picture would win every paste for the rest of the
+    // session, however many layers had been copied since. What goes on
+    // is the names: pasted anywhere else they say what was taken, which
+    // is more use than nothing, and pasted back here they are not a
+    // picture, so the layers win.
+    const names = selectionSet.map(
+      (id) => layers.find((l) => l.id === id)?.name ?? "layer",
+    );
+    navigator.clipboard?.writeText(names.join(", ")).catch(() => {
+      /* a browser that will not have it goes on preferring the picture */
+    });
   };
 
   const pasteClipboard = () => {
@@ -4757,15 +4772,39 @@ export function App() {
   };
 
   /** Reorder within the parent group: +1 raises toward the top. */
+  /** One step up or down, for everything picked. A run of layers moves
+   * as a run: the one nearest the end goes first, and any that are
+   * already against it hold the ones behind them, so a pair at the top
+   * stays a pair at the top instead of swapping places with each other. */
+  const reorderCommands = (direction: 1 | -1): Command[] => {
+    const ids = selectionSet;
+    if (ids.length === 0) return [];
+    const cmds: Command[] = [];
+    const rows = layers.filter((l) => ids.includes(l.id as NodeId));
+    for (const parent of new Set(rows.map((l) => l.parent))) {
+      const run_ = rows
+        .filter((l) => l.parent === parent)
+        .sort((a, b) => (direction > 0 ? b.index - a.index : a.index - b.index));
+      // How far the next one may go: the end of the list to begin with,
+      // then wherever the one ahead of it came to rest.
+      let limit = direction > 0 ? run_[0].sibling_count : -1;
+      for (const row of run_) {
+        const want = row.index + direction;
+        const to = direction > 0 ? Math.min(want, limit - 1) : Math.max(want, limit + 1);
+        if (to === row.index || to < 0 || to >= row.sibling_count) {
+          limit = row.index;
+          continue;
+        }
+        cmds.push({ MoveNode: { id: row.id, parent: row.parent, index: to } });
+        limit = to;
+      }
+    }
+    return cmds;
+  };
+
   const reorderSelected = (direction: 1 | -1) => {
-    if (!selectedLayer) return;
-    run({
-      MoveNode: {
-        id: selectedLayer.id,
-        parent: selectedLayer.parent,
-        index: selectedLayer.index + direction,
-      },
-    });
+    const cmds = reorderCommands(direction);
+    if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
   /** The group or frame the picked layer sits in, when it sits in one.
@@ -6818,10 +6857,10 @@ export function App() {
             </select>
             <button
               onClick={() => reorderSelected(1)}
-              disabled={
-                !selectedLayer ||
-                selectedLayer.index >= selectedLayer.sibling_count - 1
-              }
+              // Enabled when something picked would actually move —
+              // asked of the same working-out that does the moving, so
+              // the button cannot say yes and then do nothing.
+              disabled={reorderCommands(1).length === 0}
               title="Raise layer"
               aria-label="Raise layer"
             >
@@ -6829,7 +6868,7 @@ export function App() {
             </button>
             <button
               onClick={() => reorderSelected(-1)}
-              disabled={!selectedLayer || selectedLayer.index === 0}
+              disabled={reorderCommands(-1).length === 0}
               title="Lower layer"
               aria-label="Lower layer"
             >
