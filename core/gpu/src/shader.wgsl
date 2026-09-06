@@ -793,3 +793,49 @@ fn speck(cell: vec2i, seed: u32) -> f32 {
     h = h ^ (h >> 16u);
     return f32(h) / 4294967295.0;
 }
+
+// One box-blur pass along an axis: the average of the 2r+1 texels
+// centred on this one, taken from the texture bound as an image.
+//
+// Three of these each way approximate a Gaussian, which is the CPU
+// renderer's blur and so is this one's — same radius, same passes, same
+// order. The taps land on texel centres, so linear sampling reads one
+// texel exactly; the sampler clamps at the edge, which is what the CPU's
+// running window does when it runs off the end of a lane.
+@fragment
+fn fs_box(in: ImageOut) -> @location(0) vec4f {
+    let radius = i32(in.params.x);
+    var step = vec2f(1.0 / page.size.x, 0.0);
+    if in.params.y != 0.0 {
+        step = vec2f(0.0, 1.0 / page.size.y);
+    }
+    var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+    for (var i = -radius; i <= radius; i = i + 1) {
+        sum = sum + textureSampleLevel(image, image_sampler, in.uv + step * f32(i), 0.0);
+    }
+    return sum / f32(2 * radius + 1);
+}
+
+// A blur layer coming back down: what was under it, and the blurred copy
+// of it that the box passes left in a texture, weighed by the layer's
+// opacity and its mask.
+//
+// `params.x` is zero for a plain blur, and for a sharpen it is how much
+// of the difference between the two to add back — an unsharp mask, which
+// is the same blur read as what the picture has too little of.
+@fragment
+fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
+    let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    let soft = textureSampleLevel(image, image_sampler, in.uv, 0.0);
+    let weight = in.alpha * mask_cover(in.page, in.mask);
+    if in.params.x == 0.0 {
+        return mix(was, soft, weight);
+    }
+    // Premultiplied, so the channels are clamped to the alpha they are a
+    // share of; the layer's weight goes into the amount rather than into
+    // a mix, which is where the two readings differ once a channel
+    // clips.
+    let amount = in.params.x * weight;
+    let out = clamp(was.rgb + (was.rgb - soft.rgb) * amount, vec3f(0.0), vec3f(max(was.a, 0.0)));
+    return vec4f(out, was.a);
+}

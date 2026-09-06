@@ -166,6 +166,15 @@ enum Draw {
         /// table rather than by a handful of numbers.
         table: Option<usize>,
     },
+    /// A blur layer: what is under it, run through six box passes on a
+    /// pair of scratch textures, coming back down weighed by the
+    /// layer's opacity and its mask. `steps` is two quads — one along
+    /// each axis, each carrying the radius — that the six passes
+    /// alternate between; `quad` is the one that lays the result down.
+    Blur {
+        steps: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -194,6 +203,11 @@ pub struct GpuRenderer {
     blend: wgpu::RenderPipeline,
     /// An adjustment layer, rewriting what is composited below it.
     adjust: wgpu::RenderPipeline,
+    /// One box-blur pass, off one texture onto another: no multisampling
+    /// and no stencil, since it draws one quad over the whole page.
+    box_blur: wgpu::RenderPipeline,
+    /// The blurred copy coming back down onto what it was taken from.
+    blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
     /// instead of a flat colour.
     shape_gradient: wgpu::RenderPipeline,
@@ -509,6 +523,63 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // Six of these make a blur: three box passes each way, ping-
+        // ponging between two page-sized textures. Nothing else is on
+        // them, so there is no multisampling to do and no stencil to
+        // read.
+        let box_blur = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("box blur"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_box"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        // And the blurred page coming back down, weighed by the layer's
+        // opacity and its mask, over what it was taken from.
+        let blur_down = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blur down"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_blur_down"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shapes"),
             layout: Some(&pipeline_layout),
@@ -646,6 +717,8 @@ impl GpuRenderer {
             image,
             blend,
             adjust,
+            box_blur,
+            blur_down,
             shape_gradient,
             cover_gradient,
             union,
@@ -901,6 +974,45 @@ impl GpuRenderer {
             });
             (backdrop, read)
         });
+        // A blur is six box passes, three along each axis, ping-ponging
+        // between two page-sized textures: the copy taken above goes in,
+        // and the blurred page comes out of the second one. Neither is
+        // multisampled — one quad covers the whole of each, so there are
+        // no edges on them to sample.
+        let blurring = passes
+            .iter()
+            .any(|p| matches!(p.lay, Some(Opening::Blur { .. })));
+        let scratch: Vec<_> = if !blurring {
+            Vec::new()
+        } else {
+            (0..2)
+                .map(|_| {
+                    let texture = make(
+                        "blur",
+                        1,
+                        wgpu::TextureFormat::Rgba16Float,
+                        wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                    );
+                    let view = texture.create_view(&Default::default());
+                    let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("blur"),
+                        layout: &self.texture_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.sampler),
+                            },
+                        ],
+                    });
+                    (view, read)
+                })
+                .collect::<Vec<_>>()
+        };
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for (n, step) in passes.iter().enumerate() {
@@ -930,6 +1042,50 @@ impl GpuRenderer {
                         },
                         size,
                     );
+                }
+            }
+            // The box passes, before the pass that lays their result
+            // down: the copy of what is under the layer goes in, and six
+            // averagings later — horizontal, vertical, three times over,
+            // which is the CPU renderer's Gaussian — the second scratch
+            // texture holds the blurred page.
+            if let (Some(Opening::Blur { steps, .. }), Some((_, backdrop)), Some(quads)) =
+                (&step.lay, &under, &quads)
+            {
+                let along =
+                    |axis: usize| steps.start + 6 * axis as u32..steps.start + 6 * axis as u32 + 6;
+                for round in 0..6 {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("box blur"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &scratch[round % 2].0,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.box_blur);
+                    pass.set_bind_group(0, &bind, &[]);
+                    // The first round reads the copy; every one after it
+                    // reads what the one before wrote.
+                    pass.set_bind_group(
+                        1,
+                        if round == 0 {
+                            backdrop
+                        } else {
+                            &scratch[(round + 1) % 2].1
+                        },
+                        &[],
+                    );
+                    pass.set_bind_group(2, &self.open, &[]);
+                    pass.set_bind_group(3, &self.open, &[]);
+                    pass.set_vertex_buffer(0, quads.slice(..));
+                    pass.draw(along(round % 2), 0..1);
                 }
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -993,6 +1149,12 @@ impl GpuRenderer {
                                 pass.set_pipeline(&self.blend);
                             }
                             pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
+                            (quad, mask)
+                        }
+                        Opening::Blur { quad, mask, .. } => {
+                            pass.set_pipeline(&self.blur_down);
+                            // Six rounds end on the second of the pair.
+                            pass.set_bind_group(1, &scratch[1].1, &[]);
                             (quad, mask)
                         }
                         Opening::Adjust { quad, mask, table } => {
@@ -1060,9 +1222,12 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &textures[*texture], &[]);
                             pass.draw(quad.clone(), 0..1);
                         }
-                        // The three that cut a pass are drawn as its
+                        // The four that cut a pass are drawn as its
                         // opening, above; nothing of them is left here.
-                        Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } => {}
+                        Draw::Open
+                        | Draw::Close { .. }
+                        | Draw::Adjust { .. }
+                        | Draw::Blur { .. } => {}
                     }
                 }
             }
@@ -1366,9 +1531,33 @@ fn collect(
                 // composited below it, from the same copy taken aside,
                 // in the same pass. The ones that read a neighbourhood
                 // are declined by `filter_of` and stay the CPU's.
-                let params = filter_of(filter)?;
-                let quad = out.push(page_quad(doc, alpha, params.0, params.1, [0.0; 3]));
-                out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
+                // A filter's radius is written in the space it lives
+                // in, so a group that scales stretches it — which is the
+                // reading the CPU renderer takes.
+                let scale = parent.a.hypot(parent.b).max(parent.c.hypot(parent.d));
+                match filter_of(filter, scale)? {
+                    Filtering::Pointwise(params, grad) => {
+                        let quad = out.push(page_quad(doc, alpha, params, grad, [0.0; 3]));
+                        out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
+                    }
+                    Filtering::Blur { radius, sharpen } => {
+                        let axis =
+                            |a: f32| page_quad(doc, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
+                        let mut steps = out.push(axis(0.0));
+                        steps.end = out.push(axis(1.0)).end;
+                        let quad = out.push(page_quad(
+                            doc,
+                            alpha,
+                            [sharpen, 0.0, 0.0, 0.0],
+                            [0.0; 4],
+                            [0.0; 3],
+                        ));
+                        out.draws.push(Item::of(Draw::Blur { steps, quad }));
+                    }
+                    // Nothing asked for is nothing drawn, and nothing
+                    // drawn wants no mask over it either.
+                    Filtering::Nothing => continue,
+                }
             }
             _ => return None,
         }
@@ -2045,27 +2234,76 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
 /// pixel: they want the surface under them sampled many times over, at
 /// offsets, which is passes of its own rather than the single copy-aside
 /// everything here works from. Until that exists they are the CPU's.
-fn filter_of(filter: &chitrakar_doc::Filter) -> Option<([f32; 4], [f32; 4])> {
+fn filter_of(filter: &chitrakar_doc::Filter, scale: f32) -> Option<Filtering> {
     use chitrakar_doc::Filter as F;
+    let point = |params: [f32; 4], grad: [f32; 4]| Filtering::Pointwise(params, grad);
+    // The W3C's box size for a Gaussian after three passes each way,
+    // read off the CPU renderer so the two blur by the same amount.
+    let boxes = |sigma: f32| {
+        let sigma = sigma * scale;
+        (sigma > 0.01).then(|| {
+            let d =
+                ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
+            (d.max(1) / 2).max(1) as f32
+        })
+    };
     Some(match filter {
         F::Vignette {
             amount,
             radius,
             softness,
-        } => ([14.0, *amount, *radius, *softness], [0.0; 4]),
+        } => point([14.0, *amount, *radius, *softness], [0.0; 4]),
         F::Noise {
             amount,
             grain,
             mono,
             seed,
-        } => (
+        } => point(
             [15.0, *amount, *grain, if *mono { 1.0 } else { 0.0 }],
             // A seed is a whole 32 bits and a vertex carries floats, so
             // it travels as two halves that a float holds exactly.
             [(seed & 0xffff) as f32, (seed >> 16) as f32, 0.0, 0.0],
         ),
-        F::GaussianBlur { .. } | F::Sharpen { .. } | F::Pixelate { .. } => return None,
+        F::GaussianBlur { sigma } => match boxes(*sigma) {
+            Some(radius) => Filtering::Blur {
+                radius,
+                sharpen: 0.0,
+            },
+            // A blur too small to move a pixel does nothing at all, and
+            // the CPU renderer returns without touching the page.
+            None => Filtering::Nothing,
+        },
+        F::Sharpen { sigma, amount } => match boxes(*sigma) {
+            // A sharpen with no amount is the same nothing, and one is
+            // easy enough to author by dragging a slider back to zero.
+            Some(radius) if *amount != 0.0 => Filtering::Blur {
+                radius,
+                sharpen: *amount,
+            },
+            _ => Filtering::Nothing,
+        },
+        // A grid of squares, each the average of what it covered. It
+        // reads a neighbourhood the way a blur does but not along an
+        // axis, so the box passes are no use to it; it is still the
+        // CPU's.
+        F::Pixelate { .. } => return None,
     })
+}
+
+/// What a filter layer turns into here.
+enum Filtering {
+    /// A function of one pixel and of where it is: the quad says which
+    /// filter and what it was asked for, and the adjustment machinery
+    /// does the rest.
+    Pointwise([f32; 4], [f32; 4]),
+    /// Three box passes each way over what is under it, and how much of
+    /// the difference to add back — zero for a plain blur, and an
+    /// unsharp amount for a sharpen.
+    Blur { radius: f32, sharpen: f32 },
+    /// A filter that was asked for nothing: a blur of no radius, a
+    /// sharpen of no amount. The CPU renderer draws nothing for these,
+    /// and neither does this.
+    Nothing,
 }
 
 /// What an adjustment is stated by: the numbers the vertex carries, and
@@ -2137,6 +2375,15 @@ enum Opening {
         mask: Option<usize>,
         table: Option<usize>,
     },
+    /// A blur layer. The six box passes have already run on the scratch
+    /// pair by the time this opens the pass; what is left is the one
+    /// quad that reads the blurred copy and the untouched one and mixes
+    /// them by the layer's weight.
+    Blur {
+        steps: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
 }
 
 impl Opening {
@@ -2144,7 +2391,7 @@ impl Opening {
     fn reads_under(&self) -> bool {
         match self {
             Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
-            Opening::Adjust { .. } => true,
+            Opening::Adjust { .. } | Opening::Blur { .. } => true,
         }
     }
 }
@@ -2162,10 +2409,10 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
     let mut stack = vec![0usize];
     let (mut start, mut clear, mut lay) = (0usize, true, None);
     for (i, item) in draws.iter().enumerate() {
-        // Only the three that change what the pass is drawing on, or
+        // Only the four that change what the pass is drawing on, or
         // want to read it, cut it.
         match &item.draw {
-            Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } => {}
+            Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } | Draw::Blur { .. } => {}
             _ => continue,
         }
         passes.push(Pass {
@@ -2197,7 +2444,15 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     table: *table,
                 });
             }
-            _ => unreachable!("only the three above cut a pass"),
+            Draw::Blur { steps, quad } => {
+                clear = false;
+                lay = Some(Opening::Blur {
+                    steps: steps.clone(),
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
+            }
+            _ => unreachable!("only the four above cut a pass"),
         }
         start = i + 1;
     }
@@ -4289,20 +4544,10 @@ mod tests {
             }
         }
 
-        // The three that read a neighbourhood are still handed back.
-        for filter in [
-            F::GaussianBlur { sigma: 3.0 },
-            F::Sharpen {
-                sigma: 2.0,
-                amount: 0.5,
-            },
-            F::Pixelate { size: 6.0 },
-        ] {
-            assert!(
-                !GpuRenderer::can_render(&with(filter.clone())),
-                "{filter:?} reads a neighbourhood and belongs to the CPU"
-            );
-        }
+        // A grid of squares reads a neighbourhood that is not along an
+        // axis, so the box passes are no use to it and it is still the
+        // CPU's.
+        assert!(!GpuRenderer::can_render(&with(F::Pixelate { size: 6.0 })));
 
         // And a filter carrying a blend mode goes back too: the CPU
         // renderer writes a filter straight into what it read and never
@@ -4365,6 +4610,180 @@ mod tests {
         assert!(
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
+        );
+    }
+
+    /// Blur and sharpen: six box passes on a pair of scratch textures,
+    /// three along each axis, which is the CPU renderer's Gaussian
+    /// written out as passes.
+    #[test]
+    fn a_blur_is_the_same_six_averagings_the_cpu_takes() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // Something with edges in it, so a blur has work to do: a light
+        // square on a dark page.
+        let page = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.15,
+                        g: 0.2,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "square",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.85,
+                        b: 0.4,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(20.0, 10.0),
+            );
+            doc
+        };
+        let with = |filter: F| {
+            let mut doc = page();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            doc
+        };
+
+        for filter in [
+            F::GaussianBlur { sigma: 1.0 },
+            F::GaussianBlur { sigma: 4.0 },
+            F::Sharpen {
+                sigma: 2.0,
+                amount: 0.8,
+            },
+            F::Sharpen {
+                sigma: 1.0,
+                amount: -0.6,
+            },
+        ] {
+            let doc = with(filter.clone());
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{filter:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // A blur softens the square's edge and a sharpen hardens it: at
+        // the edge the two go opposite ways from the page that has
+        // neither, which is the reading that says the passes ran in the
+        // right order rather than merely ran.
+        let bare = chitrakar_render::render(&page()).unwrap();
+        let soft = gpu.render(&with(F::GaussianBlur { sigma: 4.0 })).unwrap();
+        let hard = gpu
+            .render(&with(F::Sharpen {
+                sigma: 4.0,
+                amount: 1.0,
+            }))
+            .unwrap();
+        // Just inside the square's left edge, which the blur pulls down
+        // towards the dark page and the sharpen pushes further up.
+        let (b, s, h) = (bare.get(21, 20).r, soft.get(21, 20).r, hard.get(21, 20).r);
+        assert!(s < b - 0.02, "a blur softens the edge: {s} against {b}");
+        assert!(h > b + 0.02, "a sharpen hardens it: {h} against {b}");
+        // And flat page well out of the blur's reach — three box passes
+        // of radius four reach twelve pixels, and this is eighteen from
+        // the square — is left where it was by both.
+        for (name, got) in [
+            ("blurred", soft.get(2, 20).r),
+            ("sharpened", hard.get(2, 20).r),
+        ] {
+            assert!(
+                (got - bare.get(2, 20).r).abs() < 0.01,
+                "flat page out of reach is untouched when {name}: {got}"
+            );
+        }
+
+        // A blur too small to move a pixel, and a sharpen asked for
+        // nothing, are both nothing — the CPU renderer returns without
+        // touching the page, and so does this.
+        for filter in [
+            F::GaussianBlur { sigma: 0.0 },
+            F::Sharpen {
+                sigma: 3.0,
+                amount: 0.0,
+            },
+        ] {
+            let doc = with(filter.clone());
+            assert!(GpuRenderer::can_render(&doc));
+            let (mean, _) = difference(&gpu.render(&doc).unwrap(), &bare);
+            assert!(mean < 0.001, "{filter:?} draws nothing: {mean}");
+        }
+
+        // Opacity and a mask weigh a blur the way they weigh everything
+        // else here.
+        let mut doc = with(F::GaussianBlur { sigma: 4.0 });
+        let id = doc.children_of(doc.root()).unwrap()[2];
+        doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: false,
+            })),
+        })
+        .unwrap();
+        let weighed = gpu.render(&doc).unwrap();
+        let (mean, worst) = difference(&weighed, &chitrakar_render::render(&doc).unwrap());
+        assert!(
+            mean < 0.004,
+            "weighed by opacity and mask: mean {mean:.5} (worst {worst:.3})"
+        );
+        // Half the softening on the left edge, none on the right one.
+        assert!(
+            (weighed.get(21, 20).r - (b + s) / 2.0).abs() < 0.01,
+            "half of it inside the mask: {}",
+            weighed.get(21, 20).r
+        );
+        assert!(
+            (weighed.get(39, 20).r - bare.get(39, 20).r).abs() < 0.005,
+            "and none of it outside: {}",
+            weighed.get(39, 20).r
         );
     }
 
