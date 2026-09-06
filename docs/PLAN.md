@@ -794,10 +794,18 @@ without reading anything else.*
   a different command with a region of its own. The engine already
   keeps a couple of pixels of margin, so a region one or two pixels too
   small is absorbed; three is caught, and a region that forgot a whole
-  node is far more than three. Both this and the inverse audit read one
-  shared list — `chitrakar_doc::fixture` (feature `fixture`, a dev
-  dependency) — so a new `Command` is added to it once and both tests
-  start asking about it.
+  node is far more than three. It asks the other half too: everything
+  that actually moved has to lie inside the region the session *named*,
+  since the app uploads that rectangle to the canvas and nothing else —
+  a pixel that changed outside it stays on screen as it was, however
+  correctly the engine drew it into its own buffer. Both this and the
+  inverse audit read one shared list — `chitrakar_doc::fixture` (feature
+  `fixture`, a dev dependency) — so a new `Command` is added to it once
+  and every audit starts asking about it. Its document is a group of two
+  overlapping filled shapes, a paint stroke, a placed checkerboard
+  turned and scaled, a block of text, a frame and a guide: the kinds
+  whose pixels come from somewhere other than a shape's own geometry are
+  the ones a question about pixels is most likely to be wrong about.
 - **And every gesture, the same way:** every drag goes through
   preview/commit/cancel — the document updates on each pointer move so
   the user sees it, and history records one entry when the mouse comes

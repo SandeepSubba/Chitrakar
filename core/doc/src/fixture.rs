@@ -10,7 +10,7 @@
 
 use crate::{
     BlendMode, Command, Document, Effect, Guide, Mask, MaskKind, Node, NodeId, NodeKind,
-    PaintStroke, Pin, Pinning, Swatch, Transform, VectorShape,
+    PaintStroke, Pin, Pinning, RasterRef, Swatch, TextSpec, Transform, VectorShape,
 };
 use chitrakar_color::ColorMode;
 
@@ -22,6 +22,9 @@ pub struct Fixture {
     pub under: NodeId,
     pub over: NodeId,
     pub painted: NodeId,
+    pub picture: NodeId,
+    pub words: NodeId,
+    pub frame: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -120,6 +123,91 @@ pub fn everything() -> Fixture {
         on_mask: false,
     })
     .unwrap();
+    // A picture, a block of text and a frame: the three kinds whose
+    // pixels come from somewhere other than a shape's own geometry, and
+    // so the three a question about pixels is most likely to be wrong
+    // about. The picture's bytes are a checkerboard, which has an edge
+    // in it wherever a scale or a mirror would smear one.
+    let pixels: Vec<u8> = (0..8 * 8)
+        .flat_map(|i: u32| {
+            let on = (i / 8 + i % 8).is_multiple_of(2);
+            let v = if on { 235 } else { 40 };
+            [v, (255 - v) / 2, 255 - v, 255]
+        })
+        .collect();
+    let resource_id = doc.add_resource(8, 8, pixels);
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 2,
+        node: Box::new(Node::raster(
+            "picture",
+            RasterRef {
+                resource_id,
+                width: 8,
+                height: 8,
+            },
+        )),
+    })
+    .unwrap();
+    let picture = doc.children_of(root).unwrap()[2];
+    doc.apply(Command::SetTransform {
+        id: picture,
+        transform: Transform {
+            a: 2.5,
+            b: 0.0,
+            c: 0.0,
+            d: 2.5,
+            e: 50.0,
+            f: 6.0,
+        },
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 3,
+        node: Box::new(Node::text(
+            "words",
+            TextSpec::new(
+                "Ag",
+                18.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.05,
+                    g: 0.05,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+        )),
+    })
+    .unwrap();
+    let words = doc.children_of(root).unwrap()[3];
+    doc.apply(Command::SetTransform {
+        id: words,
+        transform: Transform::translation(8.0, 54.0),
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 4,
+        node: Box::new(Node::artboard(
+            "frame",
+            20.0,
+            14.0,
+            Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.95,
+                g: 0.95,
+                b: 0.9,
+                a: 1.0,
+            }),
+        )),
+    })
+    .unwrap();
+    let frame = doc.children_of(root).unwrap()[4];
+    doc.apply(Command::SetTransform {
+        id: frame,
+        transform: Transform::translation(56.0, 40.0),
+    })
+    .unwrap();
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })
@@ -132,6 +220,9 @@ pub fn everything() -> Fixture {
         under,
         over,
         painted,
+        picture,
+        words,
+        frame,
         stroke,
     }
 }
@@ -146,10 +237,14 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         under,
         over,
         painted,
+        picture,
+        words,
+        frame,
         stroke,
         ..
     } = f;
     let (root, group, under, over, painted) = (*root, *group, *under, *over, *painted);
+    let (picture, words, frame) = (*picture, *words, *frame);
     let mask = Box::new(Mask {
         kind: MaskKind::Vector {
             shape: VectorShape::Ellipse { rx: 5.0, ry: 4.0 },
@@ -291,6 +386,58 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             id: under,
             parent: root,
             index: 0,
+        },
+        // A second turn at the variants most likely to be wrong about
+        // pixels: a picture turned rather than moved, a block of text
+        // rewritten the way the inline editor rewrites it on every
+        // keystroke, a shadow whose reach is off to one side, and a
+        // frame held to a mask.
+        Command::SetTransform {
+            id: picture,
+            transform: Transform {
+                a: 1.8,
+                b: 1.1,
+                c: -1.1,
+                d: 1.8,
+                e: 46.0,
+                f: 10.0,
+            },
+        },
+        Command::SetKind {
+            id: words,
+            kind: Box::new(NodeKind::Text(TextSpec::new(
+                "Agility",
+                18.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.05,
+                    g: 0.05,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ))),
+        },
+        Command::SetEffects {
+            id: picture,
+            effects: vec![Effect::DropShadow {
+                dx: 6.0,
+                dy: -4.0,
+                blur: 3.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.7,
+            }],
+        },
+        Command::SetMask {
+            id: frame,
+            mask: Some(mask.clone()),
+        },
+        Command::SetOpacity {
+            id: frame,
+            opacity: 0.35,
         },
         Command::Batch(vec![
             Command::SetOpacity {

@@ -3572,11 +3572,37 @@ mod tests {
     #[test]
     fn every_command_repaints_every_pixel_it_changes() {
         let f = chitrakar_doc::fixture::everything();
-        /// What the session has on screen, against the same document
-        /// drawn from nothing: any pixel the patch missed still holds
-        /// the frame before it.
-        fn same(kept: &mut Session, label: &str, step: &str) {
-            let patched = kept.render_cached().unwrap().0.clone();
+        /// How far apart two pages are, and where.
+        fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..b.height.min(a.height) {
+                for x in 0..b.width.min(a.width) {
+                    let (p, q) = (a.get(x, y), b.get(x, y));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            worst
+        }
+        /// Both halves of the promise, for one step of a command.
+        ///
+        /// `was` is the page before the step. The session repaints what
+        /// it computed to be stale and says which region that is; what
+        /// it drew has to match the same document drawn from nothing,
+        /// *and* everything that actually moved has to be inside the
+        /// region it named — the app uploads that rectangle to the
+        /// canvas and nothing else, so a pixel that changed outside it
+        /// stays on screen as it was however correctly the engine drew
+        /// it into its own buffer.
+        fn same(kept: &mut Session, was: &Surface, label: &str, step: &str) -> Surface {
+            let (patched, dirty) = kept.render_cached().unwrap();
+            let (patched, dirty) = (patched.clone(), dirty);
             let mut fresh = Session::from_document(kept.document().clone());
             let whole = fresh.render_cached().unwrap().0.clone();
             assert_eq!(
@@ -3584,25 +3610,12 @@ mod tests {
                 (whole.width, whole.height),
                 "{label} ({step}) left the two the same size"
             );
-            let mut worst = (0.0f32, 0u32, 0u32);
-            for y in 0..whole.height {
-                for x in 0..whole.width {
-                    let (a, b) = (patched.get(x, y), whole.get(x, y));
-                    let d = (a.r - b.r)
-                        .abs()
-                        .max((a.g - b.g).abs())
-                        .max((a.b - b.b).abs())
-                        .max((a.a - b.a).abs());
-                    if d > worst.0 {
-                        worst = (d, x, y);
-                    }
-                }
-            }
             // Not a tolerance for a pixel the region missed — a missed
             // pixel is a whole colour out — but for the last bit of a
             // float, since a region drawn on its own and the same region
             // drawn as part of the page need not add up in the same
             // order.
+            let worst = apart(&patched, &whole);
             assert!(
                 worst.0 < 0.002,
                 "{label} ({step}) left {},{} unrepainted: {:?} against {:?}",
@@ -3611,6 +3624,30 @@ mod tests {
                 patched.get(worst.1, worst.2),
                 whole.get(worst.1, worst.2)
             );
+            // A page that changed size is a new page, and the whole of
+            // it is uploaded.
+            if (was.width, was.height) == (patched.width, patched.height) {
+                for y in 0..patched.height {
+                    for x in 0..patched.width {
+                        let (p, q) = (patched.get(x, y), was.get(x, y));
+                        let moved = (p.r - q.r)
+                            .abs()
+                            .max((p.g - q.g).abs())
+                            .max((p.b - q.b).abs())
+                            .max((p.a - q.a).abs());
+                        if moved <= 0.002 {
+                            continue;
+                        }
+                        let inside =
+                            dirty.is_some_and(|d| x >= d.x0 && x < d.x1 && y >= d.y0 && y < d.y1);
+                        assert!(
+                            inside,
+                            "{label} ({step}) changed {x},{y} but said only {dirty:?} was stale"
+                        );
+                    }
+                }
+            }
+            patched
         }
         for cmd in chitrakar_doc::fixture::every_command(&f) {
             let label = format!("{cmd:?}");
@@ -3618,14 +3655,14 @@ mod tests {
             // A session that has already drawn the page, and so from
             // here on repaints only what it is told went stale.
             let mut kept = Session::from_document(f.doc.clone());
-            kept.render_cached().expect("the page draws");
+            let was = kept.render_cached().expect("the page draws").0.clone();
             kept.apply(cmd)
                 .unwrap_or_else(|e| panic!("{short} could not be applied: {e:?}"));
-            same(&mut kept, short, "applied");
+            let was = same(&mut kept, &was, short, "applied");
             kept.undo().expect("it undoes");
-            same(&mut kept, short, "undone");
+            let was = same(&mut kept, &was, short, "undone");
             kept.redo().expect("it redoes");
-            same(&mut kept, short, "redone");
+            same(&mut kept, &was, short, "redone");
         }
     }
     use chitrakar_color::AuthoredColor;
