@@ -2563,11 +2563,18 @@ impl Session {
     /// page, read on the values the screen shows rather than on linear
     /// light — a wand is a judgement about what *looks* the same, and
     /// linear light does not agree with the eye about that.
+    ///
+    /// `touching` says whether the question is about the run or about
+    /// the colour. A sky showing between branches is one colour in a
+    /// hundred pieces, and no amount of spreading walks from one piece
+    /// to the next; asked about the colour, every pixel that looks like
+    /// it is picked wherever it is, and comes back as that many rings.
     pub fn pick_similar(
         &mut self,
         x: f32,
         y: f32,
         tolerance: f32,
+        touching: bool,
         how: &str,
     ) -> Result<(), EngineError> {
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
@@ -2598,7 +2605,28 @@ impl Session {
         // Spread out from the seed while the colour holds. Four-connected,
         // so pixels that touch only at a corner are separate runs — which
         // is what the tracer says about them too.
+        //
+        // Unless the question was about the colour rather than the run:
+        // a sky showing between branches is one colour in a hundred
+        // pieces, and no amount of spreading walks from one to the next.
+        // Then every pixel that looks like it is picked, wherever it is,
+        // and the tracer gives back as many rings as that comes to.
         let mut inside = vec![false; (w * h) as usize];
+        if !touching {
+            for y in 0..h {
+                for x in 0..w {
+                    inside[(y * w + x) as usize] = near(shown(page.get(x, y)));
+                }
+            }
+            let rings = chitrakar_render::trace_pixels(&inside, w, h);
+            let Some(region) = Self::region_of(rings, 0.0) else {
+                return Err(EngineError::BadCommand("nothing there looks alike".into()));
+            };
+            let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+                unreachable!("region_of makes a shape")
+            };
+            return self.pick_region(shape, transform, how);
+        }
         let mut queue = vec![(sx as u32, sy as u32)];
         inside[(sy as u32 * w + sx as u32) as usize] = true;
         while let Some((cx, cy)) = queue.pop() {
@@ -6596,7 +6624,9 @@ mod tests {
                 .unwrap();
         }
 
-        session.pick_similar(20.0, 30.0, 0.05, "replace").unwrap();
+        session
+            .pick_similar(20.0, 30.0, 0.05, true, "replace")
+            .unwrap();
         let b = session.selection_bounds().expect("something is picked");
         assert_eq!(
             [b[0], b[1], b[2], b[3]],
@@ -6604,8 +6634,33 @@ mod tests {
             "the square that was clicked, and not the one across the page"
         );
 
+        // Asked about the colour rather than the run, one click takes
+        // both: two squares the same colour with the ground between them
+        // are one region of two rings, and no amount of spreading walks
+        // from one to the other.
+        session
+            .pick_similar(20.0, 30.0, 0.05, false, "replace")
+            .unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!([b[0], b[2]], [10.0, 90.0], "both squares, from one click");
+        assert!(session.selection_covers(80.0, 30.0), "the far one as well");
+        assert!(
+            !session.selection_covers(50.0, 30.0),
+            "and not the ground between them"
+        );
+        assert_eq!(
+            session.selection_outline().len(),
+            2,
+            "one region, two rings"
+        );
+
         // Shift adds the other one, and now the region reaches both.
-        session.pick_similar(80.0, 30.0, 0.05, "union").unwrap();
+        session
+            .pick_similar(20.0, 30.0, 0.05, true, "replace")
+            .unwrap();
+        session
+            .pick_similar(80.0, 30.0, 0.05, true, "union")
+            .unwrap();
         let b = session.selection_bounds().unwrap();
         assert_eq!(
             [b[0], b[2]],
@@ -6616,13 +6671,17 @@ mod tests {
         // Wide enough to hold the ground as well, clicking it takes the
         // whole page — the wand spreads while the colour holds, and at
         // that tolerance it holds everywhere.
-        session.pick_similar(2.0, 2.0, 1.0, "replace").unwrap();
+        session
+            .pick_similar(2.0, 2.0, 1.0, true, "replace")
+            .unwrap();
         let b = session.selection_bounds().unwrap();
         assert_eq!([b[0], b[1], b[2], b[3]], [0.0, 0.0, 100.0, 60.0]);
 
         // Tight, clicking the ground picks the ground and leaves both
         // squares out of it: two holes in one ring.
-        session.pick_similar(2.0, 2.0, 0.02, "replace").unwrap();
+        session
+            .pick_similar(2.0, 2.0, 0.02, true, "replace")
+            .unwrap();
         let cover = chitrakar_render::mask_plane_over(
             session.document(),
             session.selection().unwrap(),
@@ -6641,8 +6700,12 @@ mod tests {
         assert!(at(80, 30) < 0.5, "and so is the second");
 
         // Off the page is not a click on anything.
-        assert!(session.pick_similar(-1.0, 10.0, 0.1, "replace").is_err());
-        assert!(session.pick_similar(10.0, 99.0, 0.1, "replace").is_err());
+        assert!(session
+            .pick_similar(-1.0, 10.0, 0.1, true, "replace")
+            .is_err());
+        assert!(session
+            .pick_similar(10.0, 99.0, 0.1, true, "replace")
+            .is_err());
     }
 
     /// A region picked out of the page, and what picking it is for.

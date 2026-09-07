@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~341),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~888 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~890 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -970,7 +970,14 @@ without reading anything else.*
   region is a handful of points rather than four per pixel. From there
   it is a region like any other — added to, taken from, filled, handed
   to a layer — which is the whole reason for tracing rather than keeping
-  a coverage. Where two pixels touch only at a corner, four edges meet
+  a coverage. It asks either of two questions, and the rail says which:
+  about the run of pixels the click landed in, or about the colour
+  wherever it is on the page. A sky showing between branches is one
+  colour in a hundred pieces and no amount of spreading walks from one
+  piece to the next, so the second reading takes every pixel that looks
+  like it and the tracer gives back that many rings — one region all the
+  same, to be grown, softened, filled or handed to a layer like any
+  other. Where two pixels touch only at a corner, four edges meet
   there and the walk turns as far clockwise as it can: that keeps the
   inside on its right the whole way round, and makes them two rings
   rather than one pinched figure of eight. Taking whichever edge came to
@@ -1085,11 +1092,19 @@ without reading anything else.*
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
 - **Next up (rough priority):**
-  1. Wire the GPU backend into the engine behind a feature and let the
-     viewport present from it; what is left to teach it is live
-     effects (a drop shadow, an inner shadow, an outline), which are the
-     blur passes again read off a layer's own silhouette rather than off
-     what is under it, and pixelate (see docs/spikes/gpu-rendering.md).
+  1. The GPU backend, in two halves. What is left to *teach* it:
+     live effects (a drop shadow, an inner shadow, an outline), which
+     are the blur passes again read off a layer's own silhouette rather
+     than off what is under it; pixelate, whose neighbourhood is a
+     block rather than an axis; and the three node kinds it has never
+     drawn — a paint layer, a frame, a copy of another layer. What is
+     left to *wire*: it draws the page at its own size, and the app
+     shows a viewport — a scale and an origin — so presenting from it
+     means `gather` and the shader learning a view transform, which is
+     the harder half of the wiring and not a detail of it. The fixture
+     audit (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_
+     does`) is what to run while doing either. See
+     docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each

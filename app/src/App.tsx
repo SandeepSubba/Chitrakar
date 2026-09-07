@@ -1258,6 +1258,11 @@ export function App() {
   const [wandTolerance, setWandTolerance] = useState(0.12);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
+  /** Whether the wand asks about the run of pixels it landed in or
+   * about the colour wherever it is on the page. A sky between branches
+   * is one colour in a hundred pieces, and spreading never gets from
+   * one piece to the next. */
+  const [wandTouching, setWandTouching] = useState(true);
   /** How far the edge of the next region picked is softened over. Kept
    * here rather than read off the document so it carries from one
    * region to the next, the way a brush size does. */
@@ -2515,7 +2520,7 @@ export function App() {
           ? "subtract"
           : "replace";
       try {
-        session.pick_similar(x, y, wandTolerance, how);
+        session.pick_similar(x, y, wandTolerance, wandTouching, how);
         if (selectionFeather > 0) session.feather_selection(selectionFeather);
         refresh(session);
       } catch (err) {
@@ -6680,6 +6685,21 @@ export function App() {
                 )
               }
             />
+          )}
+          {/* And whether it is a question about the run of pixels the
+              click landed in or about the colour wherever it is. */}
+          {tool === "Wand" && (
+            <select
+              className="tool-ratio"
+              value={wandTouching ? "touching" : "anywhere"}
+              onChange={(e) => setWandTouching(e.target.value === "touching")}
+              onKeyDown={(e) => e.stopPropagation()}
+              title="Whether to keep to the run of pixels clicked, or take that colour wherever it is on the page"
+              aria-label="Wand reach"
+            >
+              <option value="touching">Touching</option>
+              <option value="anywhere">Anywhere</option>
+            </select>
           )}
           {/* How many sides, or points, the next one has. Only while one
               of the two tools that asks is in hand. */}

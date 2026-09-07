@@ -575,18 +575,20 @@ impl WasmSession {
         self.inner.pick_region(shape, at, how).map_err(to_js)
     }
 
-    /// Pick out the run of pixels round `(x, y)` that look like it —
-    /// the wand. `tolerance` is 0 for exactly that colour and 1 for the
-    /// whole page.
+    /// Pick out the pixels round `(x, y)` that look like it — the wand.
+    /// `tolerance` is 0 for exactly that colour and 1 for the whole
+    /// page; `touching` keeps to the run the click landed in, and
+    /// without it every pixel of that colour is picked wherever it is.
     pub fn pick_similar(
         &mut self,
         x: f64,
         y: f64,
         tolerance: f64,
+        touching: bool,
         how: &str,
     ) -> Result<(), JsError> {
         self.inner
-            .pick_similar(x as f32, y as f32, tolerance as f32, how)
+            .pick_similar(x as f32, y as f32, tolerance as f32, touching, how)
             .map_err(to_js)
     }
 

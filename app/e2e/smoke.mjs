@@ -7875,6 +7875,53 @@ assert(
     `it picked the blue square and stopped there (${across.toFixed(3)} of the page)`,
   );
 
+  // Asked about the colour rather than the run, one click takes the
+  // colour wherever it is: a second blue square across the page comes
+  // in without being clicked. A sky between branches is that shape.
+  await pickTool("Rect");
+  await setColor("Fill colour", "#2255cc");
+  await page.mouse.move(...on(260, 60));
+  await page.mouse.down();
+  await page.mouse.move(...on(360, 160), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await page.click('button[aria-label="More ways to select"]');
+  await page.waitForTimeout(200);
+  await page.click('.tool-flyout button[aria-label="Wand"]');
+  await page.waitForTimeout(250);
+  await page.mouse.click(...on(120, 120));
+  await page.waitForTimeout(450);
+  const oneOfThem = (await wandBox())[2];
+  await page.selectOption('[aria-label="Wand reach"]', "anywhere");
+  await page.mouse.click(...on(120, 120));
+  await page.waitForTimeout(500);
+  const bothOfThem = await wandBox();
+  assert(
+    bothOfThem[2] > oneOfThem + page0.width * 0.15,
+    `the far square came in unclicked (${bothOfThem[2].toFixed(0)} vs ${oneOfThem.toFixed(0)})`,
+  );
+  assert(
+    (await page.locator(".ants polygon").count()) === 2,
+    "one region, a ring round each",
+  );
+  await page.selectOption('[aria-label="Wand reach"]', "touching");
+  await page.waitForTimeout(200);
+  // Take the second square away again by name rather than by counting
+  // undos — every wand click is a step of its own — so what follows
+  // sees the page it expects.
+  await page.keyboard.press("Escape");
+  await page
+    .locator(".panel ul li", { hasText: "Rect 3" })
+    .first()
+    .click();
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(400);
+  await page.click('button[aria-label="More ways to select"]');
+  await page.waitForTimeout(200);
+  await page.click('.tool-flyout button[aria-label="Wand"]');
+  await page.waitForTimeout(250);
+
   // Clicking the ground picks the ground, with the square as a hole in
   // it: two rings, not one.
   await page.mouse.click(...on(320, 250));
