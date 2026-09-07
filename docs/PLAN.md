@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~339),
+- **Verify before committing:** `cargo test --workspace` (~340),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~888 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -753,10 +753,17 @@ without reading anything else.*
   so both renderers speck a page the same way. A blur is six box passes on a pair of scratch
   textures — three along each axis, which is the CPU renderer's
   Gaussian written out as render passes — and a sharpen is the same
-  blur read as what the picture has too little of. It declines
-  anything else — effects; a layer held to the one under it, which shows
-  only where that layer's own alpha does; a paint layer, a frame and a
-  copy of another layer; pixelate (whose neighbourhood is a block
+  blur read as what the picture has too little of. A layer held to the one under it shows only
+  where that layer's own alpha does — which is that layer drawn aside,
+  so it arrives the way a mask does, as a coverage in a texture, and the
+  two renderers cannot come to disagree about clipping either; a layer
+  that is both held and masked is held back by one coverage, since two
+  of them multiplied are one. Only where "its alpha" is a plain question
+  though — a base that draws a picture of its own, at full strength,
+  unblended and unmasked; an adjustment has no picture and a faded or
+  blended base has an alpha that depends on how it was composited. It declines
+  anything else — effects; a layer held to a base like that; a paint
+  layer, a frame and a copy of another layer; pixelate (whose neighbourhood is a block
   rather than an axis); ink authored
   for a press (a gradient stop included); and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls

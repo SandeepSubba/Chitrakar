@@ -1418,14 +1418,45 @@ fn collect(
         if !node.effects.is_empty() {
             return None;
         }
-        // So does a layer held to the one under it: it shows only where
-        // that layer's own alpha does, which is that layer drawn aside
-        // and read back — nothing here does that yet, and drawing it
-        // whole is not the same picture but a wrong one. Declining is
-        // always a safe answer; drawing the wrong thing never is.
-        if node.clipped {
-            return None;
-        }
+        // A layer held to the one under it shows only where that
+        // layer's own alpha does. That alpha is the layer drawn aside,
+        // which is what the CPU renderer does to it — so it arrives
+        // here the way a mask does, as the same coverage in the same
+        // texture, and the two renderers cannot come to disagree about
+        // what clipping means either.
+        //
+        // Only where "its alpha" is a plain question, though: a base
+        // that draws a picture of its own, at full strength, with
+        // nothing over it. An adjustment has no picture and lets
+        // everything through; a base that is faded, blended or masked
+        // has an alpha that depends on how it was composited, and this
+        // reading is of the layer alone. Any of those and the page goes
+        // back to the CPU, which is always a safe answer.
+        let held_to = if node.clipped {
+            match chitrakar_render::clip_base(doc, child).ok()? {
+                // Nothing under it to be held to — the first of a run
+                // is what the rest are held to — so it draws whole.
+                None => None,
+                Some(base) => {
+                    let b = doc.node(base).ok()?;
+                    let draws = matches!(
+                        b.kind,
+                        NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+                    );
+                    if !draws
+                        || b.opacity < 1.0
+                        || b.blend != BlendMode::Normal
+                        || b.mask.is_some()
+                        || !b.effects.is_empty()
+                    {
+                        return None;
+                    }
+                    Some(base)
+                }
+            }
+        } else {
+            None
+        };
         let t = parent.compose(node.transform);
         // What composites as a unit before it meets what is under it: a
         // layer with a blend mode, which has to see the whole of what it
@@ -1601,8 +1632,11 @@ fn collect(
         }
         // The mask, once, over everything the layer drew: the CPU
         // renderer rasterizes the coverage and the fragments read it.
-        if let Some(mask) = &node.mask {
-            let (at, box_) = mask_texture(doc, child, mask, parent, out)?;
+        // What a layer is held to rides the same texture — two
+        // coverages a layer is held back by are one coverage, and a
+        // fragment reads it once.
+        if node.mask.is_some() || held_to.is_some() {
+            let (at, box_) = mask_texture(doc, child, node.mask.as_ref(), held_to, parent, out)?;
             for v in &mut out.vertices[mark.0..] {
                 v.mask = box_;
             }
@@ -1625,7 +1659,8 @@ fn collect(
 fn mask_texture(
     doc: &Document,
     id: NodeId,
-    mask: &chitrakar_doc::Mask,
+    mask: Option<&chitrakar_doc::Mask>,
+    held_to: Option<NodeId>,
     parent: Transform,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
@@ -1654,7 +1689,17 @@ fn mask_texture(
     // than the textures this backend asked for was handed back before
     // any of this.
     let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
-    let cover = chitrakar_render::mask_plane_over(doc, mask, parent, clip, page);
+    let mut cover = match mask {
+        Some(mask) => chitrakar_render::mask_plane_over(doc, mask, parent, clip, page),
+        None => vec![1.0; (w * h) as usize],
+    };
+    if let Some(base) = held_to {
+        let held = chitrakar_render::layer_coverage(doc, base).ok()?;
+        for (i, c) in cover.iter_mut().enumerate() {
+            let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
+            *c *= held[(y * page.0 + x) as usize];
+        }
+    }
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -2763,6 +2808,83 @@ mod tests {
         eprintln!(
             "gpu drew {drawn}, declined {}: {declined:?}",
             declined.len()
+        );
+    }
+
+    /// A layer held to the one under it, and a run of them.
+    ///
+    /// Clipping is not a mask cut from a shape: it is another layer's
+    /// own alpha, which has to be that layer drawn aside. Two coverages
+    /// a layer is held back by — its own mask and what it is clipped to
+    /// — are one coverage by the time a fragment reads it.
+    #[test]
+    fn a_layer_held_to_the_one_under_it_stops_where_that_layer_does() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let round = VectorShape::Ellipse { rx: 14.0, ry: 10.0 };
+        add(
+            &mut doc,
+            filled("base", round.clone(), RED),
+            // An ellipse's own box starts at its origin, so this one
+            // spans 6..34 across and 10..30 down.
+            Transform::translation(6.0, 10.0),
+        );
+        let wide = VectorShape::Rect {
+            width: 60.0,
+            height: 18.0,
+            radius: 0.0,
+        };
+        for (name, at) in [("first", 4.0), ("second", 22.0)] {
+            let id = add(
+                &mut doc,
+                filled(name, wide.clone(), BLUE),
+                Transform::translation(0.0, at),
+            );
+            doc.apply(Command::SetClipped { id, clipped: true })
+                .unwrap();
+        }
+        assert!(GpuRenderer::can_render(&doc), "a run of held layers");
+        let (mean, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(mean < 0.004, "a run: mean {mean:.5}, worst {worst:.3}");
+
+        // Outside the base there is nothing, however wide the bands
+        // themselves are: a page that agreed everywhere by drawing
+        // nothing would pass the reading above.
+        let drawn = gpu.render(&doc).unwrap();
+        assert!(drawn.get(2, 25).a < 0.01, "nothing beyond the base");
+        assert!(drawn.get(20, 25).a > 0.99, "and the band inside it");
+
+        // The layer's own mask as well: two coverages, one answer.
+        let held = doc.children_of(doc.root()).unwrap()[1];
+        doc.apply(Command::SetMask {
+            id: held,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(0.0, 0.0),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc), "held and masked at once");
+        let (mean, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "held and masked: mean {mean:.5}, worst {worst:.3}"
         );
     }
 
@@ -5108,13 +5230,27 @@ mod tests {
             .unwrap();
         assert!(!GpuRenderer::can_render(&with_effect));
 
-        // A layer held to the one under it goes back too. It shows only
-        // where that layer's own alpha does, and drawing it whole is
-        // not a slower picture but a wrong one.
+        // A layer held to the one under it is drawn, since that layer's
+        // own alpha is a coverage like a mask's — but only where "its
+        // alpha" is a plain question. Faded, the base's alpha depends on
+        // how it was composited, and the page goes back.
         let mut held = doc.clone();
-        held.apply(Command::SetClipped { id, clipped: true })
+        let over = add(
+            &mut held,
+            filled("over", rect.clone(), BLUE),
+            Transform::translation(6.0, 6.0),
+        );
+        held.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&held), "held to a plain layer");
+        let mut faded = held.clone();
+        faded
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&held));
+        assert!(!GpuRenderer::can_render(&faded), "held to a faded one");
 
         // Ink authored for a press resolves through the document's
         // profile, so a gradient with a CMYK stop goes back too.
