@@ -7587,6 +7587,20 @@ mod tests {
         assert!(alpha(30, 20) > 100.0, "the hole is what is not picked now");
         assert_eq!(alpha(5, 20), 0.0, "and the rest of the page is");
 
+        // A softness the page cannot hold is answered rather than hung
+        // on: the box that averages a line is primed by walking it, so
+        // a radius of a few million used to be a wait nobody came back
+        // from — reachable by typing, and by opening a file.
+        session.feather_selection(1.0e7).unwrap();
+        let started = std::time::Instant::now();
+        let (_, _, alpha) = read(&session);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a wash of it comes back"
+        );
+        let _ = alpha(1, 1);
+        session.feather_selection(0.0).unwrap();
+
         // A softened edge is neither in nor out, and the wash is that.
         session.pick_inverse().unwrap();
         session.feather_selection(3.0).unwrap();

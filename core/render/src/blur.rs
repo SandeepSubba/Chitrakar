@@ -37,6 +37,12 @@ pub fn blur_plane(cover: &mut [f32], width: u32, height: u32, sigma: f32) {
     let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
     let radius = ((d.max(1) / 2).max(1)) as usize;
     let mut line = vec![0.0f32; w.max(h)];
+    // A box wider than the line it runs along is a fade over the whole
+    // of it, and there is nothing further to say past that: the window
+    // is primed by walking it once, so a radius of a few million — a
+    // softness typed at a page that cannot hold it, or read out of a
+    // file — is not a wrong answer but a wait nobody comes back from.
+    let radius = radius.min(w.max(h));
     for _ in 0..3 {
         for horizontal in [true, false] {
             let (lanes, len) = if horizontal { (h, w) } else { (w, h) };
@@ -117,6 +123,10 @@ fn box_blur_axis(surface: &mut Surface, clip: ClipRect, radius: i32, horizontal:
     if len == 0 {
         return;
     }
+    // As in `blur_plane`: a box wider than the line is a fade over the
+    // whole of it, and priming a window of a few million costs a wait
+    // nobody comes back from.
+    let radius = radius.min(len);
     let norm = 1.0 / (2 * radius + 1) as f32;
     let mut line: Vec<LinearRgba> = vec![LinearRgba::TRANSPARENT; len as usize];
 
@@ -149,6 +159,39 @@ fn box_blur_axis(surface: &mut Surface, clip: ClipRect, radius: i32, horizontal:
 
 #[cfg(test)]
 mod tests {
+    /// A softness wider than what it is being drawn on.
+    ///
+    /// Typed at a page that cannot hold it, or read out of a file that
+    /// can say anything: the box that averages a line is primed by
+    /// walking it once, so a radius of a few million is not a wrong
+    /// answer but a wait nobody comes back from. A box wider than the
+    /// line is a fade over the whole of it, and there is nothing
+    /// further to say past that.
+    #[test]
+    fn a_softness_wider_than_the_page_is_a_fade_over_the_page() {
+        let (w, h) = (40u32, 24u32);
+        let mut cover = vec![0.0f32; (w * h) as usize];
+        for y in 8..16 {
+            for x in 12..28 {
+                cover[(y * w + x) as usize] = 1.0;
+            }
+        }
+        let started = std::time::Instant::now();
+        super::blur_plane(&mut cover, w, h, 1.0e7);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "it came back"
+        );
+        let (lo, hi) = cover
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), c| (lo.min(*c), hi.max(*c)));
+        assert!(hi <= 1.0 && lo >= 0.0, "still a coverage: {lo}..{hi}");
+        assert!(
+            hi - lo < 0.2,
+            "and spread over the whole of it rather than left in a shape: {lo}..{hi}"
+        );
+    }
+
     use super::*;
 
     fn full(surface: &Surface) -> ClipRect {

@@ -4965,7 +4965,16 @@ pub fn grown(inside: &[bool], width: u32, height: u32, by: f32) -> Vec<bool> {
     }
     let grow = by > 0.0;
     let r = by.abs() as f64;
-    let pad = (r.ceil() as usize) + 1;
+    // One cell of margin, whatever the distance. Growing reads only
+    // cells inside the grid, so the margin is nothing to it; shrinking
+    // needs beyond the grid to count as outside, and a single ring of
+    // it does that exactly — the nearest outside cell to any interior
+    // point lies on the border, and the ring covers every position the
+    // border has. A margin as thick as the distance, which is what this
+    // asked for at first, is a square grid of side `2r` that a grow of a
+    // million pixels turns into an allocation nobody can serve: the
+    // process aborts, which in the browser is the editor going.
+    let pad = 1usize;
     let (pw, ph) = (w + pad * 2, h + pad * 2);
     // Growing looks for the set, shrinking for everything that is not
     // it; the margin round the grid belongs to whichever of the two is
