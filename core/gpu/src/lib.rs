@@ -48,14 +48,19 @@
 //! multiplied are one. A frame is a group with a size of its own: its
 //! ground is the rectangle it is, filled, and everything under it is
 //! held to that rectangle — whole pixels, so that holding rides the
-//! same coverage too.
+//! same coverage too. A copy of another layer draws what that layer
+//! draws, where the copy is: the original's own placement is undone
+//! first, so moving the original moves only the original, and where the
+//! copy stands in for the original's children with layers of its own,
+//! those are what it draws.
 //!
 //! What is declined, and falls back to the CPU: a live effect; a layer
 //! held to a base whose own alpha is not a plain question — an
 //! adjustment, or one that is faded, blended or masked; a frame that is
 //! turned, composited as a whole, or whose box does not land on whole
-//! pixels, each of which the CPU draws another way; a paint layer and a
-//! copy of another layer;
+//! pixels, each of which the CPU draws another way; a copy of another
+//! layer that is faded, blended or masked, for the same reason; a paint
+//! layer;
 //! pixelate, which reads a neighbourhood but not along an axis; ink
 //! authored for a press; and anything needing a texture larger than the
 //! device was asked for. Declining is always a safe answer — the page
@@ -1428,337 +1433,384 @@ fn collect(
     out: &mut Scene,
 ) -> Option<()> {
     for &child in doc.children_of(group).ok()? {
-        let node = doc.node(child).ok()?;
-        if !node.visible || node.opacity <= 0.0 {
-            continue;
-        }
-        // A live effect still belongs to the CPU.
-        if !node.effects.is_empty() {
-            return None;
-        }
-        // A layer held to the one under it shows only where that
-        // layer's own alpha does. That alpha is the layer drawn aside,
-        // which is what the CPU renderer does to it — so it arrives
-        // here the way a mask does, as the same coverage in the same
-        // texture, and the two renderers cannot come to disagree about
-        // what clipping means either.
-        //
-        // Only where "its alpha" is a plain question, though: a base
-        // that draws a picture of its own, at full strength, with
-        // nothing over it. An adjustment has no picture and lets
-        // everything through; a base that is faded, blended or masked
-        // has an alpha that depends on how it was composited, and this
-        // reading is of the layer alone. Any of those and the page goes
-        // back to the CPU, which is always a safe answer.
-        let held_to = if node.clipped {
-            match chitrakar_render::clip_base(doc, child).ok()? {
-                // Nothing under it to be held to — the first of a run
-                // is what the rest are held to — so it draws whole.
-                None => None,
-                Some(base) => {
-                    let b = doc.node(base).ok()?;
-                    let draws = matches!(
-                        b.kind,
-                        NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
-                    );
-                    if !draws
-                        || b.opacity < 1.0
-                        || b.blend != BlendMode::Normal
-                        || b.mask.is_some()
-                        || !b.effects.is_empty()
-                    {
-                        return None;
-                    }
-                    Some(base)
-                }
-            }
-        } else {
-            None
-        };
-        let t = parent.compose(node.transform);
-        // What composites as a unit before it meets what is under it: a
-        // layer with a blend mode, which has to see the whole of what it
-        // is coming down onto; a group that is less than opaque, whose
-        // contents meet each other at full strength before the result is
-        // taken down together; a group with a mask, since holding each
-        // child to it would take the coverage twice where two of them
-        // overlap. Each of those is drawn on a surface of its own, and
-        // the surface is what lands.
-        //
-        // A masked *leaf* is not one of them: its mask is a coverage its
-        // own fragments can be multiplied by, exactly.
-        // A group holding something that reads what is under it — an
-        // adjustment, another blend — is isolated too, because that is
-        // what decides what "under it" means: the CPU renderer asks the
-        // same question, so both give the adjustment the same page to
-        // work on.
-        // A layer that rewrites what is under it has nothing left over
-        // to blend against it, and the CPU renderer reads it that way:
-        // it hands an adjustment and a filter their opacity and their
-        // mask and never looks at the blend mode. A surface of its own
-        // would be a different picture, so hand the page over instead.
-        if matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
-            && node.blend != BlendMode::Normal
-        {
-            return None;
-        }
-        let alone = node.blend != BlendMode::Normal
-            || (matches!(node.kind, NodeKind::Group)
-                && (node.opacity < 1.0
-                    || node.mask.is_some()
-                    || chitrakar_render::reads_backdrop(doc, child).ok()?));
-        if alone {
-            out.draws.push(Item::of(Draw::Open));
-        }
-        // What the layer itself is drawn at: its own opacity, unless it
-        // is going on a surface of its own, where the opacity belongs to
-        // the quad that brings the surface back.
-        let alpha = if alone { 1.0 } else { node.opacity * opacity };
-        // Where the layer's own drawing starts, so the mask can be put
-        // on everything the layer turns into and nothing else.
-        let mut mark = (out.vertices.len(), out.draws.len());
-        match &node.kind {
-            NodeKind::Group => {
-                collect(
-                    doc,
-                    child,
-                    t,
-                    if alone { 1.0 } else { opacity },
-                    // A group on a surface of its own composites
-                    // unbounded and is cut when that surface is laid
-                    // down; one that is not hands the bound to each of
-                    // its children.
-                    if alone { None } else { bound },
-                    out,
-                )?;
-            }
-            NodeKind::Vector {
-                shape,
-                fill,
-                stroke,
-                gradient,
-            } => vector(
-                doc,
-                child,
-                shape,
-                *fill,
-                stroke.as_ref(),
-                gradient.as_ref(),
-                t,
-                alpha,
-                out,
-            )?,
-            NodeKind::Raster(raster) => {
-                let Some(res) = doc.resource(&raster.resource_id) else {
-                    // A resource whose pixels never came back is drawn by
-                    // nobody; the CPU skips it too.
-                    continue;
-                };
-                if res.rgba8.is_empty() {
-                    continue;
-                }
-                if res.width > MAX_TEXTURE || res.height > MAX_TEXTURE {
-                    return None;
-                }
-                // Shrinking is where the two renderers part: the CPU box-
-                // filters the texels a pixel covers, and bilinear sampling
-                // would alias. Hand the page over rather than draw it
-                // differently.
-                let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs());
-                if scale < 0.99 {
-                    return None;
-                }
-                let at = match out.ids.iter().find(|(id, _)| *id == raster.resource_id) {
-                    Some((_, at)) => *at,
-                    None => {
-                        let at = out.textures.len();
-                        out.textures.push(premultiplied(res));
-                        out.ids.push((raster.resource_id.clone(), at));
-                        at
-                    }
-                };
-                let size = [res.width as f32, res.height as f32];
-                // The quad is the image's own box; its local coordinates
-                // are the texture's, so the vertex shader passes them
-                // straight through as texture coordinates.
-                let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 0.0);
-                for v in &mut verts {
-                    v.local = [v.local[0] / size[0], v.local[1] / size[1]];
-                }
-                let quad = out.push(verts);
-                out.draws.push(Item::of(Draw::Image { quad, texture: at }));
-            }
-            NodeKind::Text(spec) => {
-                let color = premultiplied_color(spec.fill, alpha)?;
-                text(spec, t, color, out)?;
-            }
-            NodeKind::Adjustment(adj) => {
-                // An adjustment rewrites what is composited below it,
-                // weighted by its own opacity and its mask. It reads
-                // that from the copy a blend reads, which means a pass
-                // of its own, which `plan` cuts for it.
-                let plan = adjustment_of(doc, adj)?;
-                let table = plan.table.map(|img| {
-                    let at = out.textures.len();
-                    out.textures.push(img);
-                    at
-                });
-                let quad = out.push(page_quad(doc, alpha, plan.params, plan.grad, plan.extra));
-                out.draws.push(Item::of(Draw::Adjust { quad, table }));
-            }
-            NodeKind::Filter(filter) => {
-                // A filter that is a function of one pixel and of where
-                // that pixel sits on the page is an adjustment in every
-                // way this backend cares about: it rewrites what is
-                // composited below it, from the same copy taken aside,
-                // in the same pass. The ones that read a neighbourhood
-                // are declined by `filter_of` and stay the CPU's.
-                // A filter's radius is written in the space it lives
-                // in, so a group that scales stretches it — which is the
-                // reading the CPU renderer takes.
-                let scale = parent.a.hypot(parent.b).max(parent.c.hypot(parent.d));
-                match filter_of(filter, scale)? {
-                    Filtering::Pointwise(params, grad) => {
-                        let quad = out.push(page_quad(doc, alpha, params, grad, [0.0; 3]));
-                        out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
-                    }
-                    Filtering::Blur { radius, sharpen } => {
-                        let axis =
-                            |a: f32| page_quad(doc, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
-                        let mut steps = out.push(axis(0.0));
-                        steps.end = out.push(axis(1.0)).end;
-                        let quad = out.push(page_quad(
-                            doc,
-                            alpha,
-                            [sharpen, 0.0, 0.0, 0.0],
-                            [0.0; 4],
-                            [0.0; 3],
-                        ));
-                        out.draws.push(Item::of(Draw::Blur { steps, quad }));
-                    }
-                    // Nothing asked for is nothing drawn, and nothing
-                    // drawn wants no mask over it either.
-                    Filtering::Nothing => continue,
-                }
-            }
-            // A frame is a group with a size of its own: a ground
-            // painted inside it and everything under it held to its
-            // rectangle. Upright and composited like its contents, it
-            // is nothing but a narrower region to paint in — which is
-            // how the CPU renderer reads it too, so an adjustment
-            // inside a frame sees the page below the frame on both.
-            //
-            // The rectangle is rounded to whole pixels there, because a
-            // frame's edge is a page edge and a page edge is crisp; a
-            // frame whose box does not land on whole pixels would want
-            // an antialiased edge here and a rounded one there, so it
-            // goes back. So does a turned frame, and one composited as
-            // a whole — both of which the CPU draws on a surface of its
-            // own, which is a different picture from this.
-            NodeKind::Artboard {
-                width,
-                height,
-                background,
-                ..
-            } => {
-                let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
-                if !upright || alone || node.opacity < 1.0 || node.mask.is_some() {
-                    return None;
-                }
-                let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
-                let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
-                    return None;
-                };
-                if [fx0, fy0, fx1, fy1]
-                    .iter()
-                    .any(|v| (v - v.round()).abs() > 1e-3)
+        one(doc, child, parent, opacity, bound, out)?;
+    }
+    Some(())
+}
+
+/// One layer, where its parent puts it, turned into quads.
+///
+/// Pulled out of the walk so a caller with a single layer in mind can
+/// ask for it: a copy of another layer draws that layer where the copy
+/// is, which is this same work with a different space and no parent to
+/// have walked down from.
+fn one(
+    doc: &Document,
+    child: NodeId,
+    parent: Transform,
+    opacity: f32,
+    bound: Option<chitrakar_render::ClipRect>,
+    out: &mut Scene,
+) -> Option<()> {
+    let node = doc.node(child).ok()?;
+    if !node.visible || node.opacity <= 0.0 {
+        return Some(());
+    }
+    // A live effect still belongs to the CPU.
+    if !node.effects.is_empty() {
+        return None;
+    }
+    // A layer held to the one under it shows only where that
+    // layer's own alpha does. That alpha is the layer drawn aside,
+    // which is what the CPU renderer does to it — so it arrives
+    // here the way a mask does, as the same coverage in the same
+    // texture, and the two renderers cannot come to disagree about
+    // what clipping means either.
+    //
+    // Only where "its alpha" is a plain question, though: a base
+    // that draws a picture of its own, at full strength, with
+    // nothing over it. An adjustment has no picture and lets
+    // everything through; a base that is faded, blended or masked
+    // has an alpha that depends on how it was composited, and this
+    // reading is of the layer alone. Any of those and the page goes
+    // back to the CPU, which is always a safe answer.
+    let held_to = if node.clipped {
+        match chitrakar_render::clip_base(doc, child).ok()? {
+            // Nothing under it to be held to — the first of a run
+            // is what the rest are held to — so it draws whole.
+            None => None,
+            Some(base) => {
+                let b = doc.node(base).ok()?;
+                let draws = matches!(
+                    b.kind,
+                    NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+                );
+                if !draws
+                    || b.opacity < 1.0
+                    || b.blend != BlendMode::Normal
+                    || b.mask.is_some()
+                    || !b.effects.is_empty()
                 {
                     return None;
                 }
-                let (pw, ph) = (doc.meta.width, doc.meta.height);
-                let board = chitrakar_render::ClipRect {
-                    x0: (fx0.round().max(0.0) as u32).min(pw),
-                    y0: (fy0.round().max(0.0) as u32).min(ph),
-                    x1: (fx1.round().max(0.0) as u32).min(pw),
-                    y1: (fy1.round().max(0.0) as u32).min(ph),
-                };
-                let inside = match bound {
-                    Some(outer) => outer.intersect(board),
-                    None => board,
-                };
-                if inside.is_empty() {
-                    continue;
-                }
-                // The ground is the frame's own rectangle, filled. Laid
-                // down as the shape it is, so it goes through the same
-                // arithmetic every other filled rectangle does.
-                if let Some(ground) = background {
-                    vector(
-                        doc,
-                        child,
-                        &VectorShape::Rect {
-                            width: *width,
-                            height: *height,
-                            radius: 0.0,
-                        },
-                        Some(*ground),
-                        None,
-                        None,
-                        t,
-                        alpha,
-                        out,
-                    )?;
-                    // The ground is inside the frame like everything
-                    // else: a frame hanging off the page shows only the
-                    // part of it that is on the page.
-                    let (at, quad) =
-                        mask_texture(doc, child, None, None, Some(inside), parent, out)?;
-                    for v in &mut out.vertices[mark.0..] {
-                        v.mask = quad;
-                    }
-                    for item in &mut out.draws[mark.1..] {
-                        item.mask = at;
-                    }
-                }
-                collect(doc, child, t, opacity, Some(inside), out)?;
-                // Everything inside took the bound as it was collected,
-                // and the frame itself has no mask — it was declined
-                // above if it had one — so there is nothing left to put
-                // over what was drawn.
-                continue;
+                Some(base)
             }
-            _ => return None,
         }
-        if alone {
-            // The mask and the opacity go on the quad that lays the
-            // surface down, not on what was drawn into it.
-            mark = (out.vertices.len(), out.draws.len());
-            let quad = out.push(page_quad(
+    } else {
+        None
+    };
+    let t = parent.compose(node.transform);
+    // What composites as a unit before it meets what is under it: a
+    // layer with a blend mode, which has to see the whole of what it
+    // is coming down onto; a group that is less than opaque, whose
+    // contents meet each other at full strength before the result is
+    // taken down together; a group with a mask, since holding each
+    // child to it would take the coverage twice where two of them
+    // overlap. Each of those is drawn on a surface of its own, and
+    // the surface is what lands.
+    //
+    // A masked *leaf* is not one of them: its mask is a coverage its
+    // own fragments can be multiplied by, exactly.
+    // A group holding something that reads what is under it — an
+    // adjustment, another blend — is isolated too, because that is
+    // what decides what "under it" means: the CPU renderer asks the
+    // same question, so both give the adjustment the same page to
+    // work on.
+    // A layer that rewrites what is under it has nothing left over
+    // to blend against it, and the CPU renderer reads it that way:
+    // it hands an adjustment and a filter their opacity and their
+    // mask and never looks at the blend mode. A surface of its own
+    // would be a different picture, so hand the page over instead.
+    if matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+        && node.blend != BlendMode::Normal
+    {
+        return None;
+    }
+    let alone = node.blend != BlendMode::Normal
+        || (matches!(node.kind, NodeKind::Group)
+            && (node.opacity < 1.0
+                || node.mask.is_some()
+                || chitrakar_render::reads_backdrop(doc, child).ok()?));
+    if alone {
+        out.draws.push(Item::of(Draw::Open));
+    }
+    // What the layer itself is drawn at: its own opacity, unless it
+    // is going on a surface of its own, where the opacity belongs to
+    // the quad that brings the surface back.
+    let alpha = if alone { 1.0 } else { node.opacity * opacity };
+    // Where the layer's own drawing starts, so the mask can be put
+    // on everything the layer turns into and nothing else.
+    let mut mark = (out.vertices.len(), out.draws.len());
+    match &node.kind {
+        NodeKind::Group => {
+            collect(
                 doc,
-                node.opacity * opacity,
-                [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
-                [0.0; 4],
-                [0.0; 3],
-            ));
-            out.draws.push(Item::of(Draw::Close {
-                quad,
-                blend: node.blend,
-            }));
+                child,
+                t,
+                if alone { 1.0 } else { opacity },
+                // A group on a surface of its own composites
+                // unbounded and is cut when that surface is laid
+                // down; one that is not hands the bound to each of
+                // its children.
+                if alone { None } else { bound },
+                out,
+            )?;
         }
-        // The mask, once, over everything the layer drew: the CPU
-        // renderer rasterizes the coverage and the fragments read it.
-        // What a layer is held to rides the same texture — two
-        // coverages a layer is held back by are one coverage, and a
-        // fragment reads it once.
-        if node.mask.is_some() || held_to.is_some() || bound.is_some() {
-            let (at, box_) =
-                mask_texture(doc, child, node.mask.as_ref(), held_to, bound, parent, out)?;
-            for v in &mut out.vertices[mark.0..] {
-                v.mask = box_;
+        NodeKind::Vector {
+            shape,
+            fill,
+            stroke,
+            gradient,
+        } => vector(
+            doc,
+            child,
+            shape,
+            *fill,
+            stroke.as_ref(),
+            gradient.as_ref(),
+            t,
+            alpha,
+            out,
+        )?,
+        NodeKind::Raster(raster) => {
+            let Some(res) = doc.resource(&raster.resource_id) else {
+                // A resource whose pixels never came back is drawn by
+                // nobody; the CPU skips it too.
+                return Some(());
+            };
+            if res.rgba8.is_empty() {
+                return Some(());
             }
-            for item in &mut out.draws[mark.1..] {
-                item.mask = at;
+            if res.width > MAX_TEXTURE || res.height > MAX_TEXTURE {
+                return None;
             }
+            // Shrinking is where the two renderers part: the CPU box-
+            // filters the texels a pixel covers, and bilinear sampling
+            // would alias. Hand the page over rather than draw it
+            // differently.
+            let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs());
+            if scale < 0.99 {
+                return None;
+            }
+            let at = match out.ids.iter().find(|(id, _)| *id == raster.resource_id) {
+                Some((_, at)) => *at,
+                None => {
+                    let at = out.textures.len();
+                    out.textures.push(premultiplied(res));
+                    out.ids.push((raster.resource_id.clone(), at));
+                    at
+                }
+            };
+            let size = [res.width as f32, res.height as f32];
+            // The quad is the image's own box; its local coordinates
+            // are the texture's, so the vertex shader passes them
+            // straight through as texture coordinates.
+            let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 0.0);
+            for v in &mut verts {
+                v.local = [v.local[0] / size[0], v.local[1] / size[1]];
+            }
+            let quad = out.push(verts);
+            out.draws.push(Item::of(Draw::Image { quad, texture: at }));
+        }
+        NodeKind::Text(spec) => {
+            let color = premultiplied_color(spec.fill, alpha)?;
+            text(spec, t, color, out)?;
+        }
+        NodeKind::Adjustment(adj) => {
+            // An adjustment rewrites what is composited below it,
+            // weighted by its own opacity and its mask. It reads
+            // that from the copy a blend reads, which means a pass
+            // of its own, which `plan` cuts for it.
+            let plan = adjustment_of(doc, adj)?;
+            let table = plan.table.map(|img| {
+                let at = out.textures.len();
+                out.textures.push(img);
+                at
+            });
+            let quad = out.push(page_quad(doc, alpha, plan.params, plan.grad, plan.extra));
+            out.draws.push(Item::of(Draw::Adjust { quad, table }));
+        }
+        NodeKind::Filter(filter) => {
+            // A filter that is a function of one pixel and of where
+            // that pixel sits on the page is an adjustment in every
+            // way this backend cares about: it rewrites what is
+            // composited below it, from the same copy taken aside,
+            // in the same pass. The ones that read a neighbourhood
+            // are declined by `filter_of` and stay the CPU's.
+            // A filter's radius is written in the space it lives
+            // in, so a group that scales stretches it — which is the
+            // reading the CPU renderer takes.
+            let scale = parent.a.hypot(parent.b).max(parent.c.hypot(parent.d));
+            match filter_of(filter, scale)? {
+                Filtering::Pointwise(params, grad) => {
+                    let quad = out.push(page_quad(doc, alpha, params, grad, [0.0; 3]));
+                    out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
+                }
+                Filtering::Blur { radius, sharpen } => {
+                    let axis =
+                        |a: f32| page_quad(doc, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
+                    let mut steps = out.push(axis(0.0));
+                    steps.end = out.push(axis(1.0)).end;
+                    let quad = out.push(page_quad(
+                        doc,
+                        alpha,
+                        [sharpen, 0.0, 0.0, 0.0],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
+                    out.draws.push(Item::of(Draw::Blur { steps, quad }));
+                }
+                // Nothing asked for is nothing drawn, and nothing
+                // drawn wants no mask over it either.
+                Filtering::Nothing => return Some(()),
+            }
+        }
+        // A frame is a group with a size of its own: a ground
+        // painted inside it and everything under it held to its
+        // rectangle. Upright and composited like its contents, it
+        // is nothing but a narrower region to paint in — which is
+        // how the CPU renderer reads it too, so an adjustment
+        // inside a frame sees the page below the frame on both.
+        //
+        // The rectangle is rounded to whole pixels there, because a
+        // frame's edge is a page edge and a page edge is crisp; a
+        // frame whose box does not land on whole pixels would want
+        // an antialiased edge here and a rounded one there, so it
+        // goes back. So does a turned frame, and one composited as
+        // a whole — both of which the CPU draws on a surface of its
+        // own, which is a different picture from this.
+        NodeKind::Artboard {
+            width,
+            height,
+            background,
+            ..
+        } => {
+            let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
+            if !upright || alone || node.opacity < 1.0 || node.mask.is_some() {
+                return None;
+            }
+            let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
+            let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
+                return None;
+            };
+            if [fx0, fy0, fx1, fy1]
+                .iter()
+                .any(|v| (v - v.round()).abs() > 1e-3)
+            {
+                return None;
+            }
+            let (pw, ph) = (doc.meta.width, doc.meta.height);
+            let board = chitrakar_render::ClipRect {
+                x0: (fx0.round().max(0.0) as u32).min(pw),
+                y0: (fy0.round().max(0.0) as u32).min(ph),
+                x1: (fx1.round().max(0.0) as u32).min(pw),
+                y1: (fy1.round().max(0.0) as u32).min(ph),
+            };
+            let inside = match bound {
+                Some(outer) => outer.intersect(board),
+                None => board,
+            };
+            if inside.is_empty() {
+                return Some(());
+            }
+            // The ground is the frame's own rectangle, filled. Laid
+            // down as the shape it is, so it goes through the same
+            // arithmetic every other filled rectangle does.
+            if let Some(ground) = background {
+                vector(
+                    doc,
+                    child,
+                    &VectorShape::Rect {
+                        width: *width,
+                        height: *height,
+                        radius: 0.0,
+                    },
+                    Some(*ground),
+                    None,
+                    None,
+                    t,
+                    alpha,
+                    out,
+                )?;
+                // The ground is inside the frame like everything
+                // else: a frame hanging off the page shows only the
+                // part of it that is on the page.
+                let (at, quad) = mask_texture(doc, child, None, None, Some(inside), parent, out)?;
+                for v in &mut out.vertices[mark.0..] {
+                    v.mask = quad;
+                }
+                for item in &mut out.draws[mark.1..] {
+                    item.mask = at;
+                }
+            }
+            collect(doc, child, t, opacity, Some(inside), out)?;
+            // Everything inside took the bound as it was collected,
+            // and the frame itself has no mask — it was declined
+            // above if it had one — so there is nothing left to put
+            // over what was drawn.
+            return Some(());
+        }
+        // A copy draws what the original draws, where the copy is: the
+        // original's own placement is undone first, so moving the
+        // original moves only the original. Where the copy stands in
+        // for the original's own children with layers of its own, those
+        // are what it draws, in the copy's own space.
+        //
+        // Composited like the original would be — nothing of its own to
+        // apply — it is drawn straight in, which is the reading the CPU
+        // renderer takes. A copy that is faded, blended or masked goes
+        // on a surface of its own there, and that is a different
+        // picture from this, so it goes back.
+        NodeKind::Instance { of, .. } => {
+            if alone || node.opacity < 1.0 || node.mask.is_some() {
+                return None;
+            }
+            let master = doc.node(*of).ok()?;
+            let back = chitrakar_render::invert(master.transform)?;
+            let stand_ins = if chitrakar_render::takes_stand_ins(doc, *of) {
+                chitrakar_render::copy_children(doc, child).ok()?
+            } else {
+                Vec::new()
+            };
+            if stand_ins.is_empty() {
+                one(doc, *of, t.compose(back), opacity, bound, out)?;
+            } else {
+                for part in stand_ins {
+                    one(doc, part, t, opacity, bound, out)?;
+                }
+            }
+            return Some(());
+        }
+        _ => return None,
+    }
+    if alone {
+        // The mask and the opacity go on the quad that lays the
+        // surface down, not on what was drawn into it.
+        mark = (out.vertices.len(), out.draws.len());
+        let quad = out.push(page_quad(
+            doc,
+            node.opacity * opacity,
+            [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
+            [0.0; 4],
+            [0.0; 3],
+        ));
+        out.draws.push(Item::of(Draw::Close {
+            quad,
+            blend: node.blend,
+        }));
+    }
+    // The mask, once, over everything the layer drew: the CPU
+    // renderer rasterizes the coverage and the fragments read it.
+    // What a layer is held to rides the same texture — two
+    // coverages a layer is held back by are one coverage, and a
+    // fragment reads it once.
+    if node.mask.is_some() || held_to.is_some() || bound.is_some() {
+        let (at, box_) = mask_texture(doc, child, node.mask.as_ref(), held_to, bound, parent, out)?;
+        for v in &mut out.vertices[mark.0..] {
+            v.mask = box_;
+        }
+        for item in &mut out.draws[mark.1..] {
+            item.mask = at;
         }
     }
     Some(())
@@ -3016,6 +3068,66 @@ mod tests {
 
     /// A frame: a group with a size of its own, a ground painted inside
     /// it, and everything under it held to its rectangle.
+    /// A copy of another layer, drawn where the copy is.
+    #[test]
+    fn a_copy_draws_what_it_is_a_copy_of() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(90, 60, ColorMode::Rgb);
+        let round = VectorShape::Ellipse { rx: 10.0, ry: 8.0 };
+        let master = add(
+            &mut doc,
+            filled("master", round.clone(), RED),
+            Transform::translation(6.0, 20.0),
+        );
+        doc.apply(Command::AddNode {
+            parent: doc.root(),
+            index: 1,
+            node: Box::new(Node::instance("copy", master)),
+        })
+        .unwrap();
+        let copy = doc.children_of(doc.root()).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(50.0, 24.0),
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc), "a plain copy");
+        let drawn = gpu.render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &chitrakar_render::render(&doc).unwrap());
+        assert!(mean < 0.004, "a copy: mean {mean:.5}, worst {worst:.3}");
+        assert!(drawn.get(16, 28).a > 0.99, "the original is there");
+        assert!(drawn.get(60, 32).a > 0.99, "and so is the copy");
+        assert!(drawn.get(35, 30).a < 0.01, "with page between them");
+
+        // Moving the original moves only the original: the copy draws
+        // what it draws where the copy is, so the original's own
+        // placement is undone first.
+        let mut moved = doc.clone();
+        moved
+            .apply(Command::SetTransform {
+                id: master,
+                transform: Transform::translation(6.0, 40.0),
+            })
+            .unwrap();
+        let after = gpu.render(&moved).unwrap();
+        let (mean, worst) = difference(&after, &chitrakar_render::render(&moved).unwrap());
+        assert!(mean < 0.004, "moved: mean {mean:.5}, worst {worst:.3}");
+        assert!(after.get(60, 32).a > 0.99, "the copy stayed where it was");
+
+        // Faded, blended or masked, the CPU draws a copy on a surface of
+        // its own, which is a different picture from this.
+        let mut faded = doc.clone();
+        faded
+            .apply(Command::SetOpacity {
+                id: copy,
+                opacity: 0.5,
+            })
+            .unwrap();
+        assert!(!GpuRenderer::can_render(&faded), "a copy composited whole");
+    }
+
     #[test]
     fn a_frame_paints_its_ground_and_keeps_its_contents_inside() {
         let Some(gpu) = gpu_or_skip() else {

@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~345),
+- **Verify before committing:** `cargo test --workspace` (~346),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~908 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -770,11 +770,20 @@ without reading anything else.*
   composited like its contents, a frame is nothing but a narrower
   region to paint in, which is how the CPU renderer reads it too — so
   an adjustment inside a frame sees the page below the frame on both.
+  A copy of another layer draws what that layer draws, where the copy
+  is: the original's placement is undone and the copy's applied, so
+  moving the original moves only the original, and where the copy
+  stands in for the original's own children with layers of its own,
+  those are what it draws. Drawing one layer where its parent puts it
+  is its own function here now (`one`), which is what let a copy ask
+  for the thing it is a copy of without a parent to have walked down
+  from.
   It declines
   anything else — effects; a layer held to a base like that; a frame
   that is turned, composited as a whole, or whose box does not land on
-  whole pixels, each of which the CPU draws another way; a paint
-  layer and a copy of another layer; pixelate (whose neighbourhood is a block
+  whole pixels, each of which the CPU draws another way; a copy of
+  another layer that is faded, blended or masked, for the same reason;
+  a paint layer; pixelate (whose neighbourhood is a block
   rather than an axis); ink authored
   for a press (a gradient stop included); and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
@@ -1174,8 +1183,9 @@ without reading anything else.*
      live effects (a drop shadow, an inner shadow, an outline), which
      are the blur passes again read off a layer's own silhouette rather
      than off what is under it; pixelate, whose neighbourhood is a
-     block rather than an axis; and the two node kinds it has never
-     drawn — a paint layer and a copy of another layer. What is
+     block rather than an axis; and the one node kind it has never
+     drawn — a paint layer, whose strokes carry a softness, an erase
+     and a heal the stroke geometry does not. What is
      left to *wire*: it draws the page at its own size, and the app
      shows a viewport — a scale and an origin — so presenting from it
      means `gather` and the shader learning a view transform, which is
