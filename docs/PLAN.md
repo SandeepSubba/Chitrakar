@@ -1148,7 +1148,18 @@ without reading anything else.*
   approximation is square where this is round, and a staircase edge
   shows the moment the answer is traced back into a shape. Beyond the
   page counts as outside, so "select all, then shrink" insets from the
-  page's own edge. Softness is left alone — how far a region reaches
+  page's own edge — and one cell of margin says that, whatever the
+  distance: growing reads only cells inside the grid, and shrinking
+  needs a single ring of outside, since the nearest outside cell to any
+  interior point lies on the border. A margin as thick as the distance,
+  which is what it asked for at first, made a grow of a million pixels
+  an allocation nobody can serve, and a process that aborts is, in a
+  browser, the editor going. A softness has the same shape of failure
+  and now the same kind of answer: the box that averages a line is
+  primed by walking the window once, so a radius wider than the line is
+  clamped to it — a fade over the whole of a line is all there is to
+  say past that. Both are reachable by typing a number and by opening a
+  document that says one. Softness is left alone — how far a region reaches
   and how sharply it ends are separate questions.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
