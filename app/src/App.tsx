@@ -1561,6 +1561,19 @@ export function App() {
       alert(`Select: ${err}`);
     }
   };
+  /** The way back: a layer's mask, out into the page as a region. A
+   * mask is moved and resized on canvas but not reshaped there, and
+   * this is what reshaping one is — take it out, add to it, soften it,
+   * grow it, hand it back. */
+  const pickLayerMask = () => {
+    if (!session || selected === null) return;
+    try {
+      session.pick_layer_mask(selected, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${err}`);
+    }
+  };
   /** Hand the region to the picked layer as its mask. This is what a
    * selection is for in a non-destructive editor: nothing is cut out,
    * the layer is simply held to the part of it that was picked. */
@@ -6124,6 +6137,9 @@ export function App() {
             </MenuItem>
             <MenuItem icon="mask" onClick={() => maskFromSelection(false)}>
               Mask this layer with what is picked
+            </MenuItem>
+            <MenuItem icon="marquee" onClick={pickLayerMask}>
+              Pick out this layer's mask
             </MenuItem>
             <MenuItem icon="trash" onClick={() => maskFromSelection(true)}>
               Hide what is picked, from this layer

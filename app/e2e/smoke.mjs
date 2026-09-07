@@ -8305,6 +8305,76 @@ assert(
   promptAnswer = "";
 }
 
+// 9aq. A mask handed back out as a region. A mask is moved and resized
+// on canvas but not reshaped there — and this is what reshaping one is:
+// take it out, change it, hand it back.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#cc3333");
+  await pickTool("Rect");
+  await page.mouse.move(...at(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 180), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const isRed = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return r > 150 && g < 120 && bl < 120;
+  };
+
+  // Hand it a region as its mask, then let the region go.
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...at(60, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(160, 140), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  // The layer to hand it to has to be the one picked: dragging a
+  // marquee lets go of the layers, which is what it is for.
+  const holdTheLayer = async () => {
+    await pickTool("Move");
+    await page.mouse.click(...at(100, 100));
+    await page.waitForTimeout(250);
+    await menuClick("Edit", "Mask this layer with what is picked");
+    await page.waitForTimeout(450);
+  };
+  await holdTheLayer();
+  assert(await isRed(100, 100), "the layer shows inside the mask");
+  assert(!(await isRed(220, 100)), "and not outside it");
+  // Let the region go — with a select tool in hand, since Escape means
+  // whichever of the two the tool is about — and pick the layer again.
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator(".ants").count()) === 0,
+    "with nothing picked out any more",
+  );
+  await pickTool("Move");
+  await page.mouse.click(...at(100, 100));
+  await page.waitForTimeout(250);
+
+  // Take the mask back out as a region, grow it, and hand it back: the
+  // layer shows further than it did, which no handle on a mask can do.
+  await menuClick("Edit", "Pick out this layer's mask");
+  await page.waitForTimeout(400);
+  assert((await page.locator(".ants").count()) === 1, "the mask came out");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(250);
+  const grow = page.locator('[aria-label="Grow what is picked"]');
+  await grow.fill("40");
+  await grow.press("Enter");
+  await page.waitForTimeout(500);
+  await holdTheLayer();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  assert(await isRed(190, 100), "the mask reaches further than it did");
+  assert(!(await isRed(260, 100)), "though not everywhere");
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

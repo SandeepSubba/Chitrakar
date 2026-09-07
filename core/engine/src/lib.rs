@@ -3020,6 +3020,29 @@ impl Session {
         self.pick_region(shape, transform, how)
     }
 
+    /// Pick out a layer's mask, as a region over the page.
+    ///
+    /// The way back from "mask this layer with what is picked". A mask
+    /// is moved and resized on canvas but not reshaped there, and this
+    /// is what reshaping one is: take it out as a region, add to it,
+    /// take from it, soften it, grow it, and hand it back. A mask is
+    /// written in the space its layer is placed in and a region in the
+    /// page's own, so it is carried across — the same carry as the way
+    /// in, read the other way round, softness included.
+    pub fn pick_layer_mask(&mut self, id: NodeId, how: &str) -> Result<(), EngineError> {
+        let Some(mask) = self.doc.node(id)?.mask.clone() else {
+            return Err(EngineError::BadCommand("that layer has no mask".into()));
+        };
+        let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        let Some(out) = Self::seen_from(parent).and_then(|back| Self::carried_into(&mask, back))
+        else {
+            return Err(EngineError::BadCommand(
+                "this layer sits in a space with no thickness".into(),
+            ));
+        };
+        self.pick_mask(out, how)
+    }
+
     /// The page's own space seen from `space` — the transform that
     /// carries a page-space thing into it.
     fn seen_from(space: Transform) -> Option<Transform> {
@@ -7681,6 +7704,91 @@ mod tests {
         assert!(
             !session.selection_covers(60.0, 40.0),
             "without closing it over"
+        );
+    }
+
+    #[test]
+    fn a_layer_hands_its_mask_back_as_a_region() {
+        // The way back from "mask this layer with what is picked", and
+        // what reshaping a mask is: take it out, change it, hand it
+        // back. It has to survive the round trip whole — the shape
+        // through the transforms, and the softness as the distance it
+        // is, which is the part a bare number is easiest to lose.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("twice as big")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 10.0,
+                    f: 4.0,
+                },
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: filled_rect("sheet", 40.0, 20.0),
+            })
+            .unwrap();
+        let sheet = session.document().children_of(group).unwrap()[0];
+        assert!(
+            session.pick_layer_mask(sheet, "replace").is_err(),
+            "a layer with no mask has none to hand back"
+        );
+
+        // Give it one the way the editor does: pick a region and hand it
+        // over. Then take it out again and it should be the region.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 12.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(3.0).unwrap();
+        session.mask_from_selection(sheet, false).unwrap();
+        session.pick_none().unwrap();
+        session.pick_layer_mask(sheet, "replace").unwrap();
+        let back = session.selection().unwrap();
+        assert!(
+            (back.feather - 3.0).abs() < 1e-3,
+            "as soft as it went in, through a space scaled by two: {}",
+            back.feather
+        );
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        let box_ = session.selection_bounds().unwrap();
+        assert!(
+            near(box_, [20.0, 12.0, 50.0, 32.0]),
+            "and where it went in: {box_:?}"
+        );
+
+        // A region like any other from there: grow it, hand it back, and
+        // the layer is held to the bigger one.
+        session.grow_selection(4.0).unwrap();
+        session.mask_from_selection(sheet, false).unwrap();
+        session.pick_layer_mask(sheet, "replace").unwrap();
+        let grown = session.selection_bounds().unwrap();
+        assert!(
+            near(grown, [16.0, 8.0, 54.0, 36.0]),
+            "four further out on every side, still: {grown:?}"
         );
     }
 

@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~347),
+- **Verify before committing:** `cargo test --workspace` (~348),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~908 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~914 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1091,7 +1091,13 @@ without reading anything else.*
   in hand is the clearest signal of which of the two "select all" is
   meant; both are in the Edit menu either way, beside "pick out the rest
   instead" and the four things a region is good for. Mask this layer
-  with what is picked, and its opposite — hide what is picked, which is
+  with what is picked, and the way back — a layer's mask, handed out
+  into the page as a region. A mask is moved and resized on canvas but
+  not reshaped there, and this is what reshaping one is: take it out,
+  add to it, take from it, soften it, grow it, hand it back. The same
+  carry as the way in, read the other way round, so the shape goes
+  through the transforms and the softness through the scale. And its
+  opposite — hide what is picked, which is
   what deleting a selection means done by holding the layer to
   everything *but* the region, so the layer is whole underneath and the
   region can be changed its mind about. Fill it, which turns the region
@@ -1192,6 +1198,8 @@ without reading anything else.*
   by a true distance, kept by name and picked up again. And used:
   masked into a layer or hidden from it, filled as a shape, cropped to,
   copied out or exported as a picture in the shape it was picked in.
+  And back the other way: a layer's mask comes out as a region, which
+  is how a mask gets reshaped at all.
   Marching ants say where the edge is; a wash says which side is picked
   and how soft the edge is, which an outline cannot.
 - **Next up (rough priority):**
@@ -1251,7 +1259,8 @@ without reading anything else.*
   baseline, at the em the face is scaled to — though a synthesized
   italic lean and a loaded font are the reader's to supply; a mask is an ellipse, a rectangle, or
   another shape handed down to the layer below, moved and resized on
-  canvas but not reshaped there; PDF export is live where PDF has the
+  canvas but not reshaped there — reshaping one goes the long way
+  round, out into the page as a region and back; PDF export is live where PDF has the
   words (paths, solid fills and strokes, groups, images, opacity, blend,
   text in embedded faces, subset to the glyphs used) and the engine's
   pixels where it does not (gradients, effects, masks, varying strokes;

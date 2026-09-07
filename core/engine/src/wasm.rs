@@ -655,6 +655,14 @@ impl WasmSession {
         self.inner.grow_selection(by).map_err(to_js)
     }
 
+    /// Pick out a layer's mask as a region over the page — the way back
+    /// from handing a region to a layer, and what reshaping a mask is.
+    pub fn pick_layer_mask(&mut self, id: f64, how: &str) -> Result<(), JsError> {
+        self.inner
+            .pick_layer_mask(NodeId(id as u64), how)
+            .map_err(to_js)
+    }
+
     /// Pick out the shape a layer covers — the other way round from
     /// handing a region to a layer.
     pub fn pick_from_layer(&mut self, id: f64, how: &str) -> Result<(), JsError> {
