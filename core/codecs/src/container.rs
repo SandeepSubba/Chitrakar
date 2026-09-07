@@ -191,6 +191,13 @@ mod tests {
     /// has lost. `Debug` prints what is there. The order is the tree's
     /// own, since the nodes live in a hash map and its order says
     /// nothing.
+    ///
+    /// Every accessor the document has, and a new piece of document
+    /// state has to be added here — the same rule the shared fixture
+    /// keeps for commands. Anything left out is invisible to the audit,
+    /// which is exactly as bad as not having written the audit: the
+    /// regions a document keeps by name were added a chunk after this
+    /// and slipped through until they were named here too.
     fn spelled_out(doc: &Document) -> String {
         fn walk(doc: &Document, id: chitrakar_doc::NodeId, out: &mut String) {
             out.push_str(&format!("{id:?} {:#?}\n", doc.node(id).unwrap()));
@@ -199,11 +206,16 @@ mod tests {
             }
         }
         let mut out = format!(
-            "{:#?}\n{:#?}\n{:#?}\n{:#?}\n",
+            // On one line each: a difference is reported as the line it
+            // fell on, and a pretty-printed list puts its own bracket on
+            // a line of its own, which says nothing about what changed.
+            "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\nprofile {:?} bytes\n",
             doc.meta,
             doc.selection(),
             doc.guides(),
-            doc.swatches()
+            doc.swatches(),
+            doc.regions(),
+            doc.cmyk_profile_bytes().map(<[u8]>::len)
         );
         for (id, resource) in doc.resources() {
             out.push_str(&format!(
