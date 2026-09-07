@@ -199,6 +199,11 @@ pub struct Session {
     /// the file and never reaches an export.
     display_cms: Option<chitrakar_color::cms::DisplayCms>,
     gamut_warn: bool,
+    /// One layer to show on its own, and nothing else. A setting of the
+    /// view like soft proofing rather than an edit: what a layer looks
+    /// like alone is a question about looking, so it goes nowhere near
+    /// the document, the history or the file.
+    solo: Option<NodeId>,
     /// Whether any layer is a live copy of another. Kept rather than
     /// looked up: the dirty region has to ask on every command, and the
     /// answer is no for almost every document.
@@ -251,6 +256,7 @@ impl Session {
             soft_proof: false,
             display_cms: None,
             gamut_warn: false,
+            solo: None,
             has_copies: false,
         }
     }
@@ -3785,6 +3791,13 @@ impl Session {
             self.scratch = None;
             self.stale_all = true;
         }
+        // A layer being shown on its own can go — by an undo as easily
+        // as by a delete — and a view of nothing is not what anybody
+        // asked for, so the page comes back.
+        if self.solo.is_some_and(|id| self.doc.node(id).is_err()) {
+            self.solo = None;
+            self.stale_all = true;
+        }
         let doc_clip = self.stale.take();
         let everything = std::mem::take(&mut self.stale_all);
         match (everything, doc_clip) {
@@ -3820,7 +3833,14 @@ impl Session {
                 // against stale surroundings, is discarded. The reach is a
                 // document-space figure, so it scales with the view too.
                 let pad = (chitrakar_render::filter_reach(&self.doc) as f32 * scale).ceil() as u32;
-                if pad == 0 {
+                // One layer on its own: the page's own framing with
+                // nothing but it drawn on it. No filter stack under it
+                // to reach across, so no padded region either.
+                if let Some(id) = self.solo {
+                    let cache = self.cache.as_mut().unwrap();
+                    chitrakar_render::render_one_at(&self.doc, id, cache, clip, view)?;
+                    self.pixels_recomputed += clip.area();
+                } else if pad == 0 {
                     let cache = self.cache.as_mut().unwrap();
                     chitrakar_render::render_region_at(&self.doc, cache, clip, view)?;
                     self.pixels_recomputed += clip.area();
@@ -4410,6 +4430,29 @@ impl Session {
 
     /// Toggle display soft-proofing through the document's press profile.
     /// Fails when proofing is requested without a loaded profile.
+    /// Show one layer on its own, or `None` for the page again.
+    ///
+    /// A setting of the view rather than an edit: nothing about the
+    /// document changes, so nothing goes into the history or the file,
+    /// and the page comes back exactly as it was when it is let go of.
+    /// A layer that has gone takes the setting with it, since a view of
+    /// nothing is not what anybody asked for.
+    pub fn set_solo(&mut self, id: Option<NodeId>) -> bool {
+        let want = id.filter(|id| self.doc.node(*id).is_ok());
+        if want == self.solo {
+            return false;
+        }
+        self.solo = want;
+        // Everything, since what is on the page is a different picture.
+        self.stale_all = true;
+        true
+    }
+
+    /// The layer being shown on its own, if any.
+    pub fn solo(&self) -> Option<NodeId> {
+        self.solo
+    }
+
     pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), EngineError> {
         if proof && self.proof_cms.is_none() {
             let Some(bytes) = self.doc.cmyk_profile_bytes() else {
@@ -7947,6 +7990,75 @@ mod tests {
             // Whatever any of that left, the page still has to draw.
             let _ = session.render();
         }
+    }
+
+    #[test]
+    fn one_layer_can_be_looked_at_on_its_own() {
+        // What a layer is by itself is a question every stack of layers
+        // eventually asks, and it is about looking rather than about
+        // the document — so nothing here goes into the history or the
+        // file, and the page comes back exactly as it was.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        let under = add_rect(&mut session, "under", 60.0, 40.0);
+        let over = add_rect(&mut session, "over", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: over,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetKind {
+                id: over,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.3,
+                        b: 0.9,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let steps = session.history_labels().0.len();
+
+        let page = session.render_cached().unwrap().0.clone();
+        assert!(page.get(40, 20).a > 0.99, "the page has both on it");
+        let blue = page.get(15, 15);
+        assert!(blue.b > blue.r, "the top one over the bottom one");
+
+        assert!(session.set_solo(Some(over)), "shown on its own");
+        assert!(!session.set_solo(Some(over)), "and asking twice is nothing");
+        let alone = session.render_cached().unwrap().0.clone();
+        assert!(alone.get(40, 20).a < 0.01, "what was under it is not drawn");
+        let still = alone.get(15, 15);
+        assert!(still.b > still.r, "and it is drawn where it was");
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps,
+            "with nothing about it in the history"
+        );
+
+        // Let go of, and the page is the page again — exactly, since a
+        // view is not an edit.
+        assert!(session.set_solo(None));
+        let back = session.render_cached().unwrap().0.clone();
+        assert_eq!(back.to_srgb8(), page.to_srgb8(), "the page comes back");
+
+        // A layer that goes takes the view with it rather than leaving
+        // it pointed at nothing — by an undo as readily as by a delete.
+        session.set_solo(Some(over));
+        session.apply(Command::RemoveNode { id: over }).unwrap();
+        assert!(session.render_cached().is_ok(), "the page still draws");
+        assert_eq!(session.solo(), None, "and it is the page again");
+        let _ = under;
     }
 
     #[test]

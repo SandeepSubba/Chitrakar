@@ -8394,6 +8394,67 @@ assert(
   assert(!(await isRed(260, 100)), "though not everywhere");
 }
 
+// 9ar. One layer looked at on its own. What a layer is by itself is a
+// question every stack of layers eventually asks, and it is about
+// looking rather than about the document — so it leaves no mark on the
+// history and the page comes back exactly as it was.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  const rect = async (colour, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", colour);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await rect("#cc3333", 10, 10, 290, 190);
+  await rect("#3366cc", 40, 40, 140, 140);
+  const isRed = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return r > 150 && g < 120 && bl < 120;
+  };
+  const isBlue = async (x, y) => {
+    const [r, , bl] = await canvasPixel(x, y);
+    return bl > 140 && r < 120;
+  };
+  assert(await isRed(220, 100), "the page has the big one on it");
+  assert(await isBlue(90, 90), "with the small one over it");
+  const steps = await page.locator(".history li button").count();
+
+  // Alt on the eye asks the other question the eye is about.
+  const eye = page
+    .locator(".panel ul li", { hasText: "Rect 2" })
+    .first()
+    .locator("button.visibility");
+  await eye.click({ modifiers: ["Alt"] });
+  await page.waitForTimeout(450);
+  assert(await isBlue(90, 90), "on its own, it is still drawn");
+  assert(!(await isRed(220, 100)), "and what was under it is not");
+  assert(
+    (await page.locator(".history li button").count()) === steps,
+    "with nothing about it in the history",
+  );
+
+  // Alt again puts the page back.
+  await eye.click({ modifiers: ["Alt"] });
+  await page.waitForTimeout(450);
+  assert(await isRed(220, 100), "the page comes back");
+  assert(await isBlue(90, 90), "with both on it again");
+
+  // A plain click is still the eye it was.
+  await eye.click();
+  await page.waitForTimeout(400);
+  assert(!(await isBlue(90, 90)), "a plain click still hides it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(await isBlue(90, 90), "and undo shows it again");
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

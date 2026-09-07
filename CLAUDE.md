@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~353)
+cargo test --workspace                      # engine tests (~354)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
@@ -62,7 +62,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~916 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~925 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or

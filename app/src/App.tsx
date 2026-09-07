@@ -1258,6 +1258,10 @@ export function App() {
   const [wandTolerance, setWandTolerance] = useState(0.12);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
+  /** The layer being looked at on its own, or null. A setting of the
+   * view rather than an edit: nothing about the document changes, so
+   * nothing goes into the history or the file. */
+  const [solo, setSolo] = useState<NodeId | null>(null);
   /** The regions this document has kept by name. A region is often the
    * expensive thing on a page — a sky wanded out between branches — and
    * the only place to put one used to be the layer it was handed to. */
@@ -1300,6 +1304,15 @@ export function App() {
         setKept(JSON.parse(s.kept_regions_json()) as string[]);
       } catch {
         setKept([]);
+      }
+      // Read back rather than remembered: a layer being looked at on
+      // its own can go — by an undo as readily as by a delete — and the
+      // engine puts the page back when it does.
+      try {
+        const alone = s.solo();
+        setSolo(alone < 0 ? null : (alone as NodeId));
+      } catch {
+        setSolo(null);
       }
       // The wash, when it is asked for. Made here rather than in an
       // effect because this is the one place that knows the region has
@@ -8469,13 +8482,29 @@ export function App() {
                   <span className="fold" />
                 )}
                 <button
-                  className="visibility"
+                  className={`visibility${solo === l.id ? " active" : ""}`}
                   onClick={(e) => {
                     e.stopPropagation();
+                    // Alt on the eye asks the other question the eye is
+                    // about: not "is this one shown" but "what does this
+                    // one look like by itself". Alt again puts the page
+                    // back, and so does alt on any other row.
+                    if (e.altKey) {
+                      if (!session) return;
+                      const want = solo === l.id ? null : l.id;
+                      session.set_solo(want === null ? -1 : want);
+                      setSolo(want);
+                      refresh(session);
+                      return;
+                    }
                     run({ SetVisible: { id: l.id, visible: !l.visible } });
                   }}
                   aria-pressed={l.visible}
-                  title={l.visible ? "Hide layer" : "Show layer"}
+                  title={
+                    solo === l.id
+                      ? "Shown on its own — alt-click to show the page again"
+                      : `${l.visible ? "Hide" : "Show"} layer (alt-click to see it on its own)`
+                  }
                 >
                   <Icon name={l.visible ? "eye" : "eyeOff"} size={15} />
                 </button>

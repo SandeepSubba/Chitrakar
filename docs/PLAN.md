@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~353),
+- **Verify before committing:** `cargo test --workspace` (~354),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~916 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~925 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1281,6 +1281,17 @@ without reading anything else.*
      paints pixels rather than laying down live strokes, and text
      shaping worth the name (`rustybuzz`/`parley`, weights, a face
      chosen per run rather than per block).
+- **One layer on its own:** alt on a layer's eye asks the other
+  question the eye is about — not "is this one shown" but "what does
+  this one look like by itself". The page keeps its own framing and
+  edge with that layer drawn on it and nothing else, its effects and
+  mask and all, since what is wanted is the layer as the page draws it
+  rather than a stripped-down version. It is a setting of the *view*,
+  like soft proofing: nothing about the document changes, so nothing
+  goes into the history or the file, and the page comes back exactly as
+  it was — the same bytes, not a redraw that happens to agree. A layer
+  that goes takes the view with it, by an undo as readily as by a
+  delete, since a view of nothing is not what anybody asked for.
 - **Chrome:** "?" (or View › Keys and gestures) opens a sheet of every
   key and gesture, since half of what this editor can do is a gesture
   nobody would guess at. Document actions live in a File/Edit/Page/View menu bar — Edit

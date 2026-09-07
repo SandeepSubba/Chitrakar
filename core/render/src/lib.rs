@@ -600,6 +600,33 @@ pub fn render_region_at(
     clip: ClipRect,
     view: Transform,
 ) -> Result<(), DocError> {
+    region_at(doc, surface, clip, view, None)
+}
+
+/// The same, of one layer on its own rather than of the whole page.
+///
+/// The page is still the page — the same edge, the same framing — with
+/// one layer drawn on it and nothing else. What that layer is on its
+/// own is a question every stack of layers eventually asks, and it is
+/// about looking rather than about the document, so it is a setting of
+/// the view like soft proofing rather than an edit.
+pub fn render_one_at(
+    doc: &Document,
+    id: NodeId,
+    surface: &mut Surface,
+    clip: ClipRect,
+    view: Transform,
+) -> Result<(), DocError> {
+    region_at(doc, surface, clip, view, Some(id))
+}
+
+fn region_at(
+    doc: &Document,
+    surface: &mut Surface,
+    clip: ClipRect,
+    view: Transform,
+    only: Option<NodeId>,
+) -> Result<(), DocError> {
     if clip.is_empty() {
         return Ok(());
     }
@@ -627,7 +654,19 @@ pub fn render_region_at(
     if inside.is_empty() {
         return Ok(());
     }
-    render_group(doc, doc.root(), surface, inside, view)
+    match only {
+        // One layer, where the page puts it, on the bare page: its own
+        // effects and mask and all, since what is wanted is the layer
+        // as the page draws it and not a stripped-down version of it.
+        Some(id) => render_layer(
+            doc,
+            id,
+            surface,
+            inside,
+            view.compose(ancestor_space(doc, id)),
+        ),
+        None => render_group(doc, doc.root(), surface, inside, view),
+    }
 }
 
 fn render_group(

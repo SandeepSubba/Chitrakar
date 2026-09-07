@@ -671,6 +671,18 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Show one layer on its own, or the whole page again with a
+    /// negative id. A setting of the view: nothing about the document
+    /// changes, so nothing goes into the history or the file.
+    pub fn set_solo(&mut self, id: f64) -> bool {
+        self.inner.set_solo((id >= 0.0).then(|| NodeId(id as u64)))
+    }
+
+    /// The layer being shown on its own, or -1.
+    pub fn solo(&self) -> f64 {
+        self.inner.solo().map_or(-1.0, |id| id.0 as f64)
+    }
+
     /// Keep what is picked out under a name, to be picked up again. A
     /// name already kept is replaced.
     pub fn keep_selection(&mut self, name: &str) -> Result<(), JsError> {
