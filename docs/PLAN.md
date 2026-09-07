@@ -1110,7 +1110,12 @@ without reading anything else.*
   the row the palette's colours sit in, taking the marquee's own
   modifiers — shift adds, alt takes away, both keep the overlap — since
   a region arriving from a chip is a region arriving; ctrl-click
-  forgets one, which is the gesture the combining leaves free.
+  forgets one, which is the gesture the combining leaves free. They
+  travel with the page like everything else written in its own space —
+  the third thing `map_page`'s carry now takes along, and the one that
+  most needed it: what is picked out is on screen and would be seen to
+  be wrong after a quarter turn, where a kept region is not looked at
+  again until the day it is picked up.
   A brush painted with a region picked out is confined to it, and stays
   confined after the region is let go of — which is what confining
   means, and why the region rides on the stroke (`PaintStroke::clip`)

@@ -7299,6 +7299,36 @@ mod tests {
         // One entry each in history, and undo puts the list back.
         session.undo().unwrap();
         assert_eq!(session.kept_regions().len(), 2, "sky came back");
+
+        // A kept region is written in the page's own space, so it
+        // travels with the page — and more plainly than the selection
+        // does, since what is picked out is on screen and would be seen
+        // to be wrong, where a kept region is not looked at again until
+        // the day it is picked up.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(5.0, 5.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("corner").unwrap();
+        session.pick_none().unwrap();
+        session.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        session.pick_kept(0, "replace").unwrap();
+        let turned = session.selection_bounds().unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        // A quarter turn right on a 100x60 page: the box at (5,5)-(25,15)
+        // lands at (45,5)-(55,25) on the 60x100 page it becomes.
+        assert!(
+            near(turned, [45.0, 5.0, 55.0, 25.0]),
+            "the kept region turned with the page: {turned:?}"
+        );
     }
 
     #[test]

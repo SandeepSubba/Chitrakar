@@ -401,9 +401,10 @@ impl Document {
     /// rather than out of a table of which becomes which.
     fn map_page(&mut self, m: Transform) {
         /// A coverage carried through a page transform. Written once
-        /// because two things want it: a layer's mask, and the region
-        /// picked out of the page, which is a mask over the page in
-        /// exactly the same sense.
+        /// because three things want it: a layer's mask, the region
+        /// picked out of the page, and every region the page has kept
+        /// by name — all masks over the page in exactly the same
+        /// sense.
         fn carry_mask(mask: &mut Mask, m: Transform) {
             match &mut mask.kind {
                 MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
@@ -466,6 +467,13 @@ impl Document {
         // than the one it was drawn round.
         if let Some(selection) = &mut self.selection {
             carry_mask(selection, m);
+        }
+        // And so are the regions kept by name, for the same reason and
+        // more so: what is picked out is on screen and would be seen to
+        // be wrong, where a kept region is not looked at again until
+        // the day it is picked up.
+        for kept in &mut self.regions {
+            carry_mask(&mut kept.mask, m);
         }
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
         let (w, h) = (self.meta.width as f32 / 2.0, self.meta.height as f32 / 2.0);
