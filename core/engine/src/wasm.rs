@@ -663,6 +663,27 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Keep what is picked out under a name, to be picked up again. A
+    /// name already kept is replaced.
+    pub fn keep_selection(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.keep_selection(name).map_err(to_js)
+    }
+
+    /// Pick out a region kept earlier, combining it the way `how` says.
+    pub fn pick_kept(&mut self, index: usize, how: &str) -> Result<(), JsError> {
+        self.inner.pick_kept(index, how).map_err(to_js)
+    }
+
+    /// Forget a kept region.
+    pub fn forget_region(&mut self, index: usize) -> Result<(), JsError> {
+        self.inner.forget_region(index).map_err(to_js)
+    }
+
+    /// The names of the regions kept, in order, as JSON.
+    pub fn kept_regions_json(&self) -> String {
+        serde_json::to_string(&self.inner.kept_regions()).unwrap_or_else(|_| "[]".into())
+    }
+
     /// What is picked out as a wash over what is not: a page-sized PNG,
     /// clear where the region is and tinted where it is not.
     pub fn selection_veil(&self) -> Result<Vec<u8>, JsError> {

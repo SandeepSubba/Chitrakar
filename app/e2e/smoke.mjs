@@ -73,10 +73,13 @@ const canvasPixel = (x, y) =>
  * test that wants a "no" says so for the length of one action. */
 let dialogAnswer = "accept";
 let lastDialog = "";
+/** What a prompt is answered with. Ignored by an alert and a confirm,
+ * which have nothing to type into. */
+let promptAnswer = "";
 page.on("dialog", async (d) => {
   lastDialog = d.message();
   if (dialogAnswer === "dismiss") await d.dismiss();
-  else await d.accept();
+  else await d.accept(promptAnswer);
 });
 
 const assert = (cond, msg) => {
@@ -8213,6 +8216,93 @@ assert(
   await wash.click();
   await page.waitForTimeout(400);
   assert((await page.locator(".veil").count()) === 0, "and it goes away again");
+}
+
+// 9ap. A region kept by name. A region is often the expensive thing on
+// a page — a sky wanded out between branches — and the only place to put
+// one used to be the layer it was handed to. Kept, it comes back as the
+// mask it was, softness and inside-out included.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  const keep = page.locator('[aria-label="Keep what is picked"]');
+  assert(
+    (await keep.count()) === 0,
+    "nothing picked out, nothing to keep",
+  );
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(140, 140), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(await keep.isVisible(), "with a region picked, it can be kept");
+
+  promptAnswer = "the sky";
+  await keep.click();
+  await page.waitForTimeout(400);
+  const chip = page.locator('[aria-label="Kept region the sky"]');
+  assert(await chip.isVisible(), "and the document keeps it by name");
+  assert(
+    (await chip.textContent()) === "the sky",
+    "with the name on it",
+  );
+
+  // Something else picked, and then the kept one back.
+  await page.mouse.move(...at(200, 30));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 90), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const antBox = async () => {
+    const pts = (
+      await page.$$eval(".ants polygon", (els) =>
+        els.map((el) => el.getAttribute("points")),
+      )
+    )
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    return [Math.min(...xs), Math.max(...xs)];
+  };
+  const elsewhere = await antBox();
+  await chip.click();
+  await page.waitForTimeout(400);
+  const restored = await antBox();
+  assert(
+    restored[0] < elsewhere[0] - 10,
+    `the kept region came back where it was (${restored} against ${elsewhere})`,
+  );
+
+  // Shift adds it to what is picked rather than replacing it, the same
+  // as a second drag would.
+  await page.mouse.move(...at(200, 30));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 90), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  await chip.click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(400);
+  const both = await antBox();
+  assert(
+    both[0] < elsewhere[0] - 10 && both[1] > restored[1] + 10,
+    `shift added it to what was picked (${both})`,
+  );
+
+  // Ctrl-click forgets it — free of the three the combining uses — and
+  // undo brings it back, since keeping is an edit like any other.
+  await chip.click({ modifiers: ["Control"] });
+  await page.waitForTimeout(400);
+  assert((await chip.count()) === 0, "ctrl-click forgets it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert((await chip.count()) === 1, "and undo brings it back");
+  promptAnswer = "";
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting

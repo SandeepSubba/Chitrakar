@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~342),
+- **Verify before committing:** `cargo test --workspace` (~343),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~900 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~908 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1085,6 +1085,20 @@ without reading anything else.*
   and how sharply it ends are separate questions.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
+  A region can be *kept*, by name, and picked up again. A region is
+  often the expensive thing on a page — a sky wanded out between
+  branches, a lasso drawn round somebody's hair — and the only place to
+  put one was the layer it was handed to. Kept regions live on the
+  document beside the guides and the swatches, as the same `Mask` the
+  selection is, so putting one away and taking it out again are a copy
+  each way rather than a conversion that loses the softness or the
+  inside-out. `SetRegions` is whole-list like the guides: keeping,
+  renaming and forgetting are one command with one obvious inverse, and
+  a name kept twice replaces rather than doubles. They sit as chips in
+  the row the palette's colours sit in, taking the marquee's own
+  modifiers — shift adds, alt takes away, both keep the overlap — since
+  a region arriving from a chip is a region arriving; ctrl-click
+  forgets one, which is the gesture the combining leaves free.
   A brush painted with a region picked out is confined to it, and stays
   confined after the region is let go of — which is what confining
   means, and why the region rides on the stroke (`PaintStroke::clip`)

@@ -376,6 +376,19 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 feather: 2.5,
             })),
         },
+        Command::SetRegions {
+            regions: vec![crate::KeptRegion {
+                name: "the sky".into(),
+                mask: Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 9.0, ry: 7.0 },
+                        transform: Transform::translation(4.0, 5.0),
+                    },
+                    invert: false,
+                    feather: 1.25,
+                },
+            }],
+        },
         Command::SetSwatches {
             swatches: vec![Swatch {
                 name: "ink".into(),

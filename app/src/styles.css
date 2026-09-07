@@ -1102,6 +1102,28 @@ body {
    convention has always been for, and why it is not simply a dotted
    line in the accent colour. The march is the dash offset travelling,
    slow enough to read as motion rather than shimmer. */
+/* A region the document has kept, by name: a chip in the same row the
+   palette's colours sit in, since both are things the page keeps to be
+   reached for rather than made again. */
+.kept {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0 6px;
+  height: 22px;
+  font-size: 11px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.kept:hover {
+  border-color: var(--accent);
+}
+
 /* The wash over what is not picked out: the region's own coverage, laid
    over the page where the page is and under the ants, so a soft edge and
    an inverted region can be seen rather than guessed at. */

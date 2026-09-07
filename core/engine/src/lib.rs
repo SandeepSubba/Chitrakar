@@ -273,6 +273,9 @@ impl Session {
             // Nor does the palette: it is what colours are picked from,
             // not anything the page draws.
             | Command::SetSwatches { .. }
+            // Nor the regions kept by name: a region put away is not on
+            // the page any more than a colour in the palette is.
+            | Command::SetRegions { .. }
             // Nor what is picked out of the page. The marching ants are
             // the app's to draw over the frame, not the renderer's to
             // put in it — a selection is a region to hand to a layer,
@@ -573,6 +576,13 @@ impl Session {
                     "Clear the palette".into()
                 } else {
                     format!("{} colours in the palette", swatches.len())
+                }
+            }
+            Command::SetRegions { regions } => {
+                if regions.is_empty() {
+                    "Forget the kept regions".into()
+                } else {
+                    format!("{} regions kept", regions.len())
                 }
             }
             Command::ResizeCanvas { width, height, .. } => {
@@ -2442,11 +2452,24 @@ impl Session {
         if !Self::worth_picking(&shape) {
             return Err(EngineError::BadCommand("nothing was picked out".into()));
         }
-        let fresh = chitrakar_doc::Mask {
-            kind: chitrakar_doc::MaskKind::Vector { shape, transform },
-            invert: false,
-            feather: 0.0,
-        };
+        self.pick_mask(
+            chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector { shape, transform },
+                invert: false,
+                feather: 0.0,
+            },
+            how,
+        )
+    }
+
+    /// Pick out a region already written as a mask, combining it with
+    /// what is picked the way `how` says.
+    ///
+    /// Where a drawn marquee comes in as a bare shape, this takes the
+    /// whole mask — softness, inside-out and all — so that putting a
+    /// kept region back picks out exactly what was kept rather than its
+    /// outline.
+    fn pick_mask(&mut self, fresh: chitrakar_doc::Mask, how: &str) -> Result<(), EngineError> {
         if how == "replace" {
             return self.apply_labeled(
                 Command::SetSelection {
@@ -2707,6 +2730,65 @@ impl Session {
             Some("Soften the edge".into()),
         )?;
         Ok(true)
+    }
+
+    /// Keep what is picked out, under a name, to be picked up again.
+    ///
+    /// A region is often the expensive thing on a page — a sky wanded
+    /// out between branches, a lasso drawn round somebody's hair — and
+    /// there was nowhere to put one but the layer it was handed to.
+    /// Kept, it is the same mask: put away and picked up again are a
+    /// copy each way, softness and inside-out included, rather than a
+    /// conversion that loses either. A name already kept is replaced,
+    /// since that is what naming it the same thing means.
+    pub fn keep_selection(&mut self, name: &str) -> Result<(), EngineError> {
+        let Some(mask) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::BadCommand("a kept region wants a name".into()));
+        }
+        let mut regions = self.doc.regions().to_vec();
+        let kept = chitrakar_doc::KeptRegion {
+            name: name.to_string(),
+            mask,
+        };
+        match regions.iter().position(|r| r.name == name) {
+            Some(at) => regions[at] = kept,
+            None => regions.push(kept),
+        }
+        self.apply_labeled(
+            Command::SetRegions { regions },
+            Some(format!("Keep {name}")),
+        )
+    }
+
+    /// Pick out a region kept earlier, combining it with what is picked
+    /// the way `how` says.
+    pub fn pick_kept(&mut self, index: usize, how: &str) -> Result<(), EngineError> {
+        let Some(kept) = self.doc.regions().get(index).cloned() else {
+            return Err(EngineError::BadCommand("no such kept region".into()));
+        };
+        self.pick_mask(kept.mask, how)
+    }
+
+    /// Forget a kept region.
+    pub fn forget_region(&mut self, index: usize) -> Result<(), EngineError> {
+        let mut regions = self.doc.regions().to_vec();
+        if index >= regions.len() {
+            return Err(EngineError::BadCommand("no such kept region".into()));
+        }
+        let gone = regions.remove(index);
+        self.apply_labeled(
+            Command::SetRegions { regions },
+            Some(format!("Forget {}", gone.name)),
+        )
+    }
+
+    /// The names of the regions this document has kept, in order.
+    pub fn kept_regions(&self) -> Vec<String> {
+        self.doc.regions().iter().map(|r| r.name.clone()).collect()
     }
 
     /// Take what is picked out further out, or further in, by a
@@ -7117,6 +7199,80 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    #[test]
+    fn a_region_can_be_kept_and_picked_up_again() {
+        // A region is often the expensive thing on a page. Put away and
+        // picked up again it is the same mask — softness and inside-out
+        // included — rather than an outline that lost both.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        assert!(session.keep_selection("sky").is_err(), "nothing to keep");
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(4.0).unwrap();
+        session.pick_inverse().unwrap();
+        session.keep_selection("  sky  ").unwrap();
+        assert_eq!(session.kept_regions(), vec!["sky".to_string()], "trimmed");
+        assert!(session.keep_selection("").is_err(), "and it wants a name");
+
+        // Something else picked, and then the kept one back.
+        session.pick_all().unwrap();
+        assert!(session.selection_covers(50.0, 40.0));
+        session.pick_kept(0, "replace").unwrap();
+        let back = session.selection().unwrap();
+        assert!(back.invert, "inside out as it was kept");
+        assert!((back.feather - 4.0).abs() < 1e-4, "and as soft");
+        assert!(
+            !session.selection_covers(20.0, 20.0),
+            "the hole is where it was"
+        );
+
+        // Keeping the same name again replaces it rather than making a
+        // second one called the same thing.
+        session.pick_all().unwrap();
+        session.keep_selection("sky").unwrap();
+        assert_eq!(session.kept_regions().len(), 1, "one region called sky");
+        session.pick_kept(0, "replace").unwrap();
+        assert!(
+            session.selection_covers(20.0, 20.0),
+            "and it is the one kept last"
+        );
+
+        // Combining with one, and forgetting one.
+        session.pick_none().unwrap();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(80.0, 40.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("corner").unwrap();
+        session.pick_kept(0, "union").unwrap();
+        assert!(session.selection_covers(85.0, 45.0), "the corner is there");
+        assert!(session.selection_covers(20.0, 20.0), "and the page with it");
+        assert!(session.pick_kept(9, "replace").is_err(), "no ninth region");
+        session.forget_region(0).unwrap();
+        assert_eq!(session.kept_regions(), vec!["corner".to_string()]);
+        assert!(session.forget_region(4).is_err());
+
+        // One entry each in history, and undo puts the list back.
+        session.undo().unwrap();
+        assert_eq!(session.kept_regions().len(), 2, "sky came back");
+    }
+
     #[test]
     fn a_wash_says_what_the_ants_cannot() {
         // The ants draw an inverted region the same way round as an

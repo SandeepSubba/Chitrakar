@@ -172,6 +172,23 @@ pub struct Document {
     /// nothing picked out, which is what it had.
     #[serde(default)]
     selection: Option<Box<Mask>>,
+    /// Regions kept by name, to be picked out again later.
+    ///
+    /// A region is often the expensive thing on a page — a sky wanded
+    /// out between branches, a lasso drawn round somebody's hair — and
+    /// until now the only place to put one was the layer it was handed
+    /// to. These are the same [`Mask`] the selection is, so keeping one
+    /// and picking it up again are a copy each way rather than a
+    /// conversion. Additive, like the guides and the swatches.
+    #[serde(default)]
+    regions: Vec<KeptRegion>,
+}
+
+/// A region kept by name, ready to be picked out again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeptRegion {
+    pub name: String,
+    pub mask: Mask,
 }
 
 /// One colour in the document's palette. Authored like any other colour,
@@ -216,6 +233,7 @@ impl Document {
             cmyk_cms: None,
             guides: Vec::new(),
             swatches: Vec::new(),
+            regions: Vec::new(),
             selection: None,
         }
     }
@@ -307,6 +325,11 @@ impl Document {
 
     pub fn swatches(&self) -> &[Swatch] {
         &self.swatches
+    }
+
+    /// The regions this document has kept by name.
+    pub fn regions(&self) -> &[KeptRegion] {
+        &self.regions
     }
 
     /// The region picked out of the page, if any.
@@ -821,6 +844,10 @@ impl Document {
                 let prev = std::mem::replace(&mut self.guides, guides);
                 Ok(Command::SetGuides { guides: prev })
             }
+            Command::SetRegions { regions } => {
+                let prev = std::mem::replace(&mut self.regions, regions);
+                Ok(Command::SetRegions { regions: prev })
+            }
             Command::SetSwatches { swatches } => {
                 let prev = std::mem::replace(&mut self.swatches, swatches);
                 Ok(Command::SetSwatches { swatches: prev })
@@ -1043,6 +1070,12 @@ pub enum Command {
     /// Replace the document's palette, the same whole-list way.
     SetSwatches {
         swatches: Vec<Swatch>,
+    },
+    /// Replace the regions kept by name, the same whole-list way:
+    /// keeping one, renaming one and forgetting one are then the same
+    /// command with the same obvious inverse.
+    SetRegions {
+        regions: Vec<KeptRegion>,
     },
     /// Replace the region picked out of the page — `None` for nothing
     /// picked out. Whole-value, so picking, adding to, taking from and

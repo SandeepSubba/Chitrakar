@@ -1258,6 +1258,10 @@ export function App() {
   const [wandTolerance, setWandTolerance] = useState(0.12);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
+  /** The regions this document has kept by name. A region is often the
+   * expensive thing on a page — a sky wanded out between branches — and
+   * the only place to put one used to be the layer it was handed to. */
+  const [kept, setKept] = useState<string[]>([]);
   /** A wash over what is *not* picked, for when the ants cannot say
    * enough: a softened edge is neither in nor out, an inverted region
    * is everything but its rings, and a hundred rings is a thicket. Kept
@@ -1291,6 +1295,11 @@ export function App() {
         setAntRings(JSON.parse(s.selection_outline_json()) as [number, number][][]);
       } catch {
         setAntRings([]);
+      }
+      try {
+        setKept(JSON.parse(s.kept_regions_json()) as string[]);
+      } catch {
+        setKept([]);
       }
       // The wash, when it is asked for. Made here rather than in an
       // effect because this is the one place that knows the region has
@@ -1508,6 +1517,41 @@ export function App() {
    * out into the page as a region. It is how a photograph is held to
    * the shape of the words over it — no marquee can be dragged into
    * that shape, but the layer that draws it already knows it. */
+  /** Keep what is picked out under a name, so a region that took work
+   * can be picked up again — and put back exactly as it was kept,
+   * softness and inside-out included, rather than as an outline that
+   * lost both. */
+  const keepSelection = () => {
+    if (!session) return;
+    const name = window.prompt("Keep what is picked out as:", "");
+    if (name === null) return;
+    try {
+      session.keep_selection(name);
+      refresh(session);
+    } catch (err) {
+      alert(`Keep: ${err}`);
+    }
+  };
+  /** Pick a kept region up again — with the same modifiers a marquee
+   * takes, since it is a region arriving the same way. */
+  const pickKept = (index: number, how: string) => {
+    if (!session) return;
+    try {
+      session.pick_kept(index, how);
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${err}`);
+    }
+  };
+  const forgetRegion = (index: number) => {
+    if (!session) return;
+    try {
+      session.forget_region(index);
+      refresh(session);
+    } catch (err) {
+      alert(`Forget: ${err}`);
+    }
+  };
   const pickFromLayer = () => {
     if (!session || selected === null) return;
     try {
@@ -6662,6 +6706,50 @@ export function App() {
                 if (session?.feather_selection(want)) refresh(session);
               }}
             />
+          )}
+          {/* The regions this document has kept by name. Clicking one
+              picks it out, with the modifiers a marquee takes, since it
+              is a region arriving the same way. Ctrl-click forgets one,
+              which is free of the three the combining already uses. */}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <div className="palette" role="group" aria-label="Kept regions">
+              {kept.map((name, i) => (
+                <button
+                  key={i}
+                  className="kept"
+                  title={`${name} — shift adds it, alt takes it away, ctrl-click forgets it`}
+                  aria-label={`Kept region ${name}`}
+                  onClick={(e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                      forgetRegion(i);
+                      return;
+                    }
+                    pickKept(
+                      i,
+                      e.shiftKey
+                        ? e.altKey
+                          ? "intersect"
+                          : "union"
+                        : e.altKey
+                          ? "subtract"
+                          : "replace",
+                    );
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+              {antRings.length > 0 && (
+                <button
+                  className="swatch add"
+                  onClick={keepSelection}
+                  title="Keep what is picked out, under a name"
+                  aria-label="Keep what is picked"
+                >
+                  +
+                </button>
+              )}
+            </div>
           )}
           {/* Whether to show what is picked as a wash rather than only
               as an outline. The ants cannot say how soft an edge is or
