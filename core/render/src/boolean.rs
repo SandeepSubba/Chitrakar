@@ -164,6 +164,35 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
     (!rings.is_empty()).then_some(rings)
 }
 
+/// Combine two sets of rings, asking again with the second nudged where
+/// the first answer is that they cannot be.
+///
+/// [`combine`] declines outlines whose edges overlap exactly rather than
+/// guessing what was meant, which is the honest answer to an ambiguous
+/// question. It is also the answer to a question people ask constantly
+/// and do not think is ambiguous: two rectangles snapped edge to edge
+/// and united. Snapping is *for* landing edges exactly on each other, so
+/// the editor spends its time arranging the one case the arithmetic
+/// refuses.
+///
+/// So on that answer, and only that one, ask again with the second set
+/// moved a five-hundredth of a pixel. Shapes here are sampled on a grid
+/// four to the pixel, so that is a hundred-and-twenty-eighth of the
+/// distance between samples: it can move one sample in sixteen, on the
+/// pixels an edge actually crosses. What it cannot do is turn a union
+/// into an error message.
+pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
+    if let Some(rings) = combine(a, b, op) {
+        return Some(rings);
+    }
+    const NUDGE: f32 = 1.0 / 512.0;
+    let moved: Vec<Ring> = b
+        .iter()
+        .map(|ring| ring.iter().map(|p| [p[0] + NUDGE, p[1] + NUDGE]).collect())
+        .collect();
+    combine(a, &moved, op)
+}
+
 /// Combine two sets of rings. Returns the result as rings, or `None` when
 /// the outlines are degenerate enough that no closed result can be traced —
 /// shapes that only touch, or share an edge exactly.

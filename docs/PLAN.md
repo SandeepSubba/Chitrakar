@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~331),
+- **Verify before committing:** `cargo test --workspace` (~332),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~871 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1034,8 +1034,12 @@ without reading anything else.*
   pixels where it does not (gradients, effects, masks, varying strokes;
   an adjustment or filter flattens what is under it), and TIFF is the
   composite; a boolean
-  operation flattens curves to line segments and declines outlines that
-  touch or overlap exactly, rather than guessing.
+  operation flattens curves to line segments; outlines whose edges
+  overlap exactly are declined by the arithmetic and asked again with
+  one side moved a five-hundredth of a pixel
+  (`boolean::combine_or_nudge`), since snapping is *for* landing edges
+  on each other and two rectangles snapped edge to edge is the union
+  people ask for most.
 
 ---
 

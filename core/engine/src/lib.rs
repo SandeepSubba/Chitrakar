@@ -829,11 +829,12 @@ impl Session {
         }
         let mut acc = rings.remove(0);
         for next in rings {
-            acc = chitrakar_render::boolean::combine(&acc, &next, op).ok_or_else(|| {
-                EngineError::BadCommand(
-                    "these outlines cannot be combined — they touch or overlap exactly".into(),
-                )
-            })?;
+            acc =
+                chitrakar_render::boolean::combine_or_nudge(&acc, &next, op).ok_or_else(|| {
+                    EngineError::BadCommand(
+                        "these outlines cannot be combined — their edges overlap exactly".into(),
+                    )
+                })?;
         }
         // Anchors are stored relative to the node's own origin, like every
         // other path, so the transform carries the position.
@@ -2472,29 +2473,12 @@ impl Session {
         };
         let want = Self::region_rings(&current)?;
         let have = Self::region_rings(&fresh)?;
-        // Outline arithmetic declines edges that touch or overlap
-        // exactly rather than guessing what was meant — which is right
-        // for two shapes on the page, and would be maddening here: a box
-        // dragged to take a bite out of a selection shares an edge with
-        // it whenever the drag starts on the same snap line, which is
-        // most of the time.
-        //
-        // So on that one answer, ask again with the incoming region
-        // moved by a five-hundredth of a pixel. A coverage is sampled on
-        // a grid four to the pixel, so that is a hundred-and-twenty-
-        // eighth of the spacing between samples: it can move one sample
-        // in sixteen, on the pixels an edge actually crosses, and only
-        // where an edge lay within that of a sample point. What it
-        // cannot do is turn a bite into an error message.
-        let nudged = || {
-            let d = 1.0 / 512.0;
-            have.iter()
-                .map(|ring| ring.iter().map(|p| [p[0] + d, p[1] + d]).collect())
-                .collect::<Vec<Vec<[f32; 2]>>>()
-        };
-        let combined = chitrakar_render::boolean::combine(&want, &have, op)
-            .or_else(|| chitrakar_render::boolean::combine(&want, &nudged(), op))
-            .ok_or_else(|| {
+        // A box dragged to take a bite out of a selection shares an edge
+        // with it whenever the drag starts on the same snap line, which
+        // is most of the time — see `combine_or_nudge`, which is what
+        // keeps that from being an error message.
+        let combined =
+            chitrakar_render::boolean::combine_or_nudge(&want, &have, op).ok_or_else(|| {
                 EngineError::BadCommand(
                     "these regions cannot be combined — their edges overlap exactly".into(),
                 )
@@ -6238,6 +6222,63 @@ mod tests {
         assert!(
             at[0].abs() < 1e-3,
             "one thing aligns to the page's own left edge: {at:?}"
+        );
+    }
+
+    /// Two shapes snapped edge to edge, united.
+    ///
+    /// The outline arithmetic declines edges that overlap exactly rather
+    /// than guessing, which is the honest answer to an ambiguous
+    /// question — and the question people ask most often without
+    /// thinking it ambiguous at all. Snapping is *for* landing edges on
+    /// each other, so the editor spends its time arranging the one case
+    /// that used to come back as "these outlines cannot be combined".
+    #[test]
+    fn shapes_that_share_an_edge_still_combine() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let left = add_rect(&mut session, "left", 40.0, 40.0);
+        let right = add_rect(&mut session, "right", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: left,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        // Snapped: its left edge is exactly the other's right edge.
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(50.0, 10.0),
+            })
+            .unwrap();
+
+        let one = session.boolean_nodes(&[left, right], "union").unwrap();
+        let b = session.bounds_of(one).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.1
+                && (b[1] - 10.0).abs() < 0.1
+                && (b[2] - 80.0).abs() < 0.1
+                && (b[3] - 40.0).abs() < 0.1,
+            "the two are one shape across both: {b:?}"
+        );
+        // And it is filled all the way across, seam included.
+        let page = session.render().unwrap();
+        for x in [15, 45, 50, 55, 75] {
+            assert!(
+                page.get(x, 30).a > 0.9,
+                "solid at {x}: {:?}",
+                page.get(x, 30)
+            );
+        }
+
+        // Taking one from the other where they share an edge leaves the
+        // first alone rather than failing.
+        session.undo().unwrap();
+        let rest = session.boolean_nodes(&[left, right], "subtract").unwrap();
+        let b = session.bounds_of(rest).unwrap();
+        assert!(
+            (b[2] - 40.0).abs() < 0.6,
+            "the left one, still its own width: {b:?}"
         );
     }
 
