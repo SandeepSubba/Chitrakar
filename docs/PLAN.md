@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~332),
+- **Verify before committing:** `cargo test --workspace` (~333),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~875 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~876 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -956,7 +956,13 @@ without reading anything else.*
   point is inside being the engine's answer rather than a test against
   the outline on screen, since an inverted region is everything *but*
   its rings, a softened one has an edge that is neither in nor out, and
-  a painted one has no rings at all — and marching ants — a pale
+  a painted one has no rings at all. An inverted region is a region like
+  any other: its outline is the page's own rectangle with what was
+  picked as a hole in it, so the ants run round both, and it can be
+  added to, taken from, filled and cropped to — saying it had no outline
+  made "pick out the rest instead" a dead end. Combining keeps the
+  softness of what was already picked, since the second box says where
+  rather than how sharply. And marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture
   and a light one — say where it is. The ants are drawn from the
   outline the *engine* flattens, not one worked out again in the app: a

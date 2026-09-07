@@ -7633,6 +7633,12 @@ assert(
     "inverted, the region it was is now the part held back",
   );
   assert(await isRed(300, 250), "and the rest of the page shows");
+  // Inside out it is still a region: the ants run round the page as
+  // well as round the hole, and it can still be added to.
+  assert(
+    (await page.locator(".ants polygon").count()) === 2,
+    "the ants run round both the page and the hole in it",
+  );
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
 

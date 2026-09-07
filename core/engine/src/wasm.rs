@@ -619,21 +619,11 @@ impl WasmSession {
     /// two answers to that would show as ants that do not sit on the
     /// edge the region actually has.
     pub fn selection_outline_json(&self) -> String {
-        let Some(mask) = self.inner.selection() else {
-            return "[]".into();
-        };
-        let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
-            return "[]".into();
-        };
-        let t = *transform;
-        let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
-            .into_iter()
-            .map(|ring| {
-                ring.into_iter()
-                    .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
-                    .collect()
-            })
-            .collect();
+        // The same outline the arithmetic works on, which for an
+        // inverted region is the page's own rectangle with what was
+        // picked as a hole in it: the ants should run round both, since
+        // both are the edge of what is picked.
+        let rings = self.inner.selection_outline();
         serde_json::to_string(&rings).unwrap_or_else(|_| "[]".into())
     }
 

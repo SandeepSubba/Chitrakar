@@ -2471,8 +2471,8 @@ impl Session {
                 _ => Ok(()),
             };
         };
-        let want = Self::region_rings(&current)?;
-        let have = Self::region_rings(&fresh)?;
+        let want = self.region_rings(&current)?;
+        let have = self.region_rings(&fresh)?;
         // A box dragged to take a bite out of a selection shares an edge
         // with it whenever the drag starts on the same snap line, which
         // is most of the time — see `combine_or_nudge`, which is what
@@ -2483,7 +2483,9 @@ impl Session {
                     "these regions cannot be combined — their edges overlap exactly".into(),
                 )
             })?;
-        let selection = Self::region_of(combined).map(Box::new);
+        // The softness of what was already picked carries through: the
+        // second box says where, not how sharply.
+        let selection = Self::region_of(combined, current.feather).map(Box::new);
         self.apply_labeled(
             Command::SetSelection { selection },
             Some(match op {
@@ -2496,35 +2498,38 @@ impl Session {
 
     /// A region's outlines in page coordinates.
     ///
-    /// Only a shape has outlines. A region brushed by hand or read off a
-    /// picture is a coverage with no edge to combine, and an inverted
-    /// one is the whole page minus a shape — neither is something the
-    /// outline arithmetic can take, so both say so rather than guess.
-    fn region_rings(mask: &chitrakar_doc::Mask) -> Result<Vec<Vec<[f32; 2]>>, EngineError> {
+    /// Only a shape has outlines: a region brushed by hand or read off a
+    /// picture is a coverage with no edge to combine, and says so rather
+    /// than guess. An inverted one *does* have an outline — the page's
+    /// own rectangle with what was picked as a hole in it, which is what
+    /// an even-odd path means by a ring inside a ring. Saying it had
+    /// none made "pick out the rest instead" a dead end: nothing could
+    /// be added to it, taken from it, or filled.
+    fn region_rings(&self, mask: &chitrakar_doc::Mask) -> Result<Vec<Vec<[f32; 2]>>, EngineError> {
         let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
             return Err(EngineError::BadCommand(
                 "this selection has no outline to combine with".into(),
             ));
         };
-        if mask.invert {
-            return Err(EngineError::BadCommand(
-                "an inverted selection has no outline to combine with".into(),
-            ));
-        }
         let t = *transform;
-        Ok(chitrakar_render::shape_rings(shape)
+        let mut rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
             .into_iter()
             .map(|ring| {
                 ring.into_iter()
                     .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
                     .collect()
             })
-            .collect())
+            .collect();
+        if mask.invert {
+            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+            rings.insert(0, vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]);
+        }
+        Ok(rings)
     }
 
     /// Outlines in page coordinates back into a region, or `None` where
     /// the combination left nothing at all.
-    fn region_of(rings: Vec<Vec<[f32; 2]>>) -> Option<chitrakar_doc::Mask> {
+    fn region_of(rings: Vec<Vec<[f32; 2]>>, feather: f32) -> Option<chitrakar_doc::Mask> {
         let mut rings = rings.into_iter().filter(|r| r.len() >= 3);
         let first = rings.next()?;
         let subpaths: Vec<Vec<[f32; 2]>> = rings.collect();
@@ -2540,7 +2545,9 @@ impl Session {
                 transform: Transform::default(),
             },
             invert: false,
-            feather: 0.0,
+            // Combining keeps the softness: adding a box to a softened
+            // region should not quietly harden it.
+            feather,
         })
     }
 
@@ -2613,7 +2620,7 @@ impl Session {
             }
         }
         let rings = chitrakar_render::trace_pixels(&inside, w, h);
-        let Some(region) = Self::region_of(rings) else {
+        let Some(region) = Self::region_of(rings, 0.0) else {
             return Err(EngineError::BadCommand("nothing there looks alike".into()));
         };
         let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
@@ -2816,9 +2823,19 @@ impl Session {
             .is_some_and(|c| *c >= 0.5)
     }
 
+    /// The outline of what is picked out, in page coordinates: rings,
+    /// each a closed loop. Empty where there is nothing picked out, or
+    /// where what is picked has no outline to give.
+    pub fn selection_outline(&self) -> Vec<Vec<[f32; 2]>> {
+        self.doc
+            .selection()
+            .and_then(|m| self.region_rings(m).ok())
+            .unwrap_or_default()
+    }
+
     /// The page-space box round what is picked out.
     pub fn selection_bounds(&self) -> Option<[f32; 4]> {
-        let rings = Self::region_rings(self.doc.selection()?).ok()?;
+        let rings = self.region_rings(self.doc.selection()?).ok()?;
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
@@ -2873,19 +2890,10 @@ impl Session {
         let Some(mask) = self.doc.selection() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
-        let inverted = mask.invert;
-        let mut rings = Self::region_rings(&chitrakar_doc::Mask {
-            invert: false,
-            feather: 0.0,
-            ..mask.clone()
-        })?;
-        // The rest of the page instead: the page's own rectangle with
-        // what was picked as a hole in it. Paths here fill even-odd, so
-        // a ring inside a ring is a hole and nothing else has to say so.
-        if inverted {
-            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
-            rings.insert(0, vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]);
-        }
+        // Inverted, the outline is the page's own rectangle with what
+        // was picked as a hole in it — which `region_rings` says, so
+        // filling the rest of the page needs nothing special here.
+        let rings = self.region_rings(&mask.clone())?;
         let (mut x0, mut y0) = (f32::MAX, f32::MAX);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
@@ -6685,6 +6693,96 @@ mod tests {
             "an unconfined stroke goes where it is drawn"
         );
         assert_cache_matches_fresh(&mut session);
+    }
+
+    /// What is picked inside out is still a region.
+    ///
+    /// "Pick out the rest instead" used to be a dead end: an inverted
+    /// region was said to have no outline, so nothing could be added to
+    /// it, taken from it, or cropped to it. It has one — the page's own
+    /// rectangle with what was picked as a hole in it — and softening
+    /// one and then adding to it used to lose the softening, which is
+    /// the other half of the same carelessness.
+    #[test]
+    fn an_inverted_region_is_a_region_like_any_other() {
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let box_ = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.pick_inverse().unwrap();
+
+        // The rest of the page: the box round it is the page itself.
+        let b = session.selection_bounds().expect("it has an outline");
+        assert_eq!([b[0], b[1], b[2], b[3]], [0.0, 0.0, 100.0, 60.0]);
+
+        // And it can be taken from, which used to be an error.
+        session
+            .pick_region(
+                box_(30.0, 60.0),
+                Transform::translation(70.0, 0.0),
+                "subtract",
+            )
+            .unwrap();
+        let cover = |s: &Session| {
+            chitrakar_render::mask_plane_over(
+                s.document(),
+                s.selection().unwrap(),
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 100,
+                    y1: 60,
+                },
+                (100, 60),
+            )
+        };
+        let c = cover(&session);
+        let at = |x: usize, y: usize| c[y * 100 + x];
+        assert!(at(50, 30) > 0.5, "the rest of the page is still picked");
+        assert!(at(20, 20) < 0.5, "the hole is still a hole");
+        assert!(at(85, 30) < 0.5, "and the strip taken off is gone");
+
+        // Softening carries through a combine rather than being quietly
+        // lost: the second box says where, not how sharply.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(session.feather_selection(3.0).unwrap());
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(60.0, 10.0),
+                "union",
+            )
+            .unwrap();
+        assert_eq!(
+            session.selection().map(|m| m.feather),
+            Some(3.0),
+            "adding a box to a softened region leaves it softened"
+        );
+        // Which shows: the edge of the added box is soft too.
+        let c = cover(&session);
+        let at = |x: usize, y: usize| c[y * 100 + x];
+        assert!(
+            at(60, 20) > 0.2 && at(60, 20) < 0.8,
+            "the new box's edge fades as well: {}",
+            at(60, 20)
+        );
     }
 
     /// The three other things a picked region is good for.
