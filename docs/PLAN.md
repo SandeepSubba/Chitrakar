@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~349),
+- **Verify before committing:** `cargo test --workspace` (~350),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~916 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1159,7 +1159,12 @@ without reading anything else.*
   primed by walking the window once, so a radius wider than the line is
   clamped to it — a fade over the whole of a line is all there is to
   say past that. Both are reachable by typing a number and by opening a
-  document that says one. Softness is left alone — how far a region reaches
+  document that says one. The same reasoning covers the other numbers
+  that arrive as numbers and leave as allocations: a viewport comes
+  down by halves until it is a surface the machine can hold, the same
+  rule a page is held to, and an export says no to a size larger than
+  can be made rather than attempting it — a failed allocation ends the
+  process rather than the request. Softness is left alone — how far a region reaches
   and how sharply it ends are separate questions.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.

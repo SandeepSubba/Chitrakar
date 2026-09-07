@@ -3869,7 +3869,17 @@ impl Session {
     /// the surface no longer grows with the zoom.
     pub fn set_viewport(&mut self, scale: f32, x: f32, y: f32, width: u32, height: u32) {
         let scale = scale.clamp(0.01, 64.0);
-        let size = (width.max(1), height.max(1));
+        // A viewport is a surface, and a surface has to be one the
+        // machine can hold: the same rule a page is held to, since the
+        // window it stands for is measured in device pixels and this
+        // side of the boundary has only the caller's word for it.
+        let side = chitrakar_doc::MAX_CANVAS_SIDE;
+        let (mut vw, mut vh) = (width.clamp(1, side), height.clamp(1, side));
+        while !chitrakar_doc::canvas_fits(vw, vh) {
+            vw = (vw / 2).max(1);
+            vh = (vh / 2).max(1);
+        }
+        let size = (vw, vh);
         let same = (scale - self.view_scale).abs() < 1e-4
             && (x - self.view_origin.0).abs() < 1e-3
             && (y - self.view_origin.1).abs() < 1e-3
@@ -3967,6 +3977,17 @@ impl Session {
             (w * scale).round().max(1.0) as u32,
             (h * scale).round().max(1.0) as u32,
         );
+        // Said no to rather than attempted: an export is a surface, and
+        // a surface too big to hold is an allocation that fails, which
+        // ends the process rather than the export. The region comes
+        // from the caller and is not held to the page — a layer hanging
+        // off the edge exports the part that hangs — so its size is the
+        // thing to be sure of.
+        if !chitrakar_doc::canvas_fits(pw, ph) {
+            return Err(EngineError::BadCommand(format!(
+                "an export of {pw}x{ph} is larger than can be made"
+            )));
+        }
         let mut surface = Surface::new(pw, ph);
         let full = ClipRect {
             x0: 0,
@@ -7679,6 +7700,47 @@ mod tests {
 
         session.pick_none().unwrap();
         assert!(session.selection_png(1.0).is_err());
+    }
+
+    /// Sizes that arrive from outside and become allocations.
+    ///
+    /// A viewport and an export are both surfaces, and a surface too
+    /// big to hold is not a slow answer but an allocation that fails —
+    /// which ends the process rather than the request. Every one of
+    /// these numbers crosses the boundary from the app as a plain
+    /// number, so the answer has to be an answer.
+    #[test]
+    fn a_size_too_big_to_hold_is_answered_rather_than_attempted() {
+        let mut session = Session::new(40, 30, ColorMode::Rgb);
+        add_rect(&mut session, "r", 40.0, 30.0);
+
+        // A viewport is held to what a page is held to, and comes down
+        // by halves until it fits — the same rule, since it stands for a
+        // window measured in device pixels.
+        session.set_viewport(1.0, 0.0, 0.0, 3_000_000, 2_000_000);
+        let (fw, fh) = session.present_size();
+        assert!(
+            fw as u64 * fh as u64 <= chitrakar_doc::MAX_CANVAS_PIXELS,
+            "a viewport that fits: {fw}x{fh}"
+        );
+        // Not drawn here: a hundred megapixels is a real surface and a
+        // real wait, and what is being checked is that the number came
+        // down to one, not that the machine can fill it.
+        session.set_viewport(1.0, 0.0, 0.0, 200, 150);
+        assert!(session.render_cached().is_ok(), "and an ordinary one draws");
+
+        // An export says no rather than trying: at sixteen times, a
+        // region a hundred thousand across is more pixels than exist.
+        assert!(
+            session
+                .render_png_at(16.0, Some([0.0, 0.0, 100_000.0, 100_000.0]))
+                .is_err(),
+            "an export larger than can be made"
+        );
+        assert!(
+            session.render_png_at(2.0, None).is_ok(),
+            "and the ordinary one still goes"
+        );
     }
 
     #[test]
