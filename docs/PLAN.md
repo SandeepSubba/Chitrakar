@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~337),
+- **Verify before committing:** `cargo test --workspace` (~338),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~886 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~887 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1075,8 +1075,11 @@ without reading anything else.*
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
 - **Known limits, deliberately:** the in-app clipboard carries layers
   between documents; out to other applications a selection goes as a
-  picture (Edit › Copy as image puts a PNG of its box on the system
-  clipboard), and images from other applications come *in*, by paste or
+  picture (Edit › Copy as image puts a PNG on the system clipboard: a
+  region picked out of the page when there is one, in the shape it was
+  picked in rather than as the rectangle round that — which is the only
+  way a lasso or a softened edge reaches another application at all —
+  and otherwise the picked layers' box), and images from other applications come *in*, by paste or
   by dropping a file on the canvas (a dropped .chitra opens); effects
   come in three kinds;
   and export flattens them like everything else; SVG export sets each

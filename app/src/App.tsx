@@ -5549,18 +5549,31 @@ export function App() {
     );
   };
 
-  /** The picked layers' box as a PNG on the system clipboard, for pasting
-   * into other applications — the in-app clipboard carries layers, which
-   * nothing outside can read. Pasting it back here places it as an image,
-   * which is what a picture on the clipboard is. */
+  /** A PNG on the system clipboard, for pasting into other applications
+   * — the in-app clipboard carries layers, which nothing outside can
+   * read. Pasting it back here places it as an image, which is what a
+   * picture on the clipboard is.
+   *
+   * A region picked out of the page is what goes, when there is one: it
+   * is the more particular of the two, it is drawn on screen so nobody
+   * can be surprised by it, and it goes in the shape it was picked in
+   * rather than as the rectangle round that — which is the only way a
+   * lasso or a softened edge reaches another application at all.
+   * Otherwise the picked layers' box, as before. */
   const copyAsImage = async () => {
-    if (!session || selectionSet.length === 0) return;
-    const box = unionBounds(selectionSet);
-    if (!box) return;
-    const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
-    if (!(w > 0 && h > 0)) return;
+    if (!session) return;
+    const region = antRings.length > 0;
+    if (!region && selectionSet.length === 0) return;
+    const box = region ? null : unionBounds(selectionSet);
+    if (!region && !box) return;
+    const [x, y, w, h] = box
+      ? [box[0], box[1], box[2] - box[0], box[3] - box[1]]
+      : [0, 0, 0, 0];
+    if (!region && !(w > 0 && h > 0)) return;
     try {
-      const png = session.export_png_at(1, x, y, w, h);
+      const png = region
+        ? session.selection_png()
+        : session.export_png_at(1, x, y, w, h);
       const blob = new Blob([png as BlobPart], { type: "image/png" });
       await navigator.clipboard.write([
         new ClipboardItem({ "image/png": blob }),
@@ -5953,7 +5966,7 @@ export function App() {
             <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
               Copy
             </MenuItem>
-            {selectionSet.length > 0 && (
+            {(selectionSet.length > 0 || antRings.length > 0) && (
               <MenuItem icon="copy" onClick={copyAsImage}>
                 Copy as image
               </MenuItem>

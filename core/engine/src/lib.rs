@@ -2999,6 +2999,66 @@ impl Session {
         )
     }
 
+    /// The page inside what is picked out, as a PNG.
+    ///
+    /// The one way a region reaches other applications, which have no
+    /// idea what a region is and take a picture. The region's box, with
+    /// the region's own coverage in the alpha — so a lasso comes out in
+    /// the shape it was drawn in and a softened region comes out with
+    /// its edge, rather than either as the rectangle around it. A
+    /// softened region's box is grown to leave the fade somewhere to
+    /// go, the way a softened fill's is: cut at the outline, the
+    /// outward half of a fade is not there to fade.
+    pub fn selection_png(&self) -> Result<Vec<u8>, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let Some([x0, y0, x1, y1]) = self.selection_bounds() else {
+            return Err(EngineError::BadCommand(
+                "what is picked out has no outline".into(),
+            ));
+        };
+        let pad = region.feather * 3.0;
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: (x0 - pad).max(0.0).floor() as u32,
+            y0: (y0 - pad).max(0.0).floor() as u32,
+            x1: ((x1 + pad).min(pw as f32).ceil() as u32).min(pw),
+            y1: ((y1 + pad).min(ph as f32).ceil() as u32).min(ph),
+        };
+        if clip.is_empty() {
+            return Err(EngineError::BadCommand(
+                "what is picked out is not on the page".into(),
+            ));
+        }
+        let page = self.render()?;
+        let cover = chitrakar_render::mask_plane_over(
+            &self.doc,
+            &region,
+            Transform::default(),
+            clip,
+            (pw, ph),
+        );
+        let (w, h) = (clip.x1 - clip.x0, clip.y1 - clip.y0);
+        let mut out = chitrakar_render::Surface::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                // Premultiplied, so scaling the whole pixel by the
+                // coverage is the same as scaling the alpha alone.
+                let p = page.get(clip.x0 + x, clip.y0 + y);
+                let c = cover[(y * w + x) as usize];
+                out.pixels[(y * w + x) as usize] = chitrakar_color::LinearRgba {
+                    r: p.r * c,
+                    g: p.g * c,
+                    b: p.b * c,
+                    a: p.a * c,
+                };
+            }
+        }
+        chitrakar_codecs::encode_png(w, h, &out.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Turn what is picked out into a shape layer of its own, in `color`.
     ///
     /// Filling a region in an editor that cuts pixels would put paint on
@@ -6940,6 +7000,37 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    #[test]
+    fn what_is_picked_out_leaves_in_the_shape_it_was_picked_in() {
+        // Other applications have no idea what a region is and take a
+        // picture, so the region goes out as its own box with its
+        // coverage in the alpha — not as the rectangle round it.
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        let sheet = add_rect(&mut session, "sheet", 80.0, 60.0);
+        let _ = sheet;
+        session
+            .pick_region(
+                VectorShape::Ellipse { rx: 20.0, ry: 15.0 },
+                Transform::translation(40.0, 30.0),
+                "replace",
+            )
+            .unwrap();
+        let png = session.selection_png().unwrap();
+        let img = chitrakar_codecs::decode(&png).unwrap();
+        let (w, h, pixels) = (img.width, img.height, img.rgba8);
+        assert!(
+            (w as i32 - 40).abs() <= 2 && (h as i32 - 30).abs() <= 2,
+            "the region's own box, not the page: {w}x{h}"
+        );
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(w / 2, h / 2), 255, "solid in the middle of it");
+        assert_eq!(alpha(0, 0), 0, "and nothing in the corner of the box");
+
+        // Nothing picked out is an error rather than a blank picture.
+        session.pick_none().unwrap();
+        assert!(session.selection_png().is_err());
+    }
+
     #[test]
     fn a_region_can_be_taken_further_out_or_further_in() {
         // Grow and shrink are a distance, not a scaling: a long thin

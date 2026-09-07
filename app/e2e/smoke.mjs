@@ -8035,6 +8035,11 @@ assert(
     ];
   };
   const drawn = await antBox();
+  // A softness set on an earlier region carries to the next one — it is
+  // the tool's setting, not the region's — and a softened region leaves
+  // with room round it for the fade. This one is about reach, so say so.
+  await page.locator('[aria-label="Selection feather"]').fill("0");
+  await page.waitForTimeout(300);
 
   const grow = page.locator('[aria-label="Grow what is picked"]');
   assert(await grow.isVisible(), "the box says how far, with a region picked");
@@ -8058,6 +8063,28 @@ assert(
   assert(Math.abs(left) < 3, `and back where it was drawn (${left.toFixed(1)})`);
   const step = await page.locator(".history button.current").textContent();
   assert(/shrink/i.test(step || ""), `the last step was the shrink (${step})`);
+
+  // Out to other applications, a region goes as its own box rather than
+  // the layers'. It is the more particular of the two and it is drawn
+  // on screen, so nothing about it is a surprise.
+  await page
+    .context()
+    .grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: "http://localhost:8123",
+    });
+  await menuClick("Edit", "Copy as image");
+  await page.waitForTimeout(500);
+  const copied = await page.evaluate(async () => {
+    const items = await navigator.clipboard.read();
+    const item = items.find((i) => i.types.includes("image/png"));
+    if (!item) return null;
+    const bitmap = await createImageBitmap(await item.getType("image/png"));
+    return [bitmap.width, bitmap.height];
+  });
+  assert(
+    copied && Math.abs(copied[0] - 160) <= 2 && Math.abs(copied[1] - 60) <= 2,
+    `the region's own box went to the clipboard (${copied})`,
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting
