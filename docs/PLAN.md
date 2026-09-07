@@ -842,7 +842,12 @@ without reading anything else.*
   release one), a thumbnail size that was a surface nobody bounded, a
   padding added to a clip's edge past what a `u32` holds, and five
   places where a reach saturating into a `u32` then had one added to
-  it.
+  it. It asks the same of a *command*, since one carries numbers too
+  and arrives as JSON from the app or out of a file — a transform with
+  no thickness, a stroke wider than the world, an effect that reaches
+  past it — and then renders whatever that left, because a document the
+  renderer has no answer for is the same failure one step later. Those
+  it found nothing wrong with, which is worth knowing.
 - **Everything the page carries is carried the same way:**
   `map_page` is the one place a page transform is stated, and every
   page-space thing has to be named there or it is quietly left behind —

@@ -7834,6 +7834,56 @@ mod tests {
             let _ = session.paint_extend(n, n, n);
             let _ = session.cancel_preview();
 
+            // A command carries numbers too, and arrives as JSON from
+            // the app or out of a file. A transform with no thickness,
+            // a stroke wider than the world, an effect that reaches
+            // past it: each leaves a document the renderer then has to
+            // have an answer for.
+            let _ = session.apply(Command::SetTransform {
+                id: shape,
+                transform: Transform {
+                    a: n,
+                    b: n,
+                    c: n,
+                    d: n,
+                    e: n,
+                    f: n,
+                },
+            });
+            let _ = session.apply(Command::SetEffects {
+                id: shape,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: n,
+                    dy: n,
+                    blur: n.abs(),
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: n,
+                }],
+            });
+            let _ = session.apply(Command::SetMask {
+                id: shape,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: n,
+                            height: n,
+                            radius: n,
+                        },
+                        transform: Transform::translation(n, n),
+                    },
+                    invert: false,
+                    feather: n.abs(),
+                })),
+            });
+            // Whatever that left, the page still has to draw.
+            let _ = session.render();
+            let _ = session.render_cached();
+
             // And the ones shaped like a place in a list rather than a
             // measurement: a `usize` from the app is a number too.
             for at in [0usize, 1, usize::MAX, usize::MAX / 2] {
