@@ -2884,17 +2884,20 @@ impl Session {
         &mut self,
         color: chitrakar_color::AuthoredColor,
     ) -> Result<NodeId, EngineError> {
-        let Some(mask) = self.doc.selection() else {
+        let Some(region) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
+        let feather = region.feather;
         // Inverted, the outline is the page's own rectangle with what
         // was picked as a hole in it — which `region_rings` says, so
         // filling the rest of the page needs nothing special here.
-        let rings = self.region_rings(&mask.clone())?;
-        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        let rings = self.region_rings(&region)?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
             y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
         }
         if !x0.is_finite() {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
@@ -2922,17 +2925,63 @@ impl Session {
             },
         );
         node.transform = Transform::translation(x0, y0);
+        if feather > 0.0 {
+            // Three sigma out, which is where a Gaussian has nothing
+            // left to say, clamped to the page: the fade has nowhere
+            // else to go.
+            let pad = feather * 3.0;
+            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+            let (bx0, by0) = ((x0 - pad).max(0.0), (y0 - pad).max(0.0));
+            let (bx1, by1) = ((x1 + pad).min(w), (y1 + pad).min(h));
+            node.kind = NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: (bx1 - bx0).max(0.0),
+                    height: (by1 - by0).max(0.0),
+                    radius: 0.0,
+                },
+                fill: None,
+                stroke: None,
+                gradient: None,
+            };
+            node.transform = Transform::translation(bx0, by0);
+        }
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
             *fill = Some(color);
         }
+        // A softened region filled has to come out soft, or the fill is
+        // not what was picked. A shape has no softness of its own, so
+        // the softness is said the way it is always said here — with a
+        // mask, which is what a region turns into anyway.
+        //
+        // But a mask can only take coverage away, and the outward half
+        // of a fade lies *outside* the outline: laid over the region's
+        // own shape it would be cut off there, leaving an edge soft on
+        // the inside and sheer on the outside. So a softened fill is a
+        // rectangle with room for the fade, shaped entirely by the mask.
+        // A hard one keeps the outline it was picked with, which is a
+        // shape worth editing afterwards; a softened one's outline is
+        // the mask's business and a rectangle is the honest carrier.
+        let soft = (feather > 0.0)
+            .then(|| Self::carried_into(&region, Transform::default()))
+            .flatten();
         let parent = self.doc.root();
         let index = self.doc.children_of(parent)?.len();
         let id = self.doc.peek_next_id();
+        let add = Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        };
         self.apply_labeled(
-            Command::AddNode {
-                parent,
-                index,
-                node: Box::new(node),
+            match soft {
+                None => add,
+                Some(mask) => Command::Batch(vec![
+                    add,
+                    Command::SetMask {
+                        id,
+                        mask: Some(Box::new(mask)),
+                    },
+                ]),
             },
             Some("Fill what is picked".into()),
         )?;
@@ -6813,6 +6862,42 @@ mod tests {
         assert!(at(50, 30) > 0.5, "the rest of the page is still picked");
         assert!(at(20, 20) < 0.5, "the hole is still a hole");
         assert!(at(85, 30) < 0.5, "and the strip taken off is gone");
+
+        // A softened region filled comes out soft: a fill that does not
+        // look like what was picked is not a fill of it. A shape has no
+        // softness of its own, so the layer is given the region as its
+        // mask as well — the same thing a region always turns into.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                box_(40.0, 40.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(4.0).unwrap();
+        let filled = session
+            .fill_selection(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            })
+            .unwrap();
+        let page = session.render().unwrap();
+        assert!(page.get(30, 30).a > 0.95, "solid well inside the fill");
+        assert!(page.get(60, 30).a < 0.05, "and nothing well outside it");
+        let edge = page.get(50, 30).a;
+        assert!(
+            edge > 0.2 && edge < 0.8,
+            "with the edge of the fill fading, as the region did: {edge}"
+        );
+        // One entry, shape and softness together.
+        session.undo().unwrap();
+        assert!(
+            session.document().node(filled).is_err(),
+            "the fill went whole"
+        );
 
         // Softening carries through a combine rather than being quietly
         // lost: the second box says where, not how sharply.

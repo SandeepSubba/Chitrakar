@@ -986,6 +986,14 @@ without reading anything else.*
   for a lasso the only way to draw that shape at all (inverted, it fills
   the rest of the page — the page's own rectangle with the region as a
   hole, which is what an even-odd path means by a ring inside a ring).
+  Filling a *softened* region is a shape with room round it rather than
+  the region's own outline: a mask only ever takes coverage away, and
+  the outward half of a fade lies outside the outline, so laid over its
+  own shape a soft fill came out soft on the inside and sheer on the
+  outside — the fade cut off at exactly the edge it was meant to cross.
+  So it is a rectangle three sigma clear of the region on every side,
+  clamped to the page, shaped entirely by the mask, and the shape and
+  its softness land as one history entry.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
   A brush painted with a region picked out is confined to it, and stays
