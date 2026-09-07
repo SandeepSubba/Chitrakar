@@ -24,5 +24,9 @@ usvg = { version = "0.45", default-features = false, features = ["text"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
+# The shared fixture: every command there is, applied and then put
+# through the file, so a field that does not survive the trip is caught
+# where it is added rather than where it is missed.
+chitrakar-doc = { workspace = true, features = ["fixture"] }
 ab_glyph = "0.2"
 resvg = { version = "0.45", default-features = false, features = ["raster-images", "text"] }

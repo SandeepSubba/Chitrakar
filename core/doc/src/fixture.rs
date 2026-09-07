@@ -252,7 +252,11 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             transform: Transform::translation(2.0, 3.0),
         },
         invert: true,
-        feather: 0.0,
+        // Softened, and every audit is the better for it: a softness is
+        // a number rather than a shape, which makes it the easiest
+        // thing in a mask to drop on the way through a file, an inverse
+        // or a space.
+        feather: 1.5,
     });
     vec![
         Command::AddNode {
@@ -369,7 +373,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     transform: Transform::translation(9.0, 11.0),
                 },
                 invert: false,
-                feather: 0.0,
+                feather: 2.5,
             })),
         },
         Command::SetSwatches {

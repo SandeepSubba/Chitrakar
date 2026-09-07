@@ -181,6 +181,96 @@ mod tests {
     use chitrakar_color::ColorMode;
     use chitrakar_doc::{Command, Node, VectorShape};
 
+    /// A document written out in full, in a fixed order: every field of
+    /// every node, the page's own settings, its guides, its swatches,
+    /// its resources and what is picked out.
+    ///
+    /// Spelled out rather than serialized, because serializing is the
+    /// thing under test — two documents compared as JSON agree about
+    /// every field the JSON has, and say nothing at all about a field it
+    /// has lost. `Debug` prints what is there. The order is the tree's
+    /// own, since the nodes live in a hash map and its order says
+    /// nothing.
+    fn spelled_out(doc: &Document) -> String {
+        fn walk(doc: &Document, id: chitrakar_doc::NodeId, out: &mut String) {
+            out.push_str(&format!("{id:?} {:#?}\n", doc.node(id).unwrap()));
+            for child in doc.children_of(id).unwrap_or_default() {
+                walk(doc, *child, out);
+            }
+        }
+        let mut out = format!(
+            "{:#?}\n{:#?}\n{:#?}\n{:#?}\n",
+            doc.meta,
+            doc.selection(),
+            doc.guides(),
+            doc.swatches()
+        );
+        for (id, resource) in doc.resources() {
+            out.push_str(&format!(
+                "resource {id} {}x{} {} bytes\n",
+                resource.width,
+                resource.height,
+                resource.rgba8.len()
+            ));
+        }
+        walk(doc, doc.root(), &mut out);
+        out
+    }
+
+    /// The first line of two written-out documents that differs, for a
+    /// message that says something without printing either of them.
+    fn first_difference(a: &str, b: &str) -> String {
+        a.lines()
+            .zip(b.lines())
+            .find(|(x, y)| x != y)
+            .map(|(x, y)| format!("{} became {}", x.trim(), y.trim()))
+            .unwrap_or_else(|| "one is longer than the other".into())
+    }
+
+    /// Every command there is, and then the file.
+    ///
+    /// A `.chitra` is the only thing between a session and the next one,
+    /// so a field that does not survive it is work quietly lost — and it
+    /// is lost silently, since nothing complains about a number that
+    /// came back as its default. Written per feature, the check is one
+    /// somebody has to remember to write; written over the shared
+    /// fixture's every command, it is one a new `Command` runs into by
+    /// itself. It found the softness of a picked region, which went out
+    /// and came back as a hard edge before the field was added to the
+    /// manifest's own test.
+    ///
+    /// A document, saved and loaded, is the same document: that is the
+    /// whole claim, and it holds for the state each command leaves
+    /// behind, not only for the one a test happened to build.
+    #[test]
+    fn every_command_survives_the_file() {
+        let f = chitrakar_doc::fixture::everything();
+        let mut checked = 0usize;
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what
+                .split_once(" {")
+                .map_or(what.clone(), |(k, _)| k.into());
+            let mut doc = f.doc.clone();
+            if doc.apply(command).is_err() {
+                continue;
+            }
+            let bytes = save_chitra(&doc).unwrap_or_else(|e| panic!("saving after {what}: {e}"));
+            let back = load_chitra(&bytes).unwrap_or_else(|e| panic!("loading after {what}: {e}"));
+            let (want, got) = (spelled_out(&doc), spelled_out(&back));
+            assert!(
+                want == got,
+                "after {what} the file gave back a different document: {}",
+                first_difference(&want, &got)
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 25,
+            "only {checked} commands made it as far as the file"
+        );
+    }
+
     #[test]
     fn chitra_roundtrip_preserves_document() {
         let mut doc = Document::new(320, 240, ColorMode::Cmyk);

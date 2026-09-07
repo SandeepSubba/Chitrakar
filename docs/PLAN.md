@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~340),
+- **Verify before committing:** `cargo test --workspace` (~341),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~888 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -788,6 +788,23 @@ without reading anything else.*
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
+- **Every command is put through the file:**
+  `every_command_survives_the_file` applies the shared fixture's every
+  command, saves the document as a `.chitra`, loads it back and compares
+  the two. A file is the only thing between one session and the next, so
+  a field that does not survive it is work quietly lost — and lost
+  silently, since nothing complains about a number that came back as its
+  default. The comparison is a document *spelled out* rather than
+  serialized: two documents compared as JSON agree about every field the
+  JSON has and say nothing about a field it has lost, which is exactly
+  the bug being looked for. `Debug` prints what is there, walked in the
+  tree's own order since the nodes live in a hash map. Written per
+  feature this is a check somebody has to remember to write; written
+  over every command it is one a new `Command` runs into by itself.
+  The fixture's two masks are softened on purpose — a softness is a
+  number rather than a shape, which makes it the easiest thing in a mask
+  to drop on the way through a file, an inverse or a change of space,
+  and with both at zero every audit was blind to it.
 - **Every command's inverse is checked by machine:**
   `every_command_undoes_to_exactly_where_it_started` builds a document
   with a group, shapes, a paint layer, a stroke and a guide, then walks
