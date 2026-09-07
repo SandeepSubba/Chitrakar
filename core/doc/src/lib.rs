@@ -285,7 +285,14 @@ impl Document {
     /// deserialized manifest (bytes are stored outside the manifest).
     pub fn restore_resource_bytes(&mut self, id: &str, rgba8: Vec<u8>) -> bool {
         match self.resources.get_mut(id) {
-            Some(r) if rgba8.len() == (r.width * r.height * 4) as usize => {
+            // Counted in a width that holds it: the sizes come out of a
+            // file's manifest and the bytes out of the file beside it,
+            // so this is the one place they are made to agree — and a
+            // pair whose pixels do not fit a `u32` would have failed
+            // here as arithmetic rather than as a mismatch, which in a
+            // release build is worse: the product wraps, and a handful
+            // of bytes can be accepted for an enormous picture.
+            Some(r) if rgba8.len() as u64 == r.width as u64 * r.height as u64 * 4 => {
                 r.rgba8 = rgba8;
                 true
             }

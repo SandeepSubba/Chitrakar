@@ -7904,6 +7904,51 @@ mod tests {
         );
     }
 
+    /// Every stretch of bytes that crosses the boundary, given one that
+    /// is not what it claims.
+    ///
+    /// The numbers the app sends have their own sweep; these are the
+    /// other half of what arrives from outside — a picture, a drawing,
+    /// a face, a colour profile, a document. Every one of them is a
+    /// file somebody chose, which means every one of them can be
+    /// nothing, noise, or the first half of something real. Refused is
+    /// an answer. Falling over is not, and a decoder is where a program
+    /// most often does.
+    #[test]
+    fn bytes_that_are_not_what_they_claim_are_refused() {
+        let mut real = Session::new(20, 16, ColorMode::Rgb);
+        add_rect(&mut real, "r", 10.0, 10.0);
+        let saved = real.save().unwrap();
+        let png = real.render_png_at(1.0, None).unwrap();
+
+        let mut rubbish: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0u8; 1],
+            b"<svg".to_vec(),
+            b"\x89PNG\r\n\x1a\n and then nothing".to_vec(),
+            (0u8..=255).cycle().take(4096).collect(),
+        ];
+        // The first half of something real, which is what a download
+        // that stopped looks like.
+        for whole in [&saved, &png] {
+            rubbish.push(whole[..whole.len() / 2].to_vec());
+            rubbish.push(whole[..1].to_vec());
+        }
+
+        for bytes in &rubbish {
+            let mut session = Session::new(20, 16, ColorMode::Rgb);
+            assert!(Session::load(bytes).is_err(), "not a document of ours");
+            let _ = session.place_image(bytes, "picture");
+            let _ = session.place_svg(bytes, "drawing");
+            let _ = Session::register_font("a face", bytes.clone());
+            let _ = session.set_cmyk_profile(bytes.clone());
+            let _ = session.set_display_profile(bytes);
+            let _ = session.apply_json(&String::from_utf8_lossy(bytes));
+            // Whatever any of that left, the page still has to draw.
+            let _ = session.render();
+        }
+    }
+
     #[test]
     fn a_region_can_be_taken_further_out_or_further_in() {
         // Grow and shrink are a distance, not a scaling: a long thin

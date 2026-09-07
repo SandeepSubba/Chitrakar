@@ -239,6 +239,120 @@ mod tests {
             .unwrap_or_else(|| "one is longer than the other".into())
     }
 
+    /// A file can say anything.
+    ///
+    /// A `.chitra` is a thing a person opens, and what it says about
+    /// itself is the only account of it there is: the page's size, and
+    /// every resource's, come out of a manifest, while the pixels come
+    /// out of entries beside it. So the sizes are numbers arriving from
+    /// outside exactly as the ones the app sends are, and they end the
+    /// same two ways — an allocation nobody can serve, or arithmetic
+    /// that overflows before anything is checked. Refused is the
+    /// answer; opening it and falling over is not.
+    #[test]
+    fn a_file_that_says_anything_is_refused_rather_than_believed() {
+        // A document with a picture in it, to have something real to
+        // take apart.
+        let mut doc = Document::new(20, 16, ColorMode::Rgb);
+        let id = doc.add_resource(2, 2, vec![255u8; 16]);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "picture",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: 2,
+                    height: 2,
+                },
+            )),
+        })
+        .unwrap();
+        let good = save_chitra(&doc).unwrap();
+        assert!(load_chitra(&good).is_ok(), "the honest one opens");
+
+        // Nothing, noise, and a truncation: each a file somebody could
+        // hand over, none of them one of ours.
+        for bytes in [
+            Vec::new(),
+            b"not a zip at all".to_vec(),
+            good[..good.len() / 2].to_vec(),
+            good[..8].to_vec(),
+        ] {
+            assert!(
+                load_chitra(&bytes).is_err(),
+                "a file that is not one of ours is refused"
+            );
+        }
+
+        // A manifest is JSON in a zip, so a hostile one is a zip we can
+        // write ourselves. The sizes are what it can lie about.
+        let rewrite = |patch: &dyn Fn(&mut serde_json::Value)| -> Vec<u8> {
+            let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+            let mut manifest = String::new();
+            zip.by_name(MANIFEST_PATH)
+                .unwrap()
+                .read_to_string(&mut manifest)
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+            patch(&mut value);
+            // Everything else carried over, the resource entries above
+            // all: without them the manifest's account of a picture is
+            // never held against any bytes, which is the check being
+            // aimed at.
+            let others: Vec<String> = zip
+                .file_names()
+                .filter(|n| *n != MANIFEST_PATH)
+                .map(String::from)
+                .collect();
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(value.to_string().as_bytes()).unwrap();
+                for name in others {
+                    let mut body = Vec::new();
+                    zip.by_name(&name).unwrap().read_to_end(&mut body).unwrap();
+                    w.start_file(&name, SimpleFileOptions::default()).unwrap();
+                    w.write_all(&body).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            out
+        };
+
+        // A page bigger than can be drawn. Sixteen bytes a pixel, so
+        // believing it is asking for memory nobody has.
+        let huge_page = rewrite(&|v| {
+            v["document"]["meta"]["width"] = 400_000.into();
+            v["document"]["meta"]["height"] = 400_000.into();
+        });
+        assert!(load_chitra(&huge_page).is_err(), "a page too big to draw");
+
+        // A resource whose two sides multiplied pass what a `u32` holds.
+        // The bytes for it live outside the manifest, so the two are
+        // made to agree on the way in — and that check is arithmetic
+        // that has to hold for any pair the file names.
+        let huge_resource = rewrite(&|v| {
+            let resources = v["document"]["resources"].as_object_mut().unwrap();
+            for (_, r) in resources.iter_mut() {
+                r["width"] = 65_536.into();
+                r["height"] = 65_536.into();
+            }
+        });
+        // Opened or refused, either is an answer; falling over is not.
+        let _ = load_chitra(&huge_resource);
+
+        // And one that says its format is from the future.
+        let ahead = rewrite(&|v| v["format_version"] = 9_999.into());
+        assert!(
+            load_chitra(&ahead).is_err(),
+            "a file written by something newer says so"
+        );
+    }
+
     /// Every command there is, and then the file.
     ///
     /// A `.chitra` is the only thing between a session and the next one,

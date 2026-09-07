@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~351),
+- **Verify before committing:** `cargo test --workspace` (~353),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~916 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -848,6 +848,21 @@ without reading anything else.*
   past it — and then renders whatever that left, because a document the
   renderer has no answer for is the same failure one step later. Those
   it found nothing wrong with, which is worth knowing.
+- **And every stretch of bytes:** the other half of what arrives from
+  outside is files — a picture, a drawing, a face, a colour profile, a
+  document — and every one of them can be nothing, noise, or the first
+  half of something real, which is what a download that stopped looks
+  like. `bytes_that_are_not_what_they_claim_are_refused` hands each of
+  those to each entry point and then draws whatever it left. A
+  `.chitra` gets its own, since it is the one that can *lie*: the
+  page's size and every resource's come out of a manifest while the
+  pixels come out of entries beside it, so those sizes are numbers
+  arriving from outside exactly as the app's are. The page had been
+  held to what can be drawn since early on; a resource had not, and a
+  file naming one of 65536 by 65536 overflowed the very check meant to
+  hold its bytes against it — a panic in a debug build, and in a
+  release one a wrap that lets a handful of bytes stand for an enormous
+  picture.
 - **Everything the page carries is carried the same way:**
   `map_page` is the one place a page transform is stated, and every
   page-space thing has to be named there or it is quietly left behind —
