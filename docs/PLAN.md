@@ -1070,7 +1070,13 @@ without reading anything else.*
   shape's antialiased edge crosses the edge it is drawing — but half of
   what the layer manages at its strongest rather than half of opaque,
   since a shape painted in a colour that is itself part transparent
-  would otherwise be said to cover nothing at all. Its mask is not set aside, since a masked layer covers
+  would otherwise be said to cover nothing at all. An adjustment or a
+  filter layer is asked differently, because it has no picture of its
+  own: what it covers is what its mask lets through, and the whole page
+  where it has no mask. Drawn alone it comes out empty, and "that layer
+  covers nothing" is the wrong thing to say about a layer whose mask is
+  often the most careful work on the page — the more so now that a
+  region can be kept. Its mask is not set aside, since a masked layer covers
   exactly what the mask lets through, and a group answers for
   everything under it together.
   A region can also be taken further out, or further in, by a distance

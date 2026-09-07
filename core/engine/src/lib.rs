@@ -2945,8 +2945,36 @@ impl Session {
                 effects: Vec::new(),
             })?;
         }
-        let cover = chitrakar_render::layer_coverage(&alone, id)?;
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // An adjustment and a filter have no picture of their own: they
+        // rewrite what is under them, and what they cover is what their
+        // mask lets through — the whole page where there is no mask.
+        // Drawn alone they come out empty, and "that layer covers
+        // nothing" is the wrong answer about a layer whose mask is
+        // often the most careful thing on the page.
+        let cover = if matches!(
+            self.doc.node(id)?.kind,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_)
+        ) {
+            let clip = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            };
+            match self.doc.node(id)?.mask.as_ref() {
+                Some(mask) => chitrakar_render::mask_plane_over(
+                    &self.doc,
+                    mask,
+                    chitrakar_render::ancestor_space(&self.doc, id),
+                    clip,
+                    (w, h),
+                ),
+                None => vec![1.0; (w * h) as usize],
+            }
+        } else {
+            chitrakar_render::layer_coverage(&alone, id)?
+        };
         // Half covered is inside, which is where a shape's antialiased
         // edge crosses the edge it is drawing. Half of what the layer
         // manages at its strongest, though, not half of opaque: a shape
@@ -7595,6 +7623,53 @@ mod tests {
         assert!(
             near(ghost, [20.0, 10.0, 60.0, 30.0]),
             "a third-opaque shape covers what it covers: {ghost:?}"
+        );
+
+        // An adjustment layer has no picture of its own, and its mask
+        // is often the most careful thing on the page. What it covers
+        // is what its mask lets through, which is exactly the region
+        // that made it.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            })
+            .unwrap();
+        let lift = session.document().children_of(root).unwrap()[0];
+        session.pick_from_layer(lift, "replace").unwrap();
+        let all = session.selection_bounds().unwrap();
+        assert!(
+            near(all, [0.0, 0.0, 100.0, 60.0]),
+            "unmasked, it covers the page: {all:?}"
+        );
+        session
+            .apply(Command::SetMask {
+                id: lift,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 30.0,
+                            height: 20.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(20.0, 20.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        session.pick_from_layer(lift, "replace").unwrap();
+        let through = session.selection_bounds().unwrap();
+        assert!(
+            near(through, [20.0, 20.0, 50.0, 40.0]),
+            "masked, it covers what the mask lets through: {through:?}"
         );
 
         // A layer covering nothing on the page says so rather than
