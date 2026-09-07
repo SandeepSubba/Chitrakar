@@ -1730,7 +1730,14 @@ impl Session {
     /// RGBA8, `size * size * 4` bytes — empty when the layer has no
     /// picture of its own, which an adjustment or a filter has not.
     pub fn thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
-        Ok(chitrakar_render::thumbnail(&self.doc, id, size)?.unwrap_or_default())
+        Ok(chitrakar_render::thumbnail(&self.doc, id, Self::square(size))?.unwrap_or_default())
+    }
+
+    /// How big a small square picture of a layer is allowed to be. It
+    /// is a row in a panel: a few dozen pixels, asked for by the app,
+    /// and a number arriving from outside is still a surface.
+    fn square(size: u32) -> u32 {
+        size.clamp(1, 512)
     }
 
     /// A small square picture of a layer's mask, fitted the same way its
@@ -1738,7 +1745,10 @@ impl Session {
     /// through and clear where it is hidden. Empty when there is no
     /// mask.
     pub fn mask_thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
-        Ok(chitrakar_render::mask_thumbnail(&self.doc, id, size)?.unwrap_or_default())
+        Ok(
+            chitrakar_render::mask_thumbnail(&self.doc, id, Self::square(size))?
+                .unwrap_or_default(),
+        )
     }
 
     /// Put a new anchor on a path at the point nearest a document point,
@@ -7740,6 +7750,107 @@ mod tests {
         assert!(
             session.render_png_at(2.0, None).is_ok(),
             "and the ordinary one still goes"
+        );
+    }
+
+    /// Every number that crosses the boundary, given one nobody could
+    /// mean.
+    ///
+    /// The app sends sane values; the boundary is public and has only
+    /// the caller's word for them. Each of these numbers becomes an
+    /// allocation or the length of a loop somewhere, and the two ways
+    /// that goes wrong are the two ways an editor disappears rather
+    /// than complains: an allocation that fails aborts the process, and
+    /// a loop primed with a few million is a wait nobody comes back
+    /// from. So the audit is simply that it comes back — a failure here
+    /// is the test binary dying or never finishing, both of which say
+    /// what they mean. Found four the first time it was written out.
+    #[test]
+    fn a_number_nobody_could_mean_is_answered_rather_than_fallen_over() {
+        let absurd = [
+            f32::MAX,
+            1.0e9,
+            -1.0e9,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+        ];
+        let started = std::time::Instant::now();
+        for n in absurd {
+            let mut session = Session::new(40, 30, ColorMode::Rgb);
+            let shape = add_rect(&mut session, "r", 30.0, 20.0);
+            session
+                .pick_region(
+                    VectorShape::Rect {
+                        width: 10.0,
+                        height: 10.0,
+                        radius: 0.0,
+                    },
+                    Transform::translation(5.0, 5.0),
+                    "replace",
+                )
+                .unwrap();
+
+            // Sizes that become surfaces.
+            session.set_viewport(n, n, n, n.abs() as u32, n.abs() as u32);
+            let _ = session.present_size();
+            let _ = session.thumbnail(shape, n.abs() as u32);
+            let _ = session.mask_thumbnail(shape, n.abs() as u32);
+            let _ = session.render_png_at(n, None);
+            let _ = session.render_png_at(1.0, Some([0.0, 0.0, n, n]));
+            let _ = session.export_jpeg_at(n, None, 80);
+            let _ = session.artboard_png(shape, n);
+            let _ = session.selection_png(n);
+
+            // Distances that become the length of a loop.
+            let _ = session.grow_selection(n);
+            let _ = session.feather_selection(n);
+            let _ = session.selection_veil();
+            let _ = session.selection_covers(n, n);
+
+            // And the rest of the numbers the app sends.
+            let _ = session.set_dpi(n);
+            let _ = session.straighten_size(n);
+            let _ = session.pick_similar(n, n, n, true, "replace");
+            let _ = session.pick_similar(n, n, n, false, "replace");
+            let _ = session.histogram(None);
+            let _ = session.paint_begin(
+                shape,
+                n,
+                n,
+                n,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                n,
+                false,
+                false,
+            );
+            let _ = session.paint_extend(n, n, n);
+            let _ = session.cancel_preview();
+
+            // And the ones shaped like a place in a list rather than a
+            // measurement: a `usize` from the app is a number too.
+            for at in [0usize, 1, usize::MAX, usize::MAX / 2] {
+                let _ = session.reparent(shape, session.document().root(), at);
+                let _ = session.override_child(shape, at);
+                let _ = session.clear_override(shape, at);
+                let _ = session.remove_anchor(shape, at);
+                let _ = session.pick_kept(at, "replace");
+                let _ = session.forget_region(at);
+            }
+        }
+        // Not a timing assertion so much as a floor under one: the two
+        // hangs this found took minutes each, and a suite that waits
+        // that long is one nobody runs.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the whole sweep came back"
         );
     }
 

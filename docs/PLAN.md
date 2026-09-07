@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~350),
+- **Verify before committing:** `cargo test --workspace` (~351),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~916 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -824,6 +824,25 @@ without reading anything else.*
   — was rasterized over the box the *document* places the layer at, so
   a layer inside a copied group was held back by what was happening at
   the other end of the page.
+- **Every number that crosses the boundary is given one nobody could
+  mean:** `a_number_nobody_could_mean_is_answered_rather_than_fallen_
+  over` calls every `Session` method that takes a number with the
+  largest float there is, a billion, minus a billion, NaN, both
+  infinities and both zeroes — and every index-shaped one with
+  `usize::MAX`. The app sends sane values; the boundary is public and
+  has only the caller's word for them, and each of these numbers
+  becomes an allocation or the length of a loop. The two ways that goes
+  wrong are the two ways an editor disappears rather than complains: an
+  allocation that fails aborts the process, and a loop primed with a
+  few million is a wait nobody comes back from. So the audit is simply
+  that it comes back — a failure is the test binary dying or never
+  finishing, and both say what they mean. Written out, it found four at
+  once: a surface whose two sides multiplied as `u32` (a panic in a
+  debug build and, worse, a small buffer carrying big dimensions in a
+  release one), a thumbnail size that was a surface nobody bounded, a
+  padding added to a clip's edge past what a `u32` holds, and five
+  places where a reach saturating into a `u32` then had one added to
+  it.
 - **Everything the page carries is carried the same way:**
   `map_page` is the one place a page transform is stated, and every
   page-space thing has to be named there or it is quietly left behind —

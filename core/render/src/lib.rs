@@ -38,7 +38,14 @@ impl Surface {
         Self {
             width,
             height,
-            pixels: vec![LinearRgba::TRANSPARENT; (width * height) as usize],
+            // Counted as sizes rather than as two `u32`s multiplied: a
+            // pair whose product does not fit one is a panic in a debug
+            // build and, worse, a small buffer with big dimensions
+            // written on it in a release one. Every surface here is a
+            // page, a viewport or an export, each already held to a size
+            // that can be made — this is so that a pair which slipped
+            // through fails as an allocation rather than as arithmetic.
+            pixels: vec![LinearRgba::TRANSPARENT; (width as usize).saturating_mul(height as usize)],
         }
     }
 
@@ -531,12 +538,12 @@ pub fn filter_reach(doc: &Document) -> u32 {
                     .iter()
                     .map(|s| s.source[0].abs().max(s.source[1].abs()))
                     .fold(0.0f32, f32::max);
-                (far * scale).ceil() as u32 + 1
+                ((far * scale).ceil() as u32).saturating_add(1)
             }
             // A block is the average of what it covers, so a change
             // anywhere in one changes the whole of it.
             NodeKind::Filter(Filter::Pixelate { size }) => {
-                (size * max_scale(ancestor_space(doc, *id))).ceil() as u32 + 1
+                ((size * max_scale(ancestor_space(doc, *id))).ceil() as u32).saturating_add(1)
             }
             NodeKind::Filter(Filter::GaussianBlur { sigma })
             | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
@@ -547,7 +554,7 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let scale = max_scale(ancestor_space(doc, *id));
                 // Three iterated box blurs reach ~3 * box radius ≈ 2.9σ;
                 // round up generously.
-                (sigma * scale * 3.0).ceil() as u32 + 2
+                ((sigma * scale * 3.0).ceil() as u32).saturating_add(2)
             }
             _ => 0,
         })
@@ -1382,8 +1389,13 @@ fn grow(clip: ClipRect, pad: u32, width: u32, height: u32) -> ClipRect {
     ClipRect {
         x0: clip.x0.saturating_sub(pad),
         y0: clip.y0.saturating_sub(pad),
-        x1: (clip.x1 + pad).min(width),
-        y1: (clip.y1 + pad).min(height),
+        // Saturating: a padding is worked out from a softness or a
+        // filter's reach, and either can arrive from a file saying
+        // anything. Past the surface is past the surface, and the
+        // `min` says so — what it cannot say is what a `u32` that has
+        // wrapped round means.
+        x1: clip.x1.saturating_add(pad).min(width),
+        y1: clip.y1.saturating_add(pad).min(height),
     }
 }
 
@@ -3495,12 +3507,12 @@ fn paint_shape(
     // or a head. Whatever it is, `pad` says how far in the shape's own
     // units, and nothing at all for a band lying inside the outline.
     if let Some(s) = stroke.filter(|s| s.pad > 0.0) {
-        let pad = (s.pad * max_scale(t)).ceil() as u32 + 1;
+        let pad = ((s.pad * max_scale(t)).ceil() as u32).saturating_add(1);
         bbox = ClipRect {
             x0: bbox.x0.saturating_sub(pad),
             y0: bbox.y0.saturating_sub(pad),
-            x1: (bbox.x1 + pad).min(dst.width),
-            y1: (bbox.y1 + pad).min(dst.height),
+            x1: bbox.x1.saturating_add(pad).min(dst.width),
+            y1: bbox.y1.saturating_add(pad).min(dst.height),
         }
         .intersect(clip);
     }
@@ -3728,12 +3740,12 @@ impl<'a> MaskRef<'a> {
         // pulls in coverage from outside the region being drawn: without
         // the margin the edge of a dirty rectangle would fade to nothing
         // and show as a seam.
-        let pad = (sigma * 3.0).ceil() as u32 + 1;
+        let pad = ((sigma * 3.0).ceil() as u32).saturating_add(1);
         let grown = ClipRect {
             x0: clip.x0.saturating_sub(pad),
             y0: clip.y0.saturating_sub(pad),
-            x1: (clip.x1 + pad).min(surface.0),
-            y1: (clip.y1 + pad).min(surface.1),
+            x1: clip.x1.saturating_add(pad).min(surface.0),
+            y1: clip.y1.saturating_add(pad).min(surface.1),
         };
         let hard = Mask {
             feather: 0.0,
