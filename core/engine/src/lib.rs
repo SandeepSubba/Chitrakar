@@ -3027,6 +3027,45 @@ impl Session {
         )
     }
 
+    /// What is picked out, as a wash over what is not: a page-sized
+    /// PNG, clear where the region is and tinted where it is not.
+    ///
+    /// The ants say where the edge is and cannot say more than that. A
+    /// softened edge is neither in nor out; an inverted region is
+    /// everything *but* its rings, which the ants draw the same way
+    /// round either way; a region of a hundred rings is a thicket of
+    /// them. A wash says all three at a glance, which is what a
+    /// rubylith was for — and it is the coverage itself, so it cannot
+    /// disagree with what the region will do to a layer.
+    pub fn selection_veil(&self) -> Result<Vec<u8>, EngineError> {
+        let Some(region) = self.doc.selection() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let cover = chitrakar_render::mask_plane_over(
+            &self.doc,
+            region,
+            Transform::default(),
+            clip,
+            (w, h),
+        );
+        let mut rgba8 = Vec::with_capacity(cover.len() * 4);
+        for c in &cover {
+            // Straight bytes rather than premultiplied: a PNG carries a
+            // colour and its alpha side by side.
+            let a = ((1.0 - c).clamp(0.0, 1.0) * 0.55 * 255.0).round() as u8;
+            rgba8.extend_from_slice(&[220, 40, 40, a]);
+        }
+        chitrakar_codecs::encode_png(w, h, &rgba8)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// The page inside what is picked out, as a PNG.
     ///
     /// The one way a region reaches other applications, which have no
@@ -7063,6 +7102,54 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    #[test]
+    fn a_wash_says_what_the_ants_cannot() {
+        // The ants draw an inverted region the same way round as an
+        // upright one, and a softened edge not at all. The wash is the
+        // coverage itself, so it says both.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let read = |session: &Session| {
+            let img = chitrakar_codecs::decode(&session.selection_veil().unwrap()).unwrap();
+            let at = move |x: u32, y: u32| img.rgba8[((y * img.width + x) * 4 + 3) as usize] as f32;
+            (img.width, img.height, at)
+        };
+        let (w, h, alpha) = read(&session);
+        assert_eq!((w, h), (60, 40), "a wash over the whole page");
+        assert_eq!(alpha(30, 20), 0.0, "clear where the region is");
+        assert!(alpha(5, 20) > 100.0, "and tinted where it is not");
+
+        // Inside out, the wash turns over with it — which is the thing
+        // an outline cannot say.
+        session.pick_inverse().unwrap();
+        let (_, _, alpha) = read(&session);
+        assert!(alpha(30, 20) > 100.0, "the hole is what is not picked now");
+        assert_eq!(alpha(5, 20), 0.0, "and the rest of the page is");
+
+        // A softened edge is neither in nor out, and the wash is that.
+        session.pick_inverse().unwrap();
+        session.feather_selection(3.0).unwrap();
+        let (_, _, alpha) = read(&session);
+        let edge = alpha(20, 20);
+        assert!(
+            edge > 20.0 && edge < 130.0,
+            "the edge is part way through: {edge}"
+        );
+
+        session.pick_none().unwrap();
+        assert!(session.selection_veil().is_err(), "nothing to wash over");
+    }
+
     #[test]
     fn what_is_picked_out_leaves_in_the_shape_it_was_picked_in() {
         // Other applications have no idea what a region is and take a

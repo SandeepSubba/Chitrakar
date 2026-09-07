@@ -8146,6 +8146,75 @@ assert(
   );
 }
 
+// 9ao. A wash over what is not picked. The ants say where the edge is
+// and cannot say more: a softened edge is neither in nor out, and an
+// inverted region is drawn the same way round as an upright one. The
+// wash is the coverage itself.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  const wash = page.locator('[aria-label="Show what is picked as a wash"]');
+  assert(
+    (await wash.count()) === 0,
+    "nothing picked out, nothing to offer a wash of",
+  );
+  await page.mouse.move(...at(60, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 150), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(await wash.isVisible(), "with a region picked, the wash is offered");
+  assert((await page.locator(".veil").count()) === 0, "and off to begin with");
+
+  await wash.click();
+  await page.waitForTimeout(600);
+  const veil = page.locator(".veil");
+  assert((await veil.count()) === 1, "the wash is laid over the page");
+  const box = await veil.boundingBox();
+  assert(
+    Math.abs(box.width - b.width) < 2 && Math.abs(box.height - b.height) < 2,
+    `over the page and no further (${box.width}x${box.height} against ${b.width}x${b.height})`,
+  );
+
+  // What it says: clear inside the region, tinted outside it. Read off
+  // the image itself rather than off the canvas, since it sits over it.
+  const alphaAt = async (x, y) =>
+    await page.evaluate(
+      async ([src, px, py]) => {
+        const img = new Image();
+        img.src = src;
+        await img.decode();
+        const c = document.createElement("canvas");
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        const g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        return g.getImageData(px, py, 1, 1).data[3];
+      },
+      [await veil.getAttribute("src"), x, y],
+    );
+  assert((await alphaAt(150, 100)) === 0, "clear where the region is");
+  assert((await alphaAt(10, 10)) > 100, "and tinted where it is not");
+
+  // Inside out, and the wash turns over with it — which is the thing an
+  // outline cannot say.
+  await page.keyboard.press("Control+Shift+I");
+  await page.waitForTimeout(600);
+  assert(
+    (await alphaAt(150, 100)) > 100,
+    "the middle is what is not picked now",
+  );
+  assert((await alphaAt(10, 10)) === 0, "and the rest of the page is");
+
+  await wash.click();
+  await page.waitForTimeout(400);
+  assert((await page.locator(".veil").count()) === 0, "and it goes away again");
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

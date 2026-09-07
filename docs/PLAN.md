@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~341),
+- **Verify before committing:** `cargo test --workspace` (~342),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~890 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~900 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1016,7 +1016,15 @@ without reading anything else.*
   four until the one place that carries a mask between spaces started
   scaling it too. And marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture
-  and a light one — say where it is. The ants are drawn from the
+  and a light one — say where it is. Where an outline cannot say
+  enough, a wash can: the region's own coverage laid over the page,
+  clear where it is picked and tinted where it is not. The ants draw an
+  inverted region the same way round as an upright one, a softened edge
+  not at all, and a region of a hundred rings as a thicket of them; the
+  wash says all three at a glance, and being the coverage itself it
+  cannot disagree with what the region will do to a layer. Offered
+  beside the softness, with a region picked and a select tool in hand,
+  and remade only when what is picked changes. The ants are drawn from the
   outline the *engine* flattens, not one worked out again in the app: a
   rounded box, an ellipse and a freehand path each flatten differently,
   and two answers would show as ants off the edge. `Ctrl+A` means the

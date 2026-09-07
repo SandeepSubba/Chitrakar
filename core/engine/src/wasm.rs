@@ -663,6 +663,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// What is picked out as a wash over what is not: a page-sized PNG,
+    /// clear where the region is and tinted where it is not.
+    pub fn selection_veil(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.selection_veil().map_err(to_js)
+    }
+
     /// The page inside what is picked out, as a PNG with the region's
     /// own coverage in the alpha.
     pub fn selection_png(&self) -> Result<Vec<u8>, JsError> {

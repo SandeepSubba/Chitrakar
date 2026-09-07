@@ -1258,6 +1258,13 @@ export function App() {
   const [wandTolerance, setWandTolerance] = useState(0.12);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
+  /** A wash over what is *not* picked, for when the ants cannot say
+   * enough: a softened edge is neither in nor out, an inverted region
+   * is everything but its rings, and a hundred rings is a thicket. Kept
+   * as a blob URL, remade whenever what is picked changes. */
+  const [veil, setVeil] = useState<string | null>(null);
+  const showVeil = useRef(false);
+  const [veilOn, setVeilOn] = useState(false);
   /** Whether the wand asks about the run of pixels it landed in or
    * about the colour wherever it is on the page. A sky between branches
    * is one colour in a hundred pieces, and spreading never gets from
@@ -1285,6 +1292,23 @@ export function App() {
       } catch {
         setAntRings([]);
       }
+      // The wash, when it is asked for. Made here rather than in an
+      // effect because this is the one place that knows the region has
+      // just been read: an effect would have to work out for itself
+      // whether anything changed, and would remake it on every render.
+      setVeil((old) => {
+        if (old) URL.revokeObjectURL(old);
+        if (!showVeil.current) return null;
+        try {
+          const png = s.selection_veil() as Uint8Array;
+          return URL.createObjectURL(
+            new Blob([png as BlobPart], { type: "image/png" }),
+          );
+        } catch {
+          // Nothing picked out: nothing to wash over.
+          return null;
+        }
+      });
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext("2d")!;
@@ -6639,6 +6663,24 @@ export function App() {
               }}
             />
           )}
+          {/* Whether to show what is picked as a wash rather than only
+              as an outline. The ants cannot say how soft an edge is or
+              which side of it is picked; this can. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <button
+              className={`chrome-button icon-only${veilOn ? " active" : ""}`}
+              aria-label="Show what is picked as a wash"
+              aria-pressed={veilOn}
+              title="Show what is picked as a wash over the rest"
+              onClick={() => {
+                showVeil.current = !veilOn;
+                setVeilOn(!veilOn);
+                if (session) refresh(session);
+              }}
+            >
+              <Icon name="mask" />
+            </button>
+          )}
           {/* How much further out — or, with a minus sign, further in —
               the region reaches. Applied on Enter rather than as it is
               typed: each press is an edit of its own, so "grow by two"
@@ -7346,6 +7388,22 @@ export function App() {
                 <polygon points={q!.map((p) => p.join(",")).join(" ")} />
               </svg>
             ))}
+          {/* The wash over what is not picked, under the ants: the
+              coverage itself, laid over the page where the page is. */}
+          {veil && (
+            <img
+              className="veil"
+              alt=""
+              aria-hidden="true"
+              src={veil}
+              style={{
+                left: view.x,
+                top: view.y,
+                width: docSize[0] * view.zoom,
+                height: docSize[1] * view.zoom,
+              }}
+            />
+          )}
           {/* The marching ants: what is picked out of the page, and what
               is being dragged out at this moment. Two strokes over each
               other — a pale one under a dark dashed one — so the edge
