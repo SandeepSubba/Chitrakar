@@ -1108,7 +1108,6 @@ body {
 .veil {
   position: absolute;
   pointer-events: none;
-  image-rendering: pixelated;
 }
 
 .ants {

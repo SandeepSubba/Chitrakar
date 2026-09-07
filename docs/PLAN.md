@@ -1024,7 +1024,11 @@ without reading anything else.*
   wash says all three at a glance, and being the coverage itself it
   cannot disagree with what the region will do to a layer. Offered
   beside the softness, with a region picked and a select tool in hand,
-  and remade only when what is picked changes. The ants are drawn from the
+  and remade only when what is picked changes — which, while a marquee
+  is being dragged, is every frame, so it is worked out at most a
+  thousand pixels across and stretched over the page. It is an
+  indicator rather than a mask, and that way it costs the same whatever
+  size the page is. The ants are drawn from the
   outline the *engine* flattens, not one worked out again in the app: a
   rounded box, an ellipse and a freehand path each flatten differently,
   and two answers would show as ants off the edge. `Ctrl+A` means the

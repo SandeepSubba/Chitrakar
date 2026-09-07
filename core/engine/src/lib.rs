@@ -3042,19 +3042,34 @@ impl Session {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // Not at the page's own size. A wash is remade every time what
+        // is picked changes — which, while a marquee is being dragged,
+        // is every frame — and a twelve-megapixel page encoded that
+        // often would make the drag it exists to show crawl. It is an
+        // indicator rather than a mask: worked out at most a thousand
+        // pixels across and stretched over the page, which costs the
+        // same whatever size the page is.
+        const ACROSS: f32 = 1024.0;
+        let scale = (ACROSS / w.max(h) as f32).min(1.0);
+        let (w, h) = (
+            ((w as f32 * scale).ceil() as u32).max(1),
+            ((h as f32 * scale).ceil() as u32).max(1),
+        );
         let clip = chitrakar_render::ClipRect {
             x0: 0,
             y0: 0,
             x1: w,
             y1: h,
         };
-        let cover = chitrakar_render::mask_plane_over(
-            &self.doc,
-            region,
-            Transform::default(),
-            clip,
-            (w, h),
-        );
+        let seen = Transform {
+            a: scale,
+            b: 0.0,
+            c: 0.0,
+            d: scale,
+            e: 0.0,
+            f: 0.0,
+        };
+        let cover = chitrakar_render::mask_plane_over(&self.doc, region, seen, clip, (w, h));
         let mut rgba8 = Vec::with_capacity(cover.len() * 4);
         for c in &cover {
             // Straight bytes rather than premultiplied: a PNG carries a
@@ -7125,7 +7140,11 @@ mod tests {
             (img.width, img.height, at)
         };
         let (w, h, alpha) = read(&session);
-        assert_eq!((w, h), (60, 40), "a wash over the whole page");
+        assert_eq!(
+            (w, h),
+            (60, 40),
+            "a page this size is washed at its own size"
+        );
         assert_eq!(alpha(30, 20), 0.0, "clear where the region is");
         assert!(alpha(5, 20) > 100.0, "and tinted where it is not");
 
@@ -7144,6 +7163,22 @@ mod tests {
         assert!(
             edge > 20.0 && edge < 130.0,
             "the edge is part way through: {edge}"
+        );
+
+        // A big page is washed smaller and stretched over itself: the
+        // wash is remade on every frame of a drag, and a page's own
+        // size is not a cost anyone asked for to see what is picked.
+        let mut big = Session::new(4000, 3000, ColorMode::Rgb);
+        big.pick_all().unwrap();
+        big.pick_inverse().unwrap();
+        let (bw, bh, _) = read(&big);
+        assert!(
+            bw <= 1024 && bh <= 1024 && bw > 512,
+            "a big page is washed at a bounded size: {bw}x{bh}"
+        );
+        assert!(
+            (bw as f32 / bh as f32 - 4000.0 / 3000.0).abs() < 0.01,
+            "with the page's own proportions"
         );
 
         session.pick_none().unwrap();
