@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~354),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~925 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~928 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1294,7 +1294,10 @@ without reading anything else.*
   delete, since a view of nothing is not what anybody asked for.
 - **Chrome:** "?" (or View › Keys and gestures) opens a sheet of every
   key and gesture, since half of what this editor can do is a gesture
-  nobody would guess at. Document actions live in a File/Edit/Page/View menu bar — Edit
+  nobody would guess at — which is also why a gesture added without a
+  line on the sheet leaves the sheet quietly wrong, and why the sheet's
+  own block holds it to naming them and not only to its letters
+  working. Document actions live in a File/Edit/Page/View menu bar — Edit
   carries cut/copy/paste/duplicate/delete and select-all beside undo, Page
   the page's own size, its turns and its mirrors, View
   fit/zoom/actual-size/zoom-to-selection and the guide toggles, so

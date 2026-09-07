@@ -6657,6 +6657,24 @@ assert(
     (await page.locator('[aria-label="Keys and gestures"]').count()) === 1,
     "and ? is what opens the sheet that says so",
   );
+  // The gestures it names as well as the keys. A gesture nobody would
+  // guess at is exactly what the sheet is for, so one added without a
+  // line here is one the sheet is quietly wrong about — these three
+  // work (9ao, 9ap, 9ar), and this is where the sheet is held to
+  // saying so.
+  const sheet = await page
+    .locator('[aria-label="Keys and gestures"]')
+    .textContent();
+  for (const [gesture, about] of [
+    ["Alt-click a layer's eye", "on its own"],
+    ["Click a kept region", "forgets it"],
+    ["Alt-click a swatch", "out of the palette"],
+  ]) {
+    assert(
+      sheet.includes(gesture) && sheet.includes(about),
+      `the sheet says what "${gesture}" does`,
+    );
+  }
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
 

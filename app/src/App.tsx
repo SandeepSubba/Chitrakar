@@ -8695,6 +8695,10 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Drag out of a ruler", "Place a guide; drop it back to remove it"],
       ["Ctrl++, Ctrl+-", "Zoom in, out"],
       ["Ctrl+0, Ctrl+1", "Fit the page to the window, actual size"],
+      [
+        "Alt-click a layer's eye",
+        "Show that layer on its own; again for the page back. Looking, not an edit: nothing is remembered by the file",
+      ],
     ],
   ],
   [
@@ -8712,6 +8716,11 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["M", "Pick a region out of the page (again for the ellipse and the lasso)"],
       ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
       ["Ctrl+Shift+I", "Pick out the rest instead"],
+      [
+        "Click a kept region",
+        "Pick it out again; shift adds it, alt takes it away, both keep the overlap, ctrl-click forgets it",
+      ],
+      ["Alt-click a swatch", "Take that colour out of the palette"],
       ["Delete", "Delete the picked layers"],
       ["?", "This sheet"],
     ],
