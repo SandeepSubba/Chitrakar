@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~333),
+- **Verify before committing:** `cargo test --workspace` (~334),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~876 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -962,7 +962,13 @@ without reading anything else.*
   added to, taken from, filled and cropped to — saying it had no outline
   made "pick out the rest instead" a dead end. Combining keeps the
   softness of what was already picked, since the second box says where
-  rather than how sharply. And marching ants — a pale
+  rather than how sharply. And a region handed to a layer is carried
+  into that layer's space whole — the shape through the transform, and
+  the softness *as a distance*, which is easy to forget because it is a
+  bare number rather than a point: a feather of four handed to a layer
+  inside a group scaled by two faded over eight page pixels instead of
+  four until the one place that carries a mask between spaces started
+  scaling it too. And marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture
   and a light one — say where it is. The ants are drawn from the
   outline the *engine* flattens, not one worked out again in the app: a

@@ -2715,28 +2715,11 @@ impl Session {
             selection.invert = !selection.invert;
         }
         let parent = chitrakar_render::ancestor_space(&self.doc, id);
-        let Some(into) = Self::seen_from(parent) else {
+        let Some(mask) = Self::carried_into(&selection, parent) else {
             return Err(EngineError::BadCommand(
                 "this layer sits in a space with no thickness".into(),
             ));
         };
-        let mut mask = selection;
-        match &mut mask.kind {
-            chitrakar_doc::MaskKind::Vector { transform, .. }
-            | chitrakar_doc::MaskKind::Raster { transform, .. } => {
-                *transform = into.compose(*transform);
-            }
-            chitrakar_doc::MaskKind::Painted { strokes } => {
-                for stroke in strokes {
-                    for p in &mut stroke.points {
-                        *p = [
-                            into.a * p[0] + into.c * p[1] + into.e,
-                            into.b * p[0] + into.d * p[1] + into.f,
-                        ];
-                    }
-                }
-            }
-        }
         self.apply_labeled(
             Command::SetMask {
                 id,
@@ -2768,11 +2751,19 @@ impl Session {
         })
     }
 
-    /// What is picked out of the page, carried into `space`, ready to
-    /// ride on a stroke laid down there.
-    fn region_in(&self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
-        let mut mask = self.doc.selection()?.clone();
+    /// A mask written in the page's space, carried into `space`.
+    ///
+    /// The shape goes through the transform, as a shape does. So does
+    /// the softness, which is easy to forget because it is a bare number
+    /// rather than a point: it is a *distance*, read against whatever
+    /// space it lands in, so a feather of four handed to a layer inside
+    /// a group scaled by two would fade over eight page pixels instead
+    /// of four.
+    fn carried_into(mask: &chitrakar_doc::Mask, space: Transform) -> Option<chitrakar_doc::Mask> {
         let into = Self::seen_from(space)?;
+        let shrink = into.a.hypot(into.b).max(into.c.hypot(into.d));
+        let mut mask = mask.clone();
+        mask.feather *= shrink;
         match &mut mask.kind {
             chitrakar_doc::MaskKind::Vector { transform, .. }
             | chitrakar_doc::MaskKind::Raster { transform, .. } => {
@@ -2789,7 +2780,13 @@ impl Session {
                 }
             }
         }
-        Some(Box::new(mask))
+        Some(mask)
+    }
+
+    /// What is picked out of the page, carried into `space`, ready to
+    /// ride on a stroke laid down there.
+    fn region_in(&self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
+        Self::carried_into(self.doc.selection()?, space).map(Box::new)
     }
 
     /// Whether the page point `(x, y)` is inside what is picked out.
@@ -6693,6 +6690,71 @@ mod tests {
             "an unconfined stroke goes where it is drawn"
         );
         assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A softened region handed to a layer in a scaled group keeps the
+    /// softness it looked like.
+    ///
+    /// Feather is a distance, and a distance carried into another space
+    /// has to be carried like one. The shape is — its transform goes
+    /// through the space — but the number saying how far the edge fades
+    /// is read against whatever space it lands in, so left alone it
+    /// means twice as much inside a group scaled by two.
+    #[test]
+    fn a_softened_region_keeps_its_softness_wherever_it_lands() {
+        let soft_edge = |scale: f32| {
+            let mut session = Session::new(120, 60, ColorMode::Rgb);
+            let inner = add_rect(&mut session, "sheet", 120.0 / scale, 60.0 / scale);
+            let group = session.group_nodes(&[inner], "g").unwrap();
+            session
+                .apply(Command::SetTransform {
+                    id: group,
+                    transform: Transform {
+                        a: scale,
+                        b: 0.0,
+                        c: 0.0,
+                        d: scale,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                })
+                .unwrap();
+            session
+                .pick_region(
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    Transform::default(),
+                    "replace",
+                )
+                .unwrap();
+            session.feather_selection(4.0).unwrap();
+            session.mask_from_selection(inner, false).unwrap();
+            // How far the fade runs, in page pixels: the columns that
+            // are neither whole nor nothing.
+            let page = session.render().unwrap();
+            (0..120)
+                .filter(|&x| {
+                    let a = page.get(x, 30).a;
+                    a > 0.05 && a < 0.95
+                })
+                .count()
+        };
+
+        let plain = soft_edge(1.0);
+        assert!(
+            plain > 4 && plain < 30,
+            "a softened edge fades over several pixels: {plain}"
+        );
+        for scale in [2.0, 0.5] {
+            let got = soft_edge(scale);
+            assert!(
+                (got as i32 - plain as i32).abs() <= 2,
+                "and over the same few wherever the layer sits: {got} at {scale} against {plain}"
+            );
+        }
     }
 
     /// What is picked inside out is still a region.
