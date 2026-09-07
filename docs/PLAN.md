@@ -1002,7 +1002,11 @@ without reading anything else.*
   makes, so it is drawn on its own at full strength with its blend, its
   opacity and its effects set aside — a layer at two tenths still
   covers what it covers, and a drop shadow is not part of the drawing
-  that casts it. Its mask is not set aside, since a masked layer covers
+  that casts it. Where the edge falls is half covered, which is where a
+  shape's antialiased edge crosses the edge it is drawing — but half of
+  what the layer manages at its strongest rather than half of opaque,
+  since a shape painted in a colour that is itself part transparent
+  would otherwise be said to cover nothing at all. Its mask is not set aside, since a masked layer covers
   exactly what the mask lets through, and a group answers for
   everything under it together.
   A region can also be taken further out, or further in, by a distance

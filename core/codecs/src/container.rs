@@ -673,7 +673,7 @@ mod tests {
                     transform: chitrakar_doc::Transform::translation(50.0, 40.0),
                 },
                 invert: true,
-                feather: 0.0,
+                feather: 2.5,
             })),
         })
         .unwrap();
@@ -714,6 +714,13 @@ mod tests {
                 Some((chitrakar_doc::MaskKind::Vector { .. }, true))
             ),
             "what was picked out came back, inside out as it went"
+        );
+        assert_eq!(
+            back.selection().map(|m| m.feather),
+            Some(2.5),
+            "with its edge as soft as it was: a softness is a number \
+             rather than a shape, and the easiest thing in a region to \
+             drop on the way through a file"
         );
         assert!(
             matches!(

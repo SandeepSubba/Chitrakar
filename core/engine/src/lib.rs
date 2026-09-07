@@ -2837,10 +2837,16 @@ impl Session {
         }
         let cover = chitrakar_render::layer_coverage(&alone, id)?;
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
-        // Half covered is inside, the same line the wand draws: a
-        // shape's antialiased edge is half a pixel of grey either side
-        // of where the edge really is.
-        let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+        // Half covered is inside, which is where a shape's antialiased
+        // edge crosses the edge it is drawing. Half of what the layer
+        // manages at its strongest, though, not half of opaque: a shape
+        // painted in a colour that is itself a third transparent still
+        // covers what it covers, and against a fixed half it would be
+        // said to cover nothing at all. At full strength — which is
+        // most layers — the two are the same line.
+        let peak = cover.iter().copied().fold(0.0f32, f32::max);
+        let line = peak * 0.5;
+        let inside: Vec<bool> = cover.iter().map(|c| *c >= line && *c > 0.0).collect();
         let rings = chitrakar_render::trace_pixels(&inside, w, h);
         let Some(region) = Self::region_of(rings, 0.0) else {
             return Err(EngineError::BadCommand(
@@ -7119,6 +7125,45 @@ mod tests {
             .unwrap();
         assert!(session.selection_covers(85.0, 45.0), "added to");
         assert!(session.selection_covers(30.0, 20.0), "without losing it");
+
+        // A colour that is itself part transparent is still a shape.
+        // Against a fixed half-covered line such a layer would be said
+        // to cover nothing at all, which is a lie about a layer plainly
+        // there on the page.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let faint = add_rect(&mut session, "faint", 40.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id: faint,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 40.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.3,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: faint,
+                transform: Transform::translation(20.0, 10.0),
+            })
+            .unwrap();
+        session.pick_from_layer(faint, "replace").unwrap();
+        let ghost = session.selection_bounds().unwrap();
+        assert!(
+            near(ghost, [20.0, 10.0, 60.0, 30.0]),
+            "a third-opaque shape covers what it covers: {ghost:?}"
+        );
 
         // A layer covering nothing on the page says so rather than
         // picking out an empty region.
