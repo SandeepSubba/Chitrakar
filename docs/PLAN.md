@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~346),
+- **Verify before committing:** `cargo test --workspace` (~347),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~908 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -808,6 +808,22 @@ without reading anything else.*
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
+- **The fixture holds one of every node kind:** it had the six that
+  cover — shapes, a group, a paint layer, a picture, a block of text, a
+  frame — and none of the four that draw by *reading*: an adjustment
+  and a filter rewrite what is composited below them, a clone lays down
+  what the page already holds somewhere else, and a copy draws another
+  layer's content in its own place. Adding them found three defects in
+  one run, all of the same shape and none reachable without a copy in
+  the document. Changing a layer dirtied every copy *of that layer* but
+  no copy of the group it sits in — which is how symbols are actually
+  made, so every edit inside one left stale paint at each copy. A
+  session opened from a file believed there were no copies in it until
+  something structural happened, so a plain drag left them behind. And
+  on the GPU path a coverage — a mask, or the alpha a layer is held to
+  — was rasterized over the box the *document* places the layer at, so
+  a layer inside a copied group was held back by what was happening at
+  the other end of the page.
 - **Everything the page carries is carried the same way:**
   `map_page` is the one place a page transform is stated, and every
   page-space thing has to be named there or it is quietly left behind —

@@ -25,6 +25,11 @@ pub struct Fixture {
     pub picture: NodeId,
     pub words: NodeId,
     pub frame: NodeId,
+    /// The four that draw by reading rather than by covering.
+    pub lifted: NodeId,
+    pub softened: NodeId,
+    pub borrowed: NodeId,
+    pub copy: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -209,6 +214,93 @@ pub fn everything() -> Fixture {
         transform: Transform::translation(56.0, 40.0),
     })
     .unwrap();
+    // The four kinds that draw by reading rather than by covering: an
+    // adjustment and a filter rewrite what is composited below them, a
+    // clone lays down what the page already holds somewhere else, and a
+    // copy draws another layer's content in its own place. Every one of
+    // them makes a question about pixels — which region a command
+    // dirties, what a backdrop is, what a second renderer has to agree
+    // about — answer differently from a shape's, which is the whole
+    // reason for having them here.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 5,
+        node: Box::new(Node::adjustment(
+            "lift",
+            crate::Adjustment::Exposure { stops: 0.4 },
+        )),
+    })
+    .unwrap();
+    let lifted = doc.children_of(root).unwrap()[5];
+    doc.apply(Command::SetMask {
+        id: lifted,
+        mask: Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 26.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(10.0, 30.0),
+            },
+            invert: false,
+            feather: 0.75,
+        })
+        .into(),
+    })
+    .unwrap();
+    let softened_at = 6;
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: softened_at,
+        node: Box::new(Node::filter(
+            "soften",
+            crate::Filter::GaussianBlur { sigma: 1.5 },
+        )),
+    })
+    .unwrap();
+    let softened = doc.children_of(root).unwrap()[softened_at];
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 7,
+        node: Box::new(Node::clone_layer("borrowed")),
+    })
+    .unwrap();
+    let borrowed = doc.children_of(root).unwrap()[7];
+    doc.apply(Command::AddStroke {
+        id: borrowed,
+        index: 0,
+        stroke: Box::new(PaintStroke {
+            points: vec![[30.0, 12.0], [44.0, 18.0]],
+            radii: vec![3.5],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.0,
+            erase: false,
+            source: [-14.0, 20.0],
+            heal: false,
+            clip: None,
+        }),
+        on_mask: false,
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 8,
+        node: Box::new(Node::instance("a copy", group)),
+    })
+    .unwrap();
+    let copy = doc.children_of(root).unwrap()[8];
+    doc.apply(Command::SetTransform {
+        id: copy,
+        transform: Transform::translation(44.0, 2.0),
+    })
+    .unwrap();
+
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })
@@ -224,6 +316,10 @@ pub fn everything() -> Fixture {
         picture,
         words,
         frame,
+        lifted,
+        softened,
+        borrowed,
+        copy,
         stroke,
     }
 }

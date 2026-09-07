@@ -221,6 +221,17 @@ impl Session {
     }
 
     fn from_document(doc: Document) -> Self {
+        let mut session = Self::empty_over(doc);
+        // A document arriving whole — opened from a file, handed over by
+        // a test — may already hold copies, and until this is asked
+        // every edit that is not structural would leave them stale on
+        // screen: drag the original and the copies of it keep the paint
+        // they had.
+        session.note_copies();
+        session
+    }
+
+    fn empty_over(doc: Document) -> Self {
         Self {
             doc,
             undo: Vec::new(),
@@ -360,9 +371,10 @@ impl Session {
             .unwrap_or(Bounds::None)
     }
 
-    /// Where every live copy of a layer is — directly, or through
-    /// another copy. A change to the layer changes all of them, wherever
-    /// they were put, so the region to repaint has to take them in.
+    /// Where every live copy of a layer is — of the layer itself, of a
+    /// group it sits in, or through another copy. A change to the layer
+    /// changes all of them, wherever they were put, so the region to
+    /// repaint has to take them in.
     fn copies_bounds(&self, id: Option<NodeId>) -> Bounds {
         let Some(id) = id else {
             return Bounds::None;
@@ -374,7 +386,18 @@ impl Session {
         }
         let mut order = Vec::new();
         Self::painter_order(&self.doc, self.doc.root(), &mut order);
+        // A copy of a *group* draws everything in it, so changing one
+        // shape inside a group changes every copy of that group,
+        // wherever it was put. Following copies of the layer alone
+        // missed all of them, and the miss shows as paint left on the
+        // screen at the copy after the original has moved on. So the
+        // walk starts at the layer and at every group above it.
         let mut following = vec![id];
+        let mut up = self.doc.parent_of(id);
+        while let Some(above) = up {
+            following.push(above);
+            up = self.doc.parent_of(above);
+        }
         let mut bounds = Bounds::None;
         // A copy of a copy follows the same original, so keep going until
         // nothing new is found. The graph has no cycles, so it ends.
@@ -7238,6 +7261,73 @@ mod tests {
     /// same region in two places at once, maps the page, and asks
     /// whether they still agree. Anything `map_page` forgets stops
     /// agreeing with what it remembers, whatever the transform was.
+    #[test]
+    fn changing_a_layer_repaints_every_copy_of_what_it_is_in() {
+        // A copy draws what the original draws, so changing anything
+        // inside the original changes the copy — somewhere else on the
+        // page entirely. Following copies of the layer alone missed
+        // copies of the *group* it sits in, which is how symbols are
+        // actually made, and the miss shows as stale paint left at the
+        // copy after the original has moved on.
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("inside", 20.0, 20.0),
+        })
+        .unwrap();
+        let inside = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("a copy", group)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(70.0, 20.0),
+        })
+        .unwrap();
+
+        // Opened whole, the way a file arrives: a session that has not
+        // been told there are copies in it will not repaint them, and
+        // nothing structural has happened to tell it.
+        let mut session = Session::from_document(doc);
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: inside,
+                transform: Transform::translation(0.0, 24.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        // And the region reported as stale reaches the copy, not just
+        // the original: a cache that agreed by repainting everything
+        // would pass the line above without being right about anything.
+        session
+            .apply(Command::SetOpacity {
+                id: inside,
+                opacity: 0.4,
+            })
+            .unwrap();
+        let stale = session.stale.expect("something is stale");
+        assert!(
+            stale.x1 > 70,
+            "the region reaches the copy at x=70: {stale:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
     #[test]
     fn everything_the_page_carries_is_carried_the_same_way() {
         for command in [

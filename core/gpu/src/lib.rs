@@ -1834,7 +1834,18 @@ fn mask_texture(
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
     let page = (doc.meta.width, doc.meta.height);
-    let (bx0, by0, bx1, by1) = match chitrakar_render::node_bounds(doc, id).ok()? {
+    // Through the space the layer is being drawn in rather than through
+    // the one the document places it in: a copy of a group draws that
+    // group's layers somewhere else entirely, and a coverage rasterized
+    // over the original's box would hold the copy back by what is
+    // happening at the other end of the page.
+    let placed = match chitrakar_render::bounds_in_parent_space(doc, id).ok()? {
+        chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => {
+            chitrakar_render::transformed_box(parent, [x0, y0, x1, y1])
+        }
+        other => other,
+    };
+    let (bx0, by0, bx1, by1) = match placed {
         chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
         // A layer that reaches nowhere has nothing for a mask to hold
         // back; one that reaches everywhere — an adjustment — wants the
@@ -1863,7 +1874,7 @@ fn mask_texture(
         None => vec![1.0; (w * h) as usize],
     };
     if let Some(base) = held_to {
-        let held = chitrakar_render::layer_coverage(doc, base).ok()?;
+        let held = chitrakar_render::layer_coverage_at(doc, base, parent).ok()?;
         for (i, c) in cover.iter_mut().enumerate() {
             let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
             *c *= held[(y * page.0 + x) as usize];
@@ -2940,13 +2951,15 @@ mod tests {
         };
         let mut f = chitrakar_doc::fixture::everything();
         // The fixture holds one of every node kind, and this backend
-        // does not draw them all yet — a paint layer's strokes are
-        // still the CPU's. One of those in
+        // does not draw them all yet — the strokes a paint layer and a
+        // clone layer hold are still the CPU's. One of those in
         // the document makes the whole page declined, and an audit that
         // is declined every time measures nothing, so they come out
         // first. As the backend learns a kind, its line here goes and
         // the commands that speak to it come into scope by themselves.
-        f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
+        for id in [f.painted, f.borrowed] {
+            f.doc.apply(Command::RemoveNode { id }).unwrap();
+        }
         let mut drawn = 0usize;
         let mut declined = Vec::new();
         let check = |doc: &Document, what: &str, drawn: &mut usize| {
@@ -3115,6 +3128,83 @@ mod tests {
         let (mean, worst) = difference(&after, &chitrakar_render::render(&moved).unwrap());
         assert!(mean < 0.004, "moved: mean {mean:.5}, worst {worst:.3}");
         assert!(after.get(60, 32).a > 0.99, "the copy stayed where it was");
+
+        // A copy of a group draws that group's layers somewhere else
+        // entirely, so a coverage — a mask, or the alpha a layer is
+        // held to — has to be rasterized in the space the layer is
+        // being drawn in rather than the one the document places it in.
+        // Read off the original's box it would hold the copy back by
+        // what is happening at the other end of the page.
+        let mut inner = Document::new(90, 60, ColorMode::Rgb);
+        let root = inner.root();
+        inner
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("pair")),
+            })
+            .unwrap();
+        let pair = inner.children_of(root).unwrap()[0];
+        for (i, (name, shape, at)) in [
+            ("base", round.clone(), 4.0),
+            (
+                "held",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 6.0,
+                    radius: 0.0,
+                },
+                10.0,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            inner
+                .apply(Command::AddNode {
+                    parent: pair,
+                    index: i,
+                    node: filled(name, shape, if i == 0 { RED } else { BLUE }),
+                })
+                .unwrap();
+            let id = inner.children_of(pair).unwrap()[i];
+            inner
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(2.0, at),
+                })
+                .unwrap();
+        }
+        let held = inner.children_of(pair).unwrap()[1];
+        inner
+            .apply(Command::SetClipped {
+                id: held,
+                clipped: true,
+            })
+            .unwrap();
+        inner
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::instance("a copy", pair)),
+            })
+            .unwrap();
+        let elsewhere = inner.children_of(root).unwrap()[1];
+        inner
+            .apply(Command::SetTransform {
+                id: elsewhere,
+                transform: Transform::translation(48.0, 26.0),
+            })
+            .unwrap();
+        assert!(GpuRenderer::can_render(&inner), "a copy of a held pair");
+        let (mean, worst) = difference(
+            &gpu.render(&inner).unwrap(),
+            &chitrakar_render::render(&inner).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "held inside a copy: mean {mean:.5}, worst {worst:.3}"
+        );
 
         // Faded, blended or masked, the CPU draws a copy on a surface of
         // its own, which is a different picture from this.
