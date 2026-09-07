@@ -7931,6 +7931,73 @@ assert(
   );
 }
 
+// 9am. A region taken from a layer rather than dragged out. The other
+// way round from handing a region to a layer: the shape a layer covers
+// comes back out into the page, which is the only way to pick out a
+// shape no marquee can be dragged into — here two boxes clear of each
+// other, which is one region of two rings and not one drag.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await setColor("Fill colour", "#cc3333");
+  await rect(40, 40, 120, 120);
+  await rect(240, 180, 340, 260);
+  await pickTool("Move");
+  await page.mouse.click(...at(80, 80));
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(290, 220));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(250);
+  await page.click(
+    '[aria-label="Group selected layers (ctrl-click to select several)"]',
+  );
+  await page.waitForTimeout(400);
+
+  await menuClick("Edit", "Pick out what this layer covers");
+  await page.waitForTimeout(400);
+  const rings = await page.locator(".ants polygon").count();
+  assert(rings === 2, `two boxes clear of each other are two rings (${rings})`);
+  const pts = (
+    await page.$$eval(".ants polygon", (els) =>
+      els.map((el) => el.getAttribute("points")),
+    )
+  )
+    .join(" ")
+    .trim()
+    .split(/\s+/)
+    .map((p) => p.split(",").map(Number));
+  const xs = pts.map((p) => p[0]);
+  const ys = pts.map((p) => p[1]);
+  const span = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  assert(
+    span[2] - span[0] > 200 && span[3] - span[1] > 150,
+    `and they reach across both boxes (${span})`,
+  );
+
+  // It is a region like any other from there: fill it, and the paint
+  // lands on both boxes and nowhere between them.
+  await setColor("Fill colour", "#3366cc");
+  await menuClick("Edit", "Fill what is picked");
+  await page.waitForTimeout(450);
+  const isBlue = async (x, y) => {
+    const [r, g, bl] = await canvasPixel(x, y);
+    return bl > 140 && r < 120;
+  };
+  assert(await isBlue(80, 80), "the first box is filled");
+  assert(await isBlue(290, 220), "and so is the second");
+  assert(!(await isBlue(180, 150)), "and nothing in between");
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

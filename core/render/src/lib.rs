@@ -4876,6 +4876,21 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     }))
 }
 
+/// What one layer alone covers on the page, as coverage per pixel.
+///
+/// The layer drawn exactly where the page puts it, on nothing, and read
+/// for its alpha: for a caller after the *shape* a layer occupies
+/// rather than the picture the page makes of it. Everything above and
+/// below is left out, and so is any clipping — a layer held to the one
+/// under it still has a shape of its own.
+pub fn layer_coverage(doc: &Document, id: NodeId) -> Result<Vec<f32>, DocError> {
+    let (w, h) = (doc.meta.width, doc.meta.height);
+    let mut surface = Surface::new(w, h);
+    let clip = surface.full_clip();
+    render_layer(doc, id, &mut surface, clip, ancestor_space(doc, id))?;
+    Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect())
+}
+
 /// A layer's mask as an image: what it lets through over the layer's
 /// own box, one pixel per document unit.
 ///

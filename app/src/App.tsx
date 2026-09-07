@@ -1473,6 +1473,19 @@ export function App() {
   const pickInverse = () => {
     if (session?.pick_inverse()) refresh(session);
   };
+  /** The other way round: the shape the picked layer covers, come back
+   * out into the page as a region. It is how a photograph is held to
+   * the shape of the words over it — no marquee can be dragged into
+   * that shape, but the layer that draws it already knows it. */
+  const pickFromLayer = () => {
+    if (!session || selected === null) return;
+    try {
+      session.pick_from_layer(selected, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${err}`);
+    }
+  };
   /** Hand the region to the picked layer as its mask. This is what a
    * selection is for in a non-destructive editor: nothing is cut out,
    * the layer is simply held to the part of it that was picked. */
@@ -6004,6 +6017,9 @@ export function App() {
             </MenuItem>
             <MenuItem icon="lasso" onClick={pickNothing}>
               Pick out nothing
+            </MenuItem>
+            <MenuItem icon="wand" onClick={pickFromLayer}>
+              Pick out what this layer covers
             </MenuItem>
             <MenuItem icon="fill" onClick={fillSelection}>
               Fill what is picked

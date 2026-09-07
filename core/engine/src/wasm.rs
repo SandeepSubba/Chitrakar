@@ -647,6 +647,14 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Pick out the shape a layer covers — the other way round from
+    /// handing a region to a layer.
+    pub fn pick_from_layer(&mut self, id: f64, how: &str) -> Result<(), JsError> {
+        self.inner
+            .pick_from_layer(NodeId(id as u64), how)
+            .map_err(to_js)
+    }
+
     /// Take the page in to what is picked out.
     pub fn crop_to_selection(&mut self) -> Result<(), JsError> {
         self.inner.crop_to_selection().map_err(to_js)

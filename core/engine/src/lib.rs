@@ -2733,6 +2733,64 @@ impl Session {
         )
     }
 
+    /// Pick out what a layer covers.
+    ///
+    /// The mirror of handing a region to a layer: there a region
+    /// written in the page's space becomes a layer's mask, here a
+    /// layer's own shape comes back out into the page as a region. It
+    /// is how a photograph is masked into the shape of the words over
+    /// it, or a glow made to follow a drawing — neither of which any
+    /// marquee can be dragged into.
+    ///
+    /// What is picked is the shape the layer *occupies*, not the
+    /// picture it makes: drawn on its own at full strength, with its
+    /// blend, its opacity and its effects set aside, since a layer at
+    /// two tenths still covers what it covers and a drop shadow is not
+    /// part of the drawing that casts it. Its mask is not set aside —
+    /// a masked layer covers only what the mask lets through, which is
+    /// exactly the shape being asked for. A group answers for
+    /// everything under it, together.
+    pub fn pick_from_layer(&mut self, id: NodeId, how: &str) -> Result<(), EngineError> {
+        let node = self.doc.node(id)?;
+        let (opacity, visible, blend, effects) =
+            (node.opacity, node.visible, node.blend, node.effects.clone());
+        let mut alone = self.doc.clone();
+        if opacity < 1.0 {
+            alone.apply(Command::SetOpacity { id, opacity: 1.0 })?;
+        }
+        if !visible {
+            alone.apply(Command::SetVisible { id, visible: true })?;
+        }
+        if blend != chitrakar_doc::BlendMode::Normal {
+            alone.apply(Command::SetBlendMode {
+                id,
+                blend: chitrakar_doc::BlendMode::Normal,
+            })?;
+        }
+        if !effects.is_empty() {
+            alone.apply(Command::SetEffects {
+                id,
+                effects: Vec::new(),
+            })?;
+        }
+        let cover = chitrakar_render::layer_coverage(&alone, id)?;
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // Half covered is inside, the same line the wand draws: a
+        // shape's antialiased edge is half a pixel of grey either side
+        // of where the edge really is.
+        let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+        let rings = chitrakar_render::trace_pixels(&inside, w, h);
+        let Some(region) = Self::region_of(rings, 0.0) else {
+            return Err(EngineError::BadCommand(
+                "that layer covers nothing on the page".into(),
+            ));
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+            unreachable!("region_of makes a shape")
+        };
+        self.pick_region(shape, transform, how)
+    }
+
     /// The page's own space seen from `space` — the transform that
     /// carries a page-space thing into it.
     fn seen_from(space: Transform) -> Option<Transform> {
@@ -6814,6 +6872,121 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    #[test]
+    fn a_layer_says_what_it_covers() {
+        // The mirror of handing a region to a layer. A shape can be
+        // picked out of the page by pointing at the layer that draws
+        // it, which is the only way to pick out most shapes at all.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(20.0, 10.0),
+            })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        assert!(session.selection_covers(30.0, 20.0), "inside the shape");
+        assert!(!session.selection_covers(5.0, 5.0), "and not outside it");
+        let bounds = session.selection_bounds().unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        assert!(
+            near(bounds, [20.0, 10.0, 60.0, 30.0]),
+            "the shape's own box: {bounds:?}"
+        );
+
+        // A layer at two tenths still covers what it covers, and a
+        // shadow is not part of the drawing that casts it.
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.2 })
+            .unwrap();
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 12.0,
+                    dy: 12.0,
+                    blur: 2.0,
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        let faint = session.selection_bounds().unwrap();
+        assert!(
+            near(faint, bounds),
+            "faded, shadowed and hidden, the same shape: {faint:?}"
+        );
+        assert_eq!(
+            session.document().node(id).unwrap().opacity,
+            0.2,
+            "and the layer itself is left as it was"
+        );
+
+        // A mask is not set aside: a masked layer covers only what the
+        // mask lets through, which is the shape being asked for.
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 20.0,
+                            height: 20.0,
+                            radius: 0.0,
+                        },
+                        // A mask is written in the space the layer is
+                        // placed in, so this is the left half of it.
+                        transform: Transform::translation(20.0, 10.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        let masked = session.selection_bounds().unwrap();
+        assert!(
+            near(masked, [20.0, 10.0, 40.0, 30.0]),
+            "only what the mask lets through: {masked:?}"
+        );
+
+        // And from there it is a region like any other.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(80.0, 40.0),
+                "union",
+            )
+            .unwrap();
+        assert!(session.selection_covers(85.0, 45.0), "added to");
+        assert!(session.selection_covers(30.0, 20.0), "without losing it");
+
+        // A layer covering nothing on the page says so rather than
+        // picking out an empty region.
+        let away = add_rect(&mut session, "gone", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: away,
+                transform: Transform::translation(400.0, 400.0),
+            })
+            .unwrap();
+        assert!(session.pick_from_layer(away, "replace").is_err());
+    }
+
     #[test]
     fn an_inverted_region_is_a_region_like_any_other() {
         let mut session = Session::new(100, 60, ColorMode::Rgb);

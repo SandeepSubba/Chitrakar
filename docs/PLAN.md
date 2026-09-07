@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~334),
+- **Verify before committing:** `cargo test --workspace` (~335),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~876 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~881 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -994,6 +994,17 @@ without reading anything else.*
   So it is a rectangle three sigma clear of the region on every side,
   clamped to the page, shaped entirely by the mask, and the shape and
   its softness land as one history entry.
+  A region can also be taken *from* a layer rather than dragged out —
+  the mirror of handing one to a layer, and the only way to pick out a
+  shape no marquee can be dragged into: the words in a text block, a
+  star, two boxes clear of each other as one region of two rings. What
+  is picked is the shape the layer occupies rather than the picture it
+  makes, so it is drawn on its own at full strength with its blend, its
+  opacity and its effects set aside — a layer at two tenths still
+  covers what it covers, and a drop shadow is not part of the drawing
+  that casts it. Its mask is not set aside, since a masked layer covers
+  exactly what the mask lets through, and a group answers for
+  everything under it together.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
   A brush painted with a region picked out is confined to it, and stays
