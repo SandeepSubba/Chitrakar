@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~355),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~933 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~936 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1052,7 +1052,15 @@ without reading anything else.*
   of a pixel, an eighth of a per cent of the spacing between the samples
   a coverage is taken with.
   Four tools draw one, sharing a rail slot the way the shapes do: a box
-  marquee, an ellipse, a lasso, and a wand under `M`. The wand reads the
+  marquee, an ellipse, a lasso, and a wand under `M`. The box and the
+  ellipse catch on the same lines a shape does — the page's own edge, a
+  guide, the edge of the layer being cut around — at the start of the
+  drag as well as the end, since a region laid against a layer's edge is
+  begun from that edge. Ctrl says never mind and shift wins outright,
+  the same two ways out a shape has, and for the same reason: shift is
+  asking for a square, and one nudged onto a line would be neither
+  square nor on it. The lasso is left out, having no corner to catch,
+  and so is the wand, which drags nothing. The wand reads the
   page as it is drawn, spreads out from where it was clicked while the
   colour holds — judged on the values the screen shows, since a wand is
   a judgement about what *looks* the same and linear light does not

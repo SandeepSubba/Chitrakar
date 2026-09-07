@@ -471,6 +471,10 @@ function isTextEntry(target: EventTarget | null): boolean {
 }
 
 /** The tools that drag a box out of nothing, which shift squares off. */
+/** The region tools that catch on the same lines a shape does. A lasso
+ * has no corner to catch, and the wand drags nothing. */
+const SNAPPED_REGIONS = new Set<string>(["Select", "Select ellipse"]);
+
 const BOX_TOOLS = new Set<string>([
   "Rect",
   "Ellipse",
@@ -2650,15 +2654,31 @@ export function App() {
       // Picking a region out of the page: a box, an ellipse or a
       // freehand outline. Nothing is drawn and no layer is made — what
       // comes out is a region to hand to a layer.
+      //
+      // A marquee is a box dragged out like any other, and the lines a
+      // rectangle catches on are exactly the ones a region wants: the
+      // page's own edge, a guide, the edge of the layer being cut
+      // around. Where it starts is worth catching as much as where it
+      // ends, so the first point goes through them too. The lasso is
+      // left out — a hand-drawn outline has no corner to catch — and so
+      // is the wand, which drags nothing.
+      const catches = SNAPPED_REGIONS.has(tool);
+      const [snapX, snapY] = catches ? snapTargets([]) : [undefined, undefined];
+      const [sx, sy] =
+        catches && snapX && snapY
+          ? snapPoint(x, y, snapX, snapY, e.ctrlKey || e.metaKey)
+          : [x, y];
       toolDragRef.current = {
         tool,
-        startX: x,
-        startY: y,
-        lastX: x,
-        lastY: y,
+        startX: sx,
+        startY: sy,
+        lastX: sx,
+        lastY: sy,
         moved: false,
         fromCentre: e.altKey && tool !== "Lasso",
-        stroke: [[x, y]],
+        stroke: [[sx, sy]],
+        snapX,
+        snapY,
       };
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
@@ -2877,7 +2897,20 @@ export function App() {
         return;
       }
       if (drag && SELECT_TOOLS.includes(drag.tool as never)) {
-        const [x, y] = docPoint(e);
+        let [x, y] = docPoint(e);
+        // The same lines, and the same two ways out of them: ctrl says
+        // never mind, and shift wins outright because it is asking for
+        // a square — one nudged onto a line would be neither square nor
+        // on it.
+        if (drag.snapX && drag.snapY && !e.shiftKey) {
+          [x, y] = snapPoint(
+            x,
+            y,
+            drag.snapX,
+            drag.snapY,
+            e.ctrlKey || e.metaKey,
+          );
+        }
         drag.lastX = x;
         drag.lastY = y;
         drag.moved = true;

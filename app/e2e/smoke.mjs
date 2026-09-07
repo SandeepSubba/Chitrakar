@@ -8527,6 +8527,75 @@ assert(
   );
 }
 
+// 9at. A marquee catches the same lines a shape does. A region dragged
+// round a layer to cut it out wants that layer's own edge, and a region
+// dragged to the page's edge wants the page's — which a rectangle drawn
+// over the same spot has always caught and a marquee did not.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#cc3333");
+  await pickTool("Rect");
+  await page.mouse.move(...at(80, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 150), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+
+  const antBox = async () => {
+    const pts = (
+      await page.$$eval(".ants polygon", (els) =>
+        els.map((el) => el.getAttribute("points")),
+      )
+    )
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  };
+  const perPixel = b.width / 300;
+  const region = async (x0, y0, x1, y1, mods = []) => {
+    for (const k of mods) await page.keyboard.down(k);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 8 });
+    await page.mouse.up();
+    for (const k of mods) await page.keyboard.up(k);
+    await page.waitForTimeout(350);
+  };
+
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  // Ctrl first, which says never mind: the drag lands where the hand
+  // put it, a pixel short of the layer's corner on each side.
+  await region(79, 49, 199, 149, ["Control"]);
+  const free = await antBox();
+  // Then the same drag without it, which should land on the corner.
+  await region(79, 49, 199, 149);
+  const caught = await antBox();
+  const moved = (caught[0] - free[0]) / perPixel;
+  assert(
+    Math.abs(moved - 1) < 0.7,
+    `the marquee caught the layer's own edge, a pixel over (${moved.toFixed(2)})`,
+  );
+  const grew = (caught[2] - free[2]) / perPixel;
+  assert(
+    Math.abs(grew - 1) < 0.7,
+    `and the far edge with it (${grew.toFixed(2)})`,
+  );
+  const sameWidth =
+    (caught[2] - caught[0] - (free[2] - free[0])) / perPixel;
+  assert(
+    Math.abs(sameWidth) < 0.6,
+    `the box is the size the hand drew, put where the edge is (${sameWidth.toFixed(2)})`,
+  );
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —
