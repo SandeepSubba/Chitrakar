@@ -568,7 +568,14 @@ pub fn render(doc: &Document) -> Result<Surface, DocError> {
     // A fresh surface is already transparent, so paint straight into it
     // rather than going through render_region, whose first act would be to
     // clear the region again — a whole-canvas write of zeroes over zeroes.
-    render_group(doc, doc.root(), &mut surface, clip, Transform::default())?;
+    render_group(
+        doc,
+        doc.root(),
+        &mut surface,
+        clip,
+        Transform::default(),
+        false,
+    )?;
     Ok(surface)
 }
 
@@ -600,24 +607,40 @@ pub fn render_region_at(
     clip: ClipRect,
     view: Transform,
 ) -> Result<(), DocError> {
-    region_at(doc, surface, clip, view, None)
+    region_at(doc, surface, clip, view, Showing::Everything)
 }
 
-/// The same, of one layer on its own rather than of the whole page.
+/// The same, of something less than the whole page.
 ///
 /// The page is still the page — the same edge, the same framing — with
-/// one layer drawn on it and nothing else. What that layer is on its
-/// own is a question every stack of layers eventually asks, and it is
-/// about looking rather than about the document, so it is a setting of
-/// the view like soft proofing rather than an edit.
-pub fn render_one_at(
+/// less drawn on it. Both of these are questions about *looking*
+/// rather than about the document, which is why they are settings of
+/// the view like soft proofing rather than edits.
+pub fn render_showing_at(
     doc: &Document,
-    id: NodeId,
     surface: &mut Surface,
     clip: ClipRect,
     view: Transform,
+    showing: Showing,
 ) -> Result<(), DocError> {
-    region_at(doc, surface, clip, view, Some(id))
+    region_at(doc, surface, clip, view, showing)
+}
+
+/// What a render draws of a document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Showing {
+    /// The page as it is.
+    #[default]
+    Everything,
+    /// One layer, where the page puts it, and nothing else — its own
+    /// effects and mask and all, since what is wanted is the layer as
+    /// the page draws it rather than a stripped-down version of it.
+    Alone(NodeId),
+    /// Everything but the layers that only change what is under them:
+    /// the picture as it was before the work. Exactly as though every
+    /// adjustment and filter had been hidden, which is what somebody
+    /// would otherwise do by hand, six clicks and six undos at a time.
+    Untouched,
 }
 
 fn region_at(
@@ -625,7 +648,7 @@ fn region_at(
     surface: &mut Surface,
     clip: ClipRect,
     view: Transform,
-    only: Option<NodeId>,
+    showing: Showing,
 ) -> Result<(), DocError> {
     if clip.is_empty() {
         return Ok(());
@@ -654,18 +677,26 @@ fn region_at(
     if inside.is_empty() {
         return Ok(());
     }
-    match only {
-        // One layer, where the page puts it, on the bare page: its own
-        // effects and mask and all, since what is wanted is the layer
-        // as the page draws it and not a stripped-down version of it.
-        Some(id) => render_layer(
+    match showing {
+        Showing::Alone(id) => render_layer(
             doc,
             id,
             surface,
             inside,
             view.compose(ancestor_space(doc, id)),
+            false,
         ),
-        None => render_group(doc, doc.root(), surface, inside, view),
+        // Untouched is the one that travels down the walk: it is a
+        // question about every layer rather than about the top of the
+        // tree, so each is asked on the way past.
+        other => render_group(
+            doc,
+            doc.root(),
+            surface,
+            inside,
+            view,
+            other == Showing::Untouched,
+        ),
     }
 }
 
@@ -675,6 +706,10 @@ fn render_group(
     dst: &mut Surface,
     clip: ClipRect,
     parent: Transform,
+    // Whether the layers that only change what is under them are left
+    // out: an adjustment and a filter are the work, and the picture
+    // under the work is a thing worth being able to look at.
+    bare: bool,
 ) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
     let children = doc.children_of(group)?;
@@ -699,9 +734,9 @@ fn render_group(
                 .fold(0.0f32, f32::max);
             (reach * max_scale(parent)).ceil() as u32
         });
-        let cover = draw_layer(doc, children[i], dst, clip, parent, None, capture)?;
+        let cover = draw_layer(doc, children[i], dst, clip, parent, None, capture, bare)?;
         for &above in &children[i + 1..end] {
-            draw_layer(doc, above, dst, clip, parent, cover.as_ref(), None)?;
+            draw_layer(doc, above, dst, clip, parent, cover.as_ref(), None, bare)?;
         }
         i = end;
     }
@@ -765,8 +800,9 @@ fn render_layer(
     dst: &mut Surface,
     clip: ClipRect,
     parent: Transform,
+    bare: bool,
 ) -> Result<(), DocError> {
-    draw_layer(doc, child, dst, clip, parent, None, None).map(|_| ())
+    draw_layer(doc, child, dst, clip, parent, None, None, bare).map(|_| ())
 }
 
 /// The same, with what clipping needs on either side of it: `cover`
@@ -775,6 +811,7 @@ fn render_layer(
 /// turn. Its value is how far past the region being repainted that alpha
 /// is still wanted — the reach of the effects hanging off the layers
 /// about to be cut by it, which read pixels they do not themselves cover.
+#[allow(clippy::too_many_arguments)]
 fn draw_layer(
     doc: &Document,
     child: NodeId,
@@ -783,10 +820,18 @@ fn draw_layer(
     parent: Transform,
     cover: Option<&Cover>,
     capture: Option<u32>,
+    bare: bool,
 ) -> Result<Option<Cover>, DocError> {
     {
         let node = doc.node(child)?;
-        if !node.visible || node.opacity <= 0.0 {
+        // A layer that only changes what is under it is the work, and
+        // `bare` is the picture without the work. Left out here rather
+        // than anywhere earlier so that it is exactly as though it had
+        // been hidden — which is what somebody would otherwise do by
+        // hand, and so the answer to "before" cannot be a different
+        // arithmetic from the answer to "hidden".
+        let work = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+        if !node.visible || node.opacity <= 0.0 || (bare && work) {
             return Ok(capture.map(|_| Cover::nothing()));
         }
         // Effects are drawn from the layer's own silhouette, so a layer
@@ -800,7 +845,7 @@ fn draw_layer(
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
         if !effected && cover.is_none() && capture.is_none() {
-            render_child(doc, child, dst, clip, parent, node.blend)?;
+            render_child(doc, child, dst, clip, parent, node.blend, bare)?;
             return Ok(None);
         }
         // An adjustment, a filter and a clone are transformations of what
@@ -821,7 +866,7 @@ fn draw_layer(
                 let before = blur::snapshot(dst, region);
                 let corner = (region.x0, region.y0);
                 let stride = region.x1 - region.x0;
-                render_child(doc, child, dst, region, parent, node.blend)?;
+                render_child(doc, child, dst, region, parent, node.blend, bare)?;
                 for y in region.y0..region.y1 {
                     for x in region.x0..region.x1 {
                         let a = c.alpha[at_in(c.origin, c.width, x, y)];
@@ -831,7 +876,7 @@ fn draw_layer(
                 }
                 return Ok(None);
             }
-            render_child(doc, child, dst, clip, parent, node.blend)?;
+            render_child(doc, child, dst, clip, parent, node.blend, bare)?;
             // Nothing clipped to one of these is confined by it: it has no
             // shape of its own to be confined to, so it lets everything
             // through rather than nothing.
@@ -882,6 +927,7 @@ fn draw_layer(
             shift_clip(layer_clip, origin),
             window.compose(parent),
             BlendMode::Normal,
+            bare,
         )?;
         // Cut the layer to what it is clipped to before anything is made
         // of it, so its effects grow from the shape that will actually be
@@ -954,6 +1000,7 @@ fn render_child(
     clip: ClipRect,
     parent: Transform,
     blend: BlendMode,
+    bare: bool,
 ) -> Result<(), DocError> {
     {
         let node = doc.node(child)?;
@@ -1021,10 +1068,10 @@ fn render_child(
                 // own to apply, so draw it straight in.
                 if node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none() {
                     if stand_ins.is_empty() {
-                        return render_layer(doc, *of, dst, sub_clip, space);
+                        return render_layer(doc, *of, dst, sub_clip, space, bare);
                     }
                     for &part in &stand_ins {
-                        render_layer(doc, part, dst, sub_clip, t)?;
+                        render_layer(doc, part, dst, sub_clip, t, bare)?;
                     }
                     return Ok(());
                 }
@@ -1038,10 +1085,10 @@ fn render_child(
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
                 if stand_ins.is_empty() {
-                    render_layer(doc, *of, &mut sub, inner, window.compose(space))?;
+                    render_layer(doc, *of, &mut sub, inner, window.compose(space), bare)?;
                 } else {
                     for &part in &stand_ins {
-                        render_layer(doc, part, &mut sub, inner, window.compose(t))?;
+                        render_layer(doc, part, &mut sub, inner, window.compose(t), bare)?;
                     }
                 }
                 if node.mask.is_some() {
@@ -1096,7 +1143,7 @@ fn render_child(
                     if let Some(color) = ground {
                         fill_region(dst, inside, color, blend);
                     }
-                    return render_group(doc, child, dst, inside, t);
+                    return render_group(doc, child, dst, inside, t, bare);
                 }
                 // Turned, or composited as a whole: the frame is drawn on
                 // a surface of its own and cut to shape by how much of
@@ -1125,7 +1172,7 @@ fn render_child(
                     // shape painted here would give it a second one.
                     fill_region(&mut sub, inner, color, BlendMode::Normal);
                 }
-                render_group(doc, child, &mut sub, inner, shifted)?;
+                render_group(doc, child, &mut sub, inner, shifted, bare)?;
                 if let Some(inv) = Inverse::of(shifted) {
                     for y in inner.y0..inner.y1 {
                         for x in inner.x0..inner.x1 {
@@ -1184,7 +1231,7 @@ fn render_child(
                     && mask.mask.is_none()
                     && !reads_backdrop(doc, child)?
                 {
-                    return render_group(doc, child, dst, sub_clip, t);
+                    return render_group(doc, child, dst, sub_clip, t, bare);
                 }
                 // The surface it is isolated on covers only where the
                 // group can land rather than the whole page: at A4 a
@@ -1200,7 +1247,7 @@ fn render_child(
                     y1: sub_clip.y1 - oy,
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
-                render_group(doc, child, &mut sub, inner, window.compose(t))?;
+                render_group(doc, child, &mut sub, inner, window.compose(t), bare)?;
                 if node.mask.is_some() {
                     // The mask is read in the window's coordinates too.
                     let shifted = window.compose(parent);
@@ -4478,7 +4525,7 @@ pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>
         x1: size,
         y1: size,
     };
-    render_layer(doc, id, &mut surface, clip, fit)?;
+    render_layer(doc, id, &mut surface, clip, fit, false)?;
     let mut rgba8 = Vec::with_capacity((size * size) as usize * 4);
     for px in &surface.pixels {
         rgba8.extend_from_slice(&px.to_srgb8());
@@ -4831,7 +4878,7 @@ pub fn artboard_pixels(
     // `render_layer` composes the node's own transform onto what it is
     // given, so undo that transform first: what is left is the frame in
     // its own space, blown up to the surface.
-    render_layer(doc, id, &mut surface, clip, fit.compose(back))?;
+    render_layer(doc, id, &mut surface, clip, fit.compose(back), false)?;
     Ok(Some(surface))
 }
 
@@ -4914,7 +4961,7 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     let space = Transform::translation(-x0, -y0);
     let mut surface = Surface::new(w, h);
     let clip = surface.full_clip();
-    render_layer(doc, base, &mut surface, clip, space)?;
+    render_layer(doc, base, &mut surface, clip, space, false)?;
     let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
     for p in &surface.pixels {
         rgba8.extend_from_slice(&[255, 255, 255, (p.a.clamp(0.0, 1.0) * 255.0).round() as u8]);
@@ -5073,7 +5120,7 @@ pub fn layer_coverage_at(
     let (w, h) = (doc.meta.width, doc.meta.height);
     let mut surface = Surface::new(w, h);
     let clip = surface.full_clip();
-    render_layer(doc, id, &mut surface, clip, parent)?;
+    render_layer(doc, id, &mut surface, clip, parent, false)?;
     Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect())
 }
 

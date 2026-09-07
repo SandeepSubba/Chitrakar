@@ -199,11 +199,12 @@ pub struct Session {
     /// the file and never reaches an export.
     display_cms: Option<chitrakar_color::cms::DisplayCms>,
     gamut_warn: bool,
-    /// One layer to show on its own, and nothing else. A setting of the
-    /// view like soft proofing rather than an edit: what a layer looks
-    /// like alone is a question about looking, so it goes nowhere near
-    /// the document, the history or the file.
-    solo: Option<NodeId>,
+    /// What the view shows of the document: the page, one layer on its
+    /// own, or the picture under the work. A setting of the view like
+    /// soft proofing rather than an edit — each is a question about
+    /// looking, so it goes nowhere near the document, the history or
+    /// the file.
+    showing: chitrakar_render::Showing,
     /// Whether any layer is a live copy of another. Kept rather than
     /// looked up: the dirty region has to ask on every command, and the
     /// answer is no for almost every document.
@@ -256,7 +257,7 @@ impl Session {
             soft_proof: false,
             display_cms: None,
             gamut_warn: false,
-            solo: None,
+            showing: chitrakar_render::Showing::Everything,
             has_copies: false,
         }
     }
@@ -3794,8 +3795,9 @@ impl Session {
         // A layer being shown on its own can go — by an undo as easily
         // as by a delete — and a view of nothing is not what anybody
         // asked for, so the page comes back.
-        if self.solo.is_some_and(|id| self.doc.node(id).is_err()) {
-            self.solo = None;
+        if matches!(self.showing, chitrakar_render::Showing::Alone(id) if self.doc.node(id).is_err())
+        {
+            self.showing = chitrakar_render::Showing::Everything;
             self.stale_all = true;
         }
         let doc_clip = self.stale.take();
@@ -3833,12 +3835,19 @@ impl Session {
                 // against stale surroundings, is discarded. The reach is a
                 // document-space figure, so it scales with the view too.
                 let pad = (chitrakar_render::filter_reach(&self.doc) as f32 * scale).ceil() as u32;
-                // One layer on its own: the page's own framing with
-                // nothing but it drawn on it. No filter stack under it
-                // to reach across, so no padded region either.
-                if let Some(id) = self.solo {
+                // Less than the page: one layer on its own, or the
+                // picture under the work. Neither has a filter stack
+                // left under it to reach across, so neither wants the
+                // padded region a filter makes necessary.
+                if self.showing != chitrakar_render::Showing::Everything {
                     let cache = self.cache.as_mut().unwrap();
-                    chitrakar_render::render_one_at(&self.doc, id, cache, clip, view)?;
+                    chitrakar_render::render_showing_at(
+                        &self.doc,
+                        cache,
+                        clip,
+                        view,
+                        self.showing,
+                    )?;
                     self.pixels_recomputed += clip.area();
                 } else if pad == 0 {
                     let cache = self.cache.as_mut().unwrap();
@@ -4438,19 +4447,48 @@ impl Session {
     /// A layer that has gone takes the setting with it, since a view of
     /// nothing is not what anybody asked for.
     pub fn set_solo(&mut self, id: Option<NodeId>) -> bool {
-        let want = id.filter(|id| self.doc.node(*id).is_ok());
-        if want == self.solo {
-            return false;
-        }
-        self.solo = want;
-        // Everything, since what is on the page is a different picture.
-        self.stale_all = true;
-        true
+        self.show(match id.filter(|id| self.doc.node(*id).is_ok()) {
+            Some(id) => chitrakar_render::Showing::Alone(id),
+            None => chitrakar_render::Showing::Everything,
+        })
     }
 
     /// The layer being shown on its own, if any.
     pub fn solo(&self) -> Option<NodeId> {
-        self.solo
+        match self.showing {
+            chitrakar_render::Showing::Alone(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Show the picture as it was before the work: the page with every
+    /// layer that only changes what is under it left out.
+    ///
+    /// The question a photograph asks every few minutes, and the only
+    /// way to ask it was to hide each adjustment by hand and undo them
+    /// all again afterwards — six edits the file would remember for a
+    /// glance nobody meant to keep.
+    pub fn set_untouched(&mut self, untouched: bool) -> bool {
+        self.show(if untouched {
+            chitrakar_render::Showing::Untouched
+        } else {
+            chitrakar_render::Showing::Everything
+        })
+    }
+
+    /// Whether the view is showing the picture under the work.
+    pub fn untouched(&self) -> bool {
+        self.showing == chitrakar_render::Showing::Untouched
+    }
+
+    fn show(&mut self, want: chitrakar_render::Showing) -> bool {
+        if want == self.showing {
+            return false;
+        }
+        self.showing = want;
+        // Everything, since what is on the page is a different picture.
+        self.stale_all = true;
+        true
     }
 
     pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), EngineError> {
@@ -8059,6 +8097,85 @@ mod tests {
         assert!(session.render_cached().is_ok(), "the page still draws");
         assert_eq!(session.solo(), None, "and it is the page again");
         let _ = under;
+    }
+
+    #[test]
+    fn the_picture_under_the_work_can_be_looked_at() {
+        // The question a photograph asks every few minutes. The only
+        // way to ask it was to hide each adjustment by hand and undo
+        // them all again — edits the file would remember, for a glance
+        // nobody meant to keep.
+        let mut session = Session::new(40, 30, ColorMode::Rgb);
+        let sheet = add_rect(&mut session, "sheet", 40.0, 30.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 2.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter(
+                    "soften",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 2.0 },
+                )),
+            })
+            .unwrap();
+        let steps = session.history_labels().0.len();
+        let worked = session.render_cached().unwrap().0.clone();
+
+        assert!(session.set_untouched(true), "the work is set aside");
+        assert!(!session.set_untouched(true), "and asking twice is nothing");
+        let before = session.render_cached().unwrap().0.clone();
+        assert!(
+            before.get(20, 15).r < worked.get(20, 15).r,
+            "the picture is darker without two stops added to it"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps,
+            "with nothing about it in the history"
+        );
+
+        // The same picture hiding them by hand would give, since that
+        // is exactly what this is: the two answers cannot be a
+        // different arithmetic from each other.
+        let mut byhand = Session::from_document(session.document().clone());
+        for id in byhand.document().children_of(root).unwrap().to_vec() {
+            if !matches!(
+                byhand.document().node(id).unwrap().kind,
+                NodeKind::Vector { .. }
+            ) {
+                byhand
+                    .apply(Command::SetVisible { id, visible: false })
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            byhand.render().unwrap().to_srgb8(),
+            {
+                let mut alone = Session::from_document(session.document().clone());
+                alone.set_untouched(true);
+                alone.render_cached().unwrap().0.to_srgb8()
+            },
+            "the same picture as hiding each of them by hand"
+        );
+
+        // Let go of, and the page is the page again, exactly.
+        assert!(session.set_untouched(false));
+        assert_eq!(
+            session.render_cached().unwrap().0.to_srgb8(),
+            worked.to_srgb8(),
+            "the work comes back"
+        );
+        let _ = sheet;
     }
 
     #[test]

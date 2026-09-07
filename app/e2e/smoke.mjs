@@ -8473,6 +8473,60 @@ assert(
   assert(await isBlue(90, 90), "and undo shows it again");
 }
 
+// 9as. The picture as it was before the work. The question a photograph
+// asks every few minutes, and the only way to ask it was to hide each
+// adjustment by hand and undo them all again — edits the file would
+// remember, for a glance nobody meant to keep.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#664422");
+  await pickTool("Rect");
+  await page.mouse.move(...at(10, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(290, 190), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const before = page.locator('[aria-label="Before"] button');
+  assert(
+    (await before.getAttribute("aria-pressed")) === "false",
+    "the page is the page to start with",
+  );
+  const dark = (await canvasPixel(150, 100))[0];
+
+  // Some light added, which is a thing to want to see the before of.
+  await page.selectOption('[aria-label="Add adjustment layer"]', "exposure");
+  await page.waitForTimeout(400);
+  // Picked, so the panel is showing its own numbers to change.
+  await page.locator(".panel ul li", { hasText: "Exposure" }).first().click();
+  await page.waitForTimeout(250);
+  await setSlider("Stops", 2);
+  await page.waitForTimeout(400);
+  const lit = (await canvasPixel(150, 100))[0];
+  assert(lit !== dark, `the adjustment changed the page (${dark} -> ${lit})`);
+  const steps = await page.locator(".history li button").count();
+
+  await before.click();
+  await page.waitForTimeout(450);
+  assert(
+    (await canvasPixel(150, 100))[0] === dark,
+    "and Before gives back exactly the picture under it",
+  );
+  assert(
+    (await page.locator(".history li button").count()) === steps,
+    "with nothing about it in the history",
+  );
+
+  await before.click();
+  await page.waitForTimeout(450);
+  assert(
+    (await canvasPixel(150, 100))[0] === lit,
+    "and letting go puts the work back",
+  );
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

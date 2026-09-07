@@ -678,6 +678,18 @@ impl WasmSession {
         self.inner.set_solo((id >= 0.0).then(|| NodeId(id as u64)))
     }
 
+    /// Show the picture as it was before the work: the page with every
+    /// layer that only changes what is under it left out. A setting of
+    /// the view, so nothing goes into the history or the file.
+    pub fn set_untouched(&mut self, untouched: bool) -> bool {
+        self.inner.set_untouched(untouched)
+    }
+
+    /// Whether the view is showing the picture under the work.
+    pub fn untouched(&self) -> bool {
+        self.inner.untouched()
+    }
+
     /// The layer being shown on its own, or -1.
     pub fn solo(&self) -> f64 {
         self.inner.solo().map_or(-1.0, |id| id.0 as f64)

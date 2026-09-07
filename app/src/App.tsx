@@ -1258,6 +1258,10 @@ export function App() {
   const [wandTolerance, setWandTolerance] = useState(0.12);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
+  /** Whether the view is showing the picture as it was before the work
+   * — the page with every adjustment and filter left out. A setting of
+   * the view, so nothing about it reaches the history or the file. */
+  const [untouched, setUntouched] = useState(false);
   /** The layer being looked at on its own, or null. A setting of the
    * view rather than an edit: nothing about the document changes, so
    * nothing goes into the history or the file. */
@@ -1311,6 +1315,7 @@ export function App() {
       try {
         const alone = s.solo();
         setSolo(alone < 0 ? null : (alone as NodeId));
+        setUntouched(s.untouched());
       } catch {
         setSolo(null);
       }
@@ -6295,6 +6300,32 @@ export function App() {
         </nav>
 
         <span className="spacer" />
+
+        {/* The picture as it was before the work. The question a
+            photograph asks every few minutes, and the only way to ask
+            it was to hide each adjustment by hand and undo them all
+            again — edits the file would remember, for a glance nobody
+            meant to keep. */}
+        <div className="chrome-group" role="group" aria-label="Before">
+          <button
+            // Icon-only, like undo and redo: the bar has to hold in a
+            // window narrow enough to put the layers away, and a word
+            // costs more room there than the whole of this control is
+            // worth.
+            className={`chrome-button icon-only${untouched ? " toggled" : ""}`}
+            onClick={() => {
+              if (!session) return;
+              session.set_untouched(!untouched);
+              setUntouched(!untouched);
+              refresh(session);
+            }}
+            title="Show the picture as it was before the adjustments and filters"
+            aria-pressed={untouched}
+            aria-label="Before"
+          >
+            <Icon name="eye" />
+          </button>
+        </div>
 
         {hasIcc && (
           <div className="chrome-group" role="group" aria-label="Soft proofing">

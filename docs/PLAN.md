@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~354),
+- **Verify before committing:** `cargo test --workspace` (~355),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~928 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~933 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1281,6 +1281,23 @@ without reading anything else.*
      paints pixels rather than laying down live strokes, and text
      shaping worth the name (`rustybuzz`/`parley`, weights, a face
      chosen per run rather than per block).
+- **What the view shows of the document** is one setting
+  (`chitrakar_render::Showing`) rather than a growing pile of flags: the
+  page, one layer on its own, or the picture before the work. Both of
+  the last two are questions about *looking* — nothing about the
+  document changes, so nothing goes into the history or the file, and
+  letting go gives back the same bytes rather than a redraw that
+  happens to agree.
+  **Before** leaves out every layer that only changes what is under it,
+  which is the question a photograph asks every few minutes and which
+  used to take hiding each adjustment by hand and undoing them all
+  again — edits the file would remember, for a glance nobody meant to
+  keep. It is done by skipping those layers exactly where a hidden one
+  is skipped, so the answer to "before" cannot come out of a different
+  arithmetic from the answer to "hidden"; a test holds the two pictures
+  against each other. It is a question about every layer rather than
+  about the top of the tree, so it travels down the walk, which is the
+  one thing here that costs a parameter in the recursion.
 - **One layer on its own:** alt on a layer's eye asks the other
   question the eye is about — not "is this one shown" but "what does
   this one look like by itself". The page keeps its own framing and
