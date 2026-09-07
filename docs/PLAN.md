@@ -1147,6 +1147,17 @@ without reading anything else.*
   container writes a file per entry in that order). A hash map's order
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
+- **Regions, in one breath:** a selection here is a `Mask` over the page
+  — a region to *hand to a layer*, not a stencil pixels are cut through.
+  Drawn with a box, an ellipse or a lasso; wanded, either by the run a
+  click lands in or by that colour anywhere on the page; or taken from
+  what a layer covers, which is the only way to pick out words or a
+  star. Then: added to, taken from, inverted, softened, grown or shrunk
+  by a true distance, kept by name and picked up again. And used:
+  masked into a layer or hidden from it, filled as a shape, cropped to,
+  copied out or exported as a picture in the shape it was picked in.
+  Marching ants say where the edge is; a wash says which side is picked
+  and how soft the edge is, which an outline cannot.
 - **Next up (rough priority):**
   1. The GPU backend, in two halves. What is left to *teach* it:
      live effects (a drop shadow, an inner shadow, an outline), which
@@ -1164,8 +1175,12 @@ without reading anything else.*
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth: another review pass over the last stretch of commits (each
-     pass so far has found real defects), then whatever the next user
-     of the editor misses first — artboards, a brush that paints pixels.
+     pass so far has found real defects, and the last two came out of
+     asking what the newest two features do when they meet), then
+     whatever the next user of the editor misses first — a brush that
+     paints pixels rather than laying down live strokes, and text
+     shaping worth the name (`rustybuzz`/`parley`, weights, a face
+     chosen per run rather than per block).
 - **Chrome:** "?" (or View › Keys and gestures) opens a sheet of every
   key and gesture, since half of what this editor can do is a gesture
   nobody would guess at. Document actions live in a File/Edit/Page/View menu bar — Edit
