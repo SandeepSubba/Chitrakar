@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~332),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~871 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~875 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -951,7 +951,12 @@ without reading anything else.*
   same one the mask panel shows — set before the region is handed to a
   layer rather than after. Shift while dragging adds
   to what is picked out and alt takes from it (both together keep the
-  overlap), a click with neither lets go, and marching ants — a pale
+  overlap), a click with neither lets go, a drag from *inside* what is
+  picked moves the region rather than starting another one — whether a
+  point is inside being the engine's answer rather than a test against
+  the outline on screen, since an inverted region is everything *but*
+  its rings, a softened one has an edge that is neither in nor out, and
+  a painted one has no rings at all — and marching ants — a pale
   stroke under a dark dashed one, so the edge reads on a dark picture
   and a light one — say where it is. The ants are drawn from the
   outline the *engine* flattens, not one worked out again in the app: a

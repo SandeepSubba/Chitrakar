@@ -2785,6 +2785,37 @@ impl Session {
         Some(Box::new(mask))
     }
 
+    /// Whether the page point `(x, y)` is inside what is picked out.
+    ///
+    /// Asked of the engine rather than worked out from the outline in
+    /// the app, because the outline is not the whole answer: an inverted
+    /// region is everything *but* its rings, a softened one has an edge
+    /// that is neither in nor out, and a painted one has no rings at
+    /// all. Coverage knows all three.
+    pub fn selection_covers(&self, x: f32, y: f32) -> bool {
+        let Some(mask) = self.doc.selection() else {
+            return false;
+        };
+        let (px, py) = (x.floor(), y.floor());
+        if px < 0.0 || py < 0.0 {
+            return false;
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let (px, py) = (px as u32, py as u32);
+        if px >= w || py >= h {
+            return false;
+        }
+        let clip = chitrakar_render::ClipRect {
+            x0: px,
+            y0: py,
+            x1: px + 1,
+            y1: py + 1,
+        };
+        chitrakar_render::mask_plane_over(&self.doc, mask, Transform::default(), clip, (w, h))
+            .first()
+            .is_some_and(|c| *c >= 0.5)
+    }
+
     /// The page-space box round what is picked out.
     pub fn selection_bounds(&self) -> Option<[f32; 4]> {
         let rings = Self::region_rings(self.doc.selection()?).ok()?;

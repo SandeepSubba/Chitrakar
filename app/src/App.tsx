@@ -625,6 +625,10 @@ interface ToolDrag {
   moving?: { id: NodeId; t0: Transform }[];
   /** Brush, and the lasso: the path so far, in document coordinates. */
   stroke?: [number, number][];
+  /** A region being dragged about, as it was when the drag began. Every
+   * move restates it from here rather than nudging it along, which is
+   * what makes the whole drag one entry in history. */
+  region?: Mask;
   /** Brush: a width multiplier per recorded sample. */
   widths?: number[];
   /** Brush: when the last sample was taken, for the speed that sets it. */
@@ -797,6 +801,37 @@ interface HandleDrag {
    * space its transform is written in so a document-space scale can be
    * put back into it. */
   many?: { id: NodeId; t0: Transform; p: Transform; pinv: Transform }[];
+}
+
+/** The same region, carried `dx, dy` across the page — or null for one
+ * this cannot move.
+ *
+ * A shape or a picture is placed by its transform, so moving one is
+ * moving that. A region brushed by hand is its own points instead, and
+ * the engine is the only side that builds one of those; rather than
+ * teach this half about a shape it never makes, a region it does not
+ * recognise simply does not drag. */
+function regionMoved(mask: Mask, dx: number, dy: number): Mask | null {
+  const kind = mask.kind;
+  if ("Vector" in kind) {
+    const t = kind.Vector.transform;
+    return {
+      ...mask,
+      kind: {
+        Vector: { ...kind.Vector, transform: { ...t, e: t.e + dx, f: t.f + dy } },
+      },
+    };
+  }
+  if ("Raster" in kind) {
+    const t = kind.Raster.transform;
+    return {
+      ...mask,
+      kind: {
+        Raster: { ...kind.Raster, transform: { ...t, e: t.e + dx, f: t.f + dy } },
+      },
+    };
+  }
+  return null;
 }
 
 /** A region as the engine is asked for it: the box it fits in, plus the
@@ -2474,6 +2509,25 @@ export function App() {
       return;
     }
     if (SELECT_TOOLS.includes(tool as never)) {
+      // Dragging from inside what is already picked out moves the region
+      // rather than starting another one — with no modifier, since
+      // shift and alt are how a second region is added or taken away.
+      if (!e.shiftKey && !e.altKey && session.selection_covers(x, y)) {
+        const was = JSON.parse(session.selection_json()) as Mask | null;
+        if (was && regionMoved(was, 0, 0)) {
+          toolDragRef.current = {
+            tool,
+            startX: x,
+            startY: y,
+            lastX: x,
+            lastY: y,
+            moved: false,
+            region: was,
+          };
+          (e.target as Element).setPointerCapture(e.pointerId);
+          return;
+        }
+      }
       // Picking a region out of the page: a box, an ellipse or a
       // freehand outline. Nothing is drawn and no layer is made — what
       // comes out is a region to hand to a layer.
@@ -2693,6 +2747,16 @@ export function App() {
     }
     {
       const drag = toolDragRef.current;
+      if (drag?.region) {
+        const [x, y] = docPoint(e);
+        drag.moved = true;
+        // Restated from where the region was when the drag began, not
+        // nudged along from where it is now: one entry in history for
+        // the whole drag, and an Escape that lands exactly back.
+        const moved = regionMoved(drag.region, x - drag.startX, y - drag.startY);
+        if (moved) preview({ SetSelection: { selection: moved } });
+        return;
+      }
       if (drag && SELECT_TOOLS.includes(drag.tool as never)) {
         const [x, y] = docPoint(e);
         drag.lastX = x;
@@ -2938,6 +3002,11 @@ export function App() {
     setCropRect(null);
     if (!drag || !session) return;
 
+    if (drag.region) {
+      if (drag.moved && session.commit_preview()) refresh(session);
+      else session.cancel_preview();
+      return;
+    }
     if (SELECT_TOOLS.includes(drag.tool as never)) {
       setRegionDrag(null);
       // Shift adds to what is picked out, alt takes from it, and both

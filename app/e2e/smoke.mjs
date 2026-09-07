@@ -7639,7 +7639,11 @@ assert(
   // Hiding is the same thing the other way round: what deleting a
   // selection means, done by holding the layer to everything but the
   // region rather than by cutting anything out. A fresh region first —
-  // the one above was left inside out.
+  // and let go of the one above before drawing it, since that one was
+  // left inside out and so covers very nearly the whole page: a drag
+  // starting inside what is picked moves it rather than picking again.
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(250);
   await page.keyboard.press("m");
   await page.waitForTimeout(150);
   await region(60, 60, 180, 200);
@@ -7694,6 +7698,67 @@ assert(
     (await page.locator(".ants").count()) === 0,
     "and picking out nothing leaves no ants",
   );
+
+  // 9al5. Dragging from inside what is picked out moves the region
+  // rather than starting another one — which is what the pointer is
+  // most likely to be asking for once something is picked.
+  await newDocument(400, 300, "rgb");
+  const m = await page.locator("#engine-page").boundingBox();
+  const mat = (x, y) => [m.x + (x / 400) * m.width, m.y + (y / 300) * m.height];
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...mat(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...mat(140, 140), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const antAt = async () => {
+    const polys = await page.$$eval(".ants polygon", (els) =>
+      els.map((el) => el.getAttribute("points")),
+    );
+    const pts = polys
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    return [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1]))];
+  };
+  const [x0, y0] = await antAt();
+
+  // From inside it, across the page.
+  await page.mouse.move(...mat(90, 90));
+  await page.mouse.down();
+  await page.mouse.move(...mat(230, 160), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const [x1, y1] = await antAt();
+  const step = (await page.locator("#engine-page").boundingBox()).width / 400;
+  assert(
+    Math.abs(x1 - x0 - 140 * step) < 8 && Math.abs(y1 - y0 - 70 * step) < 8,
+    `the region went with the pointer (${x0},${y0} -> ${x1},${y1})`,
+  );
+  assert(
+    (await page.locator(".ants polygon").count()) === 1,
+    "and it is still the one region, not a second one",
+  );
+  // One entry for the whole drag.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  const [x2] = await antAt();
+  assert(
+    Math.abs(x2 - x0) < 4,
+    `one undo puts it back where it was (${x2} against ${x0})`,
+  );
+
+  // From outside it, a drag picks a new region as before.
+  await page.mouse.move(...mat(300, 30));
+  await page.mouse.down();
+  await page.mouse.move(...mat(380, 90), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const [x3] = await antAt();
+  assert(x3 > x0 + 100 * step, `a drag outside picks afresh (${x3})`);
 
   // 9al4. A softened edge. The one thing a mask's edge can be asked for
   // that its shape cannot say — and since a region here becomes a mask,

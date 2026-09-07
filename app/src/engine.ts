@@ -361,6 +361,7 @@ export type Command =
   | { SetEffects: { id: NodeId; effects: Effect[] } }
   | { SetGuides: { guides: ({ Vertical: number } | { Horizontal: number })[] } }
   | { SetSwatches: { swatches: Swatch[] } }
+  | { SetSelection: { selection: Mask | null } }
   | { MoveNode: { id: NodeId; parent: NodeId; index: number } }
   /** Turn the page by any angle about its own middle and give it the size
    * it should have afterwards — what straightening a crooked horizon is

@@ -637,6 +637,12 @@ impl WasmSession {
         serde_json::to_string(&rings).unwrap_or_else(|_| "[]".into())
     }
 
+    /// Whether the page point is inside what is picked out — which is
+    /// what tells dragging the region apart from drawing a new one.
+    pub fn selection_covers(&self, x: f64, y: f64) -> bool {
+        self.inner.selection_covers(x as f32, y as f32)
+    }
+
     /// What is picked out of the page, as a mask's JSON, or "null".
     pub fn selection_json(&self) -> String {
         serde_json::to_string(&self.inner.selection()).unwrap_or_else(|_| "null".into())
