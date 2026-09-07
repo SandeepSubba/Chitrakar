@@ -5449,13 +5449,23 @@ export function App() {
     );
   };
 
-  /** PNG of just the picked layers' box, at document resolution. */
+  /** PNG of just what is picked, at document resolution: a region
+   * picked out of the page when there is one — in the shape it was
+   * picked in — and otherwise the picked layers' box. The same rule
+   * Copy as image goes by, since the two are the same picture leaving
+   * by different doors. */
   const exportSelectionPng = () => {
-    if (!session || selectionSet.length === 0) return;
+    if (!session) return;
+    const name = `${fileName()}-selection.png`;
+    if (antRings.length > 0) {
+      saveAs("PNG export", name, "image/png", () => session.selection_png());
+      return;
+    }
+    if (selectionSet.length === 0) return;
     const box = unionBounds(selectionSet);
     if (!box) return;
     const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
-    saveAs("PNG export", `${fileName()}-selection.png`, "image/png", () =>
+    saveAs("PNG export", name, "image/png", () =>
       session.export_png_at(1, x, y, w, h),
     );
   };
@@ -5864,7 +5874,7 @@ export function App() {
             <MenuItem icon="export" onClick={() => exportPngAt(3)} hint="@3x">
               Export PNG at 3×
             </MenuItem>
-            {selectionSet.length > 0 && (
+            {(selectionSet.length > 0 || antRings.length > 0) && (
               <MenuItem icon="export" onClick={exportSelectionPng}>
                 Export selection as PNG
               </MenuItem>

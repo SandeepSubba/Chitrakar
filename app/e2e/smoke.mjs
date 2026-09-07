@@ -8085,6 +8085,18 @@ assert(
     copied && Math.abs(copied[0] - 160) <= 2 && Math.abs(copied[1] - 60) <= 2,
     `the region's own box went to the clipboard (${copied})`,
   );
+
+  // And out to a file by the other door, which goes by the same rule.
+  const [saved] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export selection as PNG")).click(),
+  ]);
+  const bytes = await readFile(await saved.path());
+  const size = [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  assert(
+    Math.abs(size[0] - 160) <= 2 && Math.abs(size[1] - 60) <= 2,
+    `and the same picture leaves as a file (${size})`,
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting
