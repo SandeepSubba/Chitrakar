@@ -700,8 +700,8 @@ impl WasmSession {
 
     /// The page inside what is picked out, as a PNG with the region's
     /// own coverage in the alpha.
-    pub fn selection_png(&self) -> Result<Vec<u8>, JsError> {
-        self.inner.selection_png().map_err(to_js)
+    pub fn selection_png(&self, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner.selection_png(scale).map_err(to_js)
     }
 
     /// Take the page in to what is picked out.

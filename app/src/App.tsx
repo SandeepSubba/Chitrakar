@@ -5540,11 +5540,14 @@ export function App() {
    * picked in — and otherwise the picked layers' box. The same rule
    * Copy as image goes by, since the two are the same picture leaving
    * by different doors. */
-  const exportSelectionPng = () => {
+  const exportSelectionPng = (scale: number) => {
     if (!session) return;
-    const name = `${fileName()}-selection.png`;
+    const at = scale === 1 ? "" : `@${scale}x`;
+    const name = `${fileName()}-selection${at}.png`;
     if (antRings.length > 0) {
-      saveAs("PNG export", name, "image/png", () => session.selection_png());
+      saveAs("PNG export", name, "image/png", () =>
+        session.selection_png(scale),
+      );
       return;
     }
     if (selectionSet.length === 0) return;
@@ -5552,7 +5555,7 @@ export function App() {
     if (!box) return;
     const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
     saveAs("PNG export", name, "image/png", () =>
-      session.export_png_at(1, x, y, w, h),
+      session.export_png_at(scale, x, y, w, h),
     );
   };
 
@@ -5668,7 +5671,7 @@ export function App() {
     if (!region && !(w > 0 && h > 0)) return;
     try {
       const png = region
-        ? session.selection_png()
+        ? session.selection_png(1)
         : session.export_png_at(1, x, y, w, h);
       const blob = new Blob([png as BlobPart], { type: "image/png" });
       await navigator.clipboard.write([
@@ -5961,9 +5964,32 @@ export function App() {
               Export PNG at 3×
             </MenuItem>
             {(selectionSet.length > 0 || antRings.length > 0) && (
-              <MenuItem icon="export" onClick={exportSelectionPng}>
-                Export selection as PNG
-              </MenuItem>
+              <>
+                <MenuItem
+                  icon="export"
+                  onClick={() => exportSelectionPng(1)}
+                >
+                  Export selection as PNG
+                </MenuItem>
+                {/* The same asset at the size a screen with two or three
+                    pixels to the point wants it, which is what the page's
+                    own exports offer and what a picked-out asset is
+                    usually for. */}
+                <MenuItem
+                  icon="export"
+                  onClick={() => exportSelectionPng(2)}
+                  hint="@2x"
+                >
+                  Export selection at 2×
+                </MenuItem>
+                <MenuItem
+                  icon="export"
+                  onClick={() => exportSelectionPng(3)}
+                  hint="@3x"
+                >
+                  Export selection at 3×
+                </MenuItem>
+              </>
             )}
             {selectedLayer?.kind === "artboard" && (
               <MenuItem icon="frame" onClick={exportArtboard}>

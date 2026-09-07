@@ -8147,6 +8147,25 @@ assert(
     Math.abs(size[0] - 160) <= 2 && Math.abs(size[1] - 60) <= 2,
     `and the same picture leaves as a file (${size})`,
   );
+  // And at the size a screen with two pixels to the point wants it,
+  // which is what a picked-out asset is usually for.
+  const [twice] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Export selection at 2×")).click(),
+  ]);
+  const twiceBytes = await readFile(await twice.path());
+  const twiceSize = [
+    twiceBytes.readUInt32BE(16),
+    twiceBytes.readUInt32BE(20),
+  ];
+  assert(
+    Math.abs(twiceSize[0] - 320) <= 3 && Math.abs(twiceSize[1] - 120) <= 3,
+    `twice across and twice down (${twiceSize})`,
+  );
+  assert(
+    /@2x\.png$/.test(twice.suggestedFilename()),
+    `and says so in its name (${twice.suggestedFilename()})`,
+  );
 }
 
 // 9ao. A wash over what is not picked. The ants say where the edge is

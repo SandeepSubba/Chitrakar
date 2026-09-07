@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~348),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~914 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~916 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1251,7 +1251,10 @@ without reading anything else.*
   way a lasso or a softened edge reaches another application at all —
   and otherwise the picked layers' box; File › Export selection as PNG
   goes by the same rule, being the same picture leaving by another
-  door), and images from other applications come *in*, by paste or
+  door, and offers it at twice and three times as the page's own
+  exports do — an asset picked out of a design is usually wanted at the
+  size the screen it is for has pixels for, and the region's box stays
+  the region's box while the picture in it is drawn bigger), and images from other applications come *in*, by paste or
   by dropping a file on the canvas (a dropped .chitra opens); effects
   come in three kinds;
   and export flattens them like everything else; SVG export sets each

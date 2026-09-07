@@ -3247,7 +3247,7 @@ impl Session {
     /// softened region's box is grown to leave the fade somewhere to
     /// go, the way a softened fill's is: cut at the outline, the
     /// outward half of a fade is not there to fade.
-    pub fn selection_png(&self) -> Result<Vec<u8>, EngineError> {
+    pub fn selection_png(&self, scale: f32) -> Result<Vec<u8>, EngineError> {
         let Some(region) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
@@ -3269,29 +3269,53 @@ impl Session {
                 "what is picked out is not on the page".into(),
             ));
         }
-        let page = self.render()?;
+        // At a scale, the region's box is the region's box and the
+        // picture in it is drawn bigger — the same thing an export at
+        // twice does to the page, so an asset picked out of a design
+        // comes out at the size the screen it is for wants.
+        let scale = scale.clamp(0.05, 16.0);
+        let (bx, by) = (clip.x0 as f32, clip.y0 as f32);
+        let mut out = self.render_scaled(
+            scale,
+            Some([
+                bx,
+                by,
+                (clip.x1 - clip.x0) as f32,
+                (clip.y1 - clip.y0) as f32,
+            ]),
+        )?;
+        let (w, h) = (out.width, out.height);
+        // The coverage is asked for at that scale, in the space the
+        // picture was drawn in: the region carried through the export's
+        // own transform rather than worked out small and stretched.
+        let seen = Transform {
+            a: scale,
+            d: scale,
+            e: -bx * scale,
+            f: -by * scale,
+            ..Default::default()
+        };
         let cover = chitrakar_render::mask_plane_over(
             &self.doc,
             &region,
-            Transform::default(),
-            clip,
-            (pw, ph),
+            seen,
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            (w, h),
         );
-        let (w, h) = (clip.x1 - clip.x0, clip.y1 - clip.y0);
-        let mut out = chitrakar_render::Surface::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                // Premultiplied, so scaling the whole pixel by the
-                // coverage is the same as scaling the alpha alone.
-                let p = page.get(clip.x0 + x, clip.y0 + y);
-                let c = cover[(y * w + x) as usize];
-                out.pixels[(y * w + x) as usize] = chitrakar_color::LinearRgba {
-                    r: p.r * c,
-                    g: p.g * c,
-                    b: p.b * c,
-                    a: p.a * c,
-                };
-            }
+        for (p, c) in out.pixels.iter_mut().zip(&cover) {
+            // Premultiplied, so scaling the whole pixel by the coverage
+            // is the same as scaling the alpha alone.
+            *p = chitrakar_color::LinearRgba {
+                r: p.r * c,
+                g: p.g * c,
+                b: p.b * c,
+                a: p.a * c,
+            };
         }
         chitrakar_codecs::encode_png(w, h, &out.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
@@ -7608,7 +7632,7 @@ mod tests {
                 "replace",
             )
             .unwrap();
-        let png = session.selection_png().unwrap();
+        let png = session.selection_png(1.0).unwrap();
         let img = chitrakar_codecs::decode(&png).unwrap();
         let (w, h, pixels) = (img.width, img.height, img.rgba8);
         assert!(
@@ -7620,8 +7644,27 @@ mod tests {
         assert_eq!(alpha(0, 0), 0, "and nothing in the corner of the box");
 
         // Nothing picked out is an error rather than a blank picture.
+        // At twice, the same box with twice the picture in it: what an
+        // asset picked out of a design is wanted at for a screen with
+        // two pixels to the point.
+        let big = chitrakar_codecs::decode(&session.selection_png(2.0).unwrap()).unwrap();
+        assert!(
+            (big.width as i32 - 2 * w as i32).abs() <= 2
+                && (big.height as i32 - 2 * h as i32).abs() <= 2,
+            "twice across and twice down: {}x{}",
+            big.width,
+            big.height
+        );
+        let far = |x: u32, y: u32| big.rgba8[((y * big.width + x) * 4 + 3) as usize];
+        assert_eq!(
+            far(big.width / 2, big.height / 2),
+            255,
+            "solid in the middle"
+        );
+        assert_eq!(far(0, 0), 0, "and nothing in the corner of the box");
+
         session.pick_none().unwrap();
-        assert!(session.selection_png().is_err());
+        assert!(session.selection_png(1.0).is_err());
     }
 
     #[test]
