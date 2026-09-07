@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~338),
+- **Verify before committing:** `cargo test --workspace` (~339),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~888 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -754,11 +754,26 @@ without reading anything else.*
   textures — three along each axis, which is the CPU renderer's
   Gaussian written out as render passes — and a sharpen is the same
   blur read as what the picture has too little of. It declines
-  anything else — effects, pixelate (whose neighbourhood is a block
-  rather than an axis), ink authored
-  for a press (a gradient stop included), and anything wanting a texture
+  anything else — effects; a layer held to the one under it, which shows
+  only where that layer's own alpha does; a paint layer, a frame and a
+  copy of another layer; pixelate (whose neighbourhood is a block
+  rather than an axis); ink authored
+  for a press (a gradient stop included); and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
-  back to the CPU. Its tests render the same page both ways and compare: mean channel
+  back to the CPU. What is declined is checked as carefully as what is
+  drawn, because declining always gives the right page slowly and
+  drawing the wrong thing never does: `whatever_the_gpu_agrees_to_draw_
+  it_draws_the_way_the_cpu_does` walks the shared fixture's every
+  `Command`, one at a time, and holds the backend to the CPU's answer
+  wherever it agreed to draw at all. It found clipping on the way in —
+  a layer held to the one below it was being drawn whole, which is not a
+  slower picture but a wrong one — and it is what a new `Command` or a
+  new node kind runs into. The node kinds this backend cannot draw come
+  out of that fixture first, since one of them in the document declines
+  the whole page and an audit declined every time measures nothing; as a
+  kind is learned, its line goes and the commands that speak to it come
+  into scope by themselves. Its other tests render the same page both
+  ways and compare: mean channel
   difference under 0.004 for the analytic shapes, the gradients and the
   strokes, 0.012 for the stencilled paths and 0.0005 for text, interiors,
   holes and bare page exact, the antialiased edges tracking the CPU's. Nothing depends on it yet: the engine still

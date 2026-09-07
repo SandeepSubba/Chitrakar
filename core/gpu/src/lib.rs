@@ -30,11 +30,25 @@
 //! tapers all come out of the one region. Text is the whole block
 //! rasterized to coverage at the size it is seen at — by the renderer
 //! that owns that decision, so the bitmap is the one the CPU would have
-//! sampled — read off a quad over the block's own box. Everything else
-//! — masks, effects, filters, adjustments, blend modes, a group that
-//! has to be composited on its own, ink authored for a press, and
-//! anything needing a texture larger than the device was asked for — is
-//! declined, and the caller falls back to the CPU.
+//! sampled — read off a quad over the block's own box. A mask is the
+//! coverage the CPU compositor reads, rasterized once into a texture
+//! and multiplied into the fragments of everything the layer drew. A
+//! blend mode, a group that is less than opaque, one carrying a mask
+//! and one holding something that reads what is under it each
+//! composite on a surface of their own, and the surface is what lands.
+//! An adjustment layer, and a filter that is a function of one pixel,
+//! rewrite what is composited below them from a copy taken aside; a
+//! blur and a sharpen are the same three box passes each way the CPU
+//! makes them of.
+//!
+//! What is declined, and falls back to the CPU: a live effect; a layer
+//! held to the one under it, which shows only where that layer's own
+//! alpha does; a paint layer, a frame and a copy of another layer;
+//! pixelate, which reads a neighbourhood but not along an axis; ink
+//! authored for a press; and anything needing a texture larger than the
+//! device was asked for. Declining is always a safe answer — the page
+//! comes out right, more slowly. Drawing the wrong thing never is,
+//! which is what the audit over every command is there to catch.
 
 use chitrakar_color::LinearRgba;
 use chitrakar_doc::{BlendMode, Document, NodeId, NodeKind, Transform, VectorShape};
@@ -1404,6 +1418,14 @@ fn collect(
         if !node.effects.is_empty() {
             return None;
         }
+        // So does a layer held to the one under it: it shows only where
+        // that layer's own alpha does, which is that layer drawn aside
+        // and read back — nothing here does that yet, and drawing it
+        // whole is not the same picture but a wrong one. Declining is
+        // always a safe answer; drawing the wrong thing never is.
+        if node.clipped {
+            return None;
+        }
         let t = parent.compose(node.transform);
         // What composites as a unit before it meets what is under it: a
         // layer with a blend mode, which has to see the whole of what it
@@ -2675,6 +2697,73 @@ mod tests {
             }
         }
         (total / (a.pixels.len() * 4) as f64, worst)
+    }
+
+    /// Every command there is, asked of this backend one at a time.
+    ///
+    /// The CPU renderer is the reference and this one draws what it can,
+    /// so the thing worth knowing is not what it declines — declining is
+    /// always a safe answer — but whether anything it *accepts* comes
+    /// out differently. One command at a time over a document with
+    /// something of everything in it finds that where a test written per
+    /// feature cannot: the disagreements live in the combinations, and
+    /// the fixture is where every new `Command` has to be added anyway.
+    #[test]
+    fn whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut f = chitrakar_doc::fixture::everything();
+        // The fixture holds one of every node kind, and this backend
+        // does not draw them all yet — a paint layer's strokes and a
+        // frame's ground and clip are still the CPU's. One of those in
+        // the document makes the whole page declined, and an audit that
+        // is declined every time measures nothing, so they come out
+        // first. As the backend learns a kind, its line here goes and
+        // the commands that speak to it come into scope by themselves.
+        for id in [f.painted, f.frame] {
+            f.doc.apply(Command::RemoveNode { id }).unwrap();
+        }
+        let mut drawn = 0usize;
+        let mut declined = Vec::new();
+        let check = |doc: &Document, what: &str, drawn: &mut usize| {
+            if !GpuRenderer::can_render(doc) {
+                return false;
+            }
+            let mine = gpu.render(doc).expect("can_render said it would");
+            let reference = chitrakar_render::render(doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            assert!(
+                mean < 0.004,
+                "after {what}: mean {mean:.5}, worst {worst:.3}"
+            );
+            *drawn += 1;
+            true
+        };
+        check(&f.doc, "nothing at all", &mut drawn);
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what
+                .split_once(" {")
+                .map_or(what.clone(), |(k, _)| k.into());
+            let mut doc = f.doc.clone();
+            if doc.apply(command).is_err() {
+                continue;
+            }
+            if !check(&doc, &what, &mut drawn) {
+                declined.push(what);
+            }
+        }
+        // A backend that declined everything would pass the assertion
+        // above without having drawn a thing.
+        assert!(
+            drawn > 15,
+            "the backend drew {drawn} of them, which is too few to have              been asked anything (declined: {declined:?})"
+        );
+        eprintln!(
+            "gpu drew {drawn}, declined {}: {declined:?}",
+            declined.len()
+        );
     }
 
     #[test]
@@ -5018,6 +5107,14 @@ mod tests {
             })
             .unwrap();
         assert!(!GpuRenderer::can_render(&with_effect));
+
+        // A layer held to the one under it goes back too. It shows only
+        // where that layer's own alpha does, and drawing it whole is
+        // not a slower picture but a wrong one.
+        let mut held = doc.clone();
+        held.apply(Command::SetClipped { id, clipped: true })
+            .unwrap();
+        assert!(!GpuRenderer::can_render(&held));
 
         // Ink authored for a press resolves through the document's
         // profile, so a gradient with a CMYK stop goes back too.

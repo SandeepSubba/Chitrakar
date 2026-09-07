@@ -13,3 +13,9 @@ chitrakar-render.workspace = true
 wgpu = "23"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+
+# The shared fixture is a test dependency: every command in it is asked
+# of this backend, and whatever it agrees to draw has to come out the
+# way the CPU reference draws it.
+[dev-dependencies]
+chitrakar-doc = { workspace = true, features = ["fixture"] }
