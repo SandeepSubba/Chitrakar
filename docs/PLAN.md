@@ -801,6 +801,12 @@ without reading anything else.*
   tree's own order since the nodes live in a hash map. Written per
   feature this is a check somebody has to remember to write; written
   over every command it is one a new `Command` runs into by itself.
+  Spelling a document out means naming every accessor it has, and a new
+  piece of document state has to be added there — the same rule the
+  fixture keeps for commands. Anything left out is invisible to the
+  audit, which is exactly as bad as not having written it: the regions
+  a document keeps by name were added a chunk later and slipped through
+  until they were named too.
   The fixture's two masks are softened on purpose — a softness is a
   number rather than a shape, which makes it the easiest thing in a mask
   to drop on the way through a file, an inverse or a change of space,
