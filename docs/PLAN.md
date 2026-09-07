@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~344),
+- **Verify before committing:** `cargo test --workspace` (~345),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~908 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -761,9 +761,20 @@ without reading anything else.*
   of them multiplied are one. Only where "its alpha" is a plain question
   though — a base that draws a picture of its own, at full strength,
   unblended and unmasked; an adjustment has no picture and a faded or
-  blended base has an alpha that depends on how it was composited. It declines
-  anything else — effects; a layer held to a base like that; a paint
-  layer, a frame and a copy of another layer; pixelate (whose neighbourhood is a block
+  blended base has an alpha that depends on how it was composited. A frame is a group with a size of its own: its ground is
+  the rectangle it is, filled, and everything under it is held to that
+  rectangle — rounded to whole pixels there as here, because a frame's
+  edge is a page edge and a page edge is crisp, which also means the
+  holding takes all of a pixel or none and can ride the same coverage a
+  mask does rather than needing a surface of its own. Upright and
+  composited like its contents, a frame is nothing but a narrower
+  region to paint in, which is how the CPU renderer reads it too — so
+  an adjustment inside a frame sees the page below the frame on both.
+  It declines
+  anything else — effects; a layer held to a base like that; a frame
+  that is turned, composited as a whole, or whose box does not land on
+  whole pixels, each of which the CPU draws another way; a paint
+  layer and a copy of another layer; pixelate (whose neighbourhood is a block
   rather than an axis); ink authored
   for a press (a gradient stop included); and anything wanting a texture
   bigger than the 2048 every adapter guarantees — and the caller falls
@@ -1163,8 +1174,8 @@ without reading anything else.*
      live effects (a drop shadow, an inner shadow, an outline), which
      are the blur passes again read off a layer's own silhouette rather
      than off what is under it; pixelate, whose neighbourhood is a
-     block rather than an axis; and the three node kinds it has never
-     drawn — a paint layer, a frame, a copy of another layer. What is
+     block rather than an axis; and the two node kinds it has never
+     drawn — a paint layer and a copy of another layer. What is
      left to *wire*: it draws the page at its own size, and the app
      shows a viewport — a scale and an origin — so presenting from it
      means `gather` and the shader learning a view transform, which is
