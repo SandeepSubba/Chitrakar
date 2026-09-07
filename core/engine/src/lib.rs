@@ -7227,6 +7227,87 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    /// Everything written in the page's own space is carried the same
+    /// way when the page moves under it.
+    ///
+    /// `map_page` is the one place a page transform is stated, and
+    /// every page-space thing has to be named there or it is quietly
+    /// left behind — the kept regions were, a chunk after they were
+    /// added. Naming the transform again here would only be the same
+    /// arithmetic written twice, so the audit does not: it puts the
+    /// same region in two places at once, maps the page, and asks
+    /// whether they still agree. Anything `map_page` forgets stops
+    /// agreeing with what it remembers, whatever the transform was.
+    #[test]
+    fn everything_the_page_carries_is_carried_the_same_way() {
+        for command in [
+            Command::TurnCanvas { quarters: 1 },
+            Command::TurnCanvas { quarters: 2 },
+            Command::MirrorCanvas { across_x: true },
+            Command::MirrorCanvas { across_x: false },
+            Command::ResizeCanvas {
+                width: 70,
+                height: 90,
+                dx: -12.0,
+                dy: 7.0,
+            },
+            Command::StraightenCanvas {
+                degrees: 9.0,
+                width: 110,
+                height: 80,
+            },
+        ] {
+            let what = format!("{command:?}");
+            let mut session = Session::new(100, 60, ColorMode::Rgb);
+            session
+                .pick_region(
+                    VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+                    Transform::translation(14.0, 11.0),
+                    "replace",
+                )
+                .unwrap();
+            session.feather_selection(2.0).unwrap();
+            // The same region, in both of the places the page carries.
+            session.keep_selection("the same one").unwrap();
+            session.apply(command).unwrap();
+            let (w, h) = (
+                session.document().meta.width,
+                session.document().meta.height,
+            );
+            let probes: Vec<(f32, f32)> = (0..h / 3)
+                .flat_map(|y| (0..w / 3).map(move |x| (x as f32 * 3.0, y as f32 * 3.0)))
+                .collect();
+            let read = |session: &Session| -> Vec<bool> {
+                probes
+                    .iter()
+                    .map(|(x, y)| session.selection_covers(*x, *y))
+                    .collect()
+            };
+            let carried = read(&session);
+            assert!(
+                carried.iter().any(|c| *c),
+                "after {what} the selection covers nothing, so the audit \
+                 would agree about nothing"
+            );
+            session.pick_kept(0, "replace").unwrap();
+            // Counted rather than compared whole: two lists of a few
+            // hundred booleans printed side by side say nothing.
+            let apart = read(&session)
+                .iter()
+                .zip(&carried)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                apart,
+                0,
+                "after {what} a kept region and the selection disagree at \
+                 {apart} of {} places, so one of them was left behind by \
+                 map_page",
+                probes.len()
+            );
+        }
+    }
+
     #[test]
     fn a_region_can_be_kept_and_picked_up_again() {
         // A region is often the expensive thing on a page. Put away and

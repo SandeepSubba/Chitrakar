@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~343),
+- **Verify before committing:** `cargo test --workspace` (~344),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~908 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -788,6 +788,19 @@ without reading anything else.*
   rather than a graphics card) a 1280×720 page costs ~22ms against the CPU
   renderer's ~8ms; CI installs mesa-vulkan-drivers so the comparison runs
   there too.
+- **Everything the page carries is carried the same way:**
+  `map_page` is the one place a page transform is stated, and every
+  page-space thing has to be named there or it is quietly left behind —
+  the regions kept by name were, a chunk after they were added, and
+  nothing complained. `everything_the_page_carries_is_carried_the_same_
+  way` turns, mirrors, crops and straightens a page and checks that the
+  things carried still agree with each other. It names no transform of
+  its own: writing the arithmetic out a second time would only be a
+  second chance to write it wrong. Instead it puts the same region in
+  two of the places the page carries — as the selection and as a kept
+  region — and asks whether they still cover the same points
+  afterwards. Anything `map_page` forgets stops agreeing with what it
+  remembers, whatever the transform was.
 - **Every command is put through the file:**
   `every_command_survives_the_file` applies the shared fixture's every
   command, saves the document as a `.chitra`, loads it back and compares
