@@ -2681,6 +2681,68 @@ impl Session {
         Ok(true)
     }
 
+    /// Take what is picked out further out, or further in, by a
+    /// distance in page pixels. A negative `by` shrinks it.
+    ///
+    /// The matting move: a wand pick carries a pixel of whatever was
+    /// behind the thing it picked, and shrinking by one loses that
+    /// fringe; a region grown by two is what an outline is drawn in.
+    /// It is a *distance*, not a scaling — a long thin region grown by
+    /// four gets four pixels wider at both ends and along both sides,
+    /// which is what "grow" means about a region and is not what
+    /// scaling it by anything would do.
+    ///
+    /// The distance is read on what is covered rather than on the
+    /// outline, so it works the same on every kind of region — a
+    /// rectangle, a painted one, an inverted one — and the answer comes
+    /// back traced, the way the wand's does. The softness of the edge
+    /// is kept: how far out the region reaches and how sharply it ends
+    /// are separate questions.
+    pub fn grow_selection(&mut self, by: f32) -> Result<bool, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        if by == 0.0 {
+            return Ok(false);
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let cover = chitrakar_render::mask_plane_over(
+            &self.doc,
+            &region,
+            Transform::default(),
+            clip,
+            (w, h),
+        );
+        let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+        let rings =
+            chitrakar_render::trace_pixels(&chitrakar_render::grown(&inside, w, h, by), w, h);
+        let Some(grown) = Self::region_of(rings, region.feather) else {
+            return Err(EngineError::BadCommand(
+                "shrinking that far leaves nothing picked out".into(),
+            ));
+        };
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(grown)),
+            },
+            Some(
+                if by > 0.0 {
+                    "Grow what is picked"
+                } else {
+                    "Shrink what is picked"
+                }
+                .into(),
+            ),
+        )?;
+        Ok(true)
+    }
+
     /// Swap what is picked out for what is not.
     pub fn pick_inverse(&mut self) -> Result<bool, EngineError> {
         let Some(mut selection) = self.doc.selection().cloned() else {
@@ -6872,6 +6934,89 @@ mod tests {
     /// rectangle with what was picked as a hole in it — and softening
     /// one and then adding to it used to lose the softening, which is
     /// the other half of the same carelessness.
+    #[test]
+    fn a_region_can_be_taken_further_out_or_further_in() {
+        // Grow and shrink are a distance, not a scaling: a long thin
+        // region grown by four gets four wider at both ends and along
+        // both sides.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(30.0, 35.0),
+                "replace",
+            )
+            .unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        assert!(session.grow_selection(4.0).unwrap());
+        let out = session.selection_bounds().unwrap();
+        assert!(
+            near(out, [26.0, 31.0, 94.0, 49.0]),
+            "four further out on every side: {out:?}"
+        );
+        assert!(session.selection_covers(28.0, 40.0), "and it covers them");
+
+        // Back in by the same, and it is where it was — the shape is
+        // traced back each time, so within a pixel.
+        assert!(session.grow_selection(-4.0).unwrap());
+        let back = session.selection_bounds().unwrap();
+        assert!(
+            near(back, [30.0, 35.0, 90.0, 45.0]),
+            "and back where it started: {back:?}"
+        );
+
+        // Softness is a separate question from reach, and survives.
+        assert!(session.feather_selection(3.0).unwrap());
+        assert!(session.grow_selection(2.0).unwrap());
+        assert!(
+            (session.selection().unwrap().feather - 3.0).abs() < 1e-4,
+            "the edge is still as soft as it was"
+        );
+
+        // Shrinking past the region says so rather than picking out
+        // nothing at all, which would look like a crash to the caller.
+        assert!(session.grow_selection(-200.0).is_err());
+        assert!(
+            session.selection().is_some(),
+            "and leaves what was picked alone"
+        );
+
+        // Nothing picked is not an error, and no distance is no edit.
+        session.pick_none().unwrap();
+        assert!(!session.grow_selection(4.0).unwrap());
+
+        // Growing an inverted region grows the region, not its hole:
+        // what is picked is everything but a box, so it reaches further
+        // in on the box, leaving a smaller hole.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                Transform::translation(40.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        session.pick_inverse().unwrap();
+        assert!(!session.selection_covers(60.0, 40.0), "the hole is a hole");
+        session.grow_selection(6.0).unwrap();
+        assert!(
+            session.selection_covers(44.0, 40.0),
+            "grown, it reaches into where the hole was"
+        );
+        assert!(
+            !session.selection_covers(60.0, 40.0),
+            "without closing it over"
+        );
+    }
+
     #[test]
     fn a_layer_says_what_it_covers() {
         // The mirror of handing a region to a layer. A shape can be

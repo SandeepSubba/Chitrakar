@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~335),
+- **Verify before committing:** `cargo test --workspace` (~337),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~881 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~886 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1005,6 +1005,22 @@ without reading anything else.*
   that casts it. Its mask is not set aside, since a masked layer covers
   exactly what the mask lets through, and a group answers for
   everything under it together.
+  A region can also be taken further out, or further in, by a distance
+  in page pixels — the matting move, since a wand pick carries a pixel
+  of whatever was behind the thing it picked and shrinking by one loses
+  that fringe. A distance and not a scaling: a long thin region grown
+  by four gets four wider at both ends and along both sides. Measured
+  on what is *covered* rather than on the outline, so it works the same
+  on every kind of region — a rectangle, a painted one, an inverted one
+  (where growing the region shrinks the hole) — and the answer comes
+  back traced, the way the wand's does. The distance is a true
+  Euclidean one, from the separable parabola-envelope transform of
+  Felzenszwalb and Huttenlocher (`chitrakar_render::grown`): a chamfer
+  approximation is square where this is round, and a staircase edge
+  shows the moment the answer is traced back into a shape. Beyond the
+  page counts as outside, so "select all, then shrink" insets from the
+  page's own edge. Softness is left alone — how far a region reaches
+  and how sharply it ends are separate questions.
   And crop the page to it, which is the resize the crop tool already
   does with the region standing in for the rectangle.
   A brush painted with a region picked out is confined to it, and stays

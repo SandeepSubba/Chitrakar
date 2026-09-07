@@ -4876,6 +4876,118 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     }))
 }
 
+/// The lower envelope of the parabolas `f[p] + (q - p)^2`, sampled at
+/// every `q`: one line of the distance transform below.
+fn envelope(f: &[f64], out: &mut [f64], v: &mut [usize], z: &mut [f64]) {
+    let n = f.len();
+    let mut k = 0usize;
+    v[0] = 0;
+    z[0] = f64::NEG_INFINITY;
+    z[1] = f64::INFINITY;
+    for q in 1..n {
+        let mut s;
+        loop {
+            let p = v[k];
+            s = ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64))
+                / (2.0 * q as f64 - 2.0 * p as f64);
+            if s <= z[k] && k > 0 {
+                k -= 1;
+            } else {
+                break;
+            }
+        }
+        k += 1;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = f64::INFINITY;
+    }
+    let mut k = 0usize;
+    for (q, o) in out.iter_mut().enumerate() {
+        while z[k + 1] < q as f64 {
+            k += 1;
+        }
+        let d = q as f64 - v[k] as f64;
+        *o = d * d + f[v[k]];
+    }
+}
+
+/// The exact squared distance from every cell of a grid to the nearest
+/// set cell.
+///
+/// Separable: the lower envelope of parabolas down each column and then
+/// along each row, which together give the true Euclidean distance
+/// rather than the staircase a chamfer mask leaves — the difference
+/// shows as a lumpy outline the moment the answer is traced back into a
+/// shape. "Nowhere near" is a large number rather than infinity, so that
+/// two of them subtract to something the arithmetic can still order.
+fn squared_distance(seed: &[bool], w: usize, h: usize) -> Vec<f64> {
+    const FAR: f64 = 1e18;
+    let mut d: Vec<f64> = seed.iter().map(|s| if *s { 0.0 } else { FAR }).collect();
+    let n = w.max(h);
+    let (mut f, mut out, mut v, mut z) = (
+        vec![0.0f64; n],
+        vec![0.0f64; n],
+        vec![0usize; n],
+        vec![0.0f64; n + 1],
+    );
+    for x in 0..w {
+        for y in 0..h {
+            f[y] = d[y * w + x];
+        }
+        envelope(&f[..h], &mut out[..h], &mut v[..h], &mut z[..h + 1]);
+        for y in 0..h {
+            d[y * w + x] = out[y];
+        }
+    }
+    for y in 0..h {
+        f[..w].copy_from_slice(&d[y * w..y * w + w]);
+        envelope(&f[..w], &mut out[..w], &mut v[..w], &mut z[..w + 1]);
+        d[y * w..y * w + w].copy_from_slice(&out[..w]);
+    }
+    d
+}
+
+/// A set of pixels grown or shrunk by a distance, exactly.
+///
+/// A positive `by` takes in every pixel within that distance of the
+/// set; a negative one gives back only the pixels that far inside it.
+/// The two are symmetric: growing by one takes in the ring of pixels
+/// touching the set, shrinking by one peels that ring off.
+///
+/// Beyond the grid counts as outside the set, so shrinking something
+/// that fills the page pulls it in from the page's own edge — which is
+/// what an edge looks like from inside, and what "select all, then
+/// shrink" is asked for.
+pub fn grown(inside: &[bool], width: u32, height: u32, by: f32) -> Vec<bool> {
+    let (w, h) = (width as usize, height as usize);
+    if by == 0.0 || w == 0 || h == 0 || inside.len() != w * h {
+        return inside.to_vec();
+    }
+    let grow = by > 0.0;
+    let r = by.abs() as f64;
+    let pad = (r.ceil() as usize) + 1;
+    let (pw, ph) = (w + pad * 2, h + pad * 2);
+    // Growing looks for the set, shrinking for everything that is not
+    // it; the margin round the grid belongs to whichever of the two is
+    // "outside".
+    let mut seed = vec![!grow; pw * ph];
+    for y in 0..h {
+        for x in 0..w {
+            seed[(y + pad) * pw + x + pad] = inside[y * w + x] == grow;
+        }
+    }
+    let d = squared_distance(&seed, pw, ph);
+    let limit = r * r;
+    let mut out = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let at = d[(y + pad) * pw + x + pad];
+            out[y * w + x] = if grow { at <= limit } else { at > limit };
+        }
+    }
+    out
+}
+
 /// What one layer alone covers on the page, as coverage per pixel.
 ///
 /// The layer drawn exactly where the page puts it, on nothing, and read
@@ -5789,6 +5901,60 @@ fn hit_in_group(
 
 #[cfg(test)]
 mod tests {
+
+    /// Growing and shrinking a set of pixels by a true distance.
+    ///
+    /// Round, not square: the difference between a real Euclidean
+    /// distance and the chamfer approximations shows the moment the
+    /// answer is traced back into an outline.
+    #[test]
+    fn a_region_grows_and_shrinks_by_a_true_distance() {
+        use super::grown;
+        // One pixel in the middle of an 11x11 grid.
+        let (w, h) = (11u32, 11u32);
+        let mut one = vec![false; 121];
+        one[5 * 11 + 5] = true;
+        let count = |g: &[bool]| g.iter().filter(|b| **b).count();
+        let at = |g: &[bool], x: usize, y: usize| g[y * 11 + x];
+
+        // A diagonal neighbour is 1.414 away, so growing by one takes in
+        // the four that touch by an edge and no more.
+        let plus = grown(&one, w, h, 1.0);
+        assert_eq!(count(&plus), 5, "a cross of five");
+        assert!(at(&plus, 5, 4) && at(&plus, 4, 5), "the four that touch");
+        assert!(!at(&plus, 4, 4), "and not the corners");
+
+        // Past the diagonal and they come in too.
+        let block = grown(&one, w, h, 1.5);
+        assert_eq!(count(&block), 9, "a 3x3 block");
+        assert!(at(&block, 4, 4), "corners and all");
+
+        // Round: at two, the pixels two away on the axes are in and the
+        // ones diagonally two (2.83 away) are not.
+        let disc = grown(&one, w, h, 2.0);
+        assert!(at(&disc, 5, 3) && at(&disc, 3, 5), "two away on the axes");
+        assert!(!at(&disc, 4, 3), "but not 2.24 away");
+        assert_eq!(count(&disc), 13, "which is the disc of radius two");
+
+        // Shrinking undoes growing, ring for ring.
+        let back = grown(&block, w, h, -1.5);
+        assert_eq!(count(&back), 1, "the 3x3 comes back to one pixel");
+        assert!(at(&back, 5, 5), "the one it started as");
+
+        // Beyond the grid is outside, so a full grid shrinks inward from
+        // its own edge rather than staying whole.
+        let full = vec![true; 121];
+        let inset = grown(&full, w, h, -2.0);
+        assert_eq!(count(&inset), 7 * 7, "two rings off every side");
+        assert!(
+            !at(&inset, 1, 5) && at(&inset, 2, 5),
+            "peeled from the edge"
+        );
+
+        // Nothing to grow stays nothing, and no distance changes nothing.
+        assert_eq!(count(&grown(&[false; 121], w, h, 3.0)), 0);
+        assert_eq!(grown(&one, w, h, 0.0), one);
+    }
 
     /// A mask's edge, softened.
     ///

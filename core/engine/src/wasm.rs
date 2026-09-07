@@ -647,6 +647,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Take what is picked out further out, or — with a negative
+    /// `by` — further in, by a distance in page pixels.
+    pub fn grow_selection(&mut self, by: f32) -> Result<bool, JsError> {
+        self.inner.grow_selection(by).map_err(to_js)
+    }
+
     /// Pick out the shape a layer covers — the other way round from
     /// handing a region to a layer.
     pub fn pick_from_layer(&mut self, id: f64, how: &str) -> Result<(), JsError> {

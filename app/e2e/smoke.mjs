@@ -7998,6 +7998,68 @@ assert(
   assert(!(await isBlue(180, 150)), "and nothing in between");
 }
 
+// 9an. Taking a region further out, or further in. The matting move: a
+// wand pick carries a pixel of whatever was behind the thing it picked,
+// and shrinking by one loses that fringe. It is a distance and not a
+// scaling, so both ends and both sides move by the same amount.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const perPixel = b.width / 400;
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...at(120, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 160), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const antBox = async () => {
+    const pts = (
+      await page.$$eval(".ants polygon", (els) =>
+        els.map((el) => el.getAttribute("points")),
+      )
+    )
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return [
+      Math.min(...xs),
+      Math.min(...ys),
+      Math.max(...xs),
+      Math.max(...ys),
+    ];
+  };
+  const drawn = await antBox();
+
+  const grow = page.locator('[aria-label="Grow what is picked"]');
+  assert(await grow.isVisible(), "the box says how far, with a region picked");
+  await grow.fill("10");
+  await grow.press("Enter");
+  await page.waitForTimeout(450);
+  const out = await antBox();
+  // Ten page pixels on every side: twenty wider and twenty taller. The
+  // ants are in screen pixels, hence the scale.
+  const wider = (out[2] - out[0] - (drawn[2] - drawn[0])) / perPixel;
+  const taller = (out[3] - out[1] - (drawn[3] - drawn[1])) / perPixel;
+  assert(Math.abs(wider - 20) < 4, `twenty wider (${wider.toFixed(1)})`);
+  assert(Math.abs(taller - 20) < 4, `and twenty taller (${taller.toFixed(1)})`);
+
+  // A minus sign takes it back in, and the history says which it was.
+  await grow.fill("-10");
+  await grow.press("Enter");
+  await page.waitForTimeout(450);
+  const back = await antBox();
+  const left = (back[0] - drawn[0]) / perPixel;
+  assert(Math.abs(left) < 3, `and back where it was drawn (${left.toFixed(1)})`);
+  const step = await page.locator(".history button.current").textContent();
+  assert(/shrink/i.test(step || ""), `the last step was the shrink (${step})`);
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

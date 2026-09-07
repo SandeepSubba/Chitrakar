@@ -1256,6 +1256,8 @@ export function App() {
   /** How far the wand's colour may stray from the one it was clicked on:
    * 0 is exactly that colour and 1 is the whole page. */
   const [wandTolerance, setWandTolerance] = useState(0.12);
+  /** How far the next grow or shrink of the region reaches. */
+  const [growBy, setGrowBy] = useState(2);
   /** How far the edge of the next region picked is softened over. Kept
    * here rather than read off the document so it carries from one
    * region to the next, the way a brush size does. */
@@ -6606,6 +6608,34 @@ export function App() {
                 const want = Math.max(0, Number(e.target.value));
                 setSelectionFeather(want);
                 if (session?.feather_selection(want)) refresh(session);
+              }}
+            />
+          )}
+          {/* How much further out — or, with a minus sign, further in —
+              the region reaches. Applied on Enter rather than as it is
+              typed: each press is an edit of its own, so "grow by two"
+              twice is four, and 2 on the way to 20 is not. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <input
+              className="tool-number"
+              type="number"
+              min={-200}
+              max={200}
+              step={1}
+              value={growBy}
+              title="Press Enter to take what is picked this many page pixels further out; a minus sign takes it in"
+              aria-label="Grow what is picked"
+              onChange={(e) =>
+                setGrowBy(Math.max(-200, Math.min(200, Number(e.target.value))))
+              }
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key !== "Enter") return;
+                try {
+                  if (session?.grow_selection(growBy)) refresh(session);
+                } catch (err) {
+                  alert(`Select: ${err}`);
+                }
               }}
             />
           )}
