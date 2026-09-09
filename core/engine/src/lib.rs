@@ -6688,6 +6688,58 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
     }
 
+    /// Every command there is, and then every way out of the editor.
+    ///
+    /// An exporter is where a node kind is forgotten: each writes the
+    /// document into a form of its own, and a kind added a year later
+    /// reaches them without anybody thinking of it. Nothing here says
+    /// what the picture should look like — SVG and PDF have their own
+    /// blocks for that — only that each door opens on whatever state a
+    /// command left behind, and gives back something rather than an
+    /// error or a panic. The fixture holds one of every node kind, so
+    /// "whatever state" is a wide claim.
+    #[test]
+    fn every_command_leaves_a_document_every_door_can_take() {
+        let f = chitrakar_doc::fixture::everything();
+        let mut checked = 0usize;
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what
+                .split_once(" {")
+                .map_or(what.clone(), |(k, _)| k.into());
+            let mut session = Session::from_document(f.doc.clone());
+            if session.apply(command).is_err() {
+                continue;
+            }
+            let out = |name: &str, r: Result<usize, EngineError>| match r {
+                Ok(len) => assert!(len > 0, "{name} after {what} came out empty"),
+                Err(e) => panic!("{name} after {what}: {e}"),
+            };
+            out("a PNG", session.render_png_at(1.0, None).map(|b| b.len()));
+            out("a JPEG", session.export_jpeg(80).map(|b| b.len()));
+            out("an SVG", session.export_svg().map(|s| s.len()));
+            out("a PDF", session.export_pdf().map(|b| b.len()));
+            out(
+                "a PDF of frames",
+                session.export_pdf_frames().map(|b| b.len()),
+            );
+            // And what it saved is a document that opens again.
+            let bytes = session
+                .save()
+                .unwrap_or_else(|e| panic!("saving after {what}: {e}"));
+            out("a file", Ok(bytes.len()));
+            assert!(
+                Session::load(&bytes).is_ok(),
+                "the file written after {what} opens again"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 25,
+            "only {checked} commands made it as far as a door"
+        );
+    }
+
     #[test]
     fn a_picture_arrives_the_size_it_should_be() {
         let png = |w: u32, h: u32| {

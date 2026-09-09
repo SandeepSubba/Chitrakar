@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~358),
+- **Verify before committing:** `cargo test --workspace` (~359),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~954 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -876,6 +876,18 @@ without reading anything else.*
   region — and asks whether they still cover the same points
   afterwards. Anything `map_page` forgets stops agreeing with what it
   remembers, whatever the transform was.
+- **Every command, and then every door out:**
+  `every_command_leaves_a_document_every_door_can_take` applies the
+  shared fixture's every command and then asks for a PNG, a JPEG, an
+  SVG, a PDF, a PDF of the frames and a `.chitra` — and opens the
+  `.chitra` again. An exporter is where a node kind is forgotten: each
+  writes the document into a form of its own, and a kind added a year
+  later reaches all six of them without anybody thinking of it. Nothing
+  in it says what the picture should *look* like — SVG and PDF have
+  their own blocks for that — only that each door opens on whatever
+  state a command left behind and gives back something rather than an
+  error or a panic. Since the fixture holds one of every node kind,
+  "whatever state" is a wide claim.
 - **Every command is put through the file:**
   `every_command_survives_the_file` applies the shared fixture's every
   command, saves the document as a `.chitra`, loads it back and compares
