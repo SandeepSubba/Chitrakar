@@ -5832,18 +5832,26 @@ export function App() {
       file.arrayBuffer().then((buf) => {
         try {
           const bytes = new Uint8Array(buf);
+          const was = [session.width, session.height];
           const id = vector
             ? session.place_svg(bytes, file.name || "Pasted drawing")
             : session.place_image(bytes, file.name || "Pasted image");
           setSelected(id);
           setMultiSel([]);
           refresh(session);
+          // A picture that took the page's size with it was a picture
+          // being opened, and the view was framed for the page that is
+          // gone: without this a photograph opens showing a corner of
+          // itself, which is the thing this was supposed to stop.
+          if (session.width !== was[0] || session.height !== was[1]) {
+            fitView();
+          }
         } catch (err) {
           alert(`Could not place image: ${err}`);
         }
       });
     },
-    [session, refresh],
+    [session, refresh, fitView],
   );
 
   const placeImage = (e: React.ChangeEvent<HTMLInputElement>) => {

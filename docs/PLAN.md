@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~358),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~947 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~954 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1377,7 +1377,11 @@ without reading anything else.*
   page that is already somebody's it is laid down whole and in the
   middle, taken down to fit if it is bigger: at its own size a
   photograph hangs off three sides and shows a corner of itself, which
-  is not a picture anybody placed.
+  is not a picture anybody placed. A picture that took the page's size
+  with it takes the *view* too, since the framing that was there was
+  framed for a page that has gone — without that, a photograph opens
+  showing a corner of itself, which is the thing taking the page's size
+  was supposed to stop.
   Effects come in three kinds;
   and export flattens them like everything else; SVG export sets each
   line the renderer set — wrapped, aligned by text-anchor, on its real

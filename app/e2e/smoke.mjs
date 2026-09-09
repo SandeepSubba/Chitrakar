@@ -8725,6 +8725,57 @@ assert(
   );
 }
 
+// 9av. A photograph opened into an empty document takes the page with
+// it, and the view is framed for the page it becomes — otherwise the
+// picture opens showing a corner of itself, which is the thing taking
+// the page's size was supposed to stop.
+{
+  await newDocument(200, 150, "rgb");
+  const host = await page.locator(".canvas-host").boundingBox();
+  const small = await page.locator("#engine-page").boundingBox();
+  const wide = await page.evaluate(async () => {
+    const c = document.createElement("canvas");
+    c.width = 900;
+    c.height = 300;
+    const g = c.getContext("2d");
+    g.fillStyle = "#22aa55";
+    g.fillRect(0, 0, 900, 300);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles(
+    'input[accept="image/png,image/jpeg,image/svg+xml"]',
+    {
+      name: "photograph.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(wide, "base64"),
+    },
+  );
+  await page.waitForTimeout(600);
+  const opened = await page.locator("#engine-page").boundingBox();
+  assert(
+    Math.abs(opened.width / opened.height - 3) < 0.05,
+    `the page took the picture's own proportions (${(opened.width / opened.height).toFixed(2)})`,
+  );
+  assert(
+    opened.width <= host.width + 1 && opened.height <= host.height + 1,
+    `and the whole of it is on screen (${opened.width.toFixed(0)}x${opened.height.toFixed(0)} in ${host.width.toFixed(0)}x${host.height.toFixed(0)})`,
+  );
+  assert(
+    Math.abs(opened.height - small.height) > 20,
+    `which is a different framing from the page it replaced (${opened.height.toFixed(0)} against ${small.height.toFixed(0)})`,
+  );
+  // Every corner of it is the picture: opened, not placed in a corner.
+  for (const [x, y] of [
+    [5, 5],
+    [890, 5],
+    [5, 290],
+    [890, 290],
+  ]) {
+    const [r, g] = await canvasPixel(x, y);
+    assert(g > 120 && r < 120, `the picture reaches ${x},${y}`);
+  }
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —
