@@ -888,11 +888,14 @@ without reading anything else.*
   copy kept the id its original had in the document it came from, which
   in a new document is somebody else's layer or nobody's. Now a copy
   whose original travelled with it points at the one that *arrived* —
-  which also fixes duplicating a group holding an original and a copy
-  of it, where the new copy used to keep pointing at the old original —
   and a copy whose original stayed behind still points at it, since
   that is what duplicating a copy on its own means. One that points at
   neither is refused by name rather than pasted to draw nothing.
+  Duplicating goes by the same rule and needed the same fix: it is a
+  second, near-identical path (`emit_copy` beside `emit_clip`), which
+  is exactly why it was missed, and there duplicating a group holding
+  an original and a copy of it gave a group whose copy went on watching
+  the *old* original — two things linked in a way nobody asked for.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an

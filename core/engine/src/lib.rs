@@ -1019,6 +1019,9 @@ impl Session {
             .unwrap_or(0)
             + 1;
         let mut next = self.doc.peek_next_id().0;
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        self.assign_copy_ids(id, &mut peek, &mut becomes)?;
         let mut cmds = Vec::new();
         let copy_id = self.emit_copy(
             id,
@@ -1026,6 +1029,7 @@ impl Session {
             index,
             CopyStyle::Duplicate,
             &mut next,
+            &becomes,
             &mut cmds,
         )?;
         let label = format!("Duplicate {}", self.doc.node(id)?.name);
@@ -1481,6 +1485,9 @@ impl Session {
         }
         let at = self.doc.children_of(instance)?.len();
         let mut next = self.doc.peek_next_id().0;
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        self.assign_copy_ids(original, &mut peek, &mut becomes)?;
         let mut cmds = Vec::new();
         let made = self.emit_copy(
             original,
@@ -1488,6 +1495,7 @@ impl Session {
             at,
             CopyStyle::Exact,
             &mut next,
+            &becomes,
             &mut cmds,
         )?;
         replaces.push(index);
@@ -2113,10 +2121,19 @@ impl Session {
         // slots read a moment ago stay true if they are filled downwards.
         slots.sort_by(|a, b| b.3.cmp(&a.3));
         let mut next = self.doc.peek_next_id().0;
+        // Which id each layer being copied is about to be given — for
+        // all of them before any of them, since a copy of another layer
+        // in one of these subtrees may point at an original in another.
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        for (_, id, _, _) in &slots {
+            self.assign_copy_ids(*id, &mut peek, &mut becomes)?;
+        }
         let mut cmds = Vec::new();
         let mut copies = vec![NodeId(0); ids.len()];
         for (at, id, parent, index) in slots {
-            copies[at] = self.emit_copy(id, parent, index, style, &mut next, &mut cmds)?;
+            copies[at] =
+                self.emit_copy(id, parent, index, style, &mut next, &becomes, &mut cmds)?;
         }
         let label = if ids.len() == 1 {
             format!("Duplicate {}", self.doc.node(ids[0])?.name)
@@ -2127,6 +2144,23 @@ impl Session {
         Ok(copies)
     }
 
+    /// The id every layer of a subtree is about to be given, in the
+    /// order [`emit_copy`](Self::emit_copy) will hand them out.
+    fn assign_copy_ids(
+        &self,
+        src: NodeId,
+        next: &mut u64,
+        becomes: &mut std::collections::HashMap<NodeId, NodeId>,
+    ) -> Result<(), EngineError> {
+        becomes.insert(src, NodeId(*next));
+        *next += 1;
+        for child in self.doc.children_of(src)?.to_vec() {
+            self.assign_copy_ids(child, next, becomes)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_copy(
         &self,
         src: NodeId,
@@ -2134,11 +2168,23 @@ impl Session {
         index: usize,
         style: CopyStyle,
         next: &mut u64,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
         cmds: &mut Vec<Command>,
     ) -> Result<NodeId, EngineError> {
         let mut node = self.doc.node(src)?.clone();
         if style != CopyStyle::Exact {
             node.name = format!("{} copy", node.name);
+        }
+        // The same rule the clipboard goes by: a copy of a layer that is
+        // being copied alongside it points at the one being made, and
+        // one whose original is staying put keeps pointing at that.
+        // Duplicating a group holding an original and a copy of it
+        // otherwise gives a group whose copy still watches the original
+        // group — two things linked in a way nobody asked for.
+        if let NodeKind::Instance { of, .. } = &mut node.kind {
+            if let Some(made) = becomes.get(of) {
+                *of = *made;
+            }
         }
         if style == CopyStyle::Duplicate {
             // Nudge the copy so it is visible rather than hiding exactly
@@ -2155,7 +2201,7 @@ impl Session {
             node: Box::new(node),
         });
         for (i, child) in self.doc.children_of(src)?.to_vec().iter().enumerate() {
-            self.emit_copy(*child, new_id, i, CopyStyle::Exact, next, cmds)?;
+            self.emit_copy(*child, new_id, i, CopyStyle::Exact, next, becomes, cmds)?;
         }
         Ok(new_id)
     }
@@ -6803,6 +6849,26 @@ mod tests {
             );
             assert!(to.render().is_ok(), "and the document draws");
         }
+        // The same rule where a layer is copied without leaving the
+        // document: duplicating a group holding an original and a copy
+        // of it gives a pair that is its own. Without this the new copy
+        // goes on watching the old original, and the two groups are
+        // linked in a way nobody asked for.
+        {
+            let mut same = Session::from_document(f.doc.clone());
+            let pair = same.group_nodes(&[f.group, f.copy], "a pair").unwrap();
+            let made = same.duplicate_node(pair).unwrap();
+            let inside = same.document().children_of(made).unwrap().to_vec();
+            let NodeKind::Instance { of, .. } = &same.document().node(inside[1]).unwrap().kind
+            else {
+                panic!("the second of the pair is the copy");
+            };
+            assert_eq!(
+                *of, inside[0],
+                "the duplicate's copy watches the duplicate's original"
+            );
+        }
+
         // On its own it is a copy of something that is not here, which
         // is a layer that would arrive drawing nothing: said rather
         // than shrugged at.
