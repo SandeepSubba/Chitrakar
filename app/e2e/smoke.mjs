@@ -8615,6 +8615,59 @@ assert(
   );
 }
 
+// 9au. The histogram reads what is picked out. A histogram is read to
+// decide where a picture's tones sit, and with a region picked the
+// picture in question is the region — which is what makes grading one
+// area possible, since the graph a curve is drawn on is this reading.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  const rect = async (colour, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", colour);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await rect("#111111", 0, 0, 300, 200);
+  await rect("#eeeeee", 40, 40, 120, 120);
+
+  // A curves layer, so the graph behind it is the reading in question.
+  await page.selectOption('[aria-label="Add adjustment layer"]', "curves");
+  await page.waitForTimeout(400);
+  await page.locator(".panel ul li", { hasText: "Curves" }).first().click();
+  await page.waitForTimeout(300);
+  const drawn = () =>
+    page.$$eval(".histogram path", (els) =>
+      els.map((el) => el.getAttribute("d")).join("|"),
+    );
+  const whole = await drawn();
+  assert(whole.length > 0, "the graph is drawn over the page's own tones");
+
+  // Pick out the light patch: the tones behind the graph are its.
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...at(45, 45));
+  await page.mouse.down();
+  await page.mouse.move(...at(115, 115), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  const inside = await drawn();
+  assert(
+    inside !== whole,
+    "and over the region's own when there is one",
+  );
+
+  // Let it go, and the page is read whole again.
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(500);
+  assert((await drawn()) === whole, "the page's own reading comes back");
+}
+
 // 9ah. A layer inside a picked group travels with the group, so acting
 // on it again acts on it twice. Ctrl-clicking a group and then something
 // inside it is an easy selection to end up with — the panel lists both —

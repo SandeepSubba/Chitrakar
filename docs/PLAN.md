@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~355),
+- **Verify before committing:** `cargo test --workspace` (~356),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~937 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~940 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1238,6 +1238,14 @@ without reading anything else.*
   most needed it: what is picked out is on screen and would be seen to
   be wrong after a quarter turn, where a kept region is not looked at
   again until the day it is picked up.
+  With a region picked, the histogram is the *region's*: a histogram is
+  read to decide where a picture's tones sit, and the picture in
+  question is then the region. It is the same reading the levels and
+  curves graphs are drawn over and the same one Auto sets its points
+  from — one answer, so the graph and the button cannot come to
+  disagree — and it is what makes grading one area of a photograph
+  possible at all. Nothing about it is hidden: the region is on screen
+  with ants round it.
   A brush painted with a region picked out is confined to it, and stays
   confined after the region is let go of — which is what confining
   means, and why the region rides on the stroke (`PaintStroke::clip`)

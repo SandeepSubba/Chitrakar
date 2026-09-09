@@ -1132,9 +1132,35 @@ impl Session {
                 ..Default::default()
             },
         )?;
+        // What is picked out, if anything is: a histogram is read to
+        // decide where a picture's tones sit, and with a region picked
+        // the picture in question is the region. It is on screen with
+        // ants round it, so nothing about the reading is hidden — and
+        // it is the reading the levels and curves graphs are drawn
+        // over, which is what makes a grade of one area possible at
+        // all. Worked out at the same reduced size the picture is, so
+        // the two line up pixel for pixel.
+        let picked = doc.selection().map(|region| {
+            chitrakar_render::mask_plane_over(
+                &doc,
+                region,
+                Transform {
+                    a: scale,
+                    d: scale,
+                    ..Default::default()
+                },
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: pw,
+                    y1: ph,
+                },
+                (pw, ph),
+            )
+        });
         let mut bins = vec![0u32; 256 * 4];
-        for px in &surface.pixels {
-            if px.a <= 0.0 {
+        for (at, px) in surface.pixels.iter().enumerate() {
+            if px.a <= 0.0 || picked.as_ref().is_some_and(|c| c[at] < 0.5) {
                 continue;
             }
             let [r, g, b, _] = px.to_srgb8();
@@ -1170,6 +1196,10 @@ impl Session {
     /// A picture with nothing in it, or all of one tone, gets the range
     /// back untouched rather than a stretch of nothing.
     pub fn auto_levels(&self, below: Option<NodeId>) -> Result<[f32; 2], EngineError> {
+        // Off the same reading the graph is drawn over — which, with a
+        // region picked, is the region's. Auto and the graph cannot
+        // disagree about where a picture's tones stop, because there is
+        // only one answer to disagree about.
         let bins = self.histogram(below)?;
         // The luminance run: the fourth of the four.
         let luma = &bins[768..1024];
@@ -8176,6 +8206,105 @@ mod tests {
             "the work comes back"
         );
         let _ = sheet;
+    }
+
+    #[test]
+    fn a_histogram_reads_what_is_picked_out() {
+        // A histogram is read to decide where a picture's tones sit,
+        // and with a region picked the picture in question is the
+        // region — which is what makes grading one area possible, since
+        // the levels and curves graphs are drawn over this very
+        // reading.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let dark = add_rect(&mut session, "dark", 80.0, 40.0);
+        session
+            .apply(Command::SetKind {
+                id: dark,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 80.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let light = add_rect(&mut session, "light", 20.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id: light,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: light,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+
+        // The page: mostly black with a white patch in it.
+        let whole = session.histogram(None).unwrap();
+        let luma = |bins: &[u32]| (bins[768], bins[768 + 255]);
+        let (black, white) = luma(&whole);
+        assert!(black > 0 && white > 0, "the page has both in it");
+
+        // The white patch alone: all of the light and none of the dark.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let inside = session.histogram(None).unwrap();
+        let (dark_in, light_in) = luma(&inside);
+        assert_eq!(dark_in, 0, "nothing dark inside the white patch");
+        assert!(light_in > 0, "and the light of it is there");
+        assert!(
+            light_in <= white,
+            "no more of it than the whole page had: {light_in} against {white}"
+        );
+
+        // The rest of the page instead, which is the other way round.
+        session.pick_inverse().unwrap();
+        let (dark_out, light_out) = luma(&session.histogram(None).unwrap());
+        assert!(dark_out > 0, "the dark is what is left");
+        assert_eq!(light_out, 0, "and none of the patch is");
+
+        // Let the region go and the page is read whole again.
+        session.pick_none().unwrap();
+        assert_eq!(
+            luma(&session.histogram(None).unwrap()),
+            (black, white),
+            "the page's own reading comes back"
+        );
     }
 
     #[test]
