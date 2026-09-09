@@ -924,7 +924,9 @@ assert(
   "raising rect above semi-transparent multiply ellipse changed overlap",
 );
 
-// 8e. Place image: green 4×4 PNG appears as a raster layer at the origin.
+// 8e. Place image: a green 4×4 PNG appears as a raster layer, laid down
+// whole and in the middle of the page — a picture placed on a page that
+// is already somebody's goes where it can be seen, not into a corner.
 const pngB64 = await page.evaluate(() => {
   const c = document.createElement("canvas");
   c.width = 4;
@@ -941,8 +943,13 @@ await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
 });
 await page.waitForTimeout(300);
 assert(await page.isVisible("text=green.png"), "raster layer row appeared");
-px = await canvasPixel(2, 2);
+// The page here is 1280x720, so a 4x4 picture lands at (638, 358).
+px = await canvasPixel(640, 360);
 assert(px[1] === 255 && px[0] === 0, "placed image pixels rendered");
+assert(
+  (await canvasPixel(2, 2))[1] !== 255,
+  "and not in the corner of the page",
+);
 
 await page.screenshot({ path: join(OUT, "editor2.png") });
 // 8f. Undo removes the placed image again (one undo step).

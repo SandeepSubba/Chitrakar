@@ -4268,17 +4268,64 @@ impl Session {
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let id = self.doc.peek_next_id();
+        let mut node = Node::raster(
+            name,
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width,
+                height,
+            },
+        );
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        // A picture put into a document with nothing in it and nothing
+        // behind it is a picture being *opened*, and a photograph opened
+        // on somebody else's page size is the wrong answer to that: the
+        // page takes the picture's own size. Nothing is disturbed by it,
+        // since there was nothing there — which is exactly the condition
+        // being asked, rather than "the page looks empty".
+        let opening = index == 0
+            && self.undo.is_empty()
+            && chitrakar_doc::canvas_fits(width, height)
+            && (width, height) != (pw, ph);
+        if opening {
+            return self
+                .apply_labeled(
+                    Command::Batch(vec![
+                        Command::ResizeCanvas {
+                            width,
+                            height,
+                            dx: 0.0,
+                            dy: 0.0,
+                        },
+                        Command::AddNode {
+                            parent: root,
+                            index,
+                            node: Box::new(node),
+                        },
+                    ]),
+                    Some(format!("Open {name}")),
+                )
+                .map(|()| id);
+        }
+        // Otherwise it is being placed on a page that is already
+        // somebody's: laid down whole and in the middle, taken down to
+        // fit if it is bigger than the page. At its own size it would
+        // hang off three sides and show a corner of itself, which is
+        // not a picture anybody placed.
+        let fit = (pw as f32 / width as f32)
+            .min(ph as f32 / height as f32)
+            .min(1.0);
+        node.transform = Transform {
+            a: fit,
+            d: fit,
+            e: (pw as f32 - width as f32 * fit) / 2.0,
+            f: (ph as f32 - height as f32 * fit) / 2.0,
+            ..Default::default()
+        };
         self.apply(Command::AddNode {
             parent: root,
             index,
-            node: Box::new(Node::raster(
-                name,
-                chitrakar_doc::RasterRef {
-                    resource_id,
-                    width,
-                    height,
-                },
-            )),
+            node: Box::new(node),
         })?;
         Ok(id)
     }
@@ -6639,6 +6686,71 @@ mod tests {
         assert!(session.document().node(copy).is_err());
         assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn a_picture_arrives_the_size_it_should_be() {
+        let png = |w: u32, h: u32| {
+            chitrakar_codecs::encode_png(w, h, &vec![200u8; (w * h * 4) as usize]).unwrap()
+        };
+
+        // Into a document with nothing in it and nothing behind it: the
+        // page takes the picture's own size, because a picture put into
+        // an empty document is a picture being opened, and a photograph
+        // opened on somebody else's page size is the wrong answer.
+        let mut opened = Session::new(1000, 800, ColorMode::Rgb);
+        let id = opened.place_image(&png(300, 200), "photograph").unwrap();
+        assert_eq!(
+            (opened.document().meta.width, opened.document().meta.height),
+            (300, 200),
+            "the page is the picture's size"
+        );
+        assert_eq!(
+            opened.document().node(id).unwrap().transform,
+            Transform::default(),
+            "and the picture is at its own size, in the corner"
+        );
+        assert_eq!(
+            opened.history_labels().0.len(),
+            1,
+            "one entry: opening a picture is one thing"
+        );
+        opened.undo().unwrap();
+        assert_eq!(
+            (opened.document().meta.width, opened.document().meta.height),
+            (1000, 800),
+            "and one undo takes the page back with it"
+        );
+
+        // Onto a page that is already somebody's: laid down whole and in
+        // the middle, taken down to fit. At its own size it would hang
+        // off three sides and show a corner of itself.
+        let mut page = Session::new(200, 100, ColorMode::Rgb);
+        add_rect(&mut page, "something", 10.0, 10.0);
+        let big = page.place_image(&png(400, 400), "photograph").unwrap();
+        assert_eq!(
+            (page.document().meta.width, page.document().meta.height),
+            (200, 100),
+            "the page somebody made is left alone"
+        );
+        let t = page.document().node(big).unwrap().transform;
+        assert!((t.a - 0.25).abs() < 1e-4, "taken down to fit: {}", t.a);
+        assert!(
+            (t.e - 50.0).abs() < 0.5 && t.f.abs() < 0.5,
+            "and centred on it: {}, {}",
+            t.e,
+            t.f
+        );
+
+        // One smaller than the page is left at its own size, in the
+        // middle: fitting is for what does not fit.
+        let small = page.place_image(&png(40, 20), "stamp").unwrap();
+        let t = page.document().node(small).unwrap().transform;
+        assert!((t.a - 1.0).abs() < 1e-4, "no bigger and no smaller");
+        assert!(
+            (t.e - 80.0).abs() < 0.5 && (t.f - 40.0).abs() < 0.5,
+            "in the middle of the page"
+        );
     }
 
     #[test]

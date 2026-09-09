@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~357),
+- **Verify before committing:** `cargo test --workspace` (~358),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~946 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~947 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1368,8 +1368,17 @@ without reading anything else.*
   exports do — an asset picked out of a design is usually wanted at the
   size the screen it is for has pixels for, and the region's box stays
   the region's box while the picture in it is drawn bigger), and images from other applications come *in*, by paste or
-  by dropping a file on the canvas (a dropped .chitra opens); effects
-  come in three kinds;
+  by dropping a file on the canvas (a dropped .chitra opens). A picture
+  arriving in a document with nothing in it and nothing behind it is a
+  picture being *opened*, and the page takes its size — a photograph
+  opened on somebody else's page size is the wrong answer to that, and
+  nothing is disturbed because there was nothing there, which is the
+  condition actually asked rather than "the page looks empty". On a
+  page that is already somebody's it is laid down whole and in the
+  middle, taken down to fit if it is bigger: at its own size a
+  photograph hangs off three sides and shows a corner of itself, which
+  is not a picture anybody placed.
+  Effects come in three kinds;
   and export flattens them like everything else; SVG export sets each
   line the renderer set — wrapped, aligned by text-anchor, on its real
   baseline, at the em the face is scaled to — though a synthesized
