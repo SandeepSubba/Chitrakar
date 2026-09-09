@@ -1245,7 +1245,14 @@ without reading anything else.*
   from — one answer, so the graph and the button cannot come to
   disagree — and it is what makes grading one area of a photograph
   possible at all. Nothing about it is hidden: the region is on screen
-  with ants round it.
+  with ants round it. And the other half of the same wish: an
+  adjustment or a filter added while a region is picked arrives
+  *holding* it. The region is why the layer is being added, and the
+  numbers being set are already the region's, so a layer that then
+  covered the whole page would answer a question nobody asked. One
+  entry in the history, since it is one wish — the id the add will use
+  is known before it happens (`peek_next_id`), so the mask rides in the
+  same batch and one undo takes both.
   A brush painted with a region picked out is confined to it, and stays
   confined after the region is let go of — which is what confining
   means, and why the region rides on the stroke (`PaintStroke::clip`)
