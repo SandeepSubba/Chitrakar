@@ -30,6 +30,11 @@ const DUPLICATE_OFFSET: f32 = 12.0;
 /// the same bytes there yields the id the nodes already reference.
 #[derive(Clone)]
 struct ClipNode {
+    /// The id it had in the document it was copied from — kept so that
+    /// a copy of another layer, pasted alongside the layer it copies,
+    /// can be pointed at the one that arrived rather than the one left
+    /// behind.
+    id: NodeId,
     node: Node,
     children: Vec<ClipNode>,
 }
@@ -2203,6 +2208,7 @@ impl Session {
 
     fn clip_of(&self, id: NodeId) -> Result<ClipNode, EngineError> {
         Ok(ClipNode {
+            id,
             node: self.doc.node(id)?.clone(),
             children: self
                 .doc
@@ -2251,12 +2257,41 @@ impl Session {
         let parent = parent.unwrap_or_else(|| self.doc.root());
         let index = self.doc.children_of(parent)?.len();
         let mut next = self.doc.peek_next_id().0;
+        // Which id each copied layer is about to be given. Worked out
+        // before anything is emitted, because a copy of another layer
+        // can be emitted before the layer it copies: what it points at
+        // has to be known by then.
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        for root in &clip.roots {
+            Self::assign_ids(root, &mut peek, &mut becomes);
+        }
+        // A copy whose original did not travel and is not in this
+        // document either would arrive drawing nothing at all, which is
+        // the quiet kind of failure. Say so instead.
+        for root in &clip.roots {
+            if let Some(name) = self.orphaned_copy(root, &becomes) {
+                return Err(EngineError::BadCommand(format!(
+                    "{name} is a copy of a layer that is not here: copy that layer too"
+                )));
+            }
+        }
         let mut cmds = Vec::new();
         let ids: Vec<NodeId> = clip
             .roots
             .iter()
             .enumerate()
-            .map(|(n, root)| Self::emit_clip(root, parent, index + n, true, &mut next, &mut cmds))
+            .map(|(n, root)| {
+                Self::emit_clip(
+                    root,
+                    parent,
+                    index + n,
+                    true,
+                    &mut next,
+                    &becomes,
+                    &mut cmds,
+                )
+            })
             .collect();
         let label = match clip.roots.as_slice() {
             [only] => format!("Paste {}", only.node.name),
@@ -2266,18 +2301,63 @@ impl Session {
         Ok(ids)
     }
 
+    /// The id every layer in a copied subtree is about to be given, in
+    /// the order [`emit_clip`](Self::emit_clip) will hand them out.
+    fn assign_ids(
+        clip: &ClipNode,
+        next: &mut u64,
+        becomes: &mut std::collections::HashMap<NodeId, NodeId>,
+    ) {
+        becomes.insert(clip.id, NodeId(*next));
+        *next += 1;
+        for child in &clip.children {
+            Self::assign_ids(child, next, becomes);
+        }
+    }
+
+    /// The name of a copied layer that copies something which neither
+    /// travelled with it nor is in this document.
+    fn orphaned_copy(
+        &self,
+        clip: &ClipNode,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
+    ) -> Option<String> {
+        if let NodeKind::Instance { of, .. } = &clip.node.kind {
+            if !becomes.contains_key(of) && self.doc.node(*of).is_err() {
+                return Some(clip.node.name.clone());
+            }
+        }
+        clip.children
+            .iter()
+            .find_map(|c| self.orphaned_copy(c, becomes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_clip(
         clip: &ClipNode,
         parent: NodeId,
         index: usize,
         offset: bool,
         next: &mut u64,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
         cmds: &mut Vec<Command>,
     ) -> NodeId {
         let mut node = clip.node.clone();
         if offset {
             node.transform.e += DUPLICATE_OFFSET;
             node.transform.f += DUPLICATE_OFFSET;
+        }
+        // A copy of a layer that travelled with it points at the layer
+        // that arrived, not the one left behind: duplicating a group
+        // holding both an original and a copy of it gives a pair that
+        // is its own, and pasting one into another document gives a
+        // pair that works there. A copy whose original stayed where it
+        // was keeps pointing at it, which is what duplicating a copy on
+        // its own means.
+        if let NodeKind::Instance { of, .. } = &mut node.kind {
+            if let Some(moved) = becomes.get(of) {
+                *of = *moved;
+            }
         }
         let new_id = NodeId(*next);
         *next += 1;
@@ -2287,7 +2367,7 @@ impl Session {
             node: Box::new(node),
         });
         for (i, child) in clip.children.iter().enumerate() {
-            Self::emit_clip(child, new_id, i, false, next, cmds);
+            Self::emit_clip(child, new_id, i, false, next, becomes, cmds);
         }
         new_id
     }
@@ -6686,6 +6766,112 @@ mod tests {
         assert!(session.document().node(copy).is_err());
         assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
         assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Every kind of layer there is, copied into another document.
+    ///
+    /// The clipboard is the one place a layer leaves the document it
+    /// was made in, and what has to travel with it differs by kind: a
+    /// picture's pixels, a mask's, a paint layer's strokes, an
+    /// adjustment's numbers. A kind added later reaches this code
+    /// without anybody thinking about it, and the failure is quiet — a
+    /// layer that arrives looking right and drawing nothing.
+    ///
+    /// So: each of the fixture's layers, one at a time, into a fresh
+    /// document, and the arrival held against what was sent.
+    #[test]
+    fn every_kind_of_layer_survives_the_clipboard() {
+        let f = chitrakar_doc::fixture::everything();
+        let from = Session::from_document(f.doc.clone());
+        // A copy of another layer needs the layer it copies, so the two
+        // travel together; the rest go one at a time.
+        from.copy_nodes(&[f.group, f.copy]).unwrap();
+        {
+            let mut to = Session::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            let pasted = to.paste(None).expect("a copy and its original travel");
+            assert_eq!(pasted.len(), 2, "both arrived");
+            let NodeKind::Instance { of, .. } = &to.document().node(pasted[1]).unwrap().kind else {
+                panic!("the second is the copy");
+            };
+            assert_eq!(
+                *of, pasted[0],
+                "and it copies the one that arrived, not the one left behind"
+            );
+            assert!(to.render().is_ok(), "and the document draws");
+        }
+        // On its own it is a copy of something that is not here, which
+        // is a layer that would arrive drawing nothing: said rather
+        // than shrugged at.
+        from.copy_node(f.copy).unwrap();
+        {
+            let mut to = Session::new(20, 20, chitrakar_color::ColorMode::Rgb);
+            let refused = to.paste(None).unwrap_err().to_string();
+            assert!(
+                refused.contains("copy that layer too"),
+                "an orphan says what is missing: {refused}"
+            );
+        }
+
+        for (what, id) in [
+            ("a group", f.group),
+            ("a shape", f.under),
+            ("a paint layer", f.painted),
+            ("a picture", f.picture),
+            ("a block of text", f.words),
+            ("a frame", f.frame),
+            ("an adjustment", f.lifted),
+            ("a filter", f.softened),
+            ("a clone layer", f.borrowed),
+        ] {
+            from.copy_node(id)
+                .unwrap_or_else(|e| panic!("copying {what}: {e}"));
+            let mut to = Session::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            let pasted = to
+                .paste(None)
+                .unwrap_or_else(|e| panic!("pasting {what}: {e}"));
+            assert_eq!(pasted.len(), 1, "one layer sent, one arrived: {what}");
+            let there = to.document().node(pasted[0]).unwrap();
+            let here = from.document().node(id).unwrap();
+            // The kind carries everything that makes the layer what it
+            // is, resource ids included — and those are content
+            // addresses, so they match only if the bytes came too.
+            assert_eq!(
+                format!("{:?}", there.kind),
+                format!("{:?}", here.kind),
+                "{what} arrived as something else"
+            );
+            for (field, a, b) in [
+                (
+                    "its mask",
+                    format!("{:?}", there.mask),
+                    format!("{:?}", here.mask),
+                ),
+                (
+                    "its effects",
+                    format!("{:?}", there.effects),
+                    format!("{:?}", here.effects),
+                ),
+                (
+                    "how it composites",
+                    format!("{:?}", (there.opacity, there.blend, there.clipped)),
+                    format!("{:?}", (here.opacity, here.blend, here.clipped)),
+                ),
+            ] {
+                assert_eq!(a, b, "{what} lost {field}");
+            }
+            assert!(
+                to.render().is_ok(),
+                "the document {what} arrived in still draws"
+            );
+        }
     }
 
     /// Every command there is, and then every way out of the editor.

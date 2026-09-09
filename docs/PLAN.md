@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~359),
+- **Verify before committing:** `cargo test --workspace` (~360),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~954 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -876,6 +876,23 @@ without reading anything else.*
   region — and asks whether they still cover the same points
   afterwards. Anything `map_page` forgets stops agreeing with what it
   remembers, whatever the transform was.
+- **Every kind of layer, through the clipboard:** the clipboard is the
+  one place a layer leaves the document it was made in, and what has to
+  travel differs by kind — a picture's pixels, a mask's, a paint
+  layer's strokes, an adjustment's numbers. A kind added later reaches
+  that code without anybody thinking about it, and the failure is
+  quiet: a layer that arrives looking right and drawing nothing.
+  `every_kind_of_layer_survives_the_clipboard` sends each of the
+  fixture's ten into a fresh document and holds the arrival against
+  what was sent. It found a copy of another layer arriving broken: the
+  copy kept the id its original had in the document it came from, which
+  in a new document is somebody else's layer or nobody's. Now a copy
+  whose original travelled with it points at the one that *arrived* —
+  which also fixes duplicating a group holding an original and a copy
+  of it, where the new copy used to keep pointing at the old original —
+  and a copy whose original stayed behind still points at it, since
+  that is what duplicating a copy on its own means. One that points at
+  neither is refused by name rather than pasted to draw nothing.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an
