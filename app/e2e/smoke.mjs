@@ -8666,6 +8666,56 @@ assert(
   await menuClick("Edit", "Pick out nothing");
   await page.waitForTimeout(500);
   assert((await drawn()) === whole, "the page's own reading comes back");
+
+  // And the other half of the same wish: an adjustment added over a
+  // region arrives holding it, in one entry.
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(...at(45, 45));
+  await page.mouse.down();
+  await page.mouse.move(...at(115, 115), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const entries = await page.locator(".history li button").count();
+  const outside = (await canvasPixel(200, 160))[0];
+  await page.selectOption('[aria-label="Add adjustment layer"]', "exposure");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".history li button").count()) === entries + 1,
+    "the layer and its mask arrived as one wish, so one entry",
+  );
+  assert(
+    (await page
+      .locator(".panel ul li", { hasText: "Exposure" })
+      .first()
+      .locator('[title="What this layer\'s mask lets through"]')
+      .count()) === 1,
+    "and the row says it is holding a mask",
+  );
+  await setSlider("Stops", 3);
+  await page.waitForTimeout(450);
+  assert(
+    (await canvasPixel(80, 80))[0] > 40,
+    "the light inside the region went up",
+  );
+  assert(
+    (await canvasPixel(200, 160))[0] === outside,
+    "and outside it nothing moved",
+  );
+  // One undo takes the slider, the next takes the layer and its mask
+  // together — there is no third undo hiding a half-done state.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Exposure" }).count()) === 1,
+    "one undo takes the slider and leaves the layer",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Exposure" }).count()) === 0,
+    "and the next takes the layer and its mask together",
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting

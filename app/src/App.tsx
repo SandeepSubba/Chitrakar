@@ -3824,13 +3824,22 @@ export function App() {
       }
       return;
     }
-    run({
-      AddNode: {
-        parent: session.root_id,
-        index: topLevelCount(layers),
-        node: nodePayload(preset.name, preset.kind),
-      },
-    });
+    // A region picked out and an adjustment put over it are one wish:
+    // the region is why the layer is being added, and the graph its
+    // numbers are set against is already the region's own. So it
+    // arrives holding the region, in one entry.
+    try {
+      const id = session.add_over_selection(
+        session.root_id,
+        topLevelCount(layers),
+        JSON.stringify(nodePayload(preset.name, preset.kind)),
+      ) as number;
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Adjust: ${err}`);
+    }
   };
 
   /** Commit the running slider/drag gesture as one undo step. */

@@ -695,6 +695,22 @@ impl WasmSession {
         self.inner.solo().map_or(-1.0, |id| id.0 as f64)
     }
 
+    /// Add a layer from its JSON, held to what is picked out when
+    /// something is — one entry in the history, since a region picked
+    /// and a layer put over it are one wish. Returns the new id.
+    pub fn add_over_selection(
+        &mut self,
+        parent: f64,
+        index: usize,
+        node_json: &str,
+    ) -> Result<f64, JsError> {
+        let node = serde_json::from_str(node_json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner
+            .add_over_selection(NodeId(parent as u64), index, node)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Keep what is picked out under a name, to be picked up again. A
     /// name already kept is replaced.
     pub fn keep_selection(&mut self, name: &str) -> Result<(), JsError> {

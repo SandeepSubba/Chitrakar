@@ -2802,6 +2802,56 @@ impl Session {
         Ok(true)
     }
 
+    /// Add a layer, held to what is picked out when something is.
+    ///
+    /// A region picked out and an adjustment put over it are one wish,
+    /// not two: the region is *why* the layer is being added, and the
+    /// only thing to do with it afterwards is hand it to that layer.
+    /// The histogram the graph is drawn over is already the region's,
+    /// so the numbers being set are the region's numbers — a layer that
+    /// then covered the whole page would be answering a question nobody
+    /// asked.
+    ///
+    /// One entry in the history, since it is one wish: the id the add
+    /// will use is known before it happens, so the mask can be named in
+    /// the same batch.
+    pub fn add_over_selection(
+        &mut self,
+        parent: NodeId,
+        index: usize,
+        node: Box<Node>,
+    ) -> Result<NodeId, EngineError> {
+        let id = self.doc.peek_next_id();
+        let label = format!("Add {}", node.name);
+        let add = Command::AddNode {
+            parent,
+            index,
+            node,
+        };
+        let Some(region) = self.doc.selection().cloned() else {
+            self.apply_labeled(add, Some(label))?;
+            return Ok(id);
+        };
+        // A mask is written in the space its layer is placed in, which
+        // for a layer not yet added is its parent's own.
+        let space = chitrakar_render::world_transform(&self.doc, parent)?;
+        let Some(mask) = Self::carried_into(&region, space) else {
+            self.apply_labeled(add, Some(label))?;
+            return Ok(id);
+        };
+        self.apply_labeled(
+            Command::Batch(vec![
+                add,
+                Command::SetMask {
+                    id,
+                    mask: Some(Box::new(mask)),
+                },
+            ]),
+            Some(label),
+        )?;
+        Ok(id)
+    }
+
     /// Keep what is picked out, under a name, to be picked up again.
     ///
     /// A region is often the expensive thing on a page — a sky wanded
@@ -8206,6 +8256,75 @@ mod tests {
             "the work comes back"
         );
         let _ = sheet;
+    }
+
+    #[test]
+    fn a_layer_added_over_a_region_is_held_to_it() {
+        // A region picked out and an adjustment put over it are one
+        // wish: the region is why the layer is being added, and the
+        // graph its numbers are set against is already the region's.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        add_rect(&mut session, "sheet", 60.0, 40.0);
+        let root = session.document().root();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let steps = session.history_labels().0.len();
+        let lift = session
+            .add_over_selection(
+                root,
+                1,
+                Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 2.0 },
+                )),
+            )
+            .unwrap();
+        assert!(
+            session.document().node(lift).unwrap().mask.is_some(),
+            "the layer arrived holding the region"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps + 1,
+            "as one wish, so one entry"
+        );
+        let page = session.render().unwrap();
+        assert!(
+            page.get(15, 15).r > page.get(45, 30).r,
+            "and it lifts what was picked and nothing else"
+        );
+        session.undo().unwrap();
+        assert!(
+            session.document().node(lift).is_err(),
+            "and one undo takes the whole of it back"
+        );
+
+        // With nothing picked, it is the plain add it always was.
+        session.redo().unwrap();
+        session.pick_none().unwrap();
+        let plain = session
+            .add_over_selection(
+                root,
+                2,
+                Box::new(Node::adjustment(
+                    "all of it",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            )
+            .unwrap();
+        assert!(
+            session.document().node(plain).unwrap().mask.is_none(),
+            "nothing picked out is nothing to hold it to"
+        );
     }
 
     #[test]
