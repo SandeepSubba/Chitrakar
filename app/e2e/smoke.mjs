@@ -8594,6 +8594,25 @@ assert(
     Math.abs(sameWidth) < 0.6,
     `the box is the size the hand drew, put where the edge is (${sameWidth.toFixed(2)})`,
   );
+
+  // A region carried across the page catches them too, and by its own
+  // edges rather than by the pointer: what wants to land on an edge is
+  // the region's edge, not the place inside it the hand took hold of.
+  await region(20, 20, 76, 100, ["Control"]);
+  const away = await antBox();
+  // Take hold of the middle of it and carry it three pixels right,
+  // which leaves its right edge one short of the layer's left one.
+  await page.mouse.move(...at(48, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(51, 60), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(450);
+  const carried = await antBox();
+  const went = (carried[0] - away[0]) / perPixel;
+  assert(
+    Math.abs(went - 4) < 0.8,
+    `carried the extra pixel onto the layer's edge (${went.toFixed(2)})`,
+  );
 }
 
 // 9ah. A layer inside a picked group travels with the group, so acting

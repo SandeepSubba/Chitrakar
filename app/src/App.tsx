@@ -2638,6 +2638,14 @@ export function App() {
       if (!e.shiftKey && !e.altKey && session.selection_covers(x, y)) {
         const was = JSON.parse(session.selection_json()) as Mask | null;
         if (was && regionMoved(was, 0, 0)) {
+          // A region carried across the page catches the same lines a
+          // layer carried across it does, and by its own edges and
+          // middle rather than by the pointer: what wants to land on
+          // the page's edge is the region's edge, not the place inside
+          // it the hand happened to take hold of.
+          const xs = antRings.flat().map((p) => p[0]);
+          const ys = antRings.flat().map((p) => p[1]);
+          const [sx, sy] = snapTargets([]);
           toolDragRef.current = {
             tool,
             startX: x,
@@ -2646,6 +2654,11 @@ export function App() {
             lastY: y,
             moved: false,
             region: was,
+            b0: xs.length
+              ? [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
+              : undefined,
+            snapX: sx,
+            snapY: sy,
           };
           (e.target as Element).setPointerCapture(e.pointerId);
           return;
@@ -2889,10 +2902,25 @@ export function App() {
       if (drag?.region) {
         const [x, y] = docPoint(e);
         drag.moved = true;
+        let [mx, my] = [x - drag.startX, y - drag.startY];
+        const next: Guides = { x: [], y: [] };
+        if (drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
+          const tol = SNAP_PX / view.zoom;
+          const b = drag.b0;
+          const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX, tol);
+          const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY, tol);
+          mx += sx.delta;
+          my += sy.delta;
+          if (sx.guide !== null) next.x.push(sx.guide);
+          if (sy.guide !== null) next.y.push(sy.guide);
+        }
+        setGuides((g) =>
+          g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next,
+        );
         // Restated from where the region was when the drag began, not
         // nudged along from where it is now: one entry in history for
         // the whole drag, and an Escape that lands exactly back.
-        const moved = regionMoved(drag.region, x - drag.startX, y - drag.startY);
+        const moved = regionMoved(drag.region, mx, my);
         if (moved) preview({ SetSelection: { selection: moved } });
         return;
       }

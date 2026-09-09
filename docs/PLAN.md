@@ -661,7 +661,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~355),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~936 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~937 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1060,7 +1060,11 @@ without reading anything else.*
   the same two ways out a shape has, and for the same reason: shift is
   asking for a square, and one nudged onto a line would be neither
   square nor on it. The lasso is left out, having no corner to catch,
-  and so is the wand, which drags nothing. The wand reads the
+  and so is the wand, which drags nothing. A region *carried* across the
+  page catches them by its own edges and middle rather than by the
+  pointer, the way a layer being moved does: what wants to land on an
+  edge is the region's edge, not the place inside it the hand happened
+  to take hold of. The wand reads the
   page as it is drawn, spreads out from where it was clicked while the
   colour holds — judged on the values the screen shows, since a wand is
   a judgement about what *looks* the same and linear light does not
