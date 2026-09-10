@@ -858,6 +858,47 @@ fn fs_smear(in: ImageOut) -> @location(0) vec4f {
     return sum / f32(n);
 }
 
+// A layer's silhouette in one flat colour, or the hole around it: what
+// every live effect is built from, and the reason a shadow of a
+// photograph is a shape rather than a picture of one.
+//
+// `params.x` is one to take the hole instead of the layer — an inner
+// shadow is cast from around the layer and then kept inside it. `grad`
+// is the tint, premultiplied and already weighed by the effect's own
+// opacity: tinting before the blur rather than after is the same answer,
+// since the tint is constant and the blur is linear, and it means one
+// texture instead of two.
+@fragment
+fn fs_field(in: ImageOut) -> @location(0) vec4f {
+    let a = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
+    let cover = select(a, 1.0 - a, in.params.x != 0.0);
+    return in.grad * cover;
+}
+
+// The blurred field coming down onto what is under the layer, read at
+// the effect's offset.
+//
+// The read is linear and clamped at the field's edge, which is the same
+// bilinear reading with the same clamp the CPU renderer's stamp takes —
+// and the field is nothing at its own edge, since it was built over a
+// window grown by how far the effect reaches, so a clamped repeat is a
+// repeat of nothing.
+//
+// `params.xy` is the offset in device pixels. `params.z` is one when the
+// layer's own coverage is to be taken as well, which is what keeps an
+// inner shadow inside the silhouette instead of spilling past it.
+@fragment
+fn fs_effect(in: ImageOut) -> @location(0) vec4f {
+    let at = in.uv - vec2f(in.params.x, in.params.y) / page.size;
+    let lo = (page.lo + vec2f(0.5, 0.5)) / page.size;
+    let hi = (page.hi - vec2f(0.5, 0.5)) / page.size;
+    var out = textureSampleLevel(image, image_sampler, clamp(at, lo, hi), 0.0);
+    if in.params.z != 0.0 {
+        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a;
+    }
+    return out * in.alpha * mask_cover(in.page, in.mask);
+}
+
 // Which block of a pixelate grid a pixel falls in, along one axis.
 //
 // The grid is laid out in the document rather than on the page, so the

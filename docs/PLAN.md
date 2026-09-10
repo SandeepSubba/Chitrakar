@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~398),
+- **Verify before committing:** `cargo test --workspace` (~399),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1924,11 +1924,21 @@ without reading anything else.*
   and how soft the edge is, which an outline cannot.
 - **Next up (rough priority):**
   1. The GPU backend, in two halves. What is left to *teach* it:
-     live effects (a drop shadow, an inner shadow, an outline), which
-     are the blur passes again read off a layer's own silhouette rather
-     than off what is under it; and the one node kind it has never drawn
-     — a paint layer, whose strokes carry a softness, an erase and a heal
-     the stroke geometry does not. Both filters that used to be handed
+     the one node kind it has never drawn — a paint layer, whose strokes
+     carry a softness, an erase and a heal the stroke geometry does not.
+     Shadows it now draws, inner and outer, as the blur passes again read
+     off the layer's own silhouette rather than off what is under it
+     (`a_shadow_is_the_silhouette_the_cpu_casts`) — but only on a plain
+     leaf: a layer that is faded, masked, blended or held to the one
+     below has its silhouette decided by things this backend puts on the
+     quad that lays the surface down rather than into the surface, so its
+     shadow would be the wrong shape. Moving those onto the layer's own
+     drawing when it has effects is what would let the shared fixture's
+     shadows through the audit, which is the next thing worth doing here.
+     An outline stays the CPU's for a better reason: its band is a true
+     distance, swept by a chamfer transform whose two passes each read
+     what the one before wrote, and a parallel answer to that is a
+     different band rather than the same one arrived at faster. Both filters that used to be handed
      back it now draws: a motion blur as one pass along the line rather
      than the blur's six along the axes
      (`a_smear_runs_the_way_the_cpu_runs_it`), and a pixelate as two, one

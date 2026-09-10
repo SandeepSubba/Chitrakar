@@ -231,6 +231,11 @@ enum Draw {
     Close {
         quad: std::ops::Range<u32>,
         blend: BlendMode,
+        /// The layer's live effects, each built from the silhouette that
+        /// surface holds: the ones behind it go down before it and the
+        /// ones over it after, which is the order the CPU renderer takes
+        /// and the only one an inner shadow makes sense in.
+        effects: Vec<Painted>,
     },
 }
 
@@ -253,6 +258,8 @@ pub struct GpuRenderer {
     box_blur: wgpu::RenderPipeline,
     smear: wgpu::RenderPipeline,
     blocks: wgpu::RenderPipeline,
+    field: wgpu::RenderPipeline,
+    effect: wgpu::RenderPipeline,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -650,6 +657,64 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // A layer's silhouette in one flat colour, which every live
+        // effect is built from, and the blurred field coming back down
+        // over what is under the layer.
+        let one_of = |label: &'static str, entry: &'static str, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_image"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        blend: Some(blend),
+                        ..target.clone()
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let field = one_of("effect field", "fs_field", wgpu::BlendState::REPLACE);
+        // The stamp goes onto the surface under the layer, so it
+        // composites over what is already there the way a placed picture
+        // does — the same target and the same stencil as every other
+        // pass that draws on a page.
+        let effect = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("effect"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_effect"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         // And the blurred page coming back down, weighed by the layer's
         // opacity and its mask, over what it was taken from.
         let blur_down = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -819,6 +884,8 @@ impl GpuRenderer {
             box_blur,
             smear,
             blocks,
+            field,
+            effect,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -929,6 +996,34 @@ impl GpuRenderer {
                 ]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+        // The same numbers with the page's rectangle standing for the
+        // whole surface: what a live effect's field is built and blurred
+        // over, since the silhouette it comes from is wherever the layer
+        // is rather than wherever the page is.
+        let everywhere = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("surface"),
+                contents: bytemuck::cast_slice(&[
+                    width as f32,
+                    height as f32,
+                    0.0,
+                    0.0,
+                    width as f32,
+                    height as f32,
+                    0.0,
+                    0.0,
+                ]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let whole = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("surface"),
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: everywhere.as_entire_binding(),
+            }],
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("page"),
             layout: &self.layout,
@@ -1122,6 +1217,7 @@ impl GpuRenderer {
                 Some(Opening::Blur { .. })
                     | Some(Opening::Smear { .. })
                     | Some(Opening::Blocks { .. })
+                    | Some(Opening::Effect { .. })
             )
         });
         let scratch: Vec<_> = if !blurring {
@@ -1224,6 +1320,68 @@ impl GpuRenderer {
                         },
                         &[],
                     );
+                    pass.set_bind_group(2, &self.open, &[]);
+                    pass.set_bind_group(3, &self.open, &[]);
+                    pass.set_vertex_buffer(0, quads.slice(..));
+                    pass.draw(along(round % 2), 0..1);
+                }
+            }
+            // A live effect, before the pass that stamps it down: the
+            // layer's own surface goes in, one pass turns its silhouette
+            // into a field of flat colour, and the box passes blur that
+            // exactly as they blur a page — six of them, three each way,
+            // which is the CPU renderer's Gaussian.
+            //
+            // The field is built and blurred over the whole surface
+            // rather than over the page: it is the layer's silhouette
+            // that decides where it reaches, and the CPU renderer builds
+            // it over a window grown by that reach whether or not the
+            // page ends first. Only the stamp is held to the page.
+            if let (Some(Opening::Effect { from, at, .. }), Some(quads)) = (&step.lay, &quads) {
+                let rounds = if at.steps.is_empty() { 0 } else { 6 };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("effect field"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &scratch[0].0,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.field);
+                pass.set_bind_group(0, &whole, &[]);
+                pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
+                pass.set_bind_group(2, &self.open, &[]);
+                pass.set_bind_group(3, &self.open, &[]);
+                pass.set_vertex_buffer(0, quads.slice(..));
+                pass.draw(at.field.clone(), 0..1);
+                drop(pass);
+                let along = |axis: usize| {
+                    at.steps.start + 6 * axis as u32..at.steps.start + 6 * axis as u32 + 6
+                };
+                for round in 0..rounds {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("effect blur"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &scratch[(round + 1) % 2].0,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.box_blur);
+                    pass.set_bind_group(0, &whole, &[]);
+                    pass.set_bind_group(1, &scratch[round % 2].1, &[]);
                     pass.set_bind_group(2, &self.open, &[]);
                     pass.set_bind_group(3, &self.open, &[]);
                     pass.set_vertex_buffer(0, quads.slice(..));
@@ -1375,6 +1533,20 @@ impl GpuRenderer {
                             pass.set_pipeline(&self.blur_down);
                             pass.set_bind_group(1, &scratch[1].1, &[]);
                             (quad, mask)
+                        }
+                        Opening::Effect { from, at, mask } => {
+                            pass.set_pipeline(&self.effect);
+                            // Six rounds end on the first of the pair; a
+                            // field that was never blurred is still on it.
+                            pass.set_bind_group(1, &scratch[0].1, &[]);
+                            // An inner shadow is held to the layer's own
+                            // coverage, which is the surface it was drawn
+                            // on — read where a blend reads what is under
+                            // it, since an effect has no use for that.
+                            if at.inside {
+                                pass.set_bind_group(3, &surfaces[from - 1].2, &[]);
+                            }
+                            (&at.quad, mask)
                         }
                         Opening::Adjust { quad, mask, table } => {
                             pass.set_pipeline(&self.adjust);
@@ -1698,10 +1870,36 @@ fn one(
     if !node.visible || node.opacity <= 0.0 {
         return Some(());
     }
-    // A live effect still belongs to the CPU.
-    if !node.effects.is_empty() {
-        return None;
-    }
+    // A layer with live effects goes onto a surface of its own — the
+    // effects are built from its silhouette, so there has to be one —
+    // and only where its silhouette is a plain question. Its own
+    // opacity, its mask and being held to the layer below all belong to
+    // the layer as the CPU renderer draws it aside, and this backend
+    // puts them on the quad that lays the surface down instead: the two
+    // readings agree about the picture and not about the silhouette, so
+    // the page goes back rather than casting a shadow of the wrong
+    // shape. A group is out for the same reason and one more: what a
+    // group's opacity means to its children is not what a layer's means
+    // to itself.
+    let shadings: Vec<Shading> = if node.effects.is_empty() {
+        Vec::new()
+    } else {
+        if node.blend != BlendMode::Normal
+            || node.opacity < 1.0
+            || node.mask.is_some()
+            || node.clipped
+            || !matches!(
+                node.kind,
+                NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+            )
+        {
+            return None;
+        }
+        node.effects
+            .iter()
+            .map(|e| effect_of(doc, e, parent))
+            .collect::<Option<_>>()?
+    };
     // A layer held to the one under it shows only where that
     // layer's own alpha does. That alpha is the layer drawn aside,
     // which is what the CPU renderer does to it — so it arrives
@@ -1768,7 +1966,8 @@ fn one(
     {
         return None;
     }
-    let alone = node.blend != BlendMode::Normal
+    let alone = !shadings.is_empty()
+        || node.blend != BlendMode::Normal
         || (matches!(node.kind, NodeKind::Group)
             && (node.opacity < 1.0
                 || node.mask.is_some()
@@ -2090,6 +2289,58 @@ fn one(
         // The mask and the opacity go on the quad that lays the
         // surface down, not on what was drawn into it.
         mark = (out.vertices.len(), out.draws.len());
+        // Each effect first: the field over the whole surface, since the
+        // silhouette it is built from is wherever the layer is, then the
+        // pair of axis quads the box passes alternate between, then the
+        // quad that stamps the blurred field down over the page.
+        let whole = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: out.surface.0,
+            y1: out.surface.1,
+        };
+        let effects: Vec<Painted> = shadings
+            .iter()
+            .map(|s| {
+                let field = out.push(page_quad(
+                    (whole, out.surface),
+                    1.0,
+                    [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    s.tint,
+                    [0.0; 3],
+                ));
+                let steps = match s.radius {
+                    Some(radius) => {
+                        let on = (whole, out.surface);
+                        let axis =
+                            |a: f32| page_quad(on, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
+                        let mut steps = out.push(axis(0.0));
+                        steps.end = out.push(axis(1.0)).end;
+                        steps
+                    }
+                    None => 0..0,
+                };
+                let quad = out.push(page_quad(
+                    (out.page, out.surface),
+                    1.0,
+                    [
+                        s.offset[0],
+                        s.offset[1],
+                        if s.inside { 1.0 } else { 0.0 },
+                        0.0,
+                    ],
+                    [0.0; 4],
+                    [0.0; 3],
+                ));
+                Painted {
+                    over: s.over,
+                    inside: s.inside,
+                    field,
+                    steps,
+                    quad,
+                }
+            })
+            .collect();
         let quad = out.push(page_quad(
             (out.page, out.surface),
             node.opacity * opacity,
@@ -2100,6 +2351,7 @@ fn one(
         out.draws.push(Item::of(Draw::Close {
             quad,
             blend: node.blend,
+            effects,
         }));
     }
     // The mask, once, over everything the layer drew: the CPU
@@ -2808,16 +3060,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
     // through the scale alone.
     let scale = view.a.hypot(view.b).max(view.c.hypot(view.d));
     let point = |params: [f32; 4], grad: [f32; 4]| Filtering::Pointwise(params, grad);
-    // The W3C's box size for a Gaussian after three passes each way,
-    // read off the CPU renderer so the two blur by the same amount.
-    let boxes = |sigma: f32| {
-        let sigma = sigma * scale;
-        (sigma > 0.01).then(|| {
-            let d =
-                ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
-            (d.max(1) / 2).max(1) as f32
-        })
-    };
+    let boxes = |sigma: f32| box_radius(sigma * scale);
     Some(match filter {
         F::Vignette {
             amount,
@@ -2914,6 +3157,112 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
                 step: [ox / (n as f32 - 1.0), oy / (n as f32 - 1.0)],
             }
         }
+    })
+}
+
+/// A live effect's quads: the one that builds the field from the
+/// layer's silhouette, the pair the box passes alternate between, and
+/// the one that stamps the blurred field down.
+#[derive(Clone)]
+struct Painted {
+    over: bool,
+    inside: bool,
+    field: std::ops::Range<u32>,
+    /// Empty when the effect is not blurred at all, in which case the
+    /// field goes down as it was built.
+    steps: std::ops::Range<u32>,
+    quad: std::ops::Range<u32>,
+}
+
+/// A live effect ready to draw: the field to build from the layer's
+/// silhouette, blurred, and stamped back down.
+#[derive(Clone)]
+struct Shading {
+    /// Painted over the layer rather than behind it — an inner shadow
+    /// shades the pixels it sits on, so it cannot go down before they
+    /// are there.
+    over: bool,
+    /// Built from the hole around the layer instead of the layer.
+    invert: bool,
+    /// Held to the layer's own coverage on the way down, which is what
+    /// keeps an inner shadow inside the silhouette.
+    inside: bool,
+    /// Premultiplied, already weighed by the effect's own opacity.
+    tint: [f32; 4],
+    /// Box radius for the blur passes; nothing when the effect is not
+    /// blurred at all.
+    radius: Option<f32>,
+    /// In device pixels, which is where the layer's parent space has
+    /// already carried it.
+    offset: [f32; 2],
+}
+
+/// What a live effect turns into here, or `None` when it stays the
+/// CPU's.
+fn effect_of(doc: &Document, effect: &chitrakar_doc::Effect, parent: Transform) -> Option<Shading> {
+    use chitrakar_doc::Effect as E;
+    let scale = parent.max_scale();
+    // An offset is a vector in the layer's parent space, so where it
+    // points is that space's to say — the same carry the CPU renderer
+    // makes before it stamps.
+    let along = |dx: f32, dy: f32| [parent.a * dx + parent.c * dy, parent.b * dx + parent.d * dy];
+    let tinted = |color: &chitrakar_color::AuthoredColor, opacity: f32| {
+        let c = chitrakar_color::to_working(color);
+        [c.r * opacity, c.g * opacity, c.b * opacity, c.a * opacity]
+    };
+    // Ink authored for a press resolves through the document's profile,
+    // which is the CPU's business here as everywhere else.
+    let plain = |color: &chitrakar_color::AuthoredColor| {
+        matches!(color.flat(), chitrakar_color::AuthoredColor::Srgb { .. })
+            || doc.cmyk_cms().is_none()
+    };
+    match effect {
+        E::DropShadow {
+            dx,
+            dy,
+            blur,
+            color,
+            opacity,
+        }
+        | E::InnerShadow {
+            dx,
+            dy,
+            blur,
+            color,
+            opacity,
+        } => {
+            if !plain(color) {
+                return None;
+            }
+            let inner = matches!(effect, E::InnerShadow { .. });
+            Some(Shading {
+                over: inner,
+                invert: inner,
+                inside: inner,
+                tint: tinted(color, *opacity),
+                radius: box_radius(blur * scale),
+                offset: along(*dx, *dy),
+            })
+        }
+        // A band hugging the silhouette from outside, whose width is a
+        // true distance rather than a blur: the CPU renderer sweeps a
+        // chamfer distance transform over the layer for it, twice, each
+        // pass reading what the one before wrote. That is a sequence,
+        // and a parallel answer to it is a different band rather than
+        // the same one arrived at faster — so an outline stays the
+        // CPU's until there is a distance both can agree on.
+        E::Outline { .. } => None,
+    }
+}
+
+/// The W3C's box size for a Gaussian after three passes each way, read
+/// off the CPU renderer so the two blur by the same amount. Nothing when
+/// the blur is too small to move a pixel, which the CPU renderer returns
+/// from without touching anything.
+fn box_radius(sigma: f32) -> Option<f32> {
+    (sigma > 0.01).then(|| {
+        let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
+        (d.max(1) / 2).max(1) as f32
     })
 }
 
@@ -3038,6 +3387,14 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
     },
+    /// One live effect of the layer drawn on surface `from`: the field
+    /// built from its silhouette and blurred by the time this opens the
+    /// pass, and the quad that stamps the result down.
+    Effect {
+        from: usize,
+        at: Painted,
+        mask: Option<usize>,
+    },
 }
 
 impl Opening {
@@ -3049,6 +3406,8 @@ impl Opening {
             | Opening::Blur { .. }
             | Opening::Smear { .. }
             | Opening::Blocks { .. } => true,
+            // It reads the layer's own surface, not what is under it.
+            Opening::Effect { .. } => false,
         }
     }
 }
@@ -3088,15 +3447,56 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                 stack.push(stack.len());
                 clear = true;
             }
-            Draw::Close { quad, blend } => {
+            Draw::Close {
+                quad,
+                blend,
+                effects,
+            } => {
                 let from = stack.pop().unwrap_or(0);
                 clear = false;
-                lay = Some(Opening::Lay {
-                    from,
-                    quad: quad.clone(),
-                    mask: item.mask,
-                    blend: *blend,
-                });
+                if effects.is_empty() {
+                    lay = Some(Opening::Lay {
+                        from,
+                        quad: quad.clone(),
+                        mask: item.mask,
+                        blend: *blend,
+                    });
+                } else {
+                    // A pass each, in the order the CPU renderer draws
+                    // them: what is behind the layer, the layer, then
+                    // what is over it. Each reads the surface the layer
+                    // was drawn on, so none of them can be the pass that
+                    // is drawing onto it.
+                    let target = *stack.last().unwrap();
+                    let painted = |at: &Painted| Pass {
+                        target,
+                        clear: false,
+                        lay: Some(Opening::Effect {
+                            from,
+                            at: at.clone(),
+                            mask: item.mask,
+                        }),
+                        items: i..i,
+                    };
+                    for effect in effects.iter().filter(|e| !e.over) {
+                        passes.push(painted(effect));
+                    }
+                    passes.push(Pass {
+                        target,
+                        clear: false,
+                        lay: Some(Opening::Lay {
+                            from,
+                            quad: quad.clone(),
+                            mask: item.mask,
+                            blend: *blend,
+                        }),
+                        items: i..i,
+                    });
+                    for effect in effects.iter().filter(|e| e.over) {
+                        passes.push(painted(effect));
+                    }
+                    lay = None;
+                }
             }
             Draw::Adjust { quad, table } => {
                 clear = false;
@@ -5713,6 +6113,154 @@ mod tests {
         assert!(
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
+        );
+    }
+
+    /// Live effects: a shadow is the layer's own silhouette, tinted,
+    /// blurred and stamped back down — which is why a shadow of a
+    /// photograph is a shape rather than a picture of one.
+    ///
+    /// The blur is the same six box passes a blur layer takes, so what
+    /// this is really holding is the rest: that the field is built from
+    /// the silhouette and not from the picture, that the offset points
+    /// where the layer's parent space says, that a shadow behind the
+    /// layer goes down before it and an inner one after, and that an
+    /// inner shadow is kept inside the silhouette rather than spilling
+    /// past it.
+    #[test]
+    fn a_shadow_is_the_silhouette_the_cpu_casts() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let page = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.85, 0.87, 0.9, 1.0),
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "shape",
+                    VectorShape::Rect {
+                        width: 22.0,
+                        height: 14.0,
+                        radius: 3.0,
+                    },
+                    ink(0.2, 0.35, 0.75, 1.0),
+                ),
+                Transform::translation(18.0, 12.0),
+            );
+            doc
+        };
+        let with = |effects: Vec<E>| {
+            let mut doc = page();
+            let root = doc.root();
+            let id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc
+        };
+        let shadow = |dx: f32, dy: f32, blur: f32, opacity: f32| E::DropShadow {
+            dx,
+            dy,
+            blur,
+            color: ink(0.0, 0.0, 0.0, 1.0),
+            opacity,
+        };
+        let inner = |dx: f32, dy: f32, blur: f32| E::InnerShadow {
+            dx,
+            dy,
+            blur,
+            color: ink(0.05, 0.0, 0.1, 1.0),
+            opacity: 0.9,
+        };
+
+        for (name, effects) in [
+            ("a shadow", vec![shadow(4.0, 3.0, 2.0, 0.6)]),
+            // Pointed the other way, and harder, so the offset is read
+            // rather than merely applied.
+            ("a shadow the other way", vec![shadow(-5.0, -2.0, 0.5, 1.0)]),
+            // No blur at all: the field goes down as it was built.
+            ("a hard shadow", vec![shadow(3.0, 3.0, 0.0, 0.8)]),
+            ("an inner shadow", vec![inner(2.0, 2.0, 1.5)]),
+            // Both at once, which is the order they go down in.
+            (
+                "one of each",
+                vec![shadow(4.0, 4.0, 2.0, 0.7), inner(-2.0, 1.0, 1.0)],
+            ),
+        ] {
+            let doc = with(effects);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // The readings a mean would hide. A shadow is cast down and to
+        // the right of the shape, so the page just past its bottom-right
+        // corner is darker than the bare page, and the same spot on the
+        // other side is not.
+        let bare = gpu.render(&page()).unwrap();
+        let cast = gpu.render(&with(vec![shadow(5.0, 5.0, 1.0, 1.0)])).unwrap();
+        let below = |s: &chitrakar_render::Surface| s.get(42, 28).r;
+        let above = |s: &chitrakar_render::Surface| s.get(15, 9).r;
+        assert!(
+            below(&cast) < below(&bare) - 0.1,
+            "the shadow lands past the corner it is cast towards ({} against {})",
+            below(&cast),
+            below(&bare)
+        );
+        assert!(
+            (above(&cast) - above(&bare)).abs() < 0.01,
+            "and not on the other side of the shape ({} against {})",
+            above(&cast),
+            above(&bare)
+        );
+        // An inner shadow stays inside: the shape darkens at its edge and
+        // the page beside it does not.
+        let held = gpu.render(&with(vec![inner(3.0, 3.0, 1.0)])).unwrap();
+        let inside = |s: &chitrakar_render::Surface| s.get(21, 15).b;
+        assert!(
+            inside(&held) < inside(&bare) - 0.05,
+            "an inner shadow darkens the inside of the edge ({} against {})",
+            inside(&held),
+            inside(&bare)
+        );
+        assert!(
+            (below(&held) - below(&bare)).abs() < 0.01,
+            "and never leaves the layer ({} against {})",
+            below(&held),
+            below(&bare)
+        );
+
+        // An outline is still the CPU's: its band is a true distance,
+        // swept by a chamfer transform whose passes each read what the
+        // one before wrote.
+        assert!(
+            !GpuRenderer::can_render(&with(vec![E::Outline {
+                width: 2.0,
+                color: ink(1.0, 0.0, 0.0, 1.0),
+                opacity: 1.0,
+            }])),
+            "an outline goes back"
         );
     }
 
