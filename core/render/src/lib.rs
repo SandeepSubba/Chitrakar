@@ -5316,22 +5316,27 @@ pub fn grown(inside: &[bool], width: u32, height: u32, by: f32) -> Vec<bool> {
 /// below is left out, and so is any clipping — a layer held to the one
 /// under it still has a shape of its own.
 pub fn layer_coverage(doc: &Document, id: NodeId) -> Result<Vec<f32>, DocError> {
-    layer_coverage_at(doc, id, ancestor_space(doc, id))
+    let size = (doc.meta.width, doc.meta.height);
+    layer_coverage_at(doc, id, ancestor_space(doc, id), size)
 }
 
-/// The same, of a layer drawn in a space it is not placed in.
+/// The same, of a layer drawn in a space it is not placed in, onto a
+/// surface of `size`.
 ///
 /// A copy of a group draws that group's layers somewhere else entirely,
 /// so "where the page puts it" is a question about the drawing rather
 /// than about the document: the caller doing the drawing is the one that
-/// knows.
+/// knows. The size is asked for the same reason — the surface being
+/// drawn on is the page's own only while nothing is mapping one onto the
+/// other, and a plane the wrong size is a coverage read at the wrong
+/// pixel rather than an error anything would notice.
 pub fn layer_coverage_at(
     doc: &Document,
     id: NodeId,
     parent: Transform,
+    size: (u32, u32),
 ) -> Result<Vec<f32>, DocError> {
-    let (w, h) = (doc.meta.width, doc.meta.height);
-    let mut surface = Surface::new(w, h);
+    let mut surface = Surface::new(size.0, size.1);
     let clip = surface.full_clip();
     render_layer(doc, id, &mut surface, clip, parent, false)?;
     Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect())

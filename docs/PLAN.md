@@ -1950,14 +1950,13 @@ without reading anything else.*
      things that were formalities while the two were the same rectangle
      are not any more, and both are now said rather than assumed: the
      page's own edge clips the artwork, and what reads a neighbourhood
-     stops at the page's edge rather than at the surface's. What a view
-     still hands back is a page with a mask or a clipped layer on it: the
-     coverage plane both renderers read is rasterized over a plane the
-     size of the page, and under a view that is not the size of the
-     surface — so the plane has to learn which it is before those can
-     come along. Then the app has to reach for it at all, which is a
-     question about where WebGPU is to be had rather than about this
-     crate. The fixture
+     stops at the page's edge rather than at the surface's. Masks and
+     clipped layers come along too: the coverage plane both renderers
+     read is asked for the size of what is being drawn on rather than
+     assuming the page's, which was a distinction that did not exist
+     until a view did. What is left is for the app to reach for the
+     backend at all, which is a question about where WebGPU is to be had
+     rather than about this crate. The fixture
      audit (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_
      does`) is what to run while doing either. See
      docs/spikes/gpu-rendering.md.

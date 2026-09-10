@@ -1653,19 +1653,9 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
     };
     out.surface = size;
     out.page = page;
-    // A coverage plane — a layer's mask, or the layer a clipped one is
-    // held to — is rasterized by the CPU renderer over a plane the size
-    // of the page rather than of the surface, and both renderers read
-    // the same one so that a mask cannot come to mean two things. Under
-    // a view those are two different sizes, so a page with either on it
-    // goes back until the plane learns which it is.
-    let plain = view == Transform::default();
-    if !plain && doc.nodes().any(|(_, n)| n.mask.is_some() || n.clipped) {
-        return None;
-    }
     // The page's own edge is what clips the artwork, and with the surface
     // no longer being the page that has to be said rather than assumed.
-    let bound = (!plain).then_some(page);
+    let bound = (view != Transform::default()).then_some(page);
     collect(doc, doc.root(), view, 1.0, bound, out)
 }
 
@@ -2189,7 +2179,7 @@ fn mask_texture(
         None => vec![1.0; (w * h) as usize],
     };
     if let Some(base) = held_to {
-        let held = chitrakar_render::layer_coverage_at(doc, base, parent).ok()?;
+        let held = chitrakar_render::layer_coverage_at(doc, base, parent, page).ok()?;
         for (i, c) in cover.iter_mut().enumerate() {
             let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
             *c *= held[(y * page.0 + x) as usize];
@@ -5813,6 +5803,80 @@ mod tests {
             )),
             Transform::translation(6.0, 30.0),
         );
+        // A masked layer and a layer held to the one under it: both read a
+        // coverage plane the CPU renderer rasterizes, and the plane is the
+        // size of what is being drawn on rather than of the page — which
+        // is a distinction that only exists once a view does.
+        let masked = add(
+            &mut doc,
+            filled(
+                "masked",
+                VectorShape::Rect {
+                    width: 22.0,
+                    height: 14.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.55,
+                    g: 0.95,
+                    b: 0.4,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(30.0, 4.0),
+        );
+        doc.apply(Command::SetMask {
+            id: masked,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 9.0, ry: 7.0 },
+                    transform: Transform::translation(40.0, 11.0),
+                },
+                invert: false,
+                feather: 1.5,
+            })),
+        })
+        .unwrap();
+        // The one it is held to has to be a plain drawn layer — the run
+        // is held to an alpha read off the layer alone, which is only a
+        // plain question when nothing was done to it on the way down.
+        add(
+            &mut doc,
+            filled(
+                "the one it is held to",
+                VectorShape::Ellipse { rx: 8.0, ry: 8.0 },
+                AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.3,
+                    b: 0.5,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(14.0, 30.0),
+        );
+        let held = add(
+            &mut doc,
+            filled(
+                "held to it",
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 12.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.4,
+                    b: 0.85,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(2.0, 26.0),
+        );
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
         // And one hanging off the page's corner, so that the page's own
         // edge is something the render has to say rather than something
         // the surface happens to enforce.
