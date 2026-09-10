@@ -31,6 +31,9 @@ pub struct Fixture {
     pub softened: NodeId,
     pub borrowed: NodeId,
     pub copy: NodeId,
+    /// A copy of the frame, which cuts and grounds what it draws where
+    /// the copy is rather than where the frame stands.
+    pub frame_copy: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -610,6 +613,26 @@ pub fn everything() -> Fixture {
         transform: Transform::translation(44.0, 2.0),
     })
     .unwrap();
+    // And a copy of the *frame*, which is not the same question as a copy
+    // of a group. A frame has a size of its own, cuts what it holds to
+    // that box, paints a ground behind them, and exports at its own
+    // number of pixels. So a copy of one has to cut and to paint the
+    // ground where the copy is put rather than where the original stands,
+    // and what is pinned inside it has to be laid out against the
+    // original's size, since what travels is the picture and not the
+    // placement.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 9,
+        node: Box::new(Node::instance("a copy of the frame", frame)),
+    })
+    .unwrap();
+    let frame_copy = doc.children_of(root).unwrap()[9];
+    doc.apply(Command::SetTransform {
+        id: frame_copy,
+        transform: Transform::translation(2.0, 44.0),
+    })
+    .unwrap();
 
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
@@ -630,6 +653,7 @@ pub fn everything() -> Fixture {
         softened,
         borrowed,
         copy,
+        frame_copy,
         stroke,
     }
 }

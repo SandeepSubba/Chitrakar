@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~394),
+- **Verify before committing:** `cargo test --workspace` (~395),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1946,13 +1946,19 @@ without reading anything else.*
      That found a copy drawing its shadow clipped, turned up the
      clipping wrinkle above, and — once a layer in it reached for a
      palette entry — found a palette change repainting nothing and the
-     GPU declining a page it can draw. What the fixture still lacks: a
-     copy of a *frame*. Two: **ask an audit for the thing rather than an
-     account of it** — the file audit compared a document written out as
-     text and could not see wrong pixels; the clipboard audit compared a
-     layer field by field and could not see a picture that arrived blank.
-     Both now compare the page. The same question is worth asking of the
-     export audit, which still only checks that each door opens.
+     GPU declining a page it can draw. A copy of a *frame* went in after
+     that and everything held, which is worth knowing too. What it still
+     lacks is harder to name now — the next thing to try is a document
+     shape rather than a node: two frames, or a copy of a copy.
+     Two: **ask an audit for the thing rather than an account of it** —
+     the file audit compared a document written out as text and could not
+     see wrong pixels; the clipboard audit compared a layer field by field
+     and could not see a picture that arrived blank; the SVG witness read
+     a dash pattern out of the markup rather than off the page, where a
+     line on where it should be off would have passed. All three now
+     compare the picture. What is left of the export audit is the doors
+     that cannot be read back: a PDF has no reader here, so it is still
+     only asked to open.
      Then whatever the next user of the editor misses first — a brush that
      paints pixels rather than laying down live strokes, and text shaping
      worth the name (`rustybuzz`/`parley`, weights, a face chosen per run

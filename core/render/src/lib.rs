@@ -8215,6 +8215,82 @@ mod tests {
         );
     }
 
+    /// A copy of a *frame* is not the same question as a copy of a group.
+    /// A frame has a size of its own, cuts what it holds to that box and
+    /// paints a ground behind them — so a copy of one has to cut and to
+    /// ground where the copy is put, not where the frame stands, and has
+    /// to follow the frame's size when that changes, since what travels
+    /// is the picture rather than the placement.
+    #[test]
+    fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
+        let f = chitrakar_doc::fixture::everything();
+        // What the copy is responsible for: every pixel the page loses by
+        // taking it away.
+        let changed = |doc: &Document| -> (usize, Option<[u32; 4]>) {
+            let with = render(doc).unwrap();
+            let mut without = doc.clone();
+            without
+                .apply(Command::RemoveNode { id: f.frame_copy })
+                .unwrap();
+            let without = render(&without).unwrap();
+            let (mut n, mut box_) = (0usize, None::<[u32; 4]>);
+            for y in 0..with.height {
+                for x in 0..with.width {
+                    if with.get(x, y).to_srgb8() == without.get(x, y).to_srgb8() {
+                        continue;
+                    }
+                    n += 1;
+                    box_ = Some(match box_ {
+                        None => [x, y, x, y],
+                        Some(b) => [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)],
+                    });
+                }
+            }
+            (n, box_)
+        };
+
+        // The frame is 20 by 14 and the copy is put at (2, 44). Every
+        // pixel of that box changes and not one outside it: the ground
+        // fills it, and the cut holds.
+        let (n, box_) = changed(&f.doc);
+        assert_eq!(
+            box_,
+            Some([2, 44, 21, 57]),
+            "the copy draws in the frame's box at the copy's place"
+        );
+        assert_eq!(n, 20 * 14, "and fills it, which is the frame's ground");
+
+        // Made wider, the frame takes the copy with it — the copy has no
+        // size of its own to disagree with.
+        let mut doc = f.doc.clone();
+        let NodeKind::Artboard {
+            width,
+            height,
+            background,
+            export_scale,
+        } = doc.node(f.frame).unwrap().kind.clone()
+        else {
+            panic!("the fixture's frame is a frame");
+        };
+        doc.apply(Command::SetKind {
+            id: f.frame,
+            kind: Box::new(NodeKind::Artboard {
+                width: width + 8.0,
+                height,
+                background,
+                export_scale,
+            }),
+        })
+        .unwrap();
+        let (wider, box_) = changed(&doc);
+        assert_eq!(
+            box_,
+            Some([2, 44, 29, 57]),
+            "the copy is as wide as the frame now is"
+        );
+        assert_eq!(wider, 28 * 14, "and filled to there");
+    }
+
     /// A colour standing for a palette entry draws as the colour that
     /// entry means — the name is a reference, not a fourth colour space —
     /// and changing the entry changes the pixels. Which is the whole of

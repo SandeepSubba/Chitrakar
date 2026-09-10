@@ -1908,6 +1908,19 @@ mod tests {
     /// gradient, a placed raster and a line of text.
     fn everything() -> Document {
         let mut doc = Document::new(120, 80, ColorMode::Rgb);
+        // The page has a palette, and the plain rect reaches for it rather
+        // than carrying a colour: an SVG has no palette to point at, so
+        // what the reader draws is the proof that the name was resolved on
+        // the way out. It is given a different colour to carry on purpose
+        // — the palette is where the name is defined, and the rect's spot
+        // check below is red.
+        doc.apply(Command::SetSwatches {
+            swatches: vec![chitrakar_doc::Swatch {
+                name: "brand".into(),
+                color: RED,
+            }],
+        })
+        .unwrap();
         place(
             &mut doc,
             painted(
@@ -1917,7 +1930,7 @@ mod tests {
                     height: 30.0,
                     radius: 0.0,
                 },
-                RED,
+                BLUE.standing_for("brand"),
             ),
             [10.0, 10.0],
         );
@@ -2068,6 +2081,39 @@ mod tests {
         }
         place(&mut doc, elbow, [98.0, 6.0]);
 
+        // A broken line. Where it is on and where it is off is a thing
+        // the reader draws, and a pattern exported with the wrong
+        // lengths — or with the two the wrong way round — writes an SVG
+        // that reads perfectly well and draws a different line. The gaps
+        // are wide enough to land whole pixels in, so the witness can see
+        // them rather than infer them.
+        let mut broken = painted(
+            "broken",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [30.0, 0.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            BLUE,
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut broken.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: vec![6.0, 4.0],
+                cap: chitrakar_doc::StrokeCap::Butt,
+                join: Default::default(),
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+                align: None,
+            });
+        }
+        place(&mut doc, broken, [78.0, 38.0]);
+
         let mut lettering = chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE);
         // The second letter is set apart: another colour, so the page
         // exercises a block that is not all one ink.
@@ -2181,6 +2227,38 @@ mod tests {
             at(112, 28)
         );
         assert_eq!(at(112, 31), &[255, 255, 255], "and stops there");
+        // The broken line, read along its whole length: six on and four
+        // off from x=78, over and over. A pattern exported with the two
+        // lengths the wrong way round, in the wrong units, or starting at
+        // the wrong phase draws a line that is on where this one is off,
+        // and every one of those writes an SVG that reads perfectly well.
+        // Pixels straddling a boundary are skipped rather than guessed at.
+        let phase = |edge: f32| (edge - 78.0).rem_euclid(10.0) < 6.0;
+        let mut on_seen = 0;
+        let mut off_seen = 0;
+        for x in 78..108usize {
+            let (left, right) = (phase(x as f32), phase(x as f32 + 1.0));
+            if left != right {
+                continue;
+            }
+            let px = at(x, 38);
+            let inked = px[2] > 200 && px[0] < 60;
+            assert_eq!(
+                inked,
+                left,
+                "the broken line is {} at {x} ({px:?})",
+                if left { "on" } else { "off" }
+            );
+            if left {
+                on_seen += 1;
+            } else {
+                off_seen += 1;
+            }
+        }
+        assert!(
+            on_seen >= 9 && off_seen >= 6,
+            "the line was actually read along ({on_seen} on, {off_seen} off)"
+        );
         assert_eq!(
             at(114, 3),
             &[255, 255, 255],
