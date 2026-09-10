@@ -9867,6 +9867,359 @@ mod tests {
         );
     }
 
+    /// Every adjustment and every filter, set to do nothing, does
+    /// nothing.
+    ///
+    /// Each of these is arithmetic on a colour, and most of them go
+    /// somewhere and come back on the way: into the display encoding
+    /// because that is where a tone decision is read, into HSL because
+    /// that is where a hue is, out to a channel mix and back. A neutral
+    /// setting is the one input where the whole journey has to cancel,
+    /// and it is the one nobody looks at — a slider is tried by moving
+    /// it. So an eighth of a stop of drift, or a hue that comes back a
+    /// degree off, sits in the middle of a picture that has had nothing
+    /// asked of it, and shows up as a photograph that changed the moment
+    /// somebody added a layer and touched nothing.
+    ///
+    /// Two of the thirteen adjustments have no neutral at all and are
+    /// left out by name: black and white always makes grey, and there is
+    /// no mix that does not. A gradient map has one, though, and it is
+    /// the sharpest question here — a ramp from black to white *is* the
+    /// identity, if and only if where a tone sits along the ramp and what
+    /// the ramp says there are read in the same encoding.
+    ///
+    /// The picture underneath sweeps hue and brightness across the page
+    /// so that every band of a selective adjustment, both ends of a tone
+    /// range, and the greys that a vibrance or a selective hue is
+    /// supposed to leave alone all have pixels of their own.
+    #[test]
+    fn nothing_asked_of_an_adjustment_changes_nothing() {
+        use chitrakar_doc::{Adjustment, Filter, GradientStop};
+        const W: u32 = 24;
+        const H: u32 = 16;
+        // Hue across, brightness down, with a grey column and both ends
+        // of the range in it.
+        let mut rgba8 = Vec::with_capacity((W * H * 4) as usize);
+        for y in 0..H {
+            for x in 0..W {
+                let hue = x as f32 / W as f32 * 6.0;
+                let v = y as f32 / (H - 1) as f32;
+                let (r, g, b) = if x % 6 == 5 {
+                    (v, v, v)
+                } else {
+                    let i = hue.floor() as u32 % 6;
+                    let f = hue - hue.floor();
+                    let (a, b2) = (v, v * (1.0 - 0.85 * f));
+                    match i {
+                        0 => (a, b2, 0.05),
+                        1 => (b2, a, 0.05),
+                        2 => (0.05, a, b2),
+                        3 => (0.05, b2, a),
+                        4 => (b2, 0.05, a),
+                        _ => (a, 0.05, b2),
+                    }
+                };
+                for c in [r, g, b] {
+                    rgba8.push((c * 255.0).round().clamp(0.0, 255.0) as u8);
+                }
+                rgba8.push(255);
+            }
+        }
+        let mut doc = Document::new(W, H, ColorMode::Rgb);
+        let id = doc.add_resource(W, H, rgba8);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "picture",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: W,
+                    height: H,
+                },
+            )),
+        })
+        .unwrap();
+        let plain = render(&doc).unwrap();
+        assert!(
+            plain.pixels.iter().any(|p| p.a > 0.5),
+            "there is a picture to leave alone"
+        );
+
+        let neutral_adjustments: Vec<(&str, Adjustment)> = vec![
+            (
+                "brightness and contrast of nothing",
+                Adjustment::BrightnessContrast {
+                    brightness: 0.0,
+                    contrast: 0.0,
+                },
+            ),
+            ("no stops of exposure", Adjustment::Exposure { stops: 0.0 }),
+            (
+                "no hue, saturation or lightness",
+                Adjustment::HueSaturation {
+                    hue_degrees: 0.0,
+                    saturation: 0.0,
+                    lightness: 0.0,
+                },
+            ),
+            (
+                "levels from end to end",
+                Adjustment::Levels {
+                    in_black: 0.0,
+                    in_white: 1.0,
+                    gamma: 1.0,
+                    out_black: 0.0,
+                    out_white: 1.0,
+                },
+            ),
+            (
+                "a curve on the diagonal",
+                Adjustment::Curves {
+                    points: vec![[0.0, 0.0], [1.0, 1.0]],
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            ),
+            (
+                "a curve of one point on the diagonal",
+                Adjustment::Curves {
+                    points: vec![[0.5, 0.5]],
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            ),
+            (
+                "no curve at all",
+                Adjustment::Curves {
+                    points: Vec::new(),
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            ),
+            (
+                "the light left as it was",
+                Adjustment::WhiteBalance {
+                    temperature: 0.0,
+                    tint: 0.0,
+                },
+            ),
+            ("no vibrance", Adjustment::Vibrance { amount: 0.0 }),
+            ("not turned inside out", Adjustment::Invert { amount: 0.0 }),
+            (
+                "no band asked for anything",
+                Adjustment::SelectiveHsl { bands: Vec::new() },
+            ),
+            (
+                "six bands asked for nothing",
+                Adjustment::SelectiveHsl {
+                    bands: vec![[0.0; 3]; 6],
+                },
+            ),
+            (
+                "both ends of the range left alone",
+                Adjustment::ShadowsHighlights {
+                    shadows: 0.0,
+                    highlights: 0.0,
+                },
+            ),
+            (
+                "no colour pushed anywhere",
+                Adjustment::ColorBalance {
+                    shadows: [0.0; 3],
+                    midtones: [0.0; 3],
+                    highlights: [0.0; 3],
+                    preserve_luminosity: false,
+                },
+            ),
+            (
+                "the same, holding the brightness",
+                Adjustment::ColorBalance {
+                    shadows: [0.0; 3],
+                    midtones: [0.0; 3],
+                    highlights: [0.0; 3],
+                    preserve_luminosity: true,
+                },
+            ),
+        ];
+        let neutral_filters: Vec<(&str, Filter)> = vec![
+            ("a blur of nothing", Filter::GaussianBlur { sigma: 0.0 }),
+            (
+                "a sharpen of nothing",
+                Filter::Sharpen {
+                    sigma: 1.5,
+                    amount: 0.0,
+                },
+            ),
+            ("blocks one pixel across", Filter::Pixelate { size: 1.0 }),
+            (
+                "no grain",
+                Filter::Noise {
+                    amount: 0.0,
+                    grain: 2.0,
+                    mono: true,
+                    seed: 7,
+                },
+            ),
+            (
+                "no vignette",
+                Filter::Vignette {
+                    amount: 0.0,
+                    radius: 0.4,
+                    softness: 0.5,
+                },
+            ),
+            (
+                "a vignette that begins at the corner",
+                Filter::Vignette {
+                    amount: 0.8,
+                    radius: 1.0,
+                    softness: 0.0,
+                },
+            ),
+        ];
+
+        let mut checked = 0usize;
+        for (what, kind) in neutral_adjustments
+            .into_iter()
+            .map(|(w, a)| (w, NodeKind::Adjustment(a)))
+            .chain(
+                neutral_filters
+                    .into_iter()
+                    .map(|(w, f)| (w, NodeKind::Filter(f))),
+            )
+        {
+            let mut with = doc.clone();
+            let mut node = Node::group("work");
+            node.kind = kind;
+            with.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let now = render(&with).unwrap();
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..H {
+                for x in 0..W {
+                    let (p, q) = (plain.get(x, y), now.get(x, y));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            // A neutral setting is not "near enough to see": the
+            // arithmetic has to cancel, and measured over this picture
+            // every one of them cancels to within a ten-millionth. The
+            // slack here is a few times that and no more — a drift of a
+            // part in a million is not visible and is still a bug, and
+            // an eighth of a step of 8-bit grey would sail past a
+            // tolerance written in eighth-steps of 8-bit grey, since a
+            // step near white is worth far more light than one near
+            // black.
+            assert!(
+                worst.0 < 1e-6,
+                "{what}: the picture changed by {} at {},{}",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 21, "everything with a neutral was asked");
+
+        // A gradient map is the one that has to be asked of a grey
+        // picture. It replaces every tone by the colour at that tone's
+        // own place along a ramp, so a colour comes back grey however
+        // plain the ramp is — that is the adjustment, not a fault in it.
+        // Over greys, though, a ramp from black to white is the identity,
+        // and only if where a tone sits along the ramp and what the ramp
+        // says there are read in the same encoding. Read one of them in
+        // light and the other as a device shows it and a middle grey
+        // comes back at 188 or at 55.
+        {
+            let mut greys = Vec::with_capacity((W * H * 4) as usize);
+            for y in 0..H {
+                for _ in 0..W {
+                    let v = (y as f32 / (H - 1) as f32 * 255.0).round() as u8;
+                    greys.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            let mut doc = Document::new(W, H, ColorMode::Rgb);
+            let id = doc.add_resource(W, H, greys);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::raster(
+                    "greys",
+                    chitrakar_doc::RasterRef {
+                        resource_id: id,
+                        width: W,
+                        height: H,
+                    },
+                )),
+            })
+            .unwrap();
+            let plain = render(&doc).unwrap();
+            let white = |v: f32| AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            };
+            let mut node = Node::group("ramp");
+            node.kind = NodeKind::Adjustment(Adjustment::GradientMap {
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: white(0.0),
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: white(1.0),
+                    },
+                ],
+            });
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let mapped = render(&doc).unwrap();
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..H {
+                for x in 0..W {
+                    let (p, q) = (plain.get(x, y), mapped.get(x, y));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 1e-5,
+                "a ramp from black to white left the greys alone, off by {} at {},{}",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        }
+    }
+
     #[test]
     fn a_shadow_turns_with_the_group_it_is_in() {
         // A shadow's offset is written in the layer's parent space, so a

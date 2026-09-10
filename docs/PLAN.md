@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~371),
+- **Verify before committing:** `cargo test --workspace` (~372),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1013,6 +1013,33 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **Every adjustment and every filter, set to do nothing, does nothing:**
+  each of these is arithmetic on a colour and most of them go somewhere
+  and come back on the way — into the display encoding because that is
+  where a tone decision is read, into HSL because that is where a hue is,
+  out to a channel mix and back. A neutral setting is the one input where
+  the whole journey has to cancel and the one nobody looks at, since a
+  slider is tried by moving it; drift there sits in the middle of a
+  picture nothing has been asked of, and shows up as a photograph that
+  changed the moment somebody added a layer and touched nothing.
+  `nothing_asked_of_an_adjustment_changes_nothing` asks it of all
+  twenty-one neutral settings there are, over a picture that sweeps hue
+  and brightness so every band of a selective adjustment, both ends of a
+  tone range, and the greys a vibrance is meant to leave alone all have
+  pixels. Every one of them cancels to within a ten-millionth, and that
+  is what the test allows — a tolerance written in eighth-steps of 8-bit
+  grey would have let a drift of half a percent through, since a step near
+  white is worth far more light than one near black, and the first version
+  of this test did exactly that.
+  Two of the thirteen adjustments have no neutral at all and are named as
+  such: black and white always makes grey and there is no mix that does
+  not. A gradient map looked like the third and is not — it replaces every
+  tone by the colour at that tone's place along a ramp, so a colour comes
+  back grey however plain the ramp is, which is the adjustment rather than
+  a fault in it. Over *greys*, a ramp from black to white is the identity,
+  and only if where a tone sits along the ramp and what the ramp says
+  there are read in the same encoding: it gets a grey ramp of its own to
+  be asked over.
 - **A batch that fails leaves the document exactly as it was:** that is
   what makes a batch worth having — a gesture, a group, a layer added and
   masked in one breath are each several commands that have to land
