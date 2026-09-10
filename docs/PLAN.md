@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~407),
+- **Verify before committing:** `cargo test --workspace` (~408),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1959,10 +1959,16 @@ without reading anything else.*
      (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
      into a coverage of its own with max blending, since the segments of
      one stroke union rather than pile up, then laid down in its colour
-     or, for an eraser, taken off by a blend that subtracts it. What
-     still goes back is a stroke confined to a region, which would be the
-     mask machinery a second time over per stroke, and a clone layer,
-     which paints with what the page already holds. Shadows it now draws,
+     or, for an eraser, taken off by a blend that subtracts it. A stroke
+     laid inside a region it draws too
+     (`a_stroke_laid_in_a_region_stays_in_it`): the region rides on the
+     stroke rather than being read off the document, so the coverage is
+     the stroke's own — one texture per stroke rather than one per layer,
+     which is exactly what makes it the stroke's — riding the same slot a
+     layer's mask does. One slot holds one coverage, so a layer whose own
+     mask is already on it and whose stroke also carries a region is
+     still the CPU's. What still goes back is a clone layer, which paints
+     with what the page already holds. Shadows it now draws,
      inner and outer, as the blur passes again read
      off the layer's own silhouette rather than off what is under it
      (`a_shadow_is_the_silhouette_the_cpu_casts`), on a leaf that is

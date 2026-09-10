@@ -1715,10 +1715,12 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[1].1, &[]);
                             (quad, mask)
                         }
-                        Opening::Brush { quad, erase, .. } => {
+                        Opening::Brush {
+                            quad, erase, mask, ..
+                        } => {
                             pass.set_pipeline(if *erase { &self.eraser } else { &self.paint });
                             pass.set_bind_group(1, &scratch[0].1, &[]);
-                            (quad, &None)
+                            (quad, mask)
                         }
                         Opening::Effect {
                             from,
@@ -2245,12 +2247,27 @@ fn one(
             // the floor the CPU renderer puts under it.
             let band = 1.0 / t.max_scale().max(1e-6);
             for stroke in strokes {
-                // A stroke confined to a region carries that region, and
-                // reading it here would be the mask machinery a second
-                // time over, per stroke. The CPU's for now.
-                if stroke.clip.is_some() {
-                    return None;
-                }
+                // A stroke laid inside a region carries that region, so
+                // it stays confined after the region is let go of. It is
+                // a coverage over the stroke's own box — one texture per
+                // stroke rather than one per layer, which is what makes
+                // it the stroke's rather than the layer's. One slot,
+                // though: a layer's own mask is already riding it for
+                // everything the layer draws, so a stroke that also
+                // carries a region has nowhere to put it and that page
+                // is the CPU's.
+                let confined = match stroke.clip.as_deref() {
+                    Some(region) => {
+                        if node.mask.is_some() || held_to.is_some() || bound.is_some() {
+                            return None;
+                        }
+                        match stroke.bounds() {
+                            Some(box_) => clip_texture(doc, region, box_, t, out)?,
+                            None => continue,
+                        }
+                    }
+                    None => (None, NO_MASK),
+                };
                 let n = stroke.points.len();
                 if n == 0 {
                     continue;
@@ -2309,11 +2326,17 @@ fn one(
                     colour,
                     [0.0; 3],
                 ));
-                out.draws.push(Item::of(Draw::Brush {
-                    segments,
-                    quad,
-                    erase: stroke.erase,
-                }));
+                for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
+                    v.mask = confined.1;
+                }
+                out.draws.push(Item {
+                    draw: Draw::Brush {
+                        segments,
+                        quad,
+                        erase: stroke.erase,
+                    },
+                    mask: confined.0,
+                });
             }
         }
         NodeKind::Raster(raster) => {
@@ -2749,6 +2772,52 @@ fn one(
         }
     }
     Some(())
+}
+
+/// The region a brush stroke was laid inside, rasterized over the box
+/// the stroke covers.
+///
+/// A stroke carries its region rather than reading one off the document,
+/// so that letting the region go does not let the stroke spill — which
+/// is also why the coverage is the stroke's and not the layer's: one
+/// texture per stroke. `box_` is the stroke's own bounds in the layer's
+/// space, and `t` is the space the layer is being drawn in, which is
+/// where the CPU renderer rasterizes the same region.
+fn clip_texture(
+    doc: &Document,
+    region: &chitrakar_doc::Mask,
+    box_: [f32; 4],
+    t: Transform,
+    out: &mut Scene,
+) -> Option<(Option<usize>, [f32; 4])> {
+    let page = out.surface;
+    let chitrakar_render::Bounds::Rect(bx0, by0, bx1, by1) =
+        chitrakar_render::transformed_box(t, box_)
+    else {
+        return Some((None, NO_MASK));
+    };
+    // A pixel of margin, as a layer's own coverage takes: the quads are
+    // grown by a device pixel so an edge is not cut short.
+    let x0 = (bx0.floor() as i64 - 1).clamp(0, page.0 as i64) as u32;
+    let y0 = (by0.floor() as i64 - 1).clamp(0, page.1 as i64) as u32;
+    let x1 = (bx1.ceil() as i64 + 1).clamp(0, page.0 as i64) as u32;
+    let y1 = (by1.ceil() as i64 + 1).clamp(0, page.1 as i64) as u32;
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w == 0 || h == 0 {
+        // None of the stroke is on the page, so there is nothing for the
+        // region to hold back either.
+        return Some((None, NO_MASK));
+    }
+    let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
+    let cover = chitrakar_render::mask_plane_over(doc, region, t, clip, page);
+    let at = out.textures.len();
+    out.textures.push(Image {
+        width: w,
+        height: h,
+        channels: 1,
+        texels: cover.iter().map(|c| f32_to_f16(*c)).collect(),
+    });
+    Some((Some(at), [x0 as f32, y0 as f32, w as f32, h as f32]))
 }
 
 /// Rasterize a layer's mask into a scene texture, and say where it went
@@ -3872,6 +3941,8 @@ enum Opening {
         segments: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
         erase: bool,
+        /// The region the stroke was laid inside, if it carries one.
+        mask: Option<usize>,
     },
 }
 
@@ -4023,6 +4094,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     segments: segments.clone(),
                     quad: quad.clone(),
                     erase: *erase,
+                    mask: item.mask,
                 });
             }
             _ => unreachable!("only the six above cut a pass"),
@@ -4277,12 +4349,15 @@ mod tests {
         };
         let mut f = chitrakar_doc::fixture::everything();
         // The fixture holds one of every node kind, and this backend
-        // does not draw them all yet — the strokes a paint layer and a
-        // clone layer hold are still the CPU's. One of those in
-        // the document makes the whole page declined, and an audit that
-        // is declined every time measures nothing, so they come out
-        // first. As the backend learns a kind, its line here goes and
-        // the commands that speak to it come into scope by themselves.
+        // does not draw them all: a clone layer paints with what the
+        // page already holds, and the fixture's paint layer keeps a
+        // stroke authored in press ink, which a second renderer declines
+        // rather than guessing at a profile. The strokes themselves it
+        // lays now, region and all. One layer it cannot draw makes the
+        // whole page declined, and an audit that is declined every time
+        // measures nothing, so those two come out first. As the backend
+        // learns a kind, its line here goes and the commands that speak
+        // to it come into scope by themselves.
         for id in [f.painted, f.borrowed] {
             f.doc.apply(Command::RemoveNode { id }).unwrap();
         }
@@ -7006,6 +7081,171 @@ mod tests {
     /// across whatever softness the brush was set to — and the segments
     /// of one stroke *union* rather than pile up, so a stroke that
     /// doubles back is not darker where it crossed itself.
+    /// A brush stroke laid inside a region stays inside it.
+    ///
+    /// The region rides on the stroke rather than being read off the
+    /// document as the stroke is drawn — one held to whatever happens to
+    /// be picked *now* would spill the instant the selection changed —
+    /// and confining it means it stays confined after the region is let
+    /// go of. So the coverage is the stroke's own, one texture per
+    /// stroke, riding the same slot a layer's mask does. Nothing is
+    /// baked: the whole stroke is there under the region, which is what
+    /// the halves of these strokes that never show are for.
+    #[test]
+    fn a_stroke_laid_in_a_region_stays_in_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        // The left half of the page, with a soft edge down the middle so
+        // the region is read as a coverage rather than as a yes or a no.
+        let region = |feather: f32, invert: bool| {
+            Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert,
+                feather,
+            })
+        };
+        let stroke = |clip: Option<Box<chitrakar_doc::Mask>>, erase: bool| {
+            chitrakar_doc::PaintStroke {
+                // Right across the page, so half of it is outside the
+                // region whichever way round the region is.
+                points: vec![[4.0, 20.0], [56.0, 20.0]],
+                radii: vec![6.0],
+                color: ink(0.1, 0.2, 0.7, 1.0),
+                softness: 0.0,
+                erase,
+                source: [0.0, 0.0],
+                heal: false,
+                clip,
+            }
+        };
+        let page = |strokes: Vec<chitrakar_doc::PaintStroke>| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.9, 0.88, 0.8, 1.0),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::paint("brushed")),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            for (i, s) in strokes.into_iter().enumerate() {
+                doc.apply(Command::AddStroke {
+                    id,
+                    index: i,
+                    stroke: Box::new(s),
+                    on_mask: false,
+                })
+                .unwrap();
+            }
+            (doc, id)
+        };
+
+        for (name, strokes) in [
+            (
+                "held to a region",
+                vec![stroke(Some(region(0.0, false)), false)],
+            ),
+            // Softened, so what is read is a coverage between nought and
+            // one rather than an edge.
+            (
+                "held to a softened region",
+                vec![stroke(Some(region(3.0, false)), false)],
+            ),
+            // The other way round, which is a different region and not
+            // the same one read backwards by whoever draws it.
+            (
+                "held to the outside of one",
+                vec![stroke(Some(region(0.0, true)), false)],
+            ),
+            // An eraser takes off only inside the region too.
+            (
+                "an eraser held to one",
+                vec![stroke(None, false), stroke(Some(region(0.0, false)), true)],
+            ),
+            // One held and one not, on the same layer.
+            (
+                "one held and one free",
+                vec![stroke(Some(region(0.0, false)), false), stroke(None, false)],
+            ),
+        ] {
+            let (doc, _) = page(strokes);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} is drawn rather than handed back"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(mean < 0.004, "{name}: mean {mean:.5}, worst {worst:.3}");
+        }
+
+        // The readings a mean would hide. The region is the left half of
+        // the page and the stroke runs the whole width of it.
+        let (doc, _) = page(vec![stroke(Some(region(0.0, false)), false)]);
+        let drawn = gpu.render(&doc).unwrap();
+        let bare = gpu.render(&page(Vec::new()).0).unwrap();
+        assert!(
+            drawn.get(15, 20).b > drawn.get(15, 20).r + 0.2,
+            "the stroke is laid inside the region"
+        );
+        assert!(
+            (drawn.get(45, 20).b - bare.get(45, 20).b).abs() < 0.01,
+            "and nothing of it outside ({} against {})",
+            drawn.get(45, 20).b,
+            bare.get(45, 20).b
+        );
+        // And the other way round is the other half, not the same half:
+        // a region inverted is a different region, not a sign flipped
+        // somewhere in the drawing.
+        let (other, _) = page(vec![stroke(Some(region(0.0, true)), false)]);
+        let flipped = gpu.render(&other).unwrap();
+        assert!(
+            flipped.get(45, 20).b > flipped.get(45, 20).r + 0.2,
+            "inverted, the stroke shows on the other side"
+        );
+        assert!(
+            (flipped.get(15, 20).b - bare.get(15, 20).b).abs() < 0.01,
+            "and not on this one"
+        );
+
+        // One slot holds one coverage: a layer's own mask is already
+        // riding it for everything the layer draws, so a stroke that
+        // also carries a region goes back to the CPU.
+        let (mut both, id) = page(vec![stroke(Some(region(0.0, false)), false)]);
+        both.apply(Command::SetMask {
+            id,
+            mask: Some(region(0.0, true)),
+        })
+        .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&both),
+            "a masked layer whose stroke also carries a region"
+        );
+    }
+
     #[test]
     fn a_brush_lays_the_strokes_the_cpu_lays() {
         let Some(gpu) = gpu_or_skip() else {

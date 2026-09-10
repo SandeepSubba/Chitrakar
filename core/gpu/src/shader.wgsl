@@ -913,7 +913,10 @@ fn fs_brush(in: VsOut) -> @location(0) vec4f {
 @fragment
 fn fs_paint(in: ImageOut) -> @location(0) vec4f {
     let c = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
-    return in.grad * c;
+    // A stroke laid inside a region carries that region, and it rides
+    // the same slot a layer's mask does — one coverage a stroke is held
+    // back by, read once.
+    return in.grad * c * mask_cover(in.page, in.mask);
 }
 
 // A layer's silhouette in one flat colour, or the hole around it: what
