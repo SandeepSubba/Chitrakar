@@ -7732,6 +7732,95 @@ mod tests {
         }
     }
 
+    /// A layer that cannot be seen draws the same page as no layer at
+    /// all.
+    ///
+    /// There are three ways for a layer to be invisible and they are
+    /// three different pieces of arithmetic: hidden is a flag the walk
+    /// skips on, an opacity of zero is a weight at the end of it, and a
+    /// mask that covers nothing is a coverage read per pixel. For a layer
+    /// that *covers* — a shape, a picture, some text — all three come to
+    /// the same thing and nobody would get them wrong. For the four that
+    /// draw by reading what is under them they do not: an adjustment's
+    /// opacity is how far to take the adjustment and its mask is where to
+    /// take it, so both are folded into the work rather than applied to a
+    /// composite, and "none of it, nowhere" is a different line of code
+    /// from "skip this layer".
+    ///
+    /// So: each of the fixture's ten kinds, made invisible each of the
+    /// three ways, against the same document with that layer deleted.
+    /// Deleted rather than merely compared to itself, because the claim
+    /// is the strong one — that the page is what it would be if the layer
+    /// had never been added.
+    #[test]
+    fn a_layer_that_cannot_be_seen_is_the_same_as_no_layer() {
+        let f = chitrakar_doc::fixture::everything();
+        // Coverage of nothing: the whole page, inverted.
+        let covers_nothing = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: f.doc.meta.width as f32 * 4.0,
+                    height: f.doc.meta.height as f32 * 4.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(
+                    -(f.doc.meta.width as f32),
+                    -(f.doc.meta.height as f32),
+                ),
+            },
+            invert: true,
+            feather: 0.0,
+        };
+        for (what, id) in [
+            ("a group", f.group),
+            ("a shape", f.under),
+            ("a paint layer", f.painted),
+            ("a picture", f.picture),
+            ("a block of text", f.words),
+            ("a frame", f.frame),
+            ("an adjustment", f.lifted),
+            ("a filter", f.softened),
+            ("a clone layer", f.borrowed),
+            ("a copy of another layer", f.copy),
+        ] {
+            // The page with the layer gone. A group takes its children
+            // with it, which is what deleting a group means.
+            let gone = {
+                let mut s = Session::from_document(f.doc.clone());
+                s.apply(Command::RemoveNode { id }).unwrap();
+                s.render().unwrap()
+            };
+            // …and the page with it there, which had better be a
+            // different page: a kind that draws nothing anyway would pass
+            // every question below without answering any of them.
+            let there = Session::from_document(f.doc.clone()).render().unwrap();
+            let (shows, _, _) = apart(&gone, &there);
+            assert!(
+                shows > 0.01,
+                "{what} makes a visible difference to begin with ({shows})"
+            );
+            for (how, cmd) in [
+                ("hidden", Command::SetVisible { id, visible: false }),
+                ("at no opacity", Command::SetOpacity { id, opacity: 0.0 }),
+                (
+                    "masked to nothing",
+                    Command::SetMask {
+                        id,
+                        mask: Some(Box::new(covers_nothing.clone())),
+                    },
+                ),
+            ] {
+                let mut s = Session::from_document(f.doc.clone());
+                s.apply(cmd).unwrap_or_else(|e| panic!("{what} {how}: {e}"));
+                let (worst, x, y) = apart(&gone, &s.render().unwrap());
+                assert!(
+                    worst < 1e-5,
+                    "{what} {how} still draws ({worst} at {x},{y})"
+                );
+            }
+        }
+    }
+
     /// Every command, over the boundary the UI actually talks across.
     ///
     /// Nothing in the app calls `apply`: the UI is TypeScript on the far

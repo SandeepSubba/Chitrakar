@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~372),
+- **Verify before committing:** `cargo test --workspace` (~373),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1013,6 +1013,24 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **A layer that cannot be seen draws the same page as no layer at all:**
+  there are three ways for a layer to be invisible and they are three
+  different pieces of arithmetic — hidden is a flag the walk skips on, an
+  opacity of zero is a weight at the end of it, a mask that covers nothing
+  is a coverage read per pixel. For a layer that *covers* all three come
+  to the same thing; for the four that draw by reading what is under them
+  they do not, since an adjustment's opacity is how far to take the
+  adjustment and its mask is where, so both are folded into the work
+  rather than applied to a composite, and "none of it, nowhere" is a
+  different line of code from "skip this layer".
+  `a_layer_that_cannot_be_seen_is_the_same_as_no_layer` makes each of the
+  fixture's ten kinds invisible each of the three ways and holds the page
+  against the same document with that layer *deleted* — the strong claim,
+  that the page is what it would be if the layer had never been added. And
+  it first checks that the layer makes a visible difference at all, so a
+  kind that draws nothing anyway cannot pass every question without
+  answering one; that guard is the only reason this counts as an audit
+  rather than a formality.
 - **Every adjustment and every filter, set to do nothing, does nothing:**
   each of these is arithmetic on a colour and most of them go somewhere
   and come back on the way — into the display encoding because that is
