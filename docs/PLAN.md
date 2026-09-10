@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~410),
+- **Verify before committing:** `cargo test --workspace` (~411),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1995,7 +1995,24 @@ without reading anything else.*
      shift is an average over the whole stroke before any of it goes
      down: a reduction, and a pass of quads is not where one happens.
      There is no arm left over in the walk now and none wanted, so a new
-     kind of layer will not compile until it says how it is drawn. Shadows it now draws,
+     kind of layer will not compile until it says how it is drawn.
+     Effects on a *group* it draws too, and on a brush layer
+     (`an_effect_on_a_group_is_built_from_what_it_composites`). Those two
+     were out for the same reason and it is worth keeping straight: a
+     layer that draws one thing has its opacity applied as it paints, so
+     where its fill and its stroke overlap the fade is taken twice and
+     that overlap *is* the silhouette — but a group's opacity belongs to
+     the composite, so two overlapping children in a half-faded group
+     make one half-faded shape with no seam down the overlap, and the
+     shadow of it has none either. A brush layer is the same story, its
+     strokes having their conversation with each other before any of it
+     fades. So those two owe the silhouette their opacity at the moment
+     it is built rather than having it inside the surface already, which
+     is one number on the field pass. What is left out is a frame (the
+     CPU renderer cuts its contents to its own rectangle before making a
+     silhouette of them), a copy (what it draws is another layer,
+     somewhere else) and a clone layer (never on a surface of its own to
+     have a silhouette at all). Shadows it now draws,
      inner and outer, as the blur passes again read
      off the layer's own silhouette rather than off what is under it
      (`a_shadow_is_the_silhouette_the_cpu_casts`), on a leaf that is
@@ -2074,12 +2091,33 @@ without reading anything else.*
      clipped layers come along too: the coverage plane both renderers
      read is asked for the size of what is being drawn on rather than
      assuming the page's, which was a distinction that did not exist
-     until a view did. What is left is for the app to reach for the
-     backend at all, which is a question about where WebGPU is to be had
-     rather than about this crate. The fixture
-     audit (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_
-     does`) is what to run while doing either. See
-     docs/spikes/gpu-rendering.md.
+     until a view did. What is left is for anything to *reach* for the
+     backend, and that is bigger than it has been written here so far —
+     worth stating plainly rather than leaving as a line item. The engine
+     runs as WASM inside the webview on every platform today, the desktop
+     shell included (`shells/tauri/src-tauri/src/lib.rs` is a window,
+     menus and file dialogs and says so), and the UI is handed *pixels*
+     over that boundary. So there are two honest routes and neither is a
+     chunk:
+     (a) compile this crate to wasm32 and run it on WebGPU in the
+     webview, which means an async device bring-up in an engine whose
+     render entry points are synchronous, wgpu in the app's wasm bundle,
+     and a WebGPU-availability question per platform — the open half of
+     Spike 1, still unanswered on mobile; or
+     (b) run it natively in the shell and stop handing pixels across at
+     all, presenting to a surface the shell owns, which is the bigger
+     change to the presentation path but the one that pays on desktop
+     first and does not need WebGPU anywhere.
+     The spike's ~3ms round trip at 1280×720 on *software* Vulkan says a
+     readback design would be fast enough, so (b) need not mean giving up
+     the pixels-over-the-boundary shape all at once. Until one of those
+     is chosen the backend is a validated second opinion and nothing
+     else, which is a fine thing to be — holding it against the CPU
+     renderer has turned up real defects on both sides, the clone
+     stroke's lost region among them — but it is not on screen. The
+     fixture audit
+     (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does`) is
+     what to run while doing any of it. See docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
   3. Depth. Two methods have been paying, and both are cheap enough to

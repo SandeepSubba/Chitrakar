@@ -2153,11 +2153,18 @@ fn one(
     let shadings: Vec<Shading> = if node.effects.is_empty() {
         Vec::new()
     } else {
-        // A group is out: what a group's opacity means to its children
-        // is not what a layer's means to itself.
+        // A frame is out: the CPU renderer cuts its contents to its own
+        // rectangle before anything is made of them, and the silhouette
+        // here is the surface uncut. A copy is out because what it draws
+        // is another layer, somewhere else. A clone layer is out because
+        // it is never on a surface of its own to have a silhouette.
         if !matches!(
             node.kind,
-            NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+            NodeKind::Vector { .. }
+                | NodeKind::Raster(_)
+                | NodeKind::Text(_)
+                | NodeKind::Paint { .. }
+                | NodeKind::Group
         ) {
             return None;
         }
@@ -2262,9 +2269,29 @@ fn one(
     // is what the silhouette a shadow is cast from is made of. A layer
     // at a third opacity casts a third of a shadow, and it does so
     // because its silhouette is a third covered.
+    // Whether the layer's own opacity is already inside the surface an
+    // effect's silhouette is built from. It is for a layer that draws
+    // one thing: the CPU renderer fades the fill and the stroke as it
+    // paints them, so where they overlap the fade is taken twice and
+    // that overlap is what the silhouette is. It is not for a group,
+    // whose opacity belongs to the composite rather than to each child,
+    // nor for a brush layer, whose strokes have their conversation with
+    // each other before any of it fades. Those two owe the silhouette
+    // their opacity when it is built instead.
+    let in_surface = matches!(
+        node.kind,
+        NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+    );
+    let owed = if in_surface { 1.0 } else { node.opacity };
     let alpha = match (alone, shadings.is_empty()) {
         (true, true) => 1.0,
-        (true, false) => node.opacity,
+        (true, false) => {
+            if in_surface {
+                node.opacity
+            } else {
+                1.0
+            }
+        }
         (false, _) => node.opacity * opacity,
     };
     // Where the layer's own drawing starts, so the mask can be put
@@ -2754,7 +2781,7 @@ fn one(
                     Spread::Band { inside, .. } => [2.0, inside, 0.0, 0.0],
                     _ => [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 };
-                let field = out.push(page_quad(on, 1.0, said, s.tint, [0.0; 3]));
+                let field = out.push(page_quad(on, owed, said, s.tint, [0.0; 3]));
                 let mut axes = |first: [f32; 4], second: [f32; 4], tint: [f32; 4]| {
                     let mut steps = out.push(page_quad(on, 1.0, first, [0.0; 4], [0.0; 3]));
                     steps.end = out.push(page_quad(on, 1.0, second, tint, [0.0; 3])).end;
@@ -2782,7 +2809,7 @@ fn one(
                     s.offset[0],
                     s.offset[1],
                     if s.inside { 1.0 } else { 0.0 },
-                    0.0,
+                    owed,
                 ];
                 let blended = node.blend != BlendMode::Normal;
                 let settle = if blended {
@@ -2814,7 +2841,7 @@ fn one(
             .collect();
         let quad = out.push(page_quad(
             (down, out.surface),
-            if shadings.is_empty() {
+            if shadings.is_empty() || !in_surface {
                 node.opacity * opacity
             } else {
                 // Its own opacity is already in the surface; what is
@@ -4962,6 +4989,233 @@ mod tests {
         // edge — it is the whole shape's outline, cut, rather than the
         // outline of the part of the shape that shows.
         assert!(red(54, 22), "the band is the whole shape's, up to the cut");
+    }
+
+    /// An effect on a group, and on a brush layer: built from what the
+    /// whole thing composites to, faded once.
+    ///
+    /// These two were out for the same reason, and it is a reason worth
+    /// keeping straight. A layer that draws one thing has its opacity
+    /// applied as it paints — the CPU renderer fades the fill and the
+    /// stroke as they go down, so where they overlap the fade is taken
+    /// twice and *that* is the silhouette. A group's opacity is not
+    /// that: it belongs to the composite, so two overlapping children in
+    /// a half-faded group make one half-faded shape with no seam down
+    /// the overlap, and the shadow of it has no seam either. A brush
+    /// layer is the same story — its strokes have their conversation
+    /// with each other before any of it fades. So those two owe the
+    /// silhouette their opacity at the moment it is built, rather than
+    /// having it already inside the surface.
+    #[test]
+    fn an_effect_on_a_group_is_built_from_what_it_composites() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        // Two slabs that overlap between x = 30 and x = 40.
+        let grouped = |opacity: f32, effects: Vec<E>| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.92, 0.9, 0.86, 1.0),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("pair")),
+            })
+            .unwrap();
+            let group = doc.children_of(root).unwrap()[1];
+            for (i, x) in [10.0f32, 30.0].into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: group,
+                    index: i,
+                    node: filled(
+                        "slab",
+                        VectorShape::Rect {
+                            width: 30.0,
+                            height: 20.0,
+                            radius: 0.0,
+                        },
+                        ink(0.15, 0.2, 0.6, 1.0),
+                    ),
+                })
+                .unwrap();
+                let id = doc.children_of(group).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 10.0),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::SetOpacity { id: group, opacity })
+                .unwrap();
+            doc.apply(Command::SetEffects { id: group, effects })
+                .unwrap();
+            doc
+        };
+        // Two overlapping strokes, which is the same question asked of a
+        // brush layer.
+        let brushed = |opacity: f32, effects: Vec<E>| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.92, 0.9, 0.86, 1.0),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::paint("brushed")),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            for (i, x) in [[14.0f32, 46.0], [34.0, 66.0]].into_iter().enumerate() {
+                doc.apply(Command::AddStroke {
+                    id,
+                    index: i,
+                    stroke: Box::new(chitrakar_doc::PaintStroke {
+                        points: vec![[x[0], 20.0], [x[1], 20.0]],
+                        // Not a whole number of pixels from the line to
+                        // the edge: what an outline is measured from is
+                        // a yes or a no at exactly half covered, and a
+                        // coverage landing exactly on a half is a tie
+                        // two renderers can break differently in the
+                        // last bit of a float. Nothing here is about
+                        // that, so it does not sit on one.
+                        radii: vec![9.4],
+                        color: ink(0.15, 0.2, 0.6, 1.0),
+                        softness: 0.0,
+                        erase: false,
+                        source: [0.0, 0.0],
+                        heal: false,
+                        clip: None,
+                    }),
+                    on_mask: false,
+                })
+                .unwrap();
+            }
+            doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc
+        };
+        let shadow = |blur: f32| E::DropShadow {
+            dx: 5.0,
+            dy: 8.0,
+            blur,
+            color: ink(0.0, 0.0, 0.0, 1.0),
+            opacity: 0.9,
+        };
+        let outline = E::Outline {
+            width: 3.0,
+            color: ink(0.9, 0.2, 0.05, 1.0),
+            opacity: 1.0,
+        };
+        let inner = E::InnerShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 1.0,
+            color: ink(0.0, 0.0, 0.1, 1.0),
+            opacity: 0.9,
+        };
+        for (what, build) in [
+            ("a group", &grouped as &dyn Fn(f32, Vec<E>) -> Document),
+            ("a brush layer", &brushed),
+        ] {
+            for opacity in [1.0f32, 0.45] {
+                for (name, effects) in [
+                    ("a hard shadow", vec![shadow(0.0)]),
+                    ("a blurred shadow", vec![shadow(2.0)]),
+                    ("an outline", vec![outline.clone()]),
+                    ("an inner shadow", vec![inner.clone()]),
+                    (
+                        "all three",
+                        vec![shadow(1.5), outline.clone(), inner.clone()],
+                    ),
+                ] {
+                    let doc = build(opacity, effects);
+                    assert!(
+                        GpuRenderer::can_render(&doc),
+                        "{what} at {opacity} with {name} is drawn rather than handed back"
+                    );
+                    let (mean, worst) = difference(
+                        &gpu.render(&doc).unwrap(),
+                        &chitrakar_render::render(&doc).unwrap(),
+                    );
+                    assert!(
+                        mean < 0.004,
+                        "{what} at {opacity} with {name}: mean {mean:.5}, worst {worst:.3}"
+                    );
+                }
+            }
+        }
+
+        // The reading a mean would hide, and the one the whole
+        // distinction is about. The two slabs overlap between x = 30 and
+        // x = 40; at group opacity the pair is one half-faded shape, so
+        // there is no seam down the overlap — and the shadow it casts has
+        // none either. Fade the children instead and both show one.
+        let half = gpu.render(&grouped(0.45, vec![shadow(0.0)])).unwrap();
+        let on = |x: u32| half.get(x, 20);
+        assert!(
+            (on(20).r - on(35).r).abs() < 0.01 && (on(35).r - on(50).r).abs() < 0.01,
+            "a half-faded group is one shape, not two laid over each other \
+             ({:?} {:?} {:?})",
+            on(20),
+            on(35),
+            on(50)
+        );
+        // The shadow is thrown five right and eight down, so the strip
+        // just below the slabs is shadow and nothing else.
+        let under = |x: u32| half.get(x, 34).r;
+        assert!(
+            (under(25) - under(40)).abs() < 0.01 && (under(40) - under(55)).abs() < 0.01,
+            "and its shadow has no seam either ({} {} {})",
+            under(25),
+            under(40),
+            under(55)
+        );
+        // The same of a brush layer, whose strokes have the same
+        // conversation with each other that a group's children do.
+        let painted = gpu.render(&brushed(0.45, vec![shadow(0.0)])).unwrap();
+        let cast = |x: u32| painted.get(x, 34).r;
+        assert!(
+            (cast(25) - cast(40)).abs() < 0.01 && (cast(40) - cast(55)).abs() < 0.01,
+            "a half-faded painting casts one shadow, not one per stroke ({} {} {})",
+            cast(25),
+            cast(40),
+            cast(55)
+        );
+
+        // And the fade reaches the shadow at all: the same group at full
+        // strength casts a darker one.
+        let full = gpu.render(&grouped(1.0, vec![shadow(0.0)])).unwrap();
+        assert!(
+            full.get(40, 34).r < under(40) - 0.15,
+            "a faded group casts a faded shadow ({} against {})",
+            full.get(40, 34).r,
+            under(40)
+        );
     }
 
     /// An effect on a layer with a blend mode, brought down by that

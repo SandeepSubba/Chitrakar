@@ -982,7 +982,12 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
 // texture instead of two.
 @fragment
 fn fs_field(in: ImageOut) -> @location(0) vec4f {
-    let a = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
+    // `alpha` is what the surface still owes the silhouette: a layer's
+    // own opacity is inside the surface already, but a group's belongs
+    // to the composite rather than to its children, so it is taken here
+    // instead — the CPU renderer builds the same silhouette out of a
+    // group's surface *after* fading it.
+    let a = textureSampleLevel(image, image_sampler, in.uv, 0.0).a * in.alpha;
     // An outline is a distance from an edge, and an edge is where the
     // silhouette is half covered — so what a band is measured out from
     // is a yes or a no rather than a coverage, and `params.y` says at
@@ -1100,7 +1105,9 @@ fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
 fn fs_effect(in: ImageOut) -> @location(0) vec4f {
     var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
     if in.params.z != 0.0 {
-        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a;
+        // `params.w` is what the surface still owes its own silhouette,
+        // which is a group's opacity and nothing for anything else.
+        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a * in.params.w;
     }
     return out * in.alpha * mask_cover(in.page, in.mask);
 }
@@ -1121,7 +1128,7 @@ fn fs_effect(in: ImageOut) -> @location(0) vec4f {
 fn fs_settle(in: ImageOut) -> @location(0) vec4f {
     var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
     if in.params.z != 0.0 {
-        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a;
+        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a * in.params.w;
     }
     return out;
 }
