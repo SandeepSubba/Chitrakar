@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~362),
+- **Verify before committing:** `cargo test --workspace` (~364),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~966 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -934,6 +934,43 @@ without reading anything else.*
   it loses the clip, which is what every other editor does too, and
   moving the flag onto the wrapper would make the group undissolvable
   by the rule just stated.
+- **A mask does not travel with the layer's own transform:** it is
+  written in the space its owner is *placed* in — the parent's — which
+  is what lets a layer be moved behind its mask, and is why `map_page`
+  carries a layer's mask by hand along with the page. Dissolving a
+  group hands the group's transform to each child and is exactly that
+  kind of move, and it left every child's mask behind in the space the
+  group used to occupy: a moved group, dissolved, slid its layers out
+  from under their own masks. The same for a drop shadow's offset,
+  which is a vector in that space. `carry_mask` was a private helper
+  inside `map_page` with three callers; it is now
+  `Mask::carried_through` and `Effect::carried_through` beside it, so
+  the rule is stated once and the fourth caller reads it rather than
+  restating it.
+  Three lengths ride along with no direction of their own — how far a
+  mask's edge is softened over, how far a shadow is blurred, how wide an
+  outline is drawn — and each is scaled by `Transform::max_scale`, which
+  is the same figure the renderer already uses to turn them into device
+  pixels, so the two agree. An uneven scale is not a thing a round
+  softness can answer honestly and neither claims otherwise; the four
+  page maps are all rigid, so nothing there was ever affected — this is
+  a rule the new caller needed.
+  Measuring the fix is what found the second defect, in the renderer: a
+  shadow's offset was carried into device pixels by *scaling* it
+  (`dx * scale`) rather than by putting it through the parent transform,
+  so a group laid on its side went on casting its shadow down and to the
+  right. `Effect`'s own doc comment said the shadow turns with the group
+  it is in, and `map_page` already turned a layer's offsets when the
+  page turned, on the same understanding that the light belongs to the
+  page — the drawing code was the one place that disagreed, and no test
+  had ever put a shadow inside a turned group.
+  `a_dissolved_group_brings_its_children_masks_with_it` puts a softened
+  mask, a shadow and an outline on each of the fixture's ten kinds,
+  wraps each in a group that is then shifted, turned and scaled, and
+  holds the page against itself across the dissolve; each of the six
+  parts of the fix was checked by breaking it and watching that test
+  fail. `a_shadow_turns_with_the_group_it_is_in` pins the renderer's
+  half on its own.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an

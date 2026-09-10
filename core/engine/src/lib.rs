@@ -4023,10 +4023,36 @@ impl Session {
         let mut cmds: Vec<Command> = Vec::new();
         for (i, child) in children.iter().enumerate() {
             if group_t != Transform::default() {
+                let kid = self.doc.node(*child)?;
                 cmds.push(Command::SetTransform {
                     id: *child,
-                    transform: group_t.compose(self.doc.node(*child)?.transform),
+                    transform: group_t.compose(kid.transform),
                 });
+                // A mask is written in the space its owner is *placed*
+                // in, so it does not travel with the layer's own
+                // transform and has to be taken along by hand. Left
+                // behind, it goes on covering the part of the page it
+                // used to — which for a layer that has moved out from
+                // under it is the whole layer. The same for an effect's
+                // offset, which is a vector in that space: a group
+                // turned a quarter round and then dissolved would light
+                // every layer in it from a new direction.
+                if let Some(mask) = &kid.mask {
+                    cmds.push(Command::SetMask {
+                        id: *child,
+                        mask: Some(Box::new(mask.carried_through(group_t))),
+                    });
+                }
+                if !kid.effects.is_empty() {
+                    cmds.push(Command::SetEffects {
+                        id: *child,
+                        effects: kid
+                            .effects
+                            .iter()
+                            .map(|e| e.carried_through(group_t))
+                            .collect(),
+                    });
+                }
             }
             if hidden {
                 cmds.push(Command::SetVisible {
@@ -7292,6 +7318,172 @@ mod tests {
             .unwrap();
             s.ungroup_node(g)
                 .expect("a clip with nothing under it does not stop a dissolve");
+        }
+    }
+
+    /// A mask does not travel with the layer's own transform, so
+    /// anything moving a layer between spaces has to bring it by hand.
+    ///
+    /// A mask is written in the space its owner is *placed* in — the
+    /// parent's — which is what lets a layer be moved behind its mask,
+    /// and is stated where a page is mapped (`Document::map_page`
+    /// carries a layer's mask, the region picked out, and every region
+    /// kept by name). Dissolving a group hands the group's transform to
+    /// each child, and so is exactly that kind of move: it left every
+    /// child's mask behind in the space the group used to occupy, where
+    /// it went on covering the part of the page it used to. A drop
+    /// shadow's offset is a vector in that same space and went the same
+    /// way — a group turned a quarter round and then dissolved lit every
+    /// layer in it from a new direction.
+    ///
+    /// So: each kind of layer, given a mask and a shadow, wrapped in a
+    /// group that is then moved, turned and scaled, and the page held
+    /// against itself across the dissolve. The three that draw by
+    /// reading what is under them are asked the same question
+    /// structurally instead, since leaving their group is what changes
+    /// what they read.
+    #[test]
+    fn a_dissolved_group_brings_its_children_masks_with_it() {
+        let f = chitrakar_doc::fixture::everything();
+        // Not just a shift: a turn and a scale, so a mask carried by the
+        // translation alone would still be wrong, and a shadow's offset
+        // has a direction to lose.
+        // A turn and an even scale as well as a shift, so a mask carried
+        // by the shift alone would still be wrong and a shadow's offset
+        // has a direction to lose. Even rather than uneven because a
+        // softness and a blur are round: one number is what they have to
+        // say, and a transform that stretches the axes differently is
+        // not a thing they can answer honestly — the renderer reads them
+        // through the same `max_scale`, so the two agree where the answer
+        // exists and nowhere claim more than that.
+        let (c, sn) = (0.4f32.cos(), 0.4f32.sin());
+        let moved = Transform::translation(9.0, 5.0).compose(Transform {
+            a: 1.25 * c,
+            b: 1.25 * sn,
+            c: -1.25 * sn,
+            d: 1.25 * c,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 26.0,
+                    height: 12.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(14.0, 12.0),
+            },
+            invert: false,
+            // Softened and blurred generously: these are lengths with no
+            // direction, carried by the scale alone, and a quarter of a
+            // pixel either way would not show.
+            feather: 4.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 4.0,
+            dy: 0.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.9,
+        };
+        // An outline has no offset at all, only a width — the other kind
+        // of length, and the other half of the same carry.
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.8,
+                b: 0.3,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        for (what, id, covers) in [
+            ("a group", f.group, true),
+            ("a shape", f.under, true),
+            ("a paint layer", f.painted, true),
+            ("a picture", f.picture, true),
+            ("a block of text", f.words, true),
+            ("a frame", f.frame, true),
+            ("a copy of another layer", f.copy, true),
+            ("an adjustment", f.lifted, false),
+            ("a filter", f.softened, false),
+            ("a clone layer", f.borrowed, false),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            s.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.clone())),
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone(), outline.clone()],
+            })
+            .unwrap();
+            let g = s.group_nodes(&[id], "wrap").unwrap();
+            s.apply(Command::SetTransform {
+                id: g,
+                transform: moved,
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g).unwrap();
+            let after = s.render().unwrap();
+            if covers {
+                // And so the page is what it was, to within the noise of
+                // composing the same transforms in a different order.
+                let (worst, x, y) = apart(&before, &after);
+                assert!(
+                    worst < 1e-4,
+                    "{what}: the page changed on being let out ({worst} at {x},{y})"
+                );
+            }
+
+            // The mask is the same coverage read one space further out.
+            let carried = s.document().node(id).unwrap().mask.clone().unwrap();
+            assert_eq!(
+                format!("{carried:?}"),
+                format!("{:?}", mask.carried_through(moved)),
+                "{what}: its mask came out into the new space"
+            );
+            let chitrakar_doc::Effect::DropShadow { dx, dy, .. } =
+                s.document().node(id).unwrap().effects[0]
+            else {
+                panic!("{what}: still a drop shadow");
+            };
+            let chitrakar_doc::Effect::DropShadow { dx: wx, dy: wy, .. } =
+                shadow.carried_through(moved)
+            else {
+                unreachable!()
+            };
+            assert!(
+                (dx - wx).abs() < 1e-4 && (dy - wy).abs() < 1e-4,
+                "{what}: its shadow still points the same way ({dx},{dy})"
+            );
+            let chitrakar_doc::Effect::Outline { width, .. } =
+                s.document().node(id).unwrap().effects[1]
+            else {
+                panic!("{what}: still an outline");
+            };
+            assert!(
+                (width - 3.0 * moved.max_scale()).abs() < 1e-4,
+                "{what}: its outline is as wide on the page as it was ({width})"
+            );
+
+            // One undo puts the whole thing back, mask and all.
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().mask),
+                format!("{:?}", Some(mask.clone())),
+                "{what}: and one undo puts the mask back where it was"
+            );
         }
     }
 

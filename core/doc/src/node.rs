@@ -91,6 +91,21 @@ impl Transform {
             ..Default::default()
         }
     }
+
+    /// The longer of the two directions this transform stretches by.
+    ///
+    /// What a length written in one space is worth in the next, for the
+    /// lengths that have no direction of their own to be carried along —
+    /// how far a mask's edge is softened over, how far a shadow is
+    /// blurred, how wide an outline is drawn. A transform that stretches
+    /// the two axes by different amounts cannot be answered honestly by
+    /// one number, and neither can a round blur: the longer of the two
+    /// is the answer the renderer already gives when it turns those
+    /// figures into device pixels, so it is the answer used when they
+    /// move between spaces.
+    pub fn max_scale(self) -> f32 {
+        self.a.hypot(self.b).max(self.c.hypot(self.d))
+    }
 }
 
 /// One stop on a colour ramp: where it sits along the gradient (0..=1) and
@@ -1014,6 +1029,41 @@ pub struct Mask {
     pub feather: f32,
 }
 
+impl Mask {
+    /// The same coverage, read in a space one transform further out.
+    ///
+    /// A mask is written in the space its owner is *placed* in — the
+    /// parent's — rather than in the owner's own, which is what lets a
+    /// layer be moved behind its mask. The other side of that is that
+    /// anything moving a layer between spaces has to bring the mask by
+    /// hand: left behind, it goes on covering the part of the page it
+    /// used to, which for a layer that has moved out from under it is
+    /// the whole layer. Four things want this — a page being mapped,
+    /// which carries a layer's mask, the region picked out of the page
+    /// and every region kept by name; and a group being dissolved,
+    /// which hands its own transform to each child and so has to hand
+    /// it to each child's mask too.
+    pub fn carried_through(&self, m: Transform) -> Mask {
+        let mut out = self.clone();
+        // How far the edge is softened over is a length in that space
+        // with no direction of its own, so it goes by the scale alone.
+        out.feather *= m.max_scale();
+        match &mut out.kind {
+            MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
+                *transform = m.compose(*transform);
+            }
+            MaskKind::Painted { strokes } => {
+                for stroke in strokes {
+                    for p in &mut stroke.points {
+                        *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MaskKind {
     /// Hard-edged coverage from a shape (1 inside, 0 outside).
@@ -1144,6 +1194,30 @@ impl Effect {
                 blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
             }
         }
+    }
+
+    /// The same effect, read in a space one transform further out.
+    ///
+    /// An offset is a vector in the space the effect is written in — the
+    /// layer's parent — so where it points is the transform's to say and
+    /// the transform's shift is no part of it. A page turned a quarter
+    /// round with the light left where it was would light every layer
+    /// from a new direction; so would a group dissolved after being
+    /// turned.
+    pub fn carried_through(&self, m: Transform) -> Effect {
+        let mut out = self.clone();
+        // An offset has a direction and goes through the transform as a
+        // vector; how far the shadow is blurred and how wide the outline
+        // is drawn are lengths without one, and go by the scale alone.
+        let k = m.max_scale();
+        match &mut out {
+            Effect::DropShadow { dx, dy, blur, .. } | Effect::InnerShadow { dx, dy, blur, .. } => {
+                (*dx, *dy) = (m.a * *dx + m.c * *dy, m.b * *dx + m.d * *dy);
+                *blur *= k;
+            }
+            Effect::Outline { width, .. } => *width *= k,
+        }
+        out
     }
 
     /// Whether the effect is painted over the layer rather than behind it.

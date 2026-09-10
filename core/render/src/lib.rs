@@ -957,7 +957,7 @@ fn draw_layer(
                 origin,
                 doc,
                 effect,
-                scale,
+                parent,
                 layer_clip,
                 clip,
                 node.blend,
@@ -979,7 +979,7 @@ fn draw_layer(
                 origin,
                 doc,
                 effect,
-                scale,
+                parent,
                 layer_clip,
                 clip,
                 node.blend,
@@ -1347,9 +1347,18 @@ fn render_child(
 ///
 /// `layer_clip` is where that surface actually holds the layer (the visible
 /// region grown by the effect's reach); `clip` is what may be written.
-/// `scale` carries the effect's parameters — written in the layer's parent
+/// `parent` carries the effect's parameters — written in the layer's parent
 /// space — into device pixels, so a shadow grows with the group it is in
 /// and with the zoom.
+///
+/// An offset is a vector in that space and goes through the whole of it,
+/// which is what makes a shadow *turn* with the group it is in and not
+/// only grow: a group laid on its side used to keep casting its shadow
+/// down and to the right, and a page turned a quarter round was already
+/// carrying its layers' offsets round with it (`Document::map_page`) on
+/// the understanding that the light belongs to the page. How far the
+/// shadow is blurred has no direction to turn, so it goes by the scale
+/// alone.
 #[allow(clippy::too_many_arguments)]
 fn draw_effect(
     dst: &mut Surface,
@@ -1357,12 +1366,14 @@ fn draw_effect(
     origin: (u32, u32),
     doc: &Document,
     effect: &Effect,
-    scale: f32,
+    parent: Transform,
     layer_clip: ClipRect,
     clip: ClipRect,
     blend: BlendMode,
     layer_opacity: f32,
 ) {
+    let scale = parent.max_scale();
+    let along = |dx: f32, dy: f32| (parent.a * dx + parent.c * dy, parent.b * dx + parent.d * dy);
     // Every effect is built from the layer's silhouette rather than its
     // picture. That is what makes a shadow of a photograph a shape, and
     // what lets all three of these share one path.
@@ -1387,7 +1398,7 @@ fn draw_effect(
                 dst,
                 &field,
                 origin,
-                (dx * scale, dy * scale),
+                along(*dx, *dy),
                 layer_clip,
                 write,
                 blend,
@@ -1413,7 +1424,7 @@ fn draw_effect(
                 dst,
                 &field,
                 origin,
-                (dx * scale, dy * scale),
+                along(*dx, *dy),
                 layer_clip,
                 write,
                 blend,
@@ -2125,7 +2136,7 @@ pub fn layer_scale(doc: &Document, id: NodeId, on_mask: bool) -> Result<f32, Doc
 /// strokes: the larger of the two column norms, which bounds the true
 /// largest singular value closely enough for a conservative pad.
 fn max_scale(t: Transform) -> f32 {
-    t.a.hypot(t.b).max(t.c.hypot(t.d))
+    t.max_scale()
 }
 
 /// Samples per curve segment when flattening. Shared so per-anchor data
@@ -9827,6 +9838,95 @@ mod tests {
             diff < ink * 0.1,
             "magnified text differs from native by {diff} over {ink} of ink"
         );
+    }
+
+    #[test]
+    fn a_shadow_turns_with_the_group_it_is_in() {
+        // A shadow's offset is written in the layer's parent space, so a
+        // group laid on its side carries the light round with it. The
+        // arithmetic used to scale the offset and drop its direction: a
+        // shadow cast down and to the right went on being cast down and
+        // to the right however the group holding it was turned, which no
+        // shadow does. `Document::map_page` already turns a layer's
+        // offsets when the page is turned, on the same understanding —
+        // that the light belongs to the page — so the two now agree.
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 9.0,
+            dy: 0.0,
+            blur: 0.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        // A quarter turn about the middle of the page, so the shape stays
+        // on the page and only the direction of the light can move.
+        let page = 80.0;
+        let quarter = Transform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: page,
+            f: 0.0,
+        };
+        let drawn = |turned: bool| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+            let g = doc.children_of(root).unwrap()[0];
+            if turned {
+                doc.apply(Command::SetTransform {
+                    id: g,
+                    transform: quarter,
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: g,
+                index: 0,
+                node: filled_rect("r", 16.0, 16.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(g).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(32.0, 32.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone()],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let straight = drawn(false);
+        let turned = drawn(true);
+        // Nine to the right of the shape's right edge, and nothing above
+        // it: that is where an unturned shadow is.
+        let dark = |s: &Surface, x: u32, y: u32| s.get(x, y).a > 0.5 && s.get(x, y).r < 0.2;
+        assert!(
+            dark(&straight, 55, 40),
+            "the shadow is to the right of the shape when nothing is turned"
+        );
+        assert!(!dark(&straight, 40, 55), "and not below it");
+        // Turned a quarter clockwise, the shape lands in the same place —
+        // its own middle is the page's — and the light with it: what was
+        // nine to the right is now nine down.
+        assert!(
+            dark(&turned, 40, 55),
+            "turned, the shadow is below the shape"
+        );
+        assert!(!dark(&turned, 55, 40), "and no longer to the right of it");
     }
 
     #[test]

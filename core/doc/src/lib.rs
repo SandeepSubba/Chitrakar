@@ -407,26 +407,6 @@ impl Document {
     /// which falls out of where two of the guide's own points land
     /// rather than out of a table of which becomes which.
     fn map_page(&mut self, m: Transform) {
-        /// A coverage carried through a page transform. Written once
-        /// because three things want it: a layer's mask, the region
-        /// picked out of the page, and every region the page has kept
-        /// by name — all masks over the page in exactly the same
-        /// sense.
-        fn carry_mask(mask: &mut Mask, m: Transform) {
-            match &mut mask.kind {
-                MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
-                    *transform = m.compose(*transform);
-                }
-                MaskKind::Painted { strokes } => {
-                    for stroke in strokes {
-                        for p in &mut stroke.points {
-                            *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
-                        }
-                    }
-                }
-            }
-        }
-
         // A vector rather than a point: how far a thing reaches, not
         // where it is, so the map's shift is no part of it.
         let along = |dx: f32, dy: f32| (m.a * dx + m.c * dy, m.b * dx + m.d * dy);
@@ -442,18 +422,13 @@ impl Document {
             // the part of the page it used to cover — which, for a page
             // that moved out from under it, is the whole layer.
             if let Some(mask) = &mut node.mask {
-                carry_mask(mask, m);
+                *mask = mask.carried_through(m);
             }
             // An effect's offset is written in that same space. A page
             // turned a quarter round with the light left where it was
             // would light every layer from a new direction.
             for effect in &mut node.effects {
-                match effect {
-                    Effect::DropShadow { dx, dy, .. } | Effect::InnerShadow { dx, dy, .. } => {
-                        (*dx, *dy) = along(*dx, *dy);
-                    }
-                    Effect::Outline { .. } => {}
-                }
+                *effect = effect.carried_through(m);
             }
         }
         // A guide is a line, so it maps as a line: a point on it and the
@@ -473,14 +448,14 @@ impl Document {
         // a quarter turn would pick out a different part of the picture
         // than the one it was drawn round.
         if let Some(selection) = &mut self.selection {
-            carry_mask(selection, m);
+            **selection = selection.carried_through(m);
         }
         // And so are the regions kept by name, for the same reason and
         // more so: what is picked out is on screen and would be seen to
         // be wrong, where a kept region is not looked at again until
         // the day it is picked up.
         for kept in &mut self.regions {
-            carry_mask(&mut kept.mask, m);
+            kept.mask = kept.mask.carried_through(m);
         }
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
         let (w, h) = (self.meta.width as f32 / 2.0, self.meta.height as f32 / 2.0);
