@@ -486,6 +486,16 @@ mod tests {
             "/document/nodes/*/kind/Vector/shape/Rect:height",
             "/document/nodes/*/kind/Vector/shape/Rect:width",
             "/document/nodes/*/kind/Vector:shape",
+            "/document/nodes/*/mask/kind/Raster/transform:a",
+            "/document/nodes/*/mask/kind/Raster/transform:b",
+            "/document/nodes/*/mask/kind/Raster/transform:c",
+            "/document/nodes/*/mask/kind/Raster/transform:d",
+            "/document/nodes/*/mask/kind/Raster/transform:e",
+            "/document/nodes/*/mask/kind/Raster/transform:f",
+            "/document/nodes/*/mask/kind/Raster:height",
+            "/document/nodes/*/mask/kind/Raster:resource_id",
+            "/document/nodes/*/mask/kind/Raster:transform",
+            "/document/nodes/*/mask/kind/Raster:width",
             "/document/nodes/*/mask/kind/Vector/shape/Rect:height",
             "/document/nodes/*/mask/kind/Vector/shape/Rect:width",
             "/document/nodes/*/mask/kind/Vector/transform:a",
@@ -512,8 +522,8 @@ mod tests {
             "/document/nodes/*:opacity",
             "/document/nodes/*:transform",
             "/document/nodes/*:visible",
-            "/document/resources/9c1a90d2690ab945:height",
-            "/document/resources/9c1a90d2690ab945:width",
+            "/document/resources/*:height",
+            "/document/resources/*:width",
             "/document:children",
             "/document:meta",
             "/document:next_id",
@@ -578,16 +588,21 @@ mod tests {
         /// the failure say where to go — two structs can each have a
         /// `blur`, and only one of them need be at fault.
         fn shapely(path: &str) -> String {
-            path.split('/')
-                .map(|seg| {
-                    if !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()) {
-                        "*"
-                    } else {
-                        seg
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("/")
+            let mut out: Vec<&str> = Vec::new();
+            let mut after_data = false;
+            for seg in path.split('/') {
+                // A segment is data when it is an array index, or when it
+                // is the key of one of the objects keyed by data — a node
+                // id, a content address. A content address is not a number
+                // and would otherwise be baked into the list, which would
+                // then have to be rewritten every time a fixture's pixels
+                // changed.
+                let data =
+                    after_data || (!seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
+                after_data = KEYED_BY_DATA.contains(&seg);
+                out.push(if data { "*" } else { seg });
+            }
+            out.join("/")
         }
         let mut cannot: std::collections::BTreeSet<String> = Default::default();
         for (path, key) in &all {

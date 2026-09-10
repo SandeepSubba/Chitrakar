@@ -1250,6 +1250,21 @@ without reading anything else.*
   axis and carries no tilt, so it returns where it crosses the middle of
   the page. Nothing batches a straighten; the engine and the UI both send
   it alone.
+- **A mask read off an image, in the fixture:** the third mask kind was
+  the one nothing in the shared document held. A shape's coverage is its
+  own geometry and a brushed one is its strokes; this one has *pixels* — so
+  it is the only mask whose coverage a renderer has to sample rather than
+  solve, and the only reason a resource travels in a file other than a
+  picture being on the page. It gets an image of its own rather than the
+  fixture's picture, so a save has to carry a resource nothing on the page
+  draws, which is the case that is easy to write a saver for and forget.
+  The audits all held. It did find a weakness in the one above: the paths
+  it names had numbers taken out of them, and a resource id is a content
+  address rather than a number, so a resource's own fields were listed
+  under the id they happened to have — a list that would need rewriting
+  whenever a fixture's pixels changed. A segment is data now when it is an
+  index *or* the key of one of the three objects keyed by data, which is
+  the rule that was meant all along.
 - **Every field a `.chitra` was ever given, taken back out again:** the
   one rule the format has is that an old file keeps opening — a new node
   kind or a new field is additive, written with `#[serde(default)]` so a

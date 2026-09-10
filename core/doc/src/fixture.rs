@@ -215,6 +215,52 @@ pub fn everything() -> Fixture {
         transform: Transform::translation(8.0, 54.0),
     })
     .unwrap();
+    // A mask read off an image, which is the one mask kind nothing here
+    // held: a shape's coverage is its own geometry and a brushed one is
+    // its strokes, but this one has *pixels* — so it is the only mask that
+    // makes a resource travel for a reason other than a picture being on
+    // the page, and the only one whose coverage a renderer has to sample
+    // rather than solve. The picture's own bytes serve: a checkerboard
+    // read as luminance is a coverage with holes in it.
+    // Its own image rather than the picture's, so the file has to carry a
+    // resource nothing on the page draws: a resource travels because
+    // something refers to it, and a mask referring to one is the case that
+    // is easy to write a saver for and forget.
+    let coverage_id = doc.add_resource(
+        4,
+        4,
+        (0..16)
+            .flat_map(|i: u32| {
+                let v = if (i / 4 + i % 4).is_multiple_of(2) {
+                    255u8
+                } else {
+                    30
+                };
+                [v, v, v, 255]
+            })
+            .collect(),
+    );
+    doc.apply(Command::SetMask {
+        id: words,
+        mask: Some(Box::new(Mask {
+            kind: MaskKind::Raster {
+                resource_id: coverage_id,
+                width: 4,
+                height: 4,
+                transform: Transform {
+                    a: 8.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 6.0,
+                    f: 50.0,
+                },
+            },
+            invert: false,
+            feather: 0.0,
+        })),
+    })
+    .unwrap();
     doc.apply(Command::AddNode {
         parent: root,
         index: 4,
