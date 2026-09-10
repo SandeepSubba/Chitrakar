@@ -268,6 +268,10 @@ pub struct GpuRenderer {
     smear: wgpu::RenderPipeline,
     blocks: wgpu::RenderPipeline,
     field: wgpu::RenderPipeline,
+    /// One pass of an outline's band: two of these measure the exact
+    /// distance from the silhouette, one down each column and one along
+    /// each row.
+    band: wgpu::RenderPipeline,
     effect: wgpu::RenderPipeline,
     brush: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
@@ -699,6 +703,7 @@ impl GpuRenderer {
             })
         };
         let field = one_of("effect field", "fs_field", wgpu::BlendState::REPLACE);
+        let band = one_of("outline band", "fs_band", wgpu::BlendState::REPLACE);
         // A brush stroke's segments, gathered with max blending: they
         // union rather than pile up, so a stroke that doubles back is
         // not darker where it crossed itself.
@@ -979,6 +984,7 @@ impl GpuRenderer {
             smear,
             blocks,
             field,
+            band,
             effect,
             brush,
             paint,
@@ -1463,7 +1469,17 @@ impl GpuRenderer {
             // it over a window grown by that reach whether or not the
             // page ends first. Only the stamp is held to the page.
             if let (Some(Opening::Effect { from, at, .. }), Some(quads)) = (&step.lay, &quads) {
-                let rounds = if at.steps.is_empty() { 0 } else { 6 };
+                // A band is measured out instead of blurred: two passes
+                // rather than twelve, the first down the columns and the
+                // second along the rows, which between them are the
+                // exact distance from the silhouette.
+                let rounds = if at.steps.is_empty() {
+                    0
+                } else if at.band {
+                    2
+                } else {
+                    6
+                };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("effect field"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1491,7 +1507,11 @@ impl GpuRenderer {
                 };
                 for round in 0..rounds {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("effect blur"),
+                        label: Some(if at.band {
+                            "outline band"
+                        } else {
+                            "effect blur"
+                        }),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &scratch[(round + 1) % 2].0,
                             resolve_target: None,
@@ -1504,7 +1524,7 @@ impl GpuRenderer {
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
-                    pass.set_pipeline(&self.box_blur);
+                    pass.set_pipeline(if at.band { &self.band } else { &self.box_blur });
                     pass.set_bind_group(0, &whole, &[]);
                     pass.set_bind_group(1, &scratch[round % 2].1, &[]);
                     pass.set_bind_group(2, &self.open, &[]);
@@ -2035,7 +2055,7 @@ fn one(
         }
         node.effects
             .iter()
-            .map(|e| effect_of(doc, e, parent))
+            .map(|e| effect_of(doc, e, parent, node.opacity))
             .collect::<Option<_>>()?
     };
     // A layer held to the one under it shows only where that
@@ -2550,23 +2570,33 @@ fn one(
         let effects: Vec<Painted> = shadings
             .iter()
             .map(|s| {
-                let field = out.push(page_quad(
-                    (whole, out.surface),
-                    1.0,
-                    [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-                    s.tint,
-                    [0.0; 3],
-                ));
-                let steps = match s.radius {
-                    Some(radius) => {
-                        let on = (whole, out.surface);
-                        let axis =
-                            |a: f32| page_quad(on, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
-                        let mut steps = out.push(axis(0.0));
-                        steps.end = out.push(axis(1.0)).end;
-                        steps
+                let on = (whole, out.surface);
+                // A band is measured from a yes or a no rather than
+                // from a coverage, which is what the 2 asks the field
+                // pass for and what the second number is the threshold
+                // of; everything else is built as a coverage, taken
+                // from the layer or from the hole around it.
+                let said = match s.spread {
+                    Spread::Band { inside, .. } => [2.0, inside, 0.0, 0.0],
+                    _ => [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                };
+                let field = out.push(page_quad(on, 1.0, said, s.tint, [0.0; 3]));
+                let mut axes = |first: [f32; 4], second: [f32; 4], tint: [f32; 4]| {
+                    let mut steps = out.push(page_quad(on, 1.0, first, [0.0; 4], [0.0; 3]));
+                    steps.end = out.push(page_quad(on, 1.0, second, tint, [0.0; 3])).end;
+                    steps
+                };
+                let steps = match s.spread {
+                    Spread::Blurred(radius) => {
+                        axes([radius, 0.0, 0.0, 0.0], [radius, 1.0, 0.0, 0.0], [0.0; 4])
                     }
-                    None => 0..0,
+                    // The tint rides the second pass, which is the one
+                    // that has a distance to cut to a width and so the
+                    // first that has a colour to say.
+                    Spread::Band { width, .. } => {
+                        axes([width, 0.0, 0.0, 0.0], [width, 1.0, 0.0, 0.0], s.tint)
+                    }
+                    Spread::Still => 0..0,
                 };
                 let quad = out.push(page_quad(
                     (out.page, out.surface),
@@ -2583,6 +2613,7 @@ fn one(
                 Painted {
                     over: s.over,
                     inside: s.inside,
+                    band: matches!(s.spread, Spread::Band { .. }),
                     field,
                     steps,
                     quad,
@@ -3432,9 +3463,11 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
 struct Painted {
     over: bool,
     inside: bool,
+    /// A band's two distance passes rather than a blur's twelve.
+    band: bool,
     field: std::ops::Range<u32>,
-    /// Empty when the effect is not blurred at all, in which case the
-    /// field goes down as it was built.
+    /// Empty when the field is not carried out from the silhouette at
+    /// all, in which case it goes down as it was built.
     steps: std::ops::Range<u32>,
     quad: std::ops::Range<u32>,
 }
@@ -3454,17 +3487,36 @@ struct Shading {
     inside: bool,
     /// Premultiplied, already weighed by the effect's own opacity.
     tint: [f32; 4],
-    /// Box radius for the blur passes; nothing when the effect is not
-    /// blurred at all.
-    radius: Option<f32>,
+    /// How the field is carried out from the silhouette it was built on.
+    spread: Spread,
     /// In device pixels, which is where the layer's parent space has
     /// already carried it.
     offset: [f32; 2],
 }
 
+/// How a field is carried out from the silhouette it was built on.
+#[derive(Clone, Copy)]
+enum Spread {
+    /// Not carried out at all: a blur too small to move a pixel, or an
+    /// effect asked for nothing. The field goes down as it was built.
+    Still,
+    /// Three box passes each way, which is the CPU renderer's Gaussian.
+    Blurred(f32),
+    /// Measured out to a true distance and cut at a width: an outline's
+    /// band. Two passes, since the exact Euclidean transform separates —
+    /// one down each column, one along each row. `inside` is the
+    /// coverage at which a pixel counts as part of the silhouette.
+    Band { width: f32, inside: f32 },
+}
+
 /// What a live effect turns into here, or `None` when it stays the
 /// CPU's.
-fn effect_of(doc: &Document, effect: &chitrakar_doc::Effect, parent: Transform) -> Option<Shading> {
+fn effect_of(
+    doc: &Document,
+    effect: &chitrakar_doc::Effect,
+    parent: Transform,
+    layer_opacity: f32,
+) -> Option<Shading> {
     use chitrakar_doc::Effect as E;
     let scale = parent.max_scale();
     // An offset is a vector in the layer's parent space, so where it
@@ -3505,20 +3557,80 @@ fn effect_of(doc: &Document, effect: &chitrakar_doc::Effect, parent: Transform) 
                 invert: inner,
                 inside: inner,
                 tint: tinted(color, *opacity),
-                radius: box_radius(blur * scale),
+                spread: match box_radius(blur * scale) {
+                    Some(radius) => Spread::Blurred(radius),
+                    None => Spread::Still,
+                },
                 offset: along(*dx, *dy),
             })
         }
         // A band hugging the silhouette from outside, whose width is a
-        // true distance rather than a blur: the CPU renderer sweeps a
-        // chamfer distance transform over the layer for it, twice, each
-        // pass reading what the one before wrote. That is a sequence,
-        // and a parallel answer to it is a different band rather than
-        // the same one arrived at faster — so an outline stays the
-        // CPU's until there is a distance both can agree on.
-        E::Outline { .. } => None,
+        // true distance rather than a blur. The exact Euclidean
+        // transform separates — a pass down each column for how far the
+        // nearest inside pixel in it is, then a pass along each row
+        // taking the least of `dx² + g²` — so the band is two passes
+        // here and the same distance the CPU renderer measures, rather
+        // than a different band arrived at faster.
+        E::Outline {
+            width,
+            color,
+            opacity,
+        } => {
+            if !plain(color) {
+                return None;
+            }
+            let w = width * scale;
+            // Asked for nothing: the CPU renderer draws no band at all
+            // for either of these, and an empty tint says so without a
+            // pass arrangement of its own.
+            if *opacity <= 0.0 || w <= 0.0 {
+                return Some(Shading {
+                    over: false,
+                    invert: false,
+                    inside: false,
+                    tint: [0.0; 4],
+                    spread: Spread::Still,
+                    offset: [0.0; 2],
+                });
+            }
+            // Both passes walk out as far as the band reaches, and a
+            // band wider than this is more of a walk per pixel than a
+            // pass should be — the same cap, in taps, that a smear is
+            // held to.
+            if w + 1.0 > BAND_MOST {
+                return None;
+            }
+            // The CPU renderer builds the band inside the layer's box
+            // grown by the effect's reach — width + 2 in the layer's
+            // own units, which is 2·scale device pixels past where the
+            // band ends. Under half a device pixel to the unit that
+            // slack is gone and it cuts the band's outer fringe where
+            // this, drawing over the whole surface, would not.
+            if scale < 0.5 {
+                return None;
+            }
+            Some(Shading {
+                over: false,
+                invert: false,
+                inside: false,
+                tint: tinted(color, *opacity),
+                // Half covered is inside. The layer's own opacity is
+                // already in the surface, so half of *that* is where
+                // its edge is: a layer at a third opacity would
+                // otherwise have no inside at all, and cast no outline.
+                spread: Spread::Band {
+                    width: w,
+                    inside: 0.5 * layer_opacity.max(1e-3),
+                },
+                offset: [0.0; 2],
+            })
+        }
     }
 }
+
+/// The widest band, in device pixels, either pass will walk: 129 taps
+/// out from the pixel, which is the count a smear is capped at.
+const BAND_MOST: f32 = 128.0;
 
 /// The W3C's box size for a Gaussian after three passes each way, read
 /// off the CPU renderer so the two blur by the same amount. Nothing when
@@ -4078,33 +4190,61 @@ mod tests {
         for id in [f.painted, f.borrowed] {
             f.doc.apply(Command::RemoveNode { id }).unwrap();
         }
-        // And every effect the fixture hangs on a layer, for the same
-        // reason and in the same spirit: an effect is drawn from a
-        // layer's silhouette in passes this backend has not learned, so
-        // one anywhere in the document declines the page. Taken off by
-        // walking the tree rather than by naming the layers that have
-        // them, so the fixture can grow another without this going quiet.
-        // The commands that put effects *on* things are still asked —
-        // each is applied to a copy of the document and declined by name,
+        // And the effects the fixture hangs on layers, for the same
+        // reason but not so bluntly. An effect is drawn from a layer's
+        // silhouette, and this backend draws a shadow and an outline
+        // that way now — what it still hands back is one on a blended
+        // layer or inside a frame, and one of those anywhere declines
+        // the whole page. So: every effect comes off, then each goes
+        // back wherever the page is still accepted with it there. What
+        // the backend can draw stays in the audit and what it cannot is
+        // out, and which is which is *asked* rather than named — so the
+        // comparison widens by itself as the backend learns another.
+        // The commands that put effects *on* things are still asked too,
+        // each against a copy of the document and declined by name,
         // which is the audit working rather than the audit blind.
-        let with_effects: Vec<NodeId> = f
+        let mut hung: Vec<(NodeId, Vec<chitrakar_doc::Effect>)> = f
             .doc
             .nodes()
             .filter(|(_, n)| !n.effects.is_empty())
-            .map(|(id, _)| *id)
+            .map(|(id, n)| (*id, n.effects.clone()))
             .collect();
+        hung.sort_by_key(|(id, _)| *id);
         assert!(
-            !with_effects.is_empty(),
+            !hung.is_empty(),
             "the fixture still hangs effects on layers"
         );
-        for id in with_effects {
+        for (id, _) in &hung {
             f.doc
                 .apply(Command::SetEffects {
-                    id,
+                    id: *id,
                     effects: Vec::new(),
                 })
                 .unwrap();
         }
+        let mut kept = 0usize;
+        for (id, effects) in &hung {
+            f.doc
+                .apply(Command::SetEffects {
+                    id: *id,
+                    effects: effects.clone(),
+                })
+                .unwrap();
+            if GpuRenderer::can_render(&f.doc) {
+                kept += 1;
+            } else {
+                f.doc
+                    .apply(Command::SetEffects {
+                        id: *id,
+                        effects: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }
+        assert!(
+            kept > 0,
+            "the audit compares at least one layer with its effects on it"
+        );
         let mut drawn = 0usize;
         let mut declined = Vec::new();
         let check = |doc: &Document, what: &str, drawn: &mut usize| {
@@ -6760,17 +6900,176 @@ mod tests {
                 "{name} with a shadow: mean channel difference {mean:.5} (worst {worst:.3})"
             );
         }
+    }
 
-        // An outline is still the CPU's: its band is a true distance,
-        // swept by a chamfer transform whose passes each read what the
-        // one before wrote.
-        assert!(
-            !GpuRenderer::can_render(&with(vec![E::Outline {
-                width: 2.0,
+    /// An outline: a band hugging the layer's silhouette from outside,
+    /// as wide in every direction as the width it was asked for.
+    ///
+    /// The band is a distance rather than a blur — a blurred silhouette
+    /// lifted would be a band whose softness grew with its width — and a
+    /// *true* distance rather than the chamfer approximation that draws
+    /// a circle as an octagon. The exact Euclidean transform separates,
+    /// which is what lets this be two passes here at all: one down the
+    /// columns, one along the rows. The CPU renderer measures the same
+    /// distance in a sweep of its own, so what this holds is that the
+    /// two land on the same band, and — the reading a mean over a page
+    /// would hide — that the band round a disc comes out round.
+    #[test]
+    fn an_outline_is_the_band_the_cpu_measures() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let disc = || VectorShape::Ellipse { rx: 12.0, ry: 12.0 };
+        // An ellipse is drawn out from the corner its transform puts,
+        // so this is a disc of 12 about the middle of an 80-square page.
+        let middle = Transform::translation(28.0, 28.0);
+        let outlined = |shape: VectorShape, at: Transform, width: f32, opacity: f32, fade: f32| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 80.0,
+                        radius: 0.0,
+                    },
+                    ink(0.88, 0.9, 0.92, 1.0),
+                ),
+                Transform::default(),
+            );
+            let id = add(
+                &mut doc,
+                filled("shape", shape, ink(0.1, 0.15, 0.45, 1.0)),
+                at,
+            );
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![E::Outline {
+                    width,
+                    color: ink(0.9, 0.1, 0.05, 1.0),
+                    opacity,
+                }],
+            })
+            .unwrap();
+            doc.apply(Command::SetOpacity { id, opacity: fade })
+                .unwrap();
+            doc
+        };
+
+        for (name, doc) in [
+            (
+                "a band round a disc",
+                outlined(disc(), middle, 6.0, 1.0, 1.0),
+            ),
+            // A band a single pixel wide, which is all feather and no
+            // solid part: the arithmetic at the very edge of the band,
+            // where the two renderers have the most room to disagree.
+            ("a hair of a band", outlined(disc(), middle, 1.0, 1.0, 1.0)),
+            // A width that lands between pixels, and a partly clear ink.
+            (
+                "a fraction of a pixel",
+                outlined(disc(), middle, 3.5, 0.65, 1.0),
+            ),
+            // A faded layer still has an edge, and it is half of *its*
+            // coverage rather than half of a full one — a layer at a
+            // third opacity would otherwise cast no outline at all.
+            (
+                "round a faded layer",
+                outlined(disc(), middle, 4.0, 1.0, 0.35),
+            ),
+            // Corners, where a distance rounds and a box would not.
+            (
+                "round a box's corners",
+                outlined(
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: 18.0,
+                        radius: 4.0,
+                    },
+                    Transform::translation(25.0, 31.0),
+                    5.0,
+                    0.8,
+                    1.0,
+                ),
+            ),
+            // Asked for nothing: the CPU renderer draws no band, and
+            // neither can this.
+            ("no width at all", outlined(disc(), middle, 0.0, 1.0, 1.0)),
+        ] {
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // Round, and not merely near enough on average: the furthest
+        // pixel the band paints against the nearest one it leaves bare,
+        // both by their true distance from the middle. A chamfer sweep
+        // reaches nearly a pixel less far at an eighth of a turn than it
+        // does along an axis, and a mean over a page cannot tell that
+        // from a band a shade too thin.
+        //
+        // The same disc and the same band the CPU renderer's own
+        // `an_outline_round_a_disc_is_round` measures, so the two
+        // readings can be held beside each other: a disc of 30 with a
+        // band of 20 on a bare page, which reaches 50.
+        let mut doc = Document::new(160, 160, ColorMode::Rgb);
+        let id = add(
+            &mut doc,
+            filled(
+                "disc",
+                VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+                ink(0.0, 0.0, 0.0, 1.0),
+            ),
+            Transform::translation(50.0, 50.0),
+        );
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![E::Outline {
+                width: 20.0,
                 color: ink(1.0, 0.0, 0.0, 1.0),
                 opacity: 1.0,
-            }])),
-            "an outline goes back"
+            }],
+        })
+        .unwrap();
+        let drawn = gpu.render(&doc).unwrap();
+        let (mut furthest_on, mut nearest_off) = (0.0f32, f32::MAX);
+        for y in 0..drawn.height {
+            for x in 0..drawn.width {
+                let (dx, dy) = (x as f32 + 0.5 - 80.0, y as f32 + 0.5 - 80.0);
+                let r = (dx * dx + dy * dy).sqrt();
+                // Past the disc's own edge, where the band is all there
+                // is to paint anything.
+                if r < 32.0 {
+                    continue;
+                }
+                if drawn.get(x, y).a > 0.5 {
+                    furthest_on = furthest_on.max(r);
+                } else {
+                    nearest_off = nearest_off.min(r);
+                }
+            }
+        }
+        let gap = furthest_on - nearest_off;
+        assert!(
+            gap < 0.5,
+            "the band's edge is ragged: painted out to {furthest_on:.2} \
+             and bare from {nearest_off:.2} ({gap:.2} of raggedness)"
+        );
+        // And as wide as it was asked for, not merely even.
+        assert!(
+            (furthest_on - 50.0).abs() < 1.0,
+            "a disc of 30 with a band of 20 reaches about 50, not {furthest_on:.2}"
         );
     }
 
@@ -7854,9 +8153,11 @@ mod tests {
         );
         assert!(GpuRenderer::can_render(&doc));
 
-        // A live effect, or ink authored for a press: either on its own
-        // is enough to hand the page back. A stroke is not — that one it
-        // draws, and nor is a blend mode any more.
+        // An effect asking for more than a pass will do, or ink authored
+        // for a press: either on its own is enough to hand the page
+        // back. A stroke is not — that one it draws, and nor is a blend
+        // mode any more, nor a shadow, nor an outline of a width two
+        // passes can measure out.
         let mut with_stroke = doc.clone();
         with_stroke
             .apply(Command::SetKind {
@@ -7881,18 +8182,23 @@ mod tests {
             .unwrap();
         assert!(GpuRenderer::can_render(&with_stroke));
 
-        let mut with_effect = doc.clone();
-        with_effect
-            .apply(Command::SetEffects {
+        let outlined = |width: f32| {
+            let mut doc = doc.clone();
+            doc.apply(Command::SetEffects {
                 id,
                 effects: vec![chitrakar_doc::Effect::Outline {
                     color: BLUE,
-                    width: 2.0,
+                    width,
                     opacity: 1.0,
                 }],
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&with_effect));
+            doc
+        };
+        assert!(GpuRenderer::can_render(&outlined(2.0)));
+        // Wider than either of the band's passes will walk, which is the
+        // cap a smear is held to said in the same taps.
+        assert!(!GpuRenderer::can_render(&outlined(400.0)));
 
         // A layer held to the one under it is drawn, since that layer's
         // own alpha is a coverage like a mask's — but only where "its
@@ -7949,7 +8255,7 @@ mod tests {
         assert!(!GpuRenderer::can_render(&pressed));
 
         // A hidden layer it cannot draw is no obstacle: it is not drawn.
-        let mut hidden = with_effect.clone();
+        let mut hidden = outlined(400.0);
         hidden
             .apply(Command::SetVisible { id, visible: false })
             .unwrap();

@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~403),
+- **Verify before committing:** `cargo test --workspace` (~404),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1322,7 +1322,10 @@ without reading anything else.*
   coverage the last two finds came out of, and it costs nothing to keep.
   The GPU audit takes the effects off by walking the tree now instead of
   naming a layer, so the fixture can grow another without that going
-  quiet, and it asserts that it found some to take off.
+  quiet, and it asserts that it found some to take off. It takes them off
+  and then puts each back wherever the page is still accepted with it
+  there, so as the backend learns another kind of effect the comparison
+  widens by itself rather than waiting to be told.
 - **And the picture the clipboard gives back:** the same gap on the other
   side. The clipboard audit compared each arriving layer written out as
   text — its kind, its mask, its effects, how it composites — and then
@@ -1916,8 +1919,13 @@ without reading anything else.*
   a thirteenth, worst at an eighth of a turn: a band round a disc reached
   nearly a pixel less far there than along the axis, which is a circle
   drawn as an octagon. Both are the true distance now
-  (`an_outline_round_a_disc_is_round`), which is also what makes an
-  outline something the GPU backend could draw.
+  (`an_outline_round_a_disc_is_round`), and that is what gave the GPU
+  backend an outline at all: a chamfer's passes each read what the one
+  before wrote, which is a sequence, while the exact transform separates
+  into a pass down each column and a pass along each row. Both renderers
+  now hold the same reading of a band round a disc — painted out to
+  50.00 and bare from just past it — and both tests fail with the
+  chamfer put back.
 - **Picking reads what a layer shows, not only its shape.** A mask and
   being held to the layer under it are both ways of a layer being
   somewhere it is not, and hit-testing used to look at neither: a shape
@@ -1966,15 +1974,27 @@ without reading anything else.*
      spare is already carrying the layer's coverage for an inner shadow),
      a layer with effects inside a frame (the CPU cuts the shadow at the
      frame's edge and not the silhouette it grew from), and a group. An
-     outline stays the CPU's, but for a smaller reason than it was: its
-     band is a true distance now — the same one a region is grown by —
-     rather than the chamfer approximation it used to be, and a true
-     distance *is* something a shader can find, by searching a disc as
-     wide as the band. Capped the way the pixelate's walk is capped,
-     that is the shape of the remaining work. The
-     shared fixture still has its effects stripped before the audit
-     compares, because two of the three layers carrying one are a blended
-     layer and an outline. Both filters that used to be handed
+     outline it draws too
+     (`an_outline_is_the_band_the_cpu_measures`): its band is a true
+     Euclidean distance from the silhouette — the same one a region is
+     grown by — and that transform *separates*, so it is two passes here
+     rather than a search of the whole disc: one down the columns for how
+     far the nearest inside pixel in each is, then one along the rows
+     taking the least of dx² + g², which is exactly the distance to the
+     nearest inside pixel anywhere. Neither pass looks further than the
+     band reaches, so the cap they are held to — a smear's, said in the
+     same taps — can only decide an answer outside the band, where the
+     answer is nothing. What the band is measured *from* is a yes or a no
+     rather than a coverage, since an edge is where the silhouette is
+     half covered — and half of the layer's *own* opacity at that, since
+     a layer at a third opacity would otherwise have no inside at all and
+     cast no outline. The
+     shared fixture no longer has its effects stripped wholesale before
+     the audit compares: they all come off and then each goes back
+     wherever the page is still accepted with it there, so what the
+     backend can draw stays in the comparison and what it cannot is out,
+     asked rather than named. Two of the three layers carrying one are
+     compared with it on now; the third is the blended layer. Both filters that used to be handed
      back it now draws: a motion blur as one pass along the line rather
      than the blur's six along the axes
      (`a_smear_runs_the_way_the_cpu_runs_it`), and a pixelate as two, one

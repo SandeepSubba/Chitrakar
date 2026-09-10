@@ -929,8 +929,83 @@ fn fs_paint(in: ImageOut) -> @location(0) vec4f {
 @fragment
 fn fs_field(in: ImageOut) -> @location(0) vec4f {
     let a = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
+    // An outline is a distance from an edge, and an edge is where the
+    // silhouette is half covered — so what a band is measured out from
+    // is a yes or a no rather than a coverage, and `params.y` says at
+    // what coverage the answer turns. It comes down as one, not as the
+    // tint: what the band's own passes carry is a distance, and a
+    // distance has no colour until it has been cut to a width.
+    if in.params.x == 2.0 {
+        return vec4f(select(0.0, 1.0, a >= in.params.y));
+    }
     let cover = select(a, 1.0 - a, in.params.x != 0.0);
     return in.grad * cover;
+}
+
+// Whether the pixel at `p` is inside the silhouette the band is measured
+// from. Off the surface is outside: the CPU renderer measures over a
+// window it allocated, and there is nothing past the end of it either.
+fn band_inside(p: vec2i, size: vec2i) -> bool {
+    if p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y {
+        return false;
+    }
+    return textureLoad(image, p, 0).a > 0.5;
+}
+
+// One pass of an outline's band.
+//
+// The band is how far a pixel is from the layer's silhouette, cut to the
+// width the outline was asked for and feathered over the last pixel of
+// it. The distance is a true Euclidean one — the same the CPU renderer
+// measures, and the same a region is grown by — worked out the separable
+// way, which is what makes it two passes rather than a search of the
+// whole disc: down each column for how far the nearest inside pixel in
+// that column is, then along each row taking the least of `dx² + g²`,
+// which is exactly the distance to the nearest inside pixel anywhere.
+//
+// Neither pass looks further than the band reaches, and anything it did
+// not look at is further off than that — so the cap cannot decide an
+// answer inside the band, only outside it, where the answer is nothing.
+//
+// `params.x` is the width in device pixels; `params.y` says which pass.
+// `grad` is the tint, premultiplied and already weighed by the effect's
+// own opacity, which the second pass lays the band down in.
+@fragment
+fn fs_band(in: ImageOut) -> @location(0) vec4f {
+    let width = in.params.x;
+    let far = ceil(width) + 1.0;
+    let n = i32(far);
+    let size = vec2i(page.size);
+    let here = vec2i(floor(in.uv * page.size));
+    if in.params.y == 0.0 {
+        if band_inside(here, size) {
+            return vec4f(0.0);
+        }
+        var best = far;
+        for (var k = 1; k <= n; k = k + 1) {
+            if band_inside(vec2i(here.x, here.y - k), size)
+                || band_inside(vec2i(here.x, here.y + k), size) {
+                best = f32(k);
+                break;
+            }
+        }
+        return vec4f(best);
+    }
+    var best = far * far;
+    for (var k = -n; k <= n; k = k + 1) {
+        let x = here.x + k;
+        if x < 0 || x >= size.x {
+            continue;
+        }
+        let g = textureLoad(image, vec2i(x, here.y), 0).r;
+        best = min(best, f32(k) * f32(k) + g * g);
+    }
+    // The distance counts from pixel centre to pixel centre, and the
+    // centre of an edge pixel already sits half a pixel inside the
+    // shape — so the distance to the edge itself is one less half at
+    // each end. The CPU renderer's own arithmetic, written the same way
+    // round.
+    return in.grad * clamp(width + 1.0 - sqrt(best), 0.0, 1.0);
 }
 
 // The blurred field coming down onto what is under the layer, read at
