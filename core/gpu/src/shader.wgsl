@@ -816,6 +816,34 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
     return sum / f32(2 * radius + 1);
 }
 
+// A smear along a line: the average of `params.x` taps, `params.yz`
+// apart, centred on this pixel.
+//
+// One pass rather than the blur's six, and not along an axis: the line
+// runs at whatever angle it was given, so there is nothing to separate
+// into a horizontal turn and a vertical one. The taps are the CPU
+// renderer's — the same count, the same spacing, each rounded to a whole
+// pixel and clamped at the page's edge, which is what its own reading
+// past the region does — so the two come out at the same picture rather
+// than at two plausible ones.
+//
+// `floor(v + 0.5)` rather than `round`, which in WGSL takes a half to
+// the even neighbour where the CPU takes it away from zero.
+@fragment
+fn fs_smear(in: ImageOut) -> @location(0) vec4f {
+    let n = i32(in.params.x);
+    let step = vec2f(in.params.y, in.params.z);
+    let half = f32(n / 2);
+    let here = floor(in.uv * page.size);
+    var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+    for (var k = 0; k < n; k = k + 1) {
+        let at = floor(here + step * (f32(k) - half) + vec2f(0.5, 0.5));
+        let p = clamp(at, vec2f(0.0, 0.0), page.size - vec2f(1.0, 1.0));
+        sum = sum + textureLoad(image, vec2i(p), 0);
+    }
+    return sum / f32(n);
+}
+
 // A blur layer coming back down: what was under it, and the blurred copy
 // of it that the box passes left in a texture, weighed by the layer's
 // opacity and its mask.

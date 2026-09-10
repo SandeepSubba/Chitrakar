@@ -206,6 +206,13 @@ enum Draw {
         steps: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
     },
+    /// A motion blur: what is under it, run through one pass that
+    /// averages along a line, coming back down the way a blur's does.
+    /// `along` is the quad carrying how many taps and how far apart.
+    Smear {
+        along: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -237,6 +244,7 @@ pub struct GpuRenderer {
     /// One box-blur pass, off one texture onto another: no multisampling
     /// and no stencil, since it draws one quad over the whole page.
     box_blur: wgpu::RenderPipeline,
+    smear: wgpu::RenderPipeline,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -582,6 +590,32 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // One of these makes a motion blur: a single pass along the line
+        // it was given, onto the first of the same pair.
+        let smear = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("smear"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_smear"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         // And the blurred page coming back down, weighed by the layer's
         // opacity and its mask, over what it was taken from.
         let blur_down = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -749,6 +783,7 @@ impl GpuRenderer {
             blend,
             adjust,
             box_blur,
+            smear,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -1010,9 +1045,12 @@ impl GpuRenderer {
         // and the blurred page comes out of the second one. Neither is
         // multisampled — one quad covers the whole of each, so there are
         // no edges on them to sample.
-        let blurring = passes
-            .iter()
-            .any(|p| matches!(p.lay, Some(Opening::Blur { .. })));
+        let blurring = passes.iter().any(|p| {
+            matches!(
+                p.lay,
+                Some(Opening::Blur { .. }) | Some(Opening::Smear { .. })
+            )
+        });
         let scratch: Vec<_> = if !blurring {
             Vec::new()
         } else {
@@ -1119,6 +1157,35 @@ impl GpuRenderer {
                     pass.draw(along(round % 2), 0..1);
                 }
             }
+            // The one smearing pass, before the pass that lays its result
+            // down: the copy of what is under the layer goes in, and the
+            // averaging along the line leaves its answer on the first
+            // scratch texture.
+            if let (Some(Opening::Smear { along, .. }), Some((_, backdrop)), Some(quads)) =
+                (&step.lay, &under, &quads)
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("smear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &scratch[0].0,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.smear);
+                pass.set_bind_group(0, &bind, &[]);
+                pass.set_bind_group(1, backdrop, &[]);
+                pass.set_bind_group(2, &self.open, &[]);
+                pass.set_bind_group(3, &self.open, &[]);
+                pass.set_vertex_buffer(0, quads.slice(..));
+                pass.draw(along.clone(), 0..1);
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("page"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1186,6 +1253,13 @@ impl GpuRenderer {
                             pass.set_pipeline(&self.blur_down);
                             // Six rounds end on the second of the pair.
                             pass.set_bind_group(1, &scratch[1].1, &[]);
+                            (quad, mask)
+                        }
+                        Opening::Smear { quad, mask, .. } => {
+                            // Laid down the same way; the one pass left
+                            // its answer on the first of the pair.
+                            pass.set_pipeline(&self.blur_down);
+                            pass.set_bind_group(1, &scratch[0].1, &[]);
                             (quad, mask)
                         }
                         Opening::Adjust { quad, mask, table } => {
@@ -1258,7 +1332,8 @@ impl GpuRenderer {
                         Draw::Open
                         | Draw::Close { .. }
                         | Draw::Adjust { .. }
-                        | Draw::Blur { .. } => {}
+                        | Draw::Blur { .. }
+                        | Draw::Smear { .. } => {}
                     }
                 }
             }
@@ -1640,8 +1715,7 @@ fn one(
             // A filter's radius is written in the space it lives
             // in, so a group that scales stretches it — which is the
             // reading the CPU renderer takes.
-            let scale = parent.a.hypot(parent.b).max(parent.c.hypot(parent.d));
-            match filter_of(filter, scale)? {
+            match filter_of(filter, parent)? {
                 Filtering::Pointwise(params, grad) => {
                     let quad = out.push(page_quad(doc, alpha, params, grad, [0.0; 3]));
                     out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
@@ -1659,6 +1733,21 @@ fn one(
                         [0.0; 3],
                     ));
                     out.draws.push(Item::of(Draw::Blur { steps, quad }));
+                }
+                Filtering::Smear { taps, step } => {
+                    let along = out.push(page_quad(
+                        doc,
+                        1.0,
+                        [taps, step[0], step[1], 0.0],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
+                    // Laid down the way a blur is: what was under it,
+                    // mixed with the smeared copy by the layer's opacity
+                    // and its mask. Nothing is added back, so the amount
+                    // that makes a sharpen out of a blur is zero here.
+                    let quad = out.push(page_quad(doc, alpha, [0.0; 4], [0.0; 4], [0.0; 3]));
+                    out.draws.push(Item::of(Draw::Smear { along, quad }));
                 }
                 // Nothing asked for is nothing drawn, and nothing
                 // drawn wants no mask over it either.
@@ -2495,8 +2584,13 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
 /// pixel: they want the surface under them sampled many times over, at
 /// offsets, which is passes of its own rather than the single copy-aside
 /// everything here works from. Until that exists they are the CPU's.
-fn filter_of(filter: &chitrakar_doc::Filter, scale: f32) -> Option<Filtering> {
+fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filtering> {
     use chitrakar_doc::Filter as F;
+    // A filter's radius is written in the space it lives in, so a group
+    // that scales stretches it — and a smear, which has a direction as
+    // well as a length, goes through the whole of that space rather than
+    // through the scale alone.
+    let scale = view.a.hypot(view.b).max(view.c.hypot(view.d));
     let point = |params: [f32; 4], grad: [f32; 4]| Filtering::Pointwise(params, grad);
     // The W3C's box size for a Gaussian after three passes each way,
     // read off the CPU renderer so the two blur by the same amount.
@@ -2548,10 +2642,28 @@ fn filter_of(filter: &chitrakar_doc::Filter, scale: f32) -> Option<Filtering> {
         // axis, so the box passes are no use to it; it is still the
         // CPU's.
         F::Pixelate { .. } => return None,
-        // A smear along a line, which the box passes cannot walk either:
-        // they run along an axis and this one runs at whatever angle it
-        // was given. The CPU's for now.
-        F::MotionBlur { .. } => return None,
+        // A smear along a line. The box passes cannot walk it — they run
+        // along an axis and this one runs at whatever angle it was given
+        // — so it takes a pass of its own, with the taps worked out here
+        // exactly as the CPU renderer works them out.
+        F::MotionBlur { distance, degrees } => {
+            let t = degrees.to_radians();
+            let (dx, dy) = (t.cos() * distance, t.sin() * distance);
+            let (ox, oy) = (view.a * dx + view.c * dy, view.b * dx + view.d * dy);
+            let far = ox.hypot(oy);
+            // A smear shorter than a pixel does not move one, and the CPU
+            // renderer hands the page back untouched.
+            if far < 0.5 {
+                return Some(Filtering::Nothing);
+            }
+            // Odd, so the pixel itself is one of the taps.
+            const MOST: usize = 257;
+            let n = ((far.ceil() as usize).saturating_add(1)).min(MOST) | 1;
+            Filtering::Smear {
+                taps: n as f32,
+                step: [ox / (n as f32 - 1.0), oy / (n as f32 - 1.0)],
+            }
+        }
     })
 }
 
@@ -2565,6 +2677,10 @@ enum Filtering {
     /// the difference to add back — zero for a plain blur, and an
     /// unsharp amount for a sharpen.
     Blur { radius: f32, sharpen: f32 },
+    /// One pass over what is under it, averaging `taps` samples `step`
+    /// apart along a line: a smear, which has an angle and so cannot be
+    /// separated into a turn along each axis the way a blur is.
+    Smear { taps: f32, step: [f32; 2] },
     /// A filter that was asked for nothing: a blur of no radius, a
     /// sharpen of no amount. The CPU renderer draws nothing for these,
     /// and neither does this.
@@ -2649,6 +2765,16 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
     },
+    /// A motion blur. The one pass that averages along the line has run
+    /// on the first scratch texture by the time this opens the pass;
+    /// what is left is the quad that reads it and the untouched copy and
+    /// mixes them by the layer's weight — which is a blur's quad, since
+    /// there is nothing different to say once the smearing is done.
+    Smear {
+        along: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
 }
 
 impl Opening {
@@ -2656,7 +2782,7 @@ impl Opening {
     fn reads_under(&self) -> bool {
         match self {
             Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
-            Opening::Adjust { .. } | Opening::Blur { .. } => true,
+            Opening::Adjust { .. } | Opening::Blur { .. } | Opening::Smear { .. } => true,
         }
     }
 }
@@ -2677,7 +2803,11 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
         // Only the four that change what the pass is drawing on, or
         // want to read it, cut it.
         match &item.draw {
-            Draw::Open | Draw::Close { .. } | Draw::Adjust { .. } | Draw::Blur { .. } => {}
+            Draw::Open
+            | Draw::Close { .. }
+            | Draw::Adjust { .. }
+            | Draw::Blur { .. }
+            | Draw::Smear { .. } => {}
             _ => continue,
         }
         passes.push(Pass {
@@ -2717,7 +2847,15 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     mask: item.mask,
                 });
             }
-            _ => unreachable!("only the four above cut a pass"),
+            Draw::Smear { along, quad } => {
+                clear = false;
+                lay = Some(Opening::Smear {
+                    along: along.clone(),
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
+            }
+            _ => unreachable!("only the five above cut a pass"),
         }
         start = i + 1;
     }
@@ -5290,6 +5428,169 @@ mod tests {
         assert!(
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
+        );
+    }
+
+    /// A motion blur: one pass along the line it was given, rather than
+    /// the blur's six along the axes. The whole claim of a directional
+    /// blur is the direction, and a smear that ran the wrong way — or
+    /// that took its taps a pixel out — looks perfectly plausible on its
+    /// own, so it is held against the CPU renderer's own smear.
+    #[test]
+    fn a_smear_runs_the_way_the_cpu_runs_it() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // A bar across the middle of a dark page: thin enough that a
+        // smear across it is obvious and a smear along it is not.
+        let page = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.12,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "bar",
+                    VectorShape::Rect {
+                        width: 40.0,
+                        height: 6.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.95,
+                        g: 0.9,
+                        b: 0.5,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(10.0, 17.0),
+            );
+            // And one the other way, so that a smear along either axis
+            // has edges to move. A page uniform along x would make a
+            // horizontal smear of the wrong length look right.
+            add(
+                &mut doc,
+                filled(
+                    "post",
+                    VectorShape::Rect {
+                        width: 5.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.3,
+                        g: 0.8,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(40.0, 5.0),
+            );
+            doc
+        };
+        let with = |filter: F| {
+            let mut doc = page();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            doc
+        };
+
+        for filter in [
+            F::MotionBlur {
+                distance: 12.0,
+                degrees: 0.0,
+            },
+            F::MotionBlur {
+                distance: 9.0,
+                degrees: 90.0,
+            },
+            F::MotionBlur {
+                distance: 20.0,
+                degrees: 30.0,
+            },
+            // Pointed backwards, which is the same line: a smear is
+            // centred on the pixel and has no near end.
+            F::MotionBlur {
+                distance: 12.0,
+                degrees: 180.0,
+            },
+            // Shorter than a pixel, which moves nothing at all.
+            F::MotionBlur {
+                distance: 0.2,
+                degrees: 45.0,
+            },
+        ] {
+            let doc = with(filter.clone());
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{filter:?} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // And the direction is read rather than merely obeyed as a
+        // quantity: along the bar the rows above it stay dark and the bar
+        // stays bright; across it the bar bleeds upward and thins.
+        let bare = gpu.render(&page()).unwrap();
+        let along = gpu
+            .render(&with(F::MotionBlur {
+                distance: 16.0,
+                degrees: 0.0,
+            }))
+            .unwrap();
+        let across = gpu
+            .render(&with(F::MotionBlur {
+                distance: 16.0,
+                degrees: 90.0,
+            }))
+            .unwrap();
+        let above = |s: &chitrakar_render::Surface| s.get(30, 12).r;
+        let middle = |s: &chitrakar_render::Surface| s.get(30, 20).r;
+        assert!(
+            (above(&along) - above(&bare)).abs() < 0.01,
+            "smeared along itself the bar has not spread ({} against {})",
+            above(&along),
+            above(&bare)
+        );
+        assert!(
+            above(&across) > above(&bare) + 0.05,
+            "smeared across itself it has ({} against {})",
+            above(&across),
+            above(&bare)
+        );
+        assert!(
+            middle(&across) < middle(&along) - 0.05,
+            "and the middle is thinner for it ({} against {})",
+            middle(&across),
+            middle(&along)
         );
     }
 
