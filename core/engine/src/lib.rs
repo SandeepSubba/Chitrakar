@@ -1889,7 +1889,19 @@ impl Session {
         let Some((lx, ly)) = self.point_in_layer(id, false, x, y)? else {
             return Ok(0);
         };
-        let mut hs = padded_handles(handles, points.len());
+        // A smooth path carries no handles: its curve is a Catmull-Rom
+        // spline read off the anchors. Splitting a segment is arithmetic
+        // on control points, so the curve is written as the handles it
+        // already is before anything is done to it — otherwise the split
+        // reads zero handles, treats the segment as straight, and the
+        // path comes out a polyline, every bend in it gone.
+        let authored = handles.len() == points.len()
+            && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+        let mut hs = if !authored && *smooth && points.len() >= 3 {
+            chitrakar_render::smooth_handles(points, *closed)
+        } else {
+            padded_handles(handles, points.len())
+        };
         let segments = if *closed {
             points.len()
         } else {
@@ -5097,7 +5109,7 @@ mod tests {
     use super::*;
 
     /// How far apart two pages are, and where.
-    fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
+    pub(super) fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
         let mut worst = (0.0f32, 0u32, 0u32);
         for y in 0..b.height.min(a.height) {
             for x in 0..b.width.min(a.width) {
@@ -8166,6 +8178,137 @@ mod tests {
             s.undo().unwrap();
             let (worst, _, _) = apart(&before, &s.render().unwrap());
             assert!(worst < 1e-5, "one undo puts a {what} layer back as it was");
+        }
+    }
+
+    /// Adding an anchor to a path leaves the path where it was.
+    ///
+    /// That is the whole of what adding one is for: somewhere new to take
+    /// hold of a curve that is already the curve somebody wants. The
+    /// arithmetic is a de Casteljau split, which is exact — on a path that
+    /// has handles.
+    ///
+    /// A *smooth* path has none. Its curve is a Catmull-Rom spline read
+    /// straight off the anchors, which is what lets a path be drawn by
+    /// clicking, and the split read those absent handles as zeroes: it
+    /// treated the segment as a straight line, wrote handles that kept it
+    /// straight, and gave the path authored handles — which win over
+    /// `smooth` — so every other bend in it went as well. One click on a
+    /// curve and the curve was a polyline. The handles are derived first
+    /// now (`chitrakar_render::smooth_handles`, where the conversion is
+    /// stated once), so the path is split as the curve it is and comes out
+    /// as a path with handles, which is what it always was underneath.
+    ///
+    /// What is left is a fraction of an alpha step at the edge: the same
+    /// curve cut into more, shorter pieces lands its antialiasing a
+    /// hair differently. Nothing moves by as much as a quarter of a step
+    /// anywhere, which is the claim.
+    #[test]
+    fn adding_an_anchor_leaves_the_path_where_it_was() {
+        let path_layer = |smooth: bool, closed: bool, handles: Vec<[f32; 4]>| {
+            let mut s = Session::new(80, 60, ColorMode::Rgb);
+            let root = s.document().root();
+            let mut node = Node::vector(
+                "curve",
+                VectorShape::Path {
+                    points: vec![[8.0, 40.0], [24.0, 10.0], [48.0, 46.0], [70.0, 14.0]],
+                    closed,
+                    smooth,
+                    handles,
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { stroke, fill, .. } = &mut node.kind {
+                *fill = None;
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.1,
+                        a: 1.0,
+                    },
+                    width: 2.0,
+                    widths: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    dash: Vec::new(),
+                    align: None,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            s
+        };
+        let own_handles = vec![
+            [0.0, 0.0, 6.0, -10.0],
+            [-6.0, 10.0, 8.0, 6.0],
+            [-8.0, -6.0, 7.0, 8.0],
+            [-7.0, -8.0, 0.0, 0.0],
+        ];
+        for (what, smooth, closed, handles) in [
+            ("a path of corners", false, false, Vec::new()),
+            (
+                "a smooth path drawn without handles",
+                true,
+                false,
+                Vec::new(),
+            ),
+            ("a smooth path closed on itself", true, true, Vec::new()),
+            (
+                "a path with handles of its own",
+                false,
+                false,
+                own_handles.clone(),
+            ),
+            ("the same, closed", false, true, own_handles),
+        ] {
+            let before = path_layer(smooth, closed, handles.clone())
+                .render()
+                .unwrap();
+            let mut inserted = 0usize;
+            for (ax, ay) in [(36.0, 30.0), (16.0, 24.0), (60.0, 30.0), (30.0, 22.0)] {
+                let mut s = path_layer(smooth, closed, handles.clone());
+                let id = s.document().children_of(s.document().root()).unwrap()[0];
+                if s.insert_anchor(id, ax, ay, 40.0).is_err() {
+                    continue;
+                }
+                inserted += 1;
+                let after = s.render().unwrap();
+                let (worst, x, y) = apart(&before, &after);
+                assert!(
+                    worst < 0.3,
+                    "{what}: an anchor at {ax},{ay} moved it by {worst} at {x},{y}"
+                );
+                let moved = (0..before.height)
+                    .flat_map(|y| (0..before.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| (before.get(*x, *y).a - after.get(*x, *y).a).abs() > 0.25)
+                    .count();
+                assert_eq!(
+                    moved, 0,
+                    "{what}: an anchor at {ax},{ay} moved {moved} pixels by a visible amount"
+                );
+                // The path has one more anchor and it lies on the curve —
+                // which the page above has already said, but a path that
+                // refused to grow would pass that silently.
+                let NodeKind::Vector {
+                    shape: VectorShape::Path { points, .. },
+                    ..
+                } = &s.document().node(id).unwrap().kind
+                else {
+                    panic!("still a path")
+                };
+                assert_eq!(points.len(), 5, "{what}: it has the new anchor");
+            }
+            assert!(
+                inserted >= 3,
+                "{what}: the insertions were actually made ({inserted})"
+            );
         }
     }
 

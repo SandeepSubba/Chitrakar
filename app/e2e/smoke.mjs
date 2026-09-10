@@ -9419,6 +9419,86 @@ assert(
   );
 }
 
+// 9ba. Adding an anchor to a brushed line leaves the line where it was. A
+// freehand stroke lands as a *smooth* path — a Catmull-Rom spline read
+// straight off its anchors, with no handles — and double-clicking a picked
+// path's outline puts an anchor on it, which is the gesture for it in every
+// vector editor. The split read those absent handles as zeroes, so it cut
+// the segment as though it were straight and gave the path handles, which
+// win over "smooth": one double-click turned a drawn curve into a
+// polyline, every bend in it gone.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Brush");
+  await page.locator('input[aria-label="Brush width"]').fill("6");
+  await page.waitForTimeout(150);
+  // A line with real bends in it, drawn slowly enough to keep them.
+  const along = [
+    [60, 220],
+    [110, 90],
+    [170, 210],
+    [230, 80],
+    [300, 200],
+    [350, 110],
+  ];
+  await page.mouse.move(...at(...along[0]));
+  await page.mouse.down();
+  for (const p of along.slice(1)) await page.mouse.move(...at(...p), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+
+  // How much of the page the line covers. A curve cut into straight
+  // pieces is a shorter line than the curve was — the chords cut every
+  // bend off — so the ink it lays down is the plainest single number that
+  // says whether the shape survived, and it needs no guess about where
+  // the smoothed curve happens to pass.
+  const ink = () =>
+    page.evaluate(() => {
+      const el = document.getElementById("engine-canvas");
+      const img = el
+        .getContext("2d")
+        .getImageData(0, 0, el.width, el.height).data;
+      let n = 0;
+      for (let i = 3; i < img.length; i += 4) if (img[i] > 0) n++;
+      return n;
+    });
+  const curved = await ink();
+  assert(curved > 400, `the drawn line covers the page it was drawn on (${curved})`);
+
+  // Pick it and double-click on the outline, midway along a segment where
+  // the curve is furthest from the straight line between two anchors.
+  await pickTool("Move");
+  await page.mouse.click(...at(...along[0]));
+  await page.waitForTimeout(250);
+  const anchorsBefore = await page.locator(".anchor").count();
+  assert(anchorsBefore > 2, `the path shows its anchors (${anchorsBefore})`);
+  // Midway between two of the drawn points, which is where a chord and
+  // the curve are furthest apart.
+  await page.mouse.dblclick(...at(200, 145));
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".anchor").count()) === anchorsBefore + 1,
+    "double-clicking the outline put an anchor on it",
+  );
+  const after = await ink();
+  // A hundredth: the fix leaves it within a thousandth of where it was,
+  // and flattening the curve costs nearly three hundredths, so there is
+  // ten times the room either way.
+  assert(
+    Math.abs(after - curved) < curved * 0.01,
+    `and the line is the same line it was (${curved} -> ${after})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".anchor").count()) === anchorsBefore,
+    "one undo takes the anchor back off",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

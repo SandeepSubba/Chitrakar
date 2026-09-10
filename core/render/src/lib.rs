@@ -2143,6 +2143,39 @@ fn max_scale(t: Transform) -> f32 {
 /// can be resampled to match the polyline exactly.
 const FLATTEN_STEPS: usize = 12;
 
+/// The Bezier handles a `smooth` path's curve is made of.
+///
+/// A smooth path has no authored handles: its curve is a Catmull-Rom
+/// spline read straight off the anchors, which is what makes it a path
+/// somebody can draw by clicking. That spline is a cubic, though, and
+/// every segment of it is *exactly* a Bezier — `C1 = P1 + (P2-P0)/6`,
+/// `C2 = P2 - (P3-P1)/6` — so the same curve can be written as handles
+/// whenever something needs to work on it as one. Editing an anchor is
+/// what needs it: splitting a segment is arithmetic on control points,
+/// and a smooth path that had none used to be split as though it were
+/// straight, which flattened the whole path on the first insertion.
+///
+/// Both handles of an anchor are the same vector, one negated: that is
+/// what makes the join smooth, and it is why a path written this way then
+/// behaves like one that was drawn with handles.
+pub fn smooth_handles(points: &[[f32; 2]], closed: bool) -> Vec<[f32; 4]> {
+    let n = points.len();
+    let at = |i: isize| -> [f32; 2] {
+        if closed {
+            points[i.rem_euclid(n as isize) as usize]
+        } else {
+            points[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    (0..n as isize)
+        .map(|k| {
+            let (before, after) = (at(k - 1), at(k + 1));
+            let d = [(after[0] - before[0]) / 6.0, (after[1] - before[1]) / 6.0];
+            [-d[0], -d[1], d[0], d[1]]
+        })
+        .collect()
+}
+
 /// Expand a curved path into the polyline everything else works on — paint,
 /// hit test, bounds all run on the result, so curves need no special cases
 /// downstream. Bezier handles win when present because they are authored;

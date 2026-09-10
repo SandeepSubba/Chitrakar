@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~376),
+- **Verify before committing:** `cargo test --workspace` (~377),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~982 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1030,6 +1030,29 @@ without reading anything else.*
   is pinned rather than assumed. Asked with an adjustment that does
   nothing, so the claim is the plain one — the page before and the page
   after are the same page.
+- **Adding an anchor to a path leaves the path where it was:** that is
+  the whole of what adding one is for — somewhere new to take hold of a
+  curve that is already the curve somebody wants — and the arithmetic is a
+  de Casteljau split, which is exact on a path that has handles. A
+  *smooth* path has none: its curve is a Catmull-Rom spline read straight
+  off the anchors, which is what lets a path be drawn by clicking and what
+  a brush stroke lands as. The split read those absent handles as zeroes,
+  cut the segment as though it were straight, and gave the path authored
+  handles — which win over `smooth` — so every other bend went too. Draw a
+  line with the brush, double-click it to add an anchor, and the line was a
+  polyline.
+  The handles are derived first now, and the conversion is stated once as
+  `chitrakar_render::smooth_handles`: a Catmull-Rom segment *is* a Bezier,
+  `C1 = P1 + (P2-P0)/6` and `C2 = P2 - (P3-P1)/6`, and both handles of an
+  anchor are the same vector negated, which is what makes the join smooth
+  and why the path then behaves like one drawn with handles. What is left
+  is a fraction of an alpha step at the edge, since the same curve cut into
+  more, shorter pieces lands its antialiasing a hair differently; nothing
+  moves by as much as a quarter of a step anywhere, over five kinds of path
+  and four places to insert. Block 9ba drives the brush-then-double-click
+  path and reads the ink the line lays down: a curve cut into chords is a
+  shorter line, so that one number says whether the shape survived without
+  guessing where the smoothed curve passes.
 - **Combining shapes keeps the shape that was being combined:** the
   result takes the bottom-most operand's fill and stroke, because that is
   the shape the eye reads as the one being worked on — and by the same
