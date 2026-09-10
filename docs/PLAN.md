@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~364),
+- **Verify before committing:** `cargo test --workspace` (~366),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~966 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -971,6 +971,36 @@ without reading anything else.*
   parts of the fix was checked by breaking it and watching that test
   fail. `a_shadow_turns_with_the_group_it_is_in` pins the renderer's
   half on its own.
+- **Every command, over the boundary the UI talks across:** nothing in
+  the app calls `apply`. The UI is TypeScript on the far side of a wasm
+  boundary, so every mutation it makes is a serde-JSON `Command` handed
+  to `Session::apply_json` — which makes the JSON shape of `Command` the
+  editor's API, and a variant whose serde representation cannot make the
+  round trip a feature that passes every native test and does nothing in
+  the browser. One command had ever been sent that way in a test.
+  `every_command_survives_the_boundary_the_ui_talks_over` applies each
+  of the fixture's commands twice — directly to one document and, as its
+  own JSON, to a copy — and holds the two documents and the two pages
+  against each other, so a field written in a form that reads back short
+  is caught rather than a field somebody thought to look at.
+- **And the list of every command really is one:** the fixture has said
+  since it was written that adding a `Command` without adding it there
+  is what makes the audits fail, and that was true of nothing.
+  `RestoreSubtree` — the command a delete undoes to, which carries a
+  whole subtree rather than a value — was missing for as long as it had
+  existed, so none of the five audits built on that list had ever asked
+  its question about putting a deleted layer back. It is in the list now,
+  as a removal and a restore *somewhere else*: put back where it came
+  from it would change nothing, and the inverse audit rightly refuses a
+  command that changes nothing, since then its inverse proves nothing.
+  Keeping the promise is now the compiler's job. `fixture::variant_name`
+  matches every variant with no arm for anything else, so a new one stops
+  the file compiling on the line that says what to do; and
+  `the_list_holds_every_command_there_is` holds the named list against
+  what the list of things to do actually reaches, batches included. The
+  five audits accepted the new variant as it stood, so this one found a
+  hole rather than a bug — but it is the hole the other five were
+  looking through.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an

@@ -1190,6 +1190,62 @@ mod tests {
         ))
     }
 
+    /// The list of every command really is a list of every command.
+    ///
+    /// Five audits are built on `fixture::every_command` — that each
+    /// undoes exactly, that each dirties what it changes, that each
+    /// survives a file, a gesture, and the JSON boundary the UI talks
+    /// over — and every one of them is only as wide as that list. The
+    /// file has said since it was written that adding a `Command`
+    /// without adding it there is what makes those tests fail, and that
+    /// was not true of anything: `RestoreSubtree`, the command a delete
+    /// undoes to, was missing for as long as it had existed, so nothing
+    /// had ever asked any of those five questions about putting a
+    /// deleted layer back.
+    ///
+    /// Now the compiler asks first. `fixture::variant_name` matches on
+    /// every variant with no arm for anything else, so a new one stops
+    /// this file compiling; and this test says the named list and the
+    /// list of things to do agree, so naming it is not the end of it
+    /// either.
+    #[test]
+    fn the_list_holds_every_command_there_is() {
+        let f = fixture::everything();
+        let mut seen: Vec<&str> = Vec::new();
+        // A batch is a command in its own right and also a way of
+        // reaching the ones inside it, which is how `RestoreSubtree`
+        // arrives — it only means anything on a document its subtree has
+        // been taken out of, so it travels with the removal.
+        fn note<'a>(cmd: &'a Command, seen: &mut Vec<&'a str>) {
+            seen.push(fixture::variant_name(cmd));
+            if let Command::Batch(inner) = cmd {
+                for one in inner {
+                    note(one, seen);
+                }
+            }
+        }
+        let each = fixture::every_command(&f);
+        for cmd in &each {
+            note(cmd, &mut seen);
+        }
+        let missing: Vec<&&str> = fixture::EVERY_VARIANT
+            .iter()
+            .filter(|name| !seen.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "no command in the list does these: {missing:?}"
+        );
+        // And nothing is named that does not exist, which is what a
+        // variant renamed rather than added would leave behind.
+        for name in &seen {
+            assert!(
+                fixture::EVERY_VARIANT.contains(name),
+                "{name} is in the list but not in EVERY_VARIANT"
+            );
+        }
+    }
+
     /// Every command's inverse puts the document back exactly as it was.
     ///
     /// That is the invariant the whole editor rests on — undo is the

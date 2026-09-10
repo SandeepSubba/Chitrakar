@@ -7487,6 +7487,77 @@ mod tests {
         }
     }
 
+    /// Every command, over the boundary the UI actually talks across.
+    ///
+    /// Nothing in the app calls `apply`: the UI is TypeScript on the far
+    /// side of a wasm boundary, so every mutation it makes is a
+    /// serde-JSON `Command` handed to [`Session::apply_json`]. That makes
+    /// the JSON shape of `Command` the editor's API, and a variant whose
+    /// serde representation cannot make the round trip is a feature that
+    /// works in every native test and does nothing in the browser —
+    /// which is the worst place to find out. A field added with
+    /// `#[serde(default)]`, a float written in a form that reads back
+    /// short, an enum with two spellings of the same value: all of them
+    /// look fine from `apply`.
+    ///
+    /// So each of the fixture's commands goes both ways at once: applied
+    /// directly to one document and, as its own JSON, to a copy of the
+    /// same document, and the two documents held against each other.
+    /// Nothing here says what a command *does* — the inverse and repaint
+    /// audits say that — only that the wire carries it whole.
+    #[test]
+    fn every_command_survives_the_boundary_the_ui_talks_over() {
+        let f = chitrakar_doc::fixture::everything();
+        let mut checked = 0usize;
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what.split_once(" {").map(|(a, _)| a).unwrap_or(&what);
+            let json = serde_json::to_string(&command)
+                .unwrap_or_else(|e| panic!("{what} cannot be written as JSON: {e}"));
+            // Read back as a command, and asked for again: a value that
+            // survives says the same thing the second time.
+            let back: Command = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{what} cannot be read back: {e}\n{json}"));
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "{what} does not come back as itself"
+            );
+
+            let mut direct = Session::from_document(f.doc.clone());
+            let mut over_the_wire = Session::from_document(f.doc.clone());
+            let here = direct.apply(command);
+            let there = over_the_wire.apply_json(&json);
+            match (here, there) {
+                (Ok(()), Ok(())) => {}
+                (Err(a), Err(b)) => assert_eq!(
+                    a.to_string(),
+                    b.to_string(),
+                    "{what} is refused for different reasons on the two sides"
+                ),
+                (a, b) => panic!("{what}: applied directly {a:?}, over the wire {b:?}"),
+            }
+            assert_eq!(
+                format!("{:?}", over_the_wire.document()),
+                format!("{:?}", direct.document()),
+                "{what} left a different document behind when it came over the wire"
+            );
+            // And the page drawn from it, since a document can hold the
+            // same values and still be read differently.
+            let (worst, x, y) = apart(&direct.render().unwrap(), &over_the_wire.render().unwrap());
+            assert!(
+                worst < 1e-6,
+                "{what} draws differently over the wire ({worst} at {x},{y})"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= chitrakar_doc::fixture::EVERY_VARIANT.len(),
+            "the whole list was reached: {checked} of at least {}",
+            chitrakar_doc::fixture::EVERY_VARIANT.len()
+        );
+    }
+
     /// Every command there is, and then every way out of the editor.
     ///
     /// An exporter is where a node kind is forgotten: each writes the

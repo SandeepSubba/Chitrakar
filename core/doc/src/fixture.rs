@@ -354,6 +354,35 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         // or a space.
         feather: 1.5,
     });
+    // The one command nothing asks for by name: `RestoreSubtree` is what
+    // a delete undoes to, so it is never written at the top of a list of
+    // things to do and was the one variant this list did not hold — which
+    // means every audit built on it, and there are five, had never seen
+    // the command that puts a deleted layer back. It only means anything
+    // on a document the subtree has been taken out of, so it arrives with
+    // the taking: removed and put straight back. The two halves are each
+    // other's inverse, so the batch changes nothing — the point is that
+    // both are applied, and that the subtree makes every journey the list
+    // is asked about.
+    let restore = {
+        let mut scratch = f.doc.clone();
+        let back = scratch
+            .apply(Command::RemoveNode { id: words })
+            .expect("removing a layer gives back the command that restores it");
+        let Command::RestoreSubtree { subtree, .. } = back else {
+            unreachable!("what a removal undoes to is a restored subtree")
+        };
+        // Put back somewhere else. Removed and restored where it was is a
+        // pair that changes nothing, and a command that changes nothing
+        // is one whose inverse proves nothing — so the layer comes back
+        // inside the group rather than at the top of the page, which is a
+        // move a document can be held to.
+        Command::RestoreSubtree {
+            parent: group,
+            index: 0,
+            subtree,
+        }
+    };
     vec![
         Command::AddNode {
             parent: group,
@@ -583,8 +612,86 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 index: 2,
             },
         ]),
+        Command::Batch(vec![Command::RemoveNode { id: words }, restore]),
     ]
 }
+
+/// A command's variant, by name.
+///
+/// The match has no arm for "anything else", which is the point: a
+/// variant added to [`Command`] stops this file compiling until it is
+/// named here, and the line it stops on is next to the list that says
+/// what to do about it. Add the name to [`EVERY_VARIANT`] and an
+/// instance of the command to [`every_command`], and
+/// `the_list_holds_every_command_there_is` goes quiet again.
+pub fn variant_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::AddNode { .. } => "AddNode",
+        Command::RemoveNode { .. } => "RemoveNode",
+        Command::RestoreSubtree { .. } => "RestoreSubtree",
+        Command::SetOpacity { .. } => "SetOpacity",
+        Command::SetVisible { .. } => "SetVisible",
+        Command::SetLocked { .. } => "SetLocked",
+        Command::SetClipped { .. } => "SetClipped",
+        Command::SetPinning { .. } => "SetPinning",
+        Command::SetBlendMode { .. } => "SetBlendMode",
+        Command::SetName { .. } => "SetName",
+        Command::SetTransform { .. } => "SetTransform",
+        Command::SetKind { .. } => "SetKind",
+        Command::MoveNode { .. } => "MoveNode",
+        Command::AddStroke { .. } => "AddStroke",
+        Command::SetStroke { .. } => "SetStroke",
+        Command::RemoveStroke { .. } => "RemoveStroke",
+        Command::SetMask { .. } => "SetMask",
+        Command::SetEffects { .. } => "SetEffects",
+        Command::SetGuides { .. } => "SetGuides",
+        Command::SetSwatches { .. } => "SetSwatches",
+        Command::SetSelection { .. } => "SetSelection",
+        Command::SetRegions { .. } => "SetRegions",
+        Command::ResizeCanvas { .. } => "ResizeCanvas",
+        Command::TurnCanvas { .. } => "TurnCanvas",
+        Command::MirrorCanvas { .. } => "MirrorCanvas",
+        Command::StraightenCanvas { .. } => "StraightenCanvas",
+        Command::Batch(_) => "Batch",
+    }
+}
+
+/// Every variant [`every_command`] is meant to hold one of.
+///
+/// The file's promise at the top — that adding a `Command` without
+/// adding it here is what makes the audits fail — was a promise nothing
+/// kept: `RestoreSubtree` was missing for as long as it had existed, so
+/// the five audits built on the list had never once seen the command
+/// that puts a deleted layer back. This is the list that keeps it.
+pub const EVERY_VARIANT: &[&str] = &[
+    "AddNode",
+    "RemoveNode",
+    "RestoreSubtree",
+    "SetOpacity",
+    "SetVisible",
+    "SetLocked",
+    "SetClipped",
+    "SetPinning",
+    "SetBlendMode",
+    "SetName",
+    "SetTransform",
+    "SetKind",
+    "MoveNode",
+    "AddStroke",
+    "SetStroke",
+    "RemoveStroke",
+    "SetMask",
+    "SetEffects",
+    "SetGuides",
+    "SetSwatches",
+    "SetSelection",
+    "SetRegions",
+    "ResizeCanvas",
+    "TurnCanvas",
+    "MirrorCanvas",
+    "StraightenCanvas",
+    "Batch",
+];
 
 /// Whether a command can be undone bit for bit.
 ///
