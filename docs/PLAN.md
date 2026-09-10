@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~408),
+- **Verify before committing:** `cargo test --workspace` (~410),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1912,6 +1912,17 @@ without reading anything else.*
   container writes a file per entry in that order). A hash map's order
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
+- **A clone stroke stays inside its region too.** A region picked out
+  confines what is painted, and it rides on the stroke so that it goes on
+  confining it after the region is let go of. The brush read that; the
+  clone did not — so painting a patch out with a region picked spilled
+  past it, and spilled with *what the page holds somewhere else*, which
+  is the one kind of paint nobody can see coming. What a stroke is filled
+  with is no part of the question: the region confines the stroke
+  (`a_clone_stroke_laid_in_a_region_stays_in_it`). Found while teaching
+  the GPU backend to draw a clone layer — reading the CPU renderer
+  closely enough to copy it is a way of reading it closely enough to
+  catch it.
 - **One idea of distance.** An outline's band is how far a pixel is from
   the layer's silhouette, and it was worked out by a chamfer sweep — a
   step sideways costing one, a diagonal root two — while a region grown
@@ -1954,8 +1965,11 @@ without reading anything else.*
   and how soft the edge is, which an outline cannot.
 - **Next up (rough priority):**
   1. The GPU backend, in two halves. What is left to *teach* it:
-     nothing of the node kinds: a brush layer was the last it had never
-     drawn, and it draws one now
+     nothing of the node kinds — a clone layer was the last it had never
+     drawn — and what it still hands a page back for is a thing a layer
+     *holds* rather than the kind of layer it is: press ink, a healing
+     stroke, an outline wider than a pass will walk, effects on a group.
+     A brush layer it draws
      (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
      into a coverage of its own with max blending, since the segments of
      one stroke union rather than pile up, then laid down in its colour
@@ -1967,8 +1981,21 @@ without reading anything else.*
      which is exactly what makes it the stroke's — riding the same slot a
      layer's mask does. One slot holds one coverage, so a layer whose own
      mask is already on it and whose stroke also carries a region is
-     still the CPU's. What still goes back is a clone layer, which paints
-     with what the page already holds. Shadows it now draws,
+     still the CPU's. A clone layer it draws too
+     (`a_clone_lifts_what_the_cpu_lifts`), which is the last of the node
+     kinds: it paints with what the surface already holds a fixed
+     distance away, so it is never put on a surface of its own — on one
+     there would be nothing under it to paint with — and its blend, its
+     opacity and its mask go on each stroke as it lands, which is where
+     the CPU renderer puts them. What it lifts and what it lands on are
+     the same copy of the surface, taken before the stroke's pass, so a
+     stroke running over its own source reads what was there rather than
+     what it has just laid — and that is also what leaves the blend
+     something to read. What still goes back is a healing stroke, whose
+     shift is an average over the whole stroke before any of it goes
+     down: a reduction, and a pass of quads is not where one happens.
+     There is no arm left over in the walk now and none wanted, so a new
+     kind of layer will not compile until it says how it is drawn. Shadows it now draws,
      inner and outer, as the blur passes again read
      off the layer's own silhouette rather than off what is under it
      (`a_shadow_is_the_silhouette_the_cpu_casts`), on a leaf that is

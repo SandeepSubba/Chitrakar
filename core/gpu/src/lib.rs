@@ -229,6 +229,13 @@ enum Draw {
         quad: std::ops::Range<u32>,
         erase: bool,
     },
+    /// One clone stroke: the same gathered coverage, filled with what
+    /// the surface already holds a fixed distance away rather than with
+    /// a colour.
+    Clone {
+        segments: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -280,6 +287,9 @@ pub struct GpuRenderer {
     brush: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
     eraser: wgpu::RenderPipeline,
+    /// A clone stroke: the same coverage, filled with what the surface
+    /// already holds a fixed distance away, composited in full.
+    clone: wgpu::RenderPipeline,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -541,6 +551,39 @@ impl GpuRenderer {
         // rather than laid over: the fragment works out the whole
         // answer, backdrop included, so it replaces what is there
         // instead of blending into it.
+        let composite = |label: &'static str, entry: &'static str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_image"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        ..target.clone()
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(stencil_state(
+                    wgpu::StencilOperation::Keep,
+                    wgpu::CompareFunction::Always,
+                )),
+                multisample,
+                multiview: None,
+                cache: None,
+            })
+        };
+        // A clone stroke, which works its whole answer out for the same
+        // reason a blend does — what it lifts and what it lands on are
+        // both what was already there.
+        let clone = composite("clone", "fs_clone");
         let blend = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blend"),
             layout: Some(&pipeline_layout),
@@ -995,6 +1038,7 @@ impl GpuRenderer {
             brush,
             paint,
             eraser,
+            clone,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -1328,6 +1372,7 @@ impl GpuRenderer {
                     | Some(Opening::Blocks { .. })
                     | Some(Opening::Effect { .. })
                     | Some(Opening::Brush { .. })
+                    | Some(Opening::Clone { .. })
             )
         });
         let scratch: Vec<_> = if !blurring {
@@ -1440,7 +1485,13 @@ impl GpuRenderer {
             // segments are gathered into a coverage of their own with
             // max blending, since the segments of one stroke union
             // rather than pile up.
-            if let (Some(Opening::Brush { segments, .. }), Some(quads)) = (&step.lay, &quads) {
+            let gathering = match &step.lay {
+                Some(Opening::Brush { segments, .. }) | Some(Opening::Clone { segments, .. }) => {
+                    Some(segments)
+                }
+                _ => None,
+            };
+            if let (Some(segments), Some(quads)) = (gathering, &quads) {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("brush"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1722,6 +1773,16 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[0].1, &[]);
                             (quad, mask)
                         }
+                        Opening::Clone { quad, mask, .. } => {
+                            // What is under the stroke and what it lifts
+                            // are the same copy, taken before the pass:
+                            // a stroke running over its own source reads
+                            // what was there rather than what it has just
+                            // laid.
+                            pass.set_pipeline(&self.clone);
+                            pass.set_bind_group(1, &scratch[0].1, &[]);
+                            (quad, mask)
+                        }
                         Opening::Effect {
                             from,
                             at,
@@ -1827,7 +1888,8 @@ impl GpuRenderer {
                         | Draw::Blur { .. }
                         | Draw::Smear { .. }
                         | Draw::Blocks { .. }
-                        | Draw::Brush { .. } => {}
+                        | Draw::Brush { .. }
+                        | Draw::Clone { .. } => {}
                     }
                 }
             }
@@ -2185,6 +2247,11 @@ fn one(
             && (node.opacity < 1.0
                 || node.mask.is_some()
                 || chitrakar_render::reads_backdrop(doc, child).ok()?));
+    // Except a clone layer, never: what it paints with is what is under
+    // it, and a surface of its own would have nothing under it to paint
+    // with. Its blend, its opacity and its mask go on each stroke as it
+    // lands, which is where the CPU renderer puts them too.
+    let alone = alone && !matches!(node.kind, NodeKind::Clone { .. });
     if alone {
         out.draws.push(Item::of(Draw::Open));
     }
@@ -2282,40 +2349,7 @@ fn one(
                     // everywhere else.
                     premultiplied_color(stroke.color.clone(), 1.0)?
                 };
-                let start = out.vertices.len() as u32;
-                for i in 0..n.saturating_sub(1).max(1) {
-                    let j = (i + 1).min(n - 1);
-                    let (a, b) = (stroke.points[i], stroke.points[j]);
-                    let (ra, rb) = (stroke.radius(i), stroke.radius(j));
-                    let reach = ra.max(rb);
-                    if reach <= 0.0 {
-                        continue;
-                    }
-                    let box_ = [
-                        a[0].min(b[0]) - reach,
-                        a[1].min(b[1]) - reach,
-                        a[0].max(b[0]) + reach,
-                        a[1].max(b[1]) + reach,
-                    ];
-                    let at = t.compose(Transform::translation(box_[0], box_[1]));
-                    let mut verts = quad(
-                        at,
-                        [box_[2] - box_[0], box_[3] - box_[1]],
-                        [a[0], a[1], b[0], b[1]],
-                        [0.0; 4],
-                        [ra, rb, stroke.softness.clamp(0.0, 1.0), band],
-                        0.0,
-                    );
-                    // The quad is placed at the segment's corner, so its
-                    // local coordinate starts there; the segment is
-                    // written in the layer's own space, and both have to
-                    // be read in the same one.
-                    for v in &mut verts {
-                        v.local = [v.local[0] + box_[0], v.local[1] + box_[1]];
-                    }
-                    out.vertices.extend(verts);
-                }
-                let segments = start..out.vertices.len() as u32;
+                let segments = stroke_segments(stroke, t, band, out);
                 if segments.is_empty() {
                     continue;
                 }
@@ -2335,6 +2369,62 @@ fn one(
                         quad,
                         erase: stroke.erase,
                     },
+                    mask: confined.0,
+                });
+            }
+        }
+        // A clone layer: the same strokes, filled with what the surface
+        // already holds a fixed distance away rather than with a colour.
+        // Not on a surface of its own, unlike a brush layer — what it
+        // paints with is what is under it, and on one of its own there
+        // would be nothing under it to paint with.
+        NodeKind::Clone { strokes } => {
+            let band = 1.0 / t.max_scale().max(1e-6);
+            for stroke in strokes {
+                // Healing takes the texture from the source and the
+                // colour from where it lands: the shift between what the
+                // two average over the whole stroke, worked out before a
+                // single pixel of it goes down. That is a reduction, and
+                // a pass of quads is not where one happens.
+                if stroke.heal {
+                    return None;
+                }
+                let confined = match stroke.clip.as_deref() {
+                    Some(region) => {
+                        if node.mask.is_some() || held_to.is_some() || bound.is_some() {
+                            return None;
+                        }
+                        match stroke.bounds() {
+                            Some(box_) => clip_texture(doc, region, box_, t, out)?,
+                            None => continue,
+                        }
+                    }
+                    None => (None, NO_MASK),
+                };
+                let segments = stroke_segments(stroke, t, band, out);
+                if segments.is_empty() {
+                    continue;
+                }
+                // The offset is a direction rather than a place: the
+                // source is written in the layer's own space, so where
+                // it points is that space's to say and its shift is no
+                // part of it — the CPU renderer's own carry.
+                let (sx, sy) = (
+                    t.a * stroke.source[0] + t.c * stroke.source[1],
+                    t.b * stroke.source[0] + t.d * stroke.source[1],
+                );
+                let quad = out.push(page_quad(
+                    (out.page, out.surface),
+                    alpha,
+                    [blend_index(node.blend) as f32, sx, sy, 0.0],
+                    [0.0; 4],
+                    [0.0; 3],
+                ));
+                for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
+                    v.mask = confined.1;
+                }
+                out.draws.push(Item {
+                    draw: Draw::Clone { segments, quad },
                     mask: confined.0,
                 });
             }
@@ -2608,8 +2698,12 @@ fn one(
                 }
             }
             return Some(());
-        }
-        _ => return None,
+        } // No arm left over, and none wanted: every kind of layer is
+          // drawn here now, so a new one will not compile until it says
+          // how — which is the same bargain `Node::each_color_mut` makes.
+          // What a layer is still handed back for is a thing it holds
+          // rather than the kind it is: press ink, a healing stroke, a
+          // band wider than a pass will walk.
     }
     // Where the quads that lay the surface down start, so the mask can
     // be kept off them: a layer with effects wears its mask on its own
@@ -2772,6 +2866,57 @@ fn one(
         }
     }
     Some(())
+}
+
+/// A stroke's segments as quads: the round-capped bands the brush shader
+/// turns into a coverage, gathered with max blending because the
+/// segments of one stroke union rather than pile up.
+///
+/// A brush layer and a clone layer lay the same shape and differ only in
+/// what fills it, so they read this the same way.
+fn stroke_segments(
+    stroke: &chitrakar_doc::PaintStroke,
+    t: Transform,
+    band: f32,
+    out: &mut Scene,
+) -> std::ops::Range<u32> {
+    let n = stroke.points.len();
+    let start = out.vertices.len() as u32;
+    if n == 0 {
+        return start..start;
+    }
+    for i in 0..n.saturating_sub(1).max(1) {
+        let j = (i + 1).min(n - 1);
+        let (a, b) = (stroke.points[i], stroke.points[j]);
+        let (ra, rb) = (stroke.radius(i), stroke.radius(j));
+        let reach = ra.max(rb);
+        if reach <= 0.0 {
+            continue;
+        }
+        let box_ = [
+            a[0].min(b[0]) - reach,
+            a[1].min(b[1]) - reach,
+            a[0].max(b[0]) + reach,
+            a[1].max(b[1]) + reach,
+        ];
+        let at = t.compose(Transform::translation(box_[0], box_[1]));
+        let mut verts = quad(
+            at,
+            [box_[2] - box_[0], box_[3] - box_[1]],
+            [a[0], a[1], b[0], b[1]],
+            [0.0; 4],
+            [ra, rb, stroke.softness.clamp(0.0, 1.0), band],
+            0.0,
+        );
+        // The quad is placed at the segment's corner, so its local
+        // coordinate starts there; the segment is written in the layer's
+        // own space, and both have to be read in the same one.
+        for v in &mut verts {
+            v.local = [v.local[0] + box_[0], v.local[1] + box_[1]];
+        }
+        out.vertices.extend(verts);
+    }
+    start..out.vertices.len() as u32
 }
 
 /// The region a brush stroke was laid inside, rasterized over the box
@@ -3944,6 +4089,15 @@ enum Opening {
         /// The region the stroke was laid inside, if it carries one.
         mask: Option<usize>,
     },
+    /// One clone stroke. Its segments have been gathered into a coverage
+    /// on the scratch texture by the time this opens the pass; what is
+    /// left is the quad that fills that coverage with what the surface
+    /// already holds a fixed distance away.
+    Clone {
+        segments: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
 }
 
 impl Opening {
@@ -3960,6 +4114,9 @@ impl Opening {
             // which is a question about what is under it by definition.
             Opening::Effect { blend, .. } => *blend != BlendMode::Normal,
             Opening::Brush { .. } => false,
+            // What a clone lifts and what it lands on are both what was
+            // already there, which is the one copy.
+            Opening::Clone { .. } => true,
         }
     }
 }
@@ -3986,7 +4143,8 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             | Draw::Blur { .. }
             | Draw::Smear { .. }
             | Draw::Blocks { .. }
-            | Draw::Brush { .. } => {}
+            | Draw::Brush { .. }
+            | Draw::Clone { .. } => {}
             _ => continue,
         }
         passes.push(Pass {
@@ -4094,6 +4252,14 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     segments: segments.clone(),
                     quad: quad.clone(),
                     erase: *erase,
+                    mask: item.mask,
+                });
+            }
+            Draw::Clone { segments, quad } => {
+                clear = false;
+                lay = Some(Opening::Clone {
+                    segments: segments.clone(),
+                    quad: quad.clone(),
                     mask: item.mask,
                 });
             }
@@ -4349,18 +4515,14 @@ mod tests {
         };
         let mut f = chitrakar_doc::fixture::everything();
         // The fixture holds one of every node kind, and this backend
-        // does not draw them all: a clone layer paints with what the
-        // page already holds, and the fixture's paint layer keeps a
-        // stroke authored in press ink, which a second renderer declines
-        // rather than guessing at a profile. The strokes themselves it
-        // lays now, region and all. One layer it cannot draw makes the
-        // whole page declined, and an audit that is declined every time
-        // measures nothing, so those two come out first. As the backend
-        // learns a kind, its line here goes and the commands that speak
-        // to it come into scope by themselves.
-        for id in [f.painted, f.borrowed] {
-            f.doc.apply(Command::RemoveNode { id }).unwrap();
-        }
+        // draws them all now — except that the fixture's paint layer
+        // keeps a stroke authored in press ink, which a second renderer
+        // declines rather than guessing at a profile. One layer it
+        // cannot draw makes the whole page declined, and an audit that
+        // is declined every time measures nothing, so that one comes out
+        // first. As the backend learns a kind, its line here goes and
+        // the commands that speak to it come into scope by themselves.
+        f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
         // And the effects the fixture hangs on layers, for the same
         // reason but not so bluntly. An effect is drawn from a layer's
         // silhouette, and this backend draws a shadow and an outline
@@ -7081,6 +7243,256 @@ mod tests {
     /// across whatever softness the brush was set to — and the segments
     /// of one stroke *union* rather than pile up, so a stroke that
     /// doubles back is not darker where it crossed itself.
+    /// A clone layer lifts what the surface already holds.
+    ///
+    /// It paints with what is under it at a fixed offset, read at the
+    /// moment of drawing rather than kept as a copy — which is why it is
+    /// never put on a surface of its own here: on one there would be
+    /// nothing under it to paint with. What it lifts and what it lands
+    /// on are the same copy of the surface, taken before the stroke lays
+    /// anything, so a stroke running over its own source reads what was
+    /// there rather than what it has just laid.
+    #[test]
+    fn a_clone_lifts_what_the_cpu_lifts() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let dab = |points: &[[f32; 2]], radius: f32, source: [f32; 2]| chitrakar_doc::PaintStroke {
+            points: points.to_vec(),
+            radii: vec![radius],
+            color: ink(0.0, 0.0, 0.0, 1.0),
+            softness: 0.0,
+            erase: false,
+            source,
+            heal: false,
+            clip: None,
+        };
+        let page = |strokes: Vec<chitrakar_doc::PaintStroke>| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.88, 0.86, 0.82, 1.0),
+                ),
+                Transform::default(),
+            );
+            // A patch to lift from, in the top-left quarter.
+            add(
+                &mut doc,
+                filled(
+                    "patch",
+                    VectorShape::Rect {
+                        width: 24.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    ink(0.85, 0.15, 0.1, 1.0),
+                ),
+                Transform::translation(6.0, 6.0),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::clone_layer("cloned")),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[2];
+            for (i, s) in strokes.into_iter().enumerate() {
+                doc.apply(Command::AddStroke {
+                    id,
+                    index: i,
+                    stroke: Box::new(s),
+                    on_mask: false,
+                })
+                .unwrap();
+            }
+            (doc, id)
+        };
+        // Painting at (50, 36) lifts from (16, 16), inside the patch.
+        let lift = [-34.0, -20.0];
+
+        type Dress = Box<dyn Fn(&mut Document, NodeId)>;
+        let dressed: Vec<(&str, Dress)> = vec![
+            ("plain", Box::new(|_: &mut Document, _: NodeId| {})),
+            (
+                "faded",
+                Box::new(|doc: &mut Document, id: NodeId| {
+                    doc.apply(Command::SetOpacity { id, opacity: 0.45 })
+                        .unwrap();
+                }),
+            ),
+            // The layer's blend goes on each stroke as it lands, which is
+            // where the CPU renderer puts it too.
+            (
+                "blended",
+                Box::new(|doc: &mut Document, id: NodeId| {
+                    doc.apply(Command::SetBlendMode {
+                        id,
+                        blend: BlendMode::Multiply,
+                    })
+                    .unwrap();
+                }),
+            ),
+            (
+                "masked",
+                Box::new(|doc: &mut Document, id: NodeId| {
+                    doc.apply(Command::SetMask {
+                        id,
+                        mask: Some(Box::new(chitrakar_doc::Mask {
+                            kind: chitrakar_doc::MaskKind::Vector {
+                                shape: VectorShape::Ellipse { rx: 10.0, ry: 10.0 },
+                                transform: Transform::translation(50.0, 36.0),
+                            },
+                            invert: false,
+                            feather: 2.0,
+                        })),
+                    })
+                    .unwrap();
+                }),
+            ),
+        ];
+        for (how, dress) in &dressed {
+            for (name, strokes) in [
+                ("one dab", vec![dab(&[[50.0, 36.0]], 9.0, lift)]),
+                (
+                    "a line",
+                    vec![dab(&[[40.0, 30.0], [64.0, 44.0]], 6.0, lift)],
+                ),
+                // Lifting from across a sharp edge in the source: the
+                // patch's own left edge falls inside what this dab
+                // reads, so which pixel it reads is written down the
+                // middle of what it lays. Half a pixel out and the edge
+                // moves a whole one.
+                (
+                    "across the source's edge",
+                    vec![dab(&[[44.0, 36.0]], 10.0, [-32.0, -20.0])],
+                ),
+                // Reading from off the page, where there is nothing to
+                // lift and so nothing lands.
+                (
+                    "out of nowhere",
+                    vec![dab(&[[10.0, 10.0]], 8.0, [-60.0, -40.0])],
+                ),
+                // Two, so the second sees what the first laid.
+                (
+                    "one after another",
+                    vec![
+                        dab(&[[40.0, 36.0]], 8.0, lift),
+                        dab(&[[52.0, 40.0]], 8.0, [-10.0, -6.0]),
+                    ],
+                ),
+                // Running over its own source: what it reads is what was
+                // there before the stroke, not what it has just laid.
+                (
+                    "over its own source",
+                    vec![dab(&[[20.0, 14.0], [44.0, 30.0]], 10.0, [-8.0, -5.0])],
+                ),
+            ] {
+                let (mut doc, id) = page(strokes);
+                dress(&mut doc, id);
+                assert!(
+                    GpuRenderer::can_render(&doc),
+                    "{how} {name} is drawn rather than handed back"
+                );
+                let (mean, worst) = difference(
+                    &gpu.render(&doc).unwrap(),
+                    &chitrakar_render::render(&doc).unwrap(),
+                );
+                assert!(
+                    mean < 0.004,
+                    "{how} {name}: mean {mean:.5}, worst {worst:.3}"
+                );
+            }
+        }
+
+        // The reading a mean over a page hides, which is most of what a
+        // clone gets wrong: *which* pixel it reads. The patch's own left
+        // edge at x = 6 falls inside what this dab lifts, so that edge
+        // is written down the middle of what it lays — half a pixel out
+        // in the read and the whole edge moves a pixel, which is twenty
+        // pixels on a page of five thousand and disappears into a mean.
+        let (doc, _) = page(vec![dab(&[[44.0, 36.0]], 10.0, [-32.0, -20.0])]);
+        let (_, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(
+            worst < 0.1,
+            "the edge it lifts lands where the CPU lands it (worst {worst:.3})"
+        );
+
+        // The readings a mean would hide: the dab lands in the patch's
+        // colour where it was painted, and the patch itself is untouched.
+        let (doc, _) = page(vec![dab(&[[50.0, 36.0]], 9.0, lift)]);
+        let drawn = gpu.render(&doc).unwrap();
+        let patch = drawn.get(16, 16);
+        let landed = drawn.get(50, 36);
+        assert!(
+            (landed.r - patch.r).abs() < 0.02 && (landed.g - patch.g).abs() < 0.02,
+            "the dab lands in what its source shows ({landed:?} against {patch:?})"
+        );
+        let (bare, _) = page(Vec::new());
+        let plain = gpu.render(&bare).unwrap();
+        assert!(
+            (drawn.get(16, 16).r - plain.get(16, 16).r).abs() < 0.01,
+            "and the source itself is untouched"
+        );
+        assert!(
+            (drawn.get(50, 12).r - plain.get(50, 12).r).abs() < 0.01,
+            "and nothing lands where it did not paint"
+        );
+
+        // A stroke laid inside a region stays inside it, filled with
+        // what it lifts as much as with a colour.
+        let mut held = dab(&[[50.0, 36.0]], 12.0, lift);
+        held.clip = Some(Box::new(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 80.0,
+                    height: 36.0,
+                    radius: 0.0,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 0.0,
+        }));
+        let (doc, _) = page(vec![held]);
+        assert!(GpuRenderer::can_render(&doc));
+        let (mean, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "a clone held to a region: mean {mean:.5}, worst {worst:.3}"
+        );
+        let confined = gpu.render(&doc).unwrap();
+        assert!(
+            (confined.get(50, 30).r - patch.r).abs() < 0.05,
+            "it lands inside the region"
+        );
+        assert!(
+            (confined.get(50, 44).r - plain.get(50, 44).r).abs() < 0.01,
+            "and nothing of it outside"
+        );
+
+        // Healing is an average over the whole stroke before any of it
+        // goes down, which is a reduction and not a pass of quads.
+        let mut healing = dab(&[[50.0, 36.0]], 9.0, lift);
+        healing.heal = true;
+        let (doc, _) = page(vec![healing]);
+        assert!(!GpuRenderer::can_render(&doc), "a healing stroke goes back");
+    }
+
     /// A brush stroke laid inside a region stays inside it.
     ///
     /// The region rides on the stroke rather than being read off the

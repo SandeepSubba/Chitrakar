@@ -919,6 +919,57 @@ fn fs_paint(in: ImageOut) -> @location(0) vec4f {
     return in.grad * c * mask_cover(in.page, in.mask);
 }
 
+// A clone stroke coming down: the coverage its segments left, filled
+// with what the surface already holds a fixed distance away.
+//
+// The offset is a direction rather than a place — the source written in
+// the layer's own space, carried through the layer's transform without
+// its translation — and the read is the nearest whole pixel, since what
+// is being lifted is pixels rather than a picture with edges to
+// resample. Off the surface there is nothing to clone, and nothing is
+// what gets laid.
+//
+// What is under the stroke and what is being lifted are the same
+// texture, and they have to be: the CPU renderer takes its copy before
+// the stroke lays anything, so a stroke running over its own source
+// reads what was there rather than what it has just painted. Which
+// means the blend has what it needs too, and the fragment can work the
+// whole composite out and write over what was there.
+//
+// `params.yz` is the offset in device pixels, `params.x` the blend mode.
+@fragment
+fn fs_clone(in: ImageOut) -> @location(0) vec4f {
+    let cover = textureSampleLevel(image, image_sampler, in.uv, 0.0).a
+        * in.alpha
+        * mask_cover(in.page, in.mask);
+    let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    if cover <= 0.0 {
+        return dst;
+    }
+    // The CPU renderer rounds `px + s`, where `px` is the pixel's index
+    // and not its centre — so the half a pixel that `uv` carries is the
+    // half that `round` adds, and the two cancel. `floor` rather than
+    // WGSL's `round`, which takes a half to the even neighbour where the
+    // CPU takes it away from zero.
+    let at = floor(in.uv * page.size + vec2f(in.params.y, in.params.z));
+    if at.x < 0.0 || at.y < 0.0 || at.x >= page.size.x || at.y >= page.size.y {
+        return dst;
+    }
+    let lifted = textureLoad(backdrop, vec2i(at), 0);
+    if lifted.a <= 0.0 {
+        return dst;
+    }
+    let src = lifted * cover;
+    let sa = src.a;
+    let da = dst.a;
+    let b = clamp(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0), vec3f(1.0));
+    let light = vec3f(to_light(b.r), to_light(b.g), to_light(b.b));
+    return vec4f(
+        (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
+        sa + da * (1.0 - sa),
+    );
+}
+
 // A layer's silhouette in one flat colour, or the hole around it: what
 // every live effect is built from, and the reason a shadow of a
 // photograph is a shape rather than a picture of one.

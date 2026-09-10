@@ -4752,7 +4752,19 @@ fn draw_clone(
             continue;
         }
         let w = bbox.x1 - bbox.x0;
-        let cover = stroke_cover(stroke, t, inv, band, bbox, (dst.width, dst.height));
+        let mut cover = stroke_cover(stroke, t, inv, band, bbox, (dst.width, dst.height));
+        // The region this stroke was laid inside, taken into its
+        // coverage before anything is made of it: what a clone lifts,
+        // what it heals towards and what it lays are all the stroke, and
+        // the stroke is what the region confines. A brush reads the same
+        // thing the same way (`lay_strokes`) — a stroke laid inside a
+        // region stays inside it whatever it is filled with.
+        if let Some(region) = stroke.clip.as_deref() {
+            let held = mask_plane_over(doc, region, t, bbox, (dst.width, dst.height));
+            for (c, h) in cover.iter_mut().zip(&held) {
+                *c *= h;
+            }
+        }
         // The offset is written in the layer's own space; on the page it
         // is that offset carried through the layer's transform, without
         // the translation — a direction, not a place.
@@ -8256,6 +8268,84 @@ mod tests {
             [0, 0, 255, 255],
             "the clone follows its source rather than keeping a copy"
         );
+    }
+
+    /// A clone stroke laid inside a region stays inside it.
+    ///
+    /// A region picked out confines what is painted, and it rides on the
+    /// stroke so that it goes on confining it after the region is let go
+    /// of. A brush read that; a clone did not, so painting a patch out
+    /// with a region picked spilled past it — and it spilled with what
+    /// the page holds somewhere else, which is the one kind of paint
+    /// nobody can see coming. What the stroke is filled with is no part
+    /// of the question: the region confines the stroke.
+    #[test]
+    fn a_clone_stroke_laid_in_a_region_stays_in_it() {
+        let build = |clip: Option<Box<chitrakar_doc::Mask>>| {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let root = doc.root();
+            // A patch of red in one corner to clone from.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("patch", 20.0, 20.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[1];
+            // A dab wide enough to straddle the region's edge, reading
+            // from the patch forty up and left of it.
+            let mut dab = stroke(&[[60.0, 60.0]], 12.0, RED);
+            dab.source = [-40.0, -40.0];
+            dab.clip = clip;
+            doc.apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(dab),
+                on_mask: false,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        // The region is everything above y = 60, so the dab's top half
+        // is inside it and its bottom half is not.
+        let region = Box::new(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 80.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        let free = build(None);
+        let held = build(Some(region));
+        assert_eq!(
+            free.get(60, 65).to_srgb8(),
+            [255, 0, 0, 255],
+            "with no region the whole dab lands"
+        );
+        assert_eq!(
+            held.get(60, 55).to_srgb8(),
+            [255, 0, 0, 255],
+            "held to one, the part inside it still lands"
+        );
+        assert_eq!(held.get(60, 65).a, 0.0, "and the part outside it does not");
     }
 
     /// An outline round a disc is round.
