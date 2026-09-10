@@ -1884,10 +1884,17 @@ fn one(
     let shadings: Vec<Shading> = if node.effects.is_empty() {
         Vec::new()
     } else {
+        // A blend mode is out: the CPU renderer brings the effect down by
+        // it as well as the layer, and this shader has the layer's own
+        // coverage where a blend would want what is under it — there is
+        // one texture and two things that want it. A frame above is out
+        // too: the CPU renderer cuts the *shadow* at the frame's edge and
+        // not the silhouette it grew from, and holding the layer to the
+        // frame here would cut the silhouette. And a group is out because
+        // what a group's opacity means to its children is not what a
+        // layer's means to itself.
         if node.blend != BlendMode::Normal
-            || node.opacity < 1.0
-            || node.mask.is_some()
-            || node.clipped
+            || bound.is_some()
             || !matches!(
                 node.kind,
                 NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
@@ -1975,10 +1982,18 @@ fn one(
     if alone {
         out.draws.push(Item::of(Draw::Open));
     }
-    // What the layer itself is drawn at: its own opacity, unless it
-    // is going on a surface of its own, where the opacity belongs to
-    // the quad that brings the surface back.
-    let alpha = if alone { 1.0 } else { node.opacity * opacity };
+    // What the layer itself is drawn at: its own opacity, unless it is
+    // going on a surface of its own, where the opacity belongs to the
+    // quad that brings the surface back — except when it has effects,
+    // where its own opacity belongs *inside* the surface, because that
+    // is what the silhouette a shadow is cast from is made of. A layer
+    // at a third opacity casts a third of a shadow, and it does so
+    // because its silhouette is a third covered.
+    let alpha = match (alone, shadings.is_empty()) {
+        (true, true) => 1.0,
+        (true, false) => node.opacity,
+        (false, _) => node.opacity * opacity,
+    };
     // Where the layer's own drawing starts, so the mask can be put
     // on everything the layer turns into and nothing else.
     let mut mark = (out.vertices.len(), out.draws.len());
@@ -2285,10 +2300,19 @@ fn one(
         }
         _ => return None,
     }
+    // Where the quads that lay the surface down start, so the mask can
+    // be kept off them: a layer with effects wears its mask on its own
+    // drawing rather than on the way down, since a mask decides what the
+    // silhouette is and so what the shadow is a shadow of.
+    let mut laid = None;
     if alone {
-        // The mask and the opacity go on the quad that lays the
-        // surface down, not on what was drawn into it.
-        mark = (out.vertices.len(), out.draws.len());
+        if shadings.is_empty() {
+            // The mask and the opacity go on the quad that lays the
+            // surface down, not on what was drawn into it.
+            mark = (out.vertices.len(), out.draws.len());
+        } else {
+            laid = Some((out.vertices.len(), out.draws.len()));
+        }
         // Each effect first: the field over the whole surface, since the
         // silhouette it is built from is wherever the layer is, then the
         // pair of axis quads the box passes alternate between, then the
@@ -2322,7 +2346,7 @@ fn one(
                 };
                 let quad = out.push(page_quad(
                     (out.page, out.surface),
-                    1.0,
+                    opacity,
                     [
                         s.offset[0],
                         s.offset[1],
@@ -2343,7 +2367,14 @@ fn one(
             .collect();
         let quad = out.push(page_quad(
             (out.page, out.surface),
-            node.opacity * opacity,
+            if shadings.is_empty() {
+                node.opacity * opacity
+            } else {
+                // Its own opacity is already in the surface; what is
+                // left is whatever it inherited, which weighs the layer
+                // and the effects around it alike.
+                opacity
+            },
             [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
             [0.0; 4],
             [0.0; 3],
@@ -2366,6 +2397,16 @@ fn one(
         }
         for item in &mut out.draws[mark.1..] {
             item.mask = at;
+        }
+        // The surface already holds the mask; laying it down is not the
+        // place to take the coverage a second time.
+        if let Some((from, draws)) = laid {
+            for v in &mut out.vertices[from..] {
+                v.mask = NO_MASK;
+            }
+            for item in &mut out.draws[draws..] {
+                item.mask = None;
+            }
         }
     }
     Some(())
@@ -6250,6 +6291,69 @@ mod tests {
             below(&held),
             below(&bare)
         );
+
+        // A layer's own opacity, its mask and being held to the one
+        // under it all decide what its silhouette is, so all three have
+        // to be inside the surface a shadow is cast from rather than on
+        // the way down from it. A shadow of the wrong shape is what
+        // getting that backwards looks like, and it looks plausible.
+        let shadowed = |go: &dyn Fn(&mut Document, NodeId)| {
+            let mut doc = page();
+            let root = doc.root();
+            let id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow(4.0, 4.0, 1.5, 0.8)],
+            })
+            .unwrap();
+            go(&mut doc, id);
+            doc
+        };
+        for (name, doc) in [
+            (
+                "a faded layer",
+                shadowed(&|doc, id| {
+                    doc.apply(Command::SetOpacity { id, opacity: 0.35 })
+                        .unwrap();
+                }),
+            ),
+            (
+                "a masked layer",
+                shadowed(&|doc, id| {
+                    doc.apply(Command::SetMask {
+                        id,
+                        mask: Some(Box::new(chitrakar_doc::Mask {
+                            kind: chitrakar_doc::MaskKind::Vector {
+                                shape: VectorShape::Ellipse { rx: 8.0, ry: 8.0 },
+                                transform: Transform::translation(24.0, 19.0),
+                            },
+                            invert: false,
+                            feather: 1.0,
+                        })),
+                    })
+                    .unwrap();
+                }),
+            ),
+            (
+                "a layer held to the one under it",
+                shadowed(&|doc, id| {
+                    doc.apply(Command::SetClipped { id, clipped: true })
+                        .unwrap();
+                }),
+            ),
+        ] {
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} with a shadow is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{name} with a shadow: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
 
         // An outline is still the CPU's: its band is a true distance,
         // swept by a chamfer transform whose passes each read what the

@@ -1928,17 +1928,22 @@ without reading anything else.*
      carry a softness, an erase and a heal the stroke geometry does not.
      Shadows it now draws, inner and outer, as the blur passes again read
      off the layer's own silhouette rather than off what is under it
-     (`a_shadow_is_the_silhouette_the_cpu_casts`) — but only on a plain
-     leaf: a layer that is faded, masked, blended or held to the one
-     below has its silhouette decided by things this backend puts on the
-     quad that lays the surface down rather than into the surface, so its
-     shadow would be the wrong shape. Moving those onto the layer's own
-     drawing when it has effects is what would let the shared fixture's
-     shadows through the audit, which is the next thing worth doing here.
-     An outline stays the CPU's for a better reason: its band is a true
+     (`a_shadow_is_the_silhouette_the_cpu_casts`), on a leaf that is
+     faded, masked or held to the one under it as well as on a plain one
+     — all three decide what the silhouette is, so all three go into the
+     surface the shadow is cast from rather than onto the quad that lays
+     it down. What still goes back is a layer with a blend mode (the CPU
+     brings the effect down by it too, and the one texture the shader has
+     spare is already carrying the layer's coverage for an inner shadow),
+     a layer with effects inside a frame (the CPU cuts the shadow at the
+     frame's edge and not the silhouette it grew from), and a group. An
+     outline stays the CPU's for a better reason: its band is a true
      distance, swept by a chamfer transform whose two passes each read
      what the one before wrote, and a parallel answer to that is a
-     different band rather than the same one arrived at faster. Both filters that used to be handed
+     different band rather than the same one arrived at faster. The
+     shared fixture still has its effects stripped before the audit
+     compares, because two of the three layers carrying one are a blended
+     layer and an outline. Both filters that used to be handed
      back it now draws: a motion blur as one pass along the line rather
      than the blur's six along the axes
      (`a_smear_runs_the_way_the_cpu_runs_it`), and a pixelate as two, one
