@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~405),
+- **Verify before committing:** `cargo test --workspace` (~407),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1977,11 +1977,25 @@ without reading anything else.*
      shows — and since a frame is whole page pixels, the cut is the
      rectangle the quads are drawn over rather than a coverage they read.
      That leaves the mask texture for the mask and leaves what was drawn
-     into the surface uncut, which is exactly the distinction. What still
-     goes back is a layer with a blend mode (the CPU
-     brings the effect down by it too, and the one texture the shader has
-     spare is already carrying the layer's coverage for an inner shadow)
-     and a group. An
+     into the surface uncut, which is exactly the distinction. A layer with a blend
+     mode it draws too
+     (`an_effect_on_a_blended_layer_comes_down_by_the_blend`): the CPU
+     renderer brings each effect down by the layer's blend as well as the
+     layer, and that wanted the one texture the stamp had already spoken
+     for — a shadow is read at an offset and an inner one is held inside
+     the silhouette, both of which want the layer's own coverage where a
+     blend wants what is under it. So where there is a blend those two
+     happen a pass earlier, on the scratch pair, and the stamp is left an
+     ordinary picture to bring down. What still goes back is a group.
+     The fixture audit now compares all three of its layers with their
+     effects on. Finding the third of them is what turned up a separate
+     defect, in the stamp rather than the blend: the field was read
+     *clamped* at its window's edge, which is nothing where the field is
+     nothing there — but where the surface itself cuts the layer short
+     the field is not nothing, and a shape hanging off the top of the
+     page cast a shadow back onto the first row out of a silhouette
+     neither renderer has
+     (`an_effect_reads_nothing_where_the_surface_cut_the_layer`). An
      outline it draws too
      (`an_outline_is_the_band_the_cpu_measures`): its band is a true
      Euclidean distance from the silhouette — the same one a region is
@@ -2001,8 +2015,7 @@ without reading anything else.*
      the audit compares: they all come off and then each goes back
      wherever the page is still accepted with it there, so what the
      backend can draw stays in the comparison and what it cannot is out,
-     asked rather than named. Two of the three layers carrying one are
-     compared with it on now; the third is the blended layer. Both filters that used to be handed
+     asked rather than named. Both filters that used to be handed
      back it now draws: a motion blur as one pass along the line rather
      than the blur's six along the axes
      (`a_smear_runs_the_way_the_cpu_runs_it`), and a pixelate as two, one

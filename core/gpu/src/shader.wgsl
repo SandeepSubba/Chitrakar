@@ -1008,6 +1008,28 @@ fn fs_band(in: ImageOut) -> @location(0) vec4f {
     return in.grad * clamp(width + 1.0 - sqrt(best), 0.0, 1.0);
 }
 
+// A field read at the effect's offset, in the window it was built over.
+//
+// That window is the whole surface here, and the CPU renderer's is the
+// layer's box grown by how far the effect reaches — but the field is
+// nothing at the edge of *that* box, so the two only part company where
+// the surface itself cuts the layer short. There they have to part
+// company the same way: what falls off the window is nothing, rather
+// than its edge repeated. A shape hanging off the top of the page casts
+// no shadow back onto the first row, and a clamped read would have given
+// it one. Off by no more than a pixel is still read, from the edge,
+// which is what the CPU renderer's own bilinear taps do when one of
+// them runs off the end.
+fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
+    let hi = page.size - vec2f(1.0, 1.0);
+    let s = uv * page.size - vec2f(0.5, 0.5) - offset;
+    if s.x < -1.0 || s.y < -1.0 || s.x > hi.x + 1.0 || s.y > hi.y + 1.0 {
+        return vec4f(0.0);
+    }
+    let at = (clamp(s, vec2f(0.0, 0.0), hi) + vec2f(0.5, 0.5)) / page.size;
+    return textureSampleLevel(image, image_sampler, at, 0.0);
+}
+
 // The blurred field coming down onto what is under the layer, read at
 // the effect's offset.
 //
@@ -1022,14 +1044,32 @@ fn fs_band(in: ImageOut) -> @location(0) vec4f {
 // inner shadow inside the silhouette instead of spilling past it.
 @fragment
 fn fs_effect(in: ImageOut) -> @location(0) vec4f {
-    let at = in.uv - vec2f(in.params.x, in.params.y) / page.size;
-    let lo = (page.lo + vec2f(0.5, 0.5)) / page.size;
-    let hi = (page.hi - vec2f(0.5, 0.5)) / page.size;
-    var out = textureSampleLevel(image, image_sampler, clamp(at, lo, hi), 0.0);
+    var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
     if in.params.z != 0.0 {
         out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a;
     }
     return out * in.alpha * mask_cover(in.page, in.mask);
+}
+
+// A field made ready to go down on its own: read at the effect's offset,
+// and — for an inner shadow — held to the layer's own coverage. Those
+// are the two things the stamp does as it lays a field down, and both
+// want the texture a blend would want for what is under it. So when the
+// layer carries a blend mode this pass does them first, on the scratch
+// pair, and what the stamp is left with is an ordinary picture to bring
+// down by the blend.
+//
+// `params.xy` is the offset in device pixels, `params.z` one when the
+// layer's own coverage is to be taken as well; the layer's surface is
+// bound where the backdrop goes, since a scratch pass has nothing under
+// it to read.
+@fragment
+fn fs_settle(in: ImageOut) -> @location(0) vec4f {
+    var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
+    if in.params.z != 0.0 {
+        out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a;
+    }
+    return out;
 }
 
 // Which block of a pixelate grid a pixel falls in, along one axis.

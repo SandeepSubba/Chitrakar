@@ -272,6 +272,10 @@ pub struct GpuRenderer {
     /// distance from the silhouette, one down each column and one along
     /// each row.
     band: wgpu::RenderPipeline,
+    /// A field read at its offset and held inside the silhouette before
+    /// it goes down, so a blend can have the texture the stamp would
+    /// otherwise be using for that.
+    settle: wgpu::RenderPipeline,
     effect: wgpu::RenderPipeline,
     brush: wgpu::RenderPipeline,
     paint: wgpu::RenderPipeline,
@@ -704,6 +708,7 @@ impl GpuRenderer {
         };
         let field = one_of("effect field", "fs_field", wgpu::BlendState::REPLACE);
         let band = one_of("outline band", "fs_band", wgpu::BlendState::REPLACE);
+        let settle = one_of("effect settle", "fs_settle", wgpu::BlendState::REPLACE);
         // A brush stroke's segments, gathered with max blending: they
         // union rather than pile up, so a stroke that doubles back is
         // not darker where it crossed itself.
@@ -985,6 +990,7 @@ impl GpuRenderer {
             blocks,
             field,
             band,
+            settle,
             effect,
             brush,
             paint,
@@ -1532,6 +1538,36 @@ impl GpuRenderer {
                     pass.set_vertex_buffer(0, quads.slice(..));
                     pass.draw(along(round % 2), 0..1);
                 }
+                // A field the layer's blend will bring down is read at
+                // its offset and held inside the silhouette here, on the
+                // second of the pair, rather than as it lands: the stamp
+                // will be reading what is under it by then, and there is
+                // one texture for the two. The layer's own surface goes
+                // where the backdrop does, which nothing reads on a
+                // scratch pass.
+                if !at.settle.is_empty() {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("effect settle"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &scratch[1].0,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.settle);
+                    pass.set_bind_group(0, &whole, &[]);
+                    pass.set_bind_group(1, &scratch[0].1, &[]);
+                    pass.set_bind_group(2, &self.open, &[]);
+                    pass.set_bind_group(3, &surfaces[from - 1].2, &[]);
+                    pass.set_vertex_buffer(0, quads.slice(..));
+                    pass.draw(at.settle.clone(), 0..1);
+                }
             }
             // The two block passes, before the pass that lays their
             // result down: the copy of what is under the layer goes in,
@@ -1684,17 +1720,35 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[0].1, &[]);
                             (quad, &None)
                         }
-                        Opening::Effect { from, at, mask } => {
-                            pass.set_pipeline(&self.effect);
-                            // Six rounds end on the first of the pair; a
-                            // field that was never blurred is still on it.
-                            pass.set_bind_group(1, &scratch[0].1, &[]);
-                            // An inner shadow is held to the layer's own
-                            // coverage, which is the surface it was drawn
-                            // on — read where a blend reads what is under
-                            // it, since an effect has no use for that.
-                            if at.inside {
-                                pass.set_bind_group(3, &surfaces[from - 1].2, &[]);
+                        Opening::Effect {
+                            from,
+                            at,
+                            mask,
+                            blend,
+                        } => {
+                            if *blend == BlendMode::Normal || under.is_none() {
+                                pass.set_pipeline(&self.effect);
+                                // The rounds end on the first of the
+                                // pair; a field that was never carried
+                                // out from the silhouette is still on it.
+                                pass.set_bind_group(1, &scratch[0].1, &[]);
+                                // An inner shadow is held to the layer's
+                                // own coverage, which is the surface it
+                                // was drawn on — read where a blend
+                                // reads what is under it, since an
+                                // effect otherwise has no use for that.
+                                if at.inside {
+                                    pass.set_bind_group(3, &surfaces[from - 1].2, &[]);
+                                }
+                            } else {
+                                // Brought down by the layer's blend, the
+                                // same way its surface is: the offset
+                                // and the hold-inside have already been
+                                // taken, on the second of the pair, so
+                                // what is left is a picture and what is
+                                // under it.
+                                pass.set_pipeline(&self.blend);
+                                pass.set_bind_group(1, &scratch[1].1, &[]);
                             }
                             (&at.quad, mask)
                         }
@@ -2035,18 +2089,12 @@ fn one(
     let shadings: Vec<Shading> = if node.effects.is_empty() {
         Vec::new()
     } else {
-        // A blend mode is out: the CPU renderer brings the effect down by
-        // it as well as the layer, and this shader has the layer's own
-        // coverage where a blend would want what is under it — there is
-        // one texture and two things that want it. And a group is out
-        // because what a group's opacity means to its children is not
-        // what a layer's means to itself.
-        if node.blend != BlendMode::Normal
-            || !matches!(
-                node.kind,
-                NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
-            )
-        {
+        // A group is out: what a group's opacity means to its children
+        // is not what a layer's means to itself.
+        if !matches!(
+            node.kind,
+            NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+        ) {
             return None;
         }
         node.effects
@@ -2607,15 +2655,32 @@ fn one(
                     }
                     Spread::Still => 0..0,
                 };
+                // The offset and the hold-inside are the stamp's own
+                // work, unless the layer carries a blend mode: then the
+                // stamp needs what is under it where those want the
+                // layer's coverage, so they go on a pass of their own
+                // beforehand and the stamp is left an ordinary picture
+                // to bring down.
+                let carried = [
+                    s.offset[0],
+                    s.offset[1],
+                    if s.inside { 1.0 } else { 0.0 },
+                    0.0,
+                ];
+                let blended = node.blend != BlendMode::Normal;
+                let settle = if blended {
+                    out.push(page_quad(on, 1.0, carried, [0.0; 4], [0.0; 3]))
+                } else {
+                    0..0
+                };
                 let quad = out.push(page_quad(
                     (down, out.surface),
                     opacity,
-                    [
-                        s.offset[0],
-                        s.offset[1],
-                        if s.inside { 1.0 } else { 0.0 },
-                        0.0,
-                    ],
+                    if blended {
+                        [blend_index(node.blend) as f32, 0.0, 0.0, 0.0]
+                    } else {
+                        carried
+                    },
                     [0.0; 4],
                     [0.0; 3],
                 ));
@@ -2623,6 +2688,7 @@ fn one(
                     over: s.over,
                     inside: s.inside,
                     band: matches!(s.spread, Spread::Band { .. }),
+                    settle,
                     field,
                     steps,
                     quad,
@@ -3483,6 +3549,11 @@ struct Painted {
     inside: bool,
     /// A band's two distance passes rather than a blur's twelve.
     band: bool,
+    /// The pass that reads the field at its offset and holds it inside
+    /// the silhouette before the stamp, which is what leaves the stamp
+    /// nothing to do but bring a picture down by a blend mode. Empty
+    /// unless the layer carries one.
+    settle: std::ops::Range<u32>,
     field: std::ops::Range<u32>,
     /// Empty when the field is not carried out from the silhouette at
     /// all, in which case it goes down as it was built.
@@ -3789,6 +3860,9 @@ enum Opening {
         from: usize,
         at: Painted,
         mask: Option<usize>,
+        /// The layer's own blend mode, which the CPU renderer brings
+        /// the effect down by as well as the layer.
+        blend: BlendMode,
     },
     /// One brush stroke. Its segments have been gathered into a coverage
     /// on the scratch texture by the time this opens the pass; what is
@@ -3810,8 +3884,11 @@ impl Opening {
             | Opening::Blur { .. }
             | Opening::Smear { .. }
             | Opening::Blocks { .. } => true,
-            // Each reads a texture of its own, not what is under it.
-            Opening::Effect { .. } | Opening::Brush { .. } => false,
+            // An effect reads a texture of its own rather than what is
+            // under it — unless it is brought down by a blend mode,
+            // which is a question about what is under it by definition.
+            Opening::Effect { blend, .. } => *blend != BlendMode::Normal,
+            Opening::Brush { .. } => false,
         }
     }
 }
@@ -3880,6 +3957,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                             from,
                             at: at.clone(),
                             mask: item.mask,
+                            blend: *blend,
                         }),
                         items: i..i,
                     };
@@ -4647,6 +4725,236 @@ mod tests {
         // edge — it is the whole shape's outline, cut, rather than the
         // outline of the part of the shape that shows.
         assert!(red(54, 22), "the band is the whole shape's, up to the cut");
+    }
+
+    /// An effect on a layer with a blend mode, brought down by that
+    /// blend as the layer itself is.
+    ///
+    /// The CPU renderer stamps every effect with the layer's blend, not
+    /// only the layer — a shadow under a Multiply layer multiplies. That
+    /// wanted the one texture the stamp already had spoken for: a shadow
+    /// is read at an offset and an inner one is held inside the
+    /// silhouette, and both of those want the layer's own coverage where
+    /// a blend wants what is under it. So when there is a blend those two
+    /// happen a pass earlier, on the scratch pair, and what the stamp is
+    /// left with is an ordinary picture to bring down.
+    #[test]
+    fn an_effect_on_a_blended_layer_comes_down_by_the_blend() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let black = ink(0.0, 0.0, 0.0, 1.0);
+        let ground = ink(0.75, 0.55, 0.35, 1.0);
+        let page = |blend: BlendMode, effects: Vec<E>| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ground.clone(),
+                ),
+                Transform::default(),
+            );
+            let id = add(
+                &mut doc,
+                filled(
+                    "shape",
+                    VectorShape::Rect {
+                        width: 22.0,
+                        height: 14.0,
+                        radius: 3.0,
+                    },
+                    ink(0.2, 0.35, 0.75, 1.0),
+                ),
+                Transform::translation(18.0, 12.0),
+            );
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            doc
+        };
+        let shadow = |blur: f32| E::DropShadow {
+            dx: 6.0,
+            dy: 5.0,
+            blur,
+            color: black.clone(),
+            opacity: 1.0,
+        };
+        let inner = E::InnerShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 1.0,
+            color: ink(0.0, 0.0, 0.1, 1.0),
+            opacity: 0.9,
+        };
+        let outline = E::Outline {
+            width: 3.0,
+            color: ink(0.9, 0.15, 0.1, 1.0),
+            opacity: 1.0,
+        };
+        for blend in [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Difference,
+            BlendMode::Overlay,
+        ] {
+            for (name, effects) in [
+                ("a shadow", vec![shadow(2.0)]),
+                // No blur at all, so the field goes down as it was built
+                // and the settling pass is the only thing between it and
+                // the page.
+                ("a hard shadow", vec![shadow(0.0)]),
+                ("an inner shadow", vec![inner.clone()]),
+                ("an outline", vec![outline.clone()]),
+                (
+                    "one of each",
+                    vec![shadow(1.5), inner.clone(), outline.clone()],
+                ),
+            ] {
+                let doc = page(blend, effects);
+                assert!(
+                    GpuRenderer::can_render(&doc),
+                    "{name} under {blend:?} is drawn rather than handed back"
+                );
+                let (mean, worst) = difference(
+                    &gpu.render(&doc).unwrap(),
+                    &chitrakar_render::render(&doc).unwrap(),
+                );
+                assert!(
+                    mean < 0.004,
+                    "{name} under {blend:?}: mean {mean:.5}, worst {worst:.3}"
+                );
+            }
+        }
+
+        // The reading a mean would hide, and the one that says the blend
+        // is really being asked: a *black* shadow screened onto the page
+        // leaves it exactly as it was, since screening with black is the
+        // one thing that does nothing at all. Stamp the same shadow
+        // plainly instead and the page darkens under it.
+        let screened = gpu
+            .render(&page(BlendMode::Screen, vec![shadow(0.0)]))
+            .unwrap();
+        let bare = gpu.render(&page(BlendMode::Screen, Vec::new())).unwrap();
+        // Past the shape's bottom-right corner, where the shadow falls
+        // and the layer itself does not.
+        for (x, y) in [(44u32, 28u32), (40, 30), (46, 24)] {
+            let (a, b) = (screened.get(x, y), bare.get(x, y));
+            assert!(
+                (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01,
+                "a black shadow screened on leaves ({x},{y}) alone: {a:?} against {b:?}"
+            );
+        }
+        // And it is landing there at all — the same shadow multiplied
+        // takes that spot down, so the reading above is the blend rather
+        // than a shadow that missed.
+        let multiplied = gpu
+            .render(&page(BlendMode::Multiply, vec![shadow(0.0)]))
+            .unwrap();
+        assert!(
+            multiplied.get(44, 28).r < bare.get(44, 28).r - 0.2,
+            "the same shadow multiplied darkens it ({} against {})",
+            multiplied.get(44, 28).r,
+            bare.get(44, 28).r
+        );
+    }
+
+    /// A field is nothing where the surface cut the layer short, rather
+    /// than its own edge repeated.
+    ///
+    /// Every effect is built from the layer's silhouette over a window,
+    /// and the stamp reads that window at the effect's offset. The CPU
+    /// renderer's window is the layer's box grown by how far the effect
+    /// reaches, and the field is nothing at the edge of that box — so
+    /// reading past it gives nothing whichever way it is done. Except
+    /// where the surface itself cuts the layer: there the field is *not*
+    /// nothing at the window's edge, and a clamped read repeats it. A
+    /// shape hanging off the top of the page then casts a shadow back
+    /// onto the first row, out of a silhouette neither renderer has.
+    #[test]
+    fn an_effect_reads_nothing_where_the_surface_cut_the_layer() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let hanging = |effects: Vec<E>| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.75, 0.55, 0.35, 1.0),
+                ),
+                Transform::default(),
+            );
+            let id = add(
+                &mut doc,
+                filled(
+                    "shape",
+                    VectorShape::Rect {
+                        width: 22.0,
+                        height: 14.0,
+                        radius: 3.0,
+                    },
+                    ink(0.2, 0.35, 0.75, 1.0),
+                ),
+                // Turned as well as hung off the top, so the silhouette
+                // at the cut is not the silhouette above it — a
+                // rectangle repeats its own edge and would hide this.
+                Transform {
+                    a: 1.5,
+                    b: 0.25,
+                    c: -0.25,
+                    d: 1.5,
+                    e: 7.0,
+                    f: -3.0,
+                },
+            );
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc
+        };
+        let doc = hanging(vec![E::DropShadow {
+            dx: 5.0,
+            dy: 4.0,
+            blur: 2.5,
+            color: ink(0.0, 0.05, 0.15, 1.0),
+            opacity: 0.75,
+        }]);
+        assert!(GpuRenderer::can_render(&doc));
+        let (mean, worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
+        );
+        assert!(
+            mean < 0.001,
+            "a shape hung off the top: mean {mean:.5}, worst {worst:.3}"
+        );
+        // The reading itself: the first row, where the shadow would come
+        // from a part of the shape that is off the page. Cast down and to
+        // the right, so nothing that *is* on the page can put a shadow
+        // there either.
+        let cast = gpu.render(&doc).unwrap();
+        let plain = gpu.render(&hanging(Vec::new())).unwrap();
+        for x in [26u32, 30, 36] {
+            assert!(
+                (cast.get(x, 0).r - plain.get(x, 0).r).abs() < 0.1,
+                "the first row keeps its colour at x = {x} ({} against {})",
+                cast.get(x, 0).r,
+                plain.get(x, 0).r
+            );
+        }
     }
 
     #[test]
