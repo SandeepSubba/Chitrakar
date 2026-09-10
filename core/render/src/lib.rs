@@ -485,21 +485,32 @@ fn bounds_in_parent_space_inner(
 /// the one a copy draws in, and a copy of a subtree with effects in it is
 /// rare enough that the page is a cheaper answer than a wrong one.
 fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
-    fn anywhere(doc: &Document, id: NodeId) -> bool {
+    /// `left` is how many links deep this may still follow. A copy of a
+    /// copy is collapsed to a copy of the original when one is made here,
+    /// but a file can say otherwise and a `SetKind` can too, so the chain
+    /// is followed — and bounded, so that a document claiming a chain
+    /// nothing checked cannot spend the stack on it.
+    fn anywhere(doc: &Document, id: NodeId, left: u32) -> bool {
         let Ok(node) = doc.node(id) else {
             return false;
         };
         if !node.effects.is_empty() {
             return true;
         }
+        if let NodeKind::Instance { of, .. } = &node.kind {
+            if left > 0 && anywhere(doc, *of, left - 1) {
+                return true;
+            }
+        }
         doc.children_of(id)
-            .map(|kids| kids.iter().any(|&k| anywhere(doc, k)))
+            .map(|kids| kids.iter().any(|&k| anywhere(doc, k, left)))
             .unwrap_or(false)
     }
-    anywhere(doc, of)
+    const LINKS: u32 = 16;
+    anywhere(doc, of, LINKS)
         || doc
             .children_of(instance)
-            .map(|kids| kids.iter().any(|&k| anywhere(doc, k)))
+            .map(|kids| kids.iter().any(|&k| anywhere(doc, k, LINKS)))
             .unwrap_or(false)
 }
 
@@ -10458,6 +10469,43 @@ mod tests {
                 worst.0,
                 worst.1,
                 worst.2
+            );
+        }
+    }
+
+    /// A path too short to bend is asked for its handles anyway.
+    ///
+    /// `smooth_handles` is public and is the one place the Catmull-Rom to
+    /// Bezier conversion is written, so what it does with a path of no
+    /// anchors or of one matters more than what the one caller that
+    /// happens to check first does. It answers with handles of nothing,
+    /// which is what the arithmetic already gives — the loop that would
+    /// reach for the anchor before the first does not run at all on an
+    /// empty path, and on a path of one that anchor is itself. Pinned
+    /// because clamping at the ends is exactly the sort of thing a
+    /// rewrite gets wrong, and because the two ways of getting it wrong
+    /// here are a clamp whose ends cross and a remainder by zero, which
+    /// are not wrong answers but the process going away.
+    #[test]
+    fn a_path_too_short_to_bend_still_answers() {
+        for closed in [false, true] {
+            assert!(
+                smooth_handles(&[], closed).is_empty(),
+                "no anchors, no handles"
+            );
+            assert_eq!(
+                smooth_handles(&[[3.0, 4.0]], closed),
+                vec![[0.0; 4]],
+                "one anchor has a handle of nothing"
+            );
+            // Two is enough to run between, and the handles are the
+            // sixths the conversion says: with the ends clamped, each
+            // anchor's neighbour on the outside is itself.
+            let two = smooth_handles(&[[0.0, 0.0], [6.0, 0.0]], closed);
+            assert_eq!(two.len(), 2, "two anchors, two handles");
+            assert!(
+                two.iter().all(|h| h.iter().all(|v| v.is_finite())),
+                "and they are numbers: {two:?}"
             );
         }
     }

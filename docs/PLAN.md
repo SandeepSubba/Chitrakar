@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~381),
+- **Verify before committing:** `cargo test --workspace` (~382),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1086,6 +1086,22 @@ without reading anything else.*
   change, and everything the layer says about how it is drawn is in that
   one comparison. The lock and the pin cannot show on a page, so those are
   said field by field beside it. Block 9az drives it through the panel.
+- **A pass back over this stretch's own fixes**, which turned up two
+  things and corrected one claim. A copy of a *copy* of something with an
+  effect was not recognized as reaching out, so its shadow would be
+  clipped again: making a copy of a copy collapses it to a copy of the
+  original, but a file can say otherwise and so can a `SetKind`, so the
+  chain is followed now — bounded, so a document claiming a chain nothing
+  checked cannot spend the stack on it. Defensive rather than demonstrated:
+  the case is reachable but the probe for it could not tell the two copies
+  apart on one page.
+  And `smooth_handles` was given a guard against a path too short to bend,
+  on the reasoning that the arithmetic would reach for the anchor before
+  the first — a clamp whose ends cross, which panics. It would not: the
+  loop does not run at all on an empty path, and on a path of one that
+  anchor is itself. The guard is gone again and the test that was written
+  for it stays, with what it actually pins written on it, because clamping
+  at the ends is exactly what a rewrite gets wrong.
 - **Known wrinkle, found and left for a decision — what a clipped layer
   is confined to:** a layer held to the one below it is confined to that
   layer's *picture*, without the reach of its effects: the cover is taken
