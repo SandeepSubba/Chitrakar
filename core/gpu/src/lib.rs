@@ -2960,19 +2960,33 @@ mod tests {
         for id in [f.painted, f.borrowed] {
             f.doc.apply(Command::RemoveNode { id }).unwrap();
         }
-        // And the shadow the fixture's top shape casts, for the same
+        // And every effect the fixture hangs on a layer, for the same
         // reason and in the same spirit: an effect is drawn from a
         // layer's silhouette in passes this backend has not learned, so
-        // one in the document declines the page. The commands that put
-        // effects *on* things are still asked — each is applied to a copy
-        // of the document and declined by name, which is the audit
-        // working rather than the audit blind.
-        f.doc
-            .apply(Command::SetEffects {
-                id: f.over,
-                effects: Vec::new(),
-            })
-            .unwrap();
+        // one anywhere in the document declines the page. Taken off by
+        // walking the tree rather than by naming the layers that have
+        // them, so the fixture can grow another without this going quiet.
+        // The commands that put effects *on* things are still asked —
+        // each is applied to a copy of the document and declined by name,
+        // which is the audit working rather than the audit blind.
+        let with_effects: Vec<NodeId> = f
+            .doc
+            .nodes()
+            .filter(|(_, n)| !n.effects.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(
+            !with_effects.is_empty(),
+            "the fixture still hangs effects on layers"
+        );
+        for id in with_effects {
+            f.doc
+                .apply(Command::SetEffects {
+                    id,
+                    effects: Vec::new(),
+                })
+                .unwrap();
+        }
         let mut drawn = 0usize;
         let mut declined = Vec::new();
         let check = |doc: &Document, what: &str, drawn: &mut usize| {

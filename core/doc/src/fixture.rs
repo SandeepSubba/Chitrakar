@@ -100,6 +100,26 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // A band round the one underneath, and a shadow cast inward on the
+    // text further down: three of the three effect kinds are then in the
+    // document rather than one. They are not variations on each other —
+    // an outline is a ring outside the silhouette, an inner shadow is
+    // kept inside it and painted over the layer rather than behind it —
+    // so each is a different pass and a different reach.
+    doc.apply(Command::SetEffects {
+        id: under,
+        effects: vec![Effect::Outline {
+            width: 2.5,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.95,
+                g: 0.9,
+                b: 0.3,
+                a: 1.0,
+            },
+            opacity: 0.85,
+        }],
+    })
+    .unwrap();
     // A shadow on the top one, and a generous one: an effect reaches
     // beyond the layer it belongs to, and how far is a figure
     // (`Effect::reach`) that bounds and dirty regions are grown by. Every
@@ -107,6 +127,16 @@ pub fn everything() -> Fixture {
     // — a page redrawn a region at a time leaves a trail behind one if
     // that figure is short, and the layer it belongs to is inside a group,
     // so the reach has a space to be read in as well.
+    // And blending rather than covering. A layer with a blend mode is the
+    // one thing that makes a plain group stop being transparent — a group
+    // holding something that reads what is under it is drawn on a surface
+    // of its own — so this one flag puts every audit's question to the
+    // isolated path as well as to the straight one.
+    doc.apply(Command::SetBlendMode {
+        id: over,
+        blend: BlendMode::Multiply,
+    })
+    .unwrap();
     doc.apply(Command::SetEffects {
         id: over,
         effects: vec![Effect::DropShadow {
@@ -261,6 +291,22 @@ pub fn everything() -> Fixture {
         })),
     })
     .unwrap();
+    doc.apply(Command::SetEffects {
+        id: words,
+        effects: vec![Effect::InnerShadow {
+            dx: -2.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.0,
+                b: 0.2,
+                a: 1.0,
+            },
+            opacity: 0.8,
+        }],
+    })
+    .unwrap();
     doc.apply(Command::AddNode {
         parent: root,
         index: 4,
@@ -281,6 +327,48 @@ pub fn everything() -> Fixture {
     doc.apply(Command::SetTransform {
         id: frame,
         transform: Transform::translation(56.0, 40.0),
+    })
+    .unwrap();
+    // A group inside the frame, with a shape inside that: an empty frame
+    // is a coloured rectangle and says nothing about being a frame, and
+    // nothing else here is nested two deep. So this one layer answers
+    // three questions nothing else did — what a frame does to what it
+    // holds, what a group inside another parent's space does, and whether
+    // anything walking the tree stops one level short.
+    doc.apply(Command::AddNode {
+        parent: frame,
+        index: 0,
+        node: Box::new(Node::group("inside")),
+    })
+    .unwrap();
+    let inside = doc.children_of(frame).unwrap()[0];
+    doc.apply(Command::AddNode {
+        parent: inside,
+        index: 0,
+        node: rect("held", [0.15, 0.7, 0.55, 1.0]),
+    })
+    .unwrap();
+    let held = doc.children_of(inside).unwrap()[0];
+    doc.apply(Command::SetTransform {
+        id: held,
+        transform: Transform {
+            a: 0.5,
+            b: 0.0,
+            c: 0.0,
+            d: 0.5,
+            e: 2.0,
+            f: 2.0,
+        },
+    })
+    .unwrap();
+    // Pinned to the far corner, which is the only thing that makes a
+    // frame's size mean anything to what is in it.
+    doc.apply(Command::SetPinning {
+        id: inside,
+        pinned: Pinning {
+            x: Pin::End,
+            y: Pin::Stretch,
+        },
     })
     .unwrap();
     // The four kinds that draw by reading rather than by covering: an
@@ -482,9 +570,12 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 y: Pin::Stretch,
             },
         },
+        // A different one from the document's, so the command changes
+        // something — and one that reads its backdrop the other way round,
+        // since multiplying and screening are each other's opposite.
         Command::SetBlendMode {
             id: over,
-            blend: BlendMode::Multiply,
+            blend: BlendMode::Screen,
         },
         Command::SetTransform {
             id: over,

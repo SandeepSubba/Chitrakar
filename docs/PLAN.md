@@ -1250,6 +1250,26 @@ without reading anything else.*
   axis and carries no tilt, so it returns where it crosses the middle of
   the page. Nothing batches a straighten; the engine and the UI both send
   it alone.
+- **Four more things the shared fixture had never held:** a layer with a
+  *blend mode*, which is the one flag that makes a plain group stop being
+  transparent — a group holding something that reads what is under it is
+  drawn on a surface of its own — so it puts every audit's question to the
+  isolated path as well as to the straight one. A *group inside the frame*
+  with a shape inside that, pinned to the far corner: an empty frame is a
+  coloured rectangle and says nothing about being a frame, and nothing
+  else here was nested two deep, so that one layer answers what a frame
+  does to what it holds, what a group does inside another parent's space,
+  and whether anything walking the tree stops a level short. And an
+  *outline* and an *inner shadow*, so all three effect kinds are in the
+  document rather than one — they are not variations on each other, being
+  a ring outside the silhouette and a shadow kept inside it and painted
+  over the layer rather than behind it, so each is a different pass and a
+  different reach.
+  Everything held, so this is coverage rather than a fix — but it is the
+  coverage the last two finds came out of, and it costs nothing to keep.
+  The GPU audit takes the effects off by walking the tree now instead of
+  naming a layer, so the fixture can grow another without that going
+  quiet, and it asserts that it found some to take off.
 - **A mask read off an image, in the fixture:** the third mask kind was
   the one nothing in the shared document held. A shape's coverage is its
   own geometry and a brushed one is its strokes; this one has *pixels* — so
