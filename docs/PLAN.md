@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~380),
+- **Verify before committing:** `cargo test --workspace` (~381),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1086,6 +1086,29 @@ without reading anything else.*
   change, and everything the layer says about how it is drawn is in that
   one comparison. The lock and the pin cannot show on a page, so those are
   said field by field beside it. Block 9az drives it through the panel.
+- **A copy of a layer casts the same shadow the layer does:** found by
+  giving the shared fixture a drop shadow, which is worth recording as a
+  method — the fixture had one of every node *kind* and no effect on any of
+  them, so every audit built on it had been asking its question of layers
+  that never draw outside their own box. One added shadow and two audits
+  failed at once.
+  A copy draws what the original draws, where the copy is, and the
+  renderer decides where it may paint from the box of what it copies —
+  which is the box the *handles* are drawn round, deliberately without the
+  reach of anything's effects. So a copy of a group whose child casts a
+  shadow had that shadow cut off at the group's contents: a shadow on the
+  original, none on the copy, from a layer that is meant to be the same
+  layer. Both the drawing extent and the dirty box needed it (the second
+  showed up as wrapping such a copy in a group clipping it again), and a
+  copy of something that reaches out now gets the whole page to paint in —
+  the answer a copy of an adjustment or a filter already got. How far,
+  exactly, would mean carrying reaches written in three spaces through the
+  one a copy draws in; a copy of a subtree with effects in it is rare
+  enough that the page is a cheaper answer than a wrong one.
+  The GPU audit declines a document with an effect in it, so it clears the
+  shadow the way it already removes the two kinds the backend cannot draw
+  — and its "declined everything" guard is what said so, loudly, rather
+  than the audit quietly measuring nothing.
 - **A region render, padded by the reach, is the page:** everything about
   showing a document quickly rests on one claim — that a rectangle of the
   page can be recomputed on its own and come out the same as if the whole

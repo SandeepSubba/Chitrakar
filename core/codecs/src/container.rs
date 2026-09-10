@@ -427,46 +427,100 @@ mod tests {
             Some(cur)
         }
 
-        // The fields the format has always had. Everything else in a
-        // manifest is additive and a file without it has to open.
+        // Where the format has always had a field, and which. Each entry
+        // is a place in the manifest with its numbers taken out and the
+        // field that place cannot do without — the fields that were there
+        // from the beginning, which by the rule above is a finished list.
+        // It is asserted in both directions: a field added without a
+        // default joins it and the test names the place, and an entry that
+        // has stopped being needed has to leave.
         const ALWAYS: &[&str] = &[
-            "a",
-            "b",
-            "c",
-            "d",
-            "e",
-            "f", // a transform, all six of it
-            "blend",
-            "children",
-            "color",
-            "color_mode",
-            "document",
-            "dpi",
-            "fill",
-            "format_version",
-            "g",
-            "height",
-            "invert",
-            "kind",
-            "meta",
-            "name",
-            "next_id",
-            "nodes",
-            "of",
-            "opacity",
-            "points",
-            "r",
-            "radii",
-            "resource_id",
-            "root",
-            "shape",
-            "size",
-            "text",
-            "transform",
-            "visible",
-            "width",
-            "x",
-            "y",
+            "/document/meta:color_mode",
+            "/document/meta:dpi",
+            "/document/meta:height",
+            "/document/meta:width",
+            "/document/nodes/*/effects/*/DropShadow/color/Srgb:a",
+            "/document/nodes/*/effects/*/DropShadow/color/Srgb:b",
+            "/document/nodes/*/effects/*/DropShadow/color/Srgb:g",
+            "/document/nodes/*/effects/*/DropShadow/color/Srgb:r",
+            "/document/nodes/*/effects/*/DropShadow:blur",
+            "/document/nodes/*/effects/*/DropShadow:color",
+            "/document/nodes/*/effects/*/DropShadow:dx",
+            "/document/nodes/*/effects/*/DropShadow:dy",
+            "/document/nodes/*/effects/*/DropShadow:opacity",
+            "/document/nodes/*/kind/Artboard/background/Srgb:a",
+            "/document/nodes/*/kind/Artboard/background/Srgb:b",
+            "/document/nodes/*/kind/Artboard/background/Srgb:g",
+            "/document/nodes/*/kind/Artboard/background/Srgb:r",
+            "/document/nodes/*/kind/Artboard:height",
+            "/document/nodes/*/kind/Artboard:width",
+            "/document/nodes/*/kind/Clone/strokes/*/color/Srgb:a",
+            "/document/nodes/*/kind/Clone/strokes/*/color/Srgb:b",
+            "/document/nodes/*/kind/Clone/strokes/*/color/Srgb:g",
+            "/document/nodes/*/kind/Clone/strokes/*/color/Srgb:r",
+            "/document/nodes/*/kind/Clone/strokes/*:color",
+            "/document/nodes/*/kind/Clone/strokes/*:points",
+            "/document/nodes/*/kind/Clone/strokes/*:radii",
+            "/document/nodes/*/kind/Instance:of",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:a",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:b",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:g",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:r",
+            "/document/nodes/*/kind/Paint/strokes/*:color",
+            "/document/nodes/*/kind/Paint/strokes/*:points",
+            "/document/nodes/*/kind/Paint/strokes/*:radii",
+            "/document/nodes/*/kind/Raster:height",
+            "/document/nodes/*/kind/Raster:resource_id",
+            "/document/nodes/*/kind/Raster:width",
+            "/document/nodes/*/kind/Text/fill/Srgb:a",
+            "/document/nodes/*/kind/Text/fill/Srgb:b",
+            "/document/nodes/*/kind/Text/fill/Srgb:g",
+            "/document/nodes/*/kind/Text/fill/Srgb:r",
+            "/document/nodes/*/kind/Text:fill",
+            "/document/nodes/*/kind/Text:size",
+            "/document/nodes/*/kind/Text:text",
+            "/document/nodes/*/kind/Vector/fill/Srgb:a",
+            "/document/nodes/*/kind/Vector/fill/Srgb:b",
+            "/document/nodes/*/kind/Vector/fill/Srgb:g",
+            "/document/nodes/*/kind/Vector/fill/Srgb:r",
+            "/document/nodes/*/kind/Vector/shape/Rect:height",
+            "/document/nodes/*/kind/Vector/shape/Rect:width",
+            "/document/nodes/*/kind/Vector:shape",
+            "/document/nodes/*/mask/kind/Vector/shape/Rect:height",
+            "/document/nodes/*/mask/kind/Vector/shape/Rect:width",
+            "/document/nodes/*/mask/kind/Vector/transform:a",
+            "/document/nodes/*/mask/kind/Vector/transform:b",
+            "/document/nodes/*/mask/kind/Vector/transform:c",
+            "/document/nodes/*/mask/kind/Vector/transform:d",
+            "/document/nodes/*/mask/kind/Vector/transform:e",
+            "/document/nodes/*/mask/kind/Vector/transform:f",
+            "/document/nodes/*/mask/kind/Vector:shape",
+            "/document/nodes/*/mask/kind/Vector:transform",
+            "/document/nodes/*/mask:invert",
+            "/document/nodes/*/mask:kind",
+            "/document/nodes/*/pinned:x",
+            "/document/nodes/*/pinned:y",
+            "/document/nodes/*/transform:a",
+            "/document/nodes/*/transform:b",
+            "/document/nodes/*/transform:c",
+            "/document/nodes/*/transform:d",
+            "/document/nodes/*/transform:e",
+            "/document/nodes/*/transform:f",
+            "/document/nodes/*:blend",
+            "/document/nodes/*:kind",
+            "/document/nodes/*:name",
+            "/document/nodes/*:opacity",
+            "/document/nodes/*:transform",
+            "/document/nodes/*:visible",
+            "/document/resources/9c1a90d2690ab945:height",
+            "/document/resources/9c1a90d2690ab945:width",
+            "/document:children",
+            "/document:meta",
+            "/document:next_id",
+            "/document:nodes",
+            "/document:root",
+            ":document",
+            ":format_version",
         ];
 
         let f = chitrakar_doc::fixture::everything();
@@ -517,6 +571,24 @@ mod tests {
             "the manifest of everything has fields to take out: {}",
             all.len()
         );
+        /// A path with its numbers taken out, so an entry stands for
+        /// "an effect of a node" rather than for node seven's second
+        /// effect: node ids and array indices are both numbers and both
+        /// are data. Naming the place as well as the field is what makes
+        /// the failure say where to go — two structs can each have a
+        /// `blur`, and only one of them need be at fault.
+        fn shapely(path: &str) -> String {
+            path.split('/')
+                .map(|seg| {
+                    if !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()) {
+                        "*"
+                    } else {
+                        seg
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        }
         let mut cannot: std::collections::BTreeSet<String> = Default::default();
         for (path, key) in &all {
             let mut value = base.clone();
@@ -525,7 +597,7 @@ mod tests {
             };
             m.remove(key);
             if load_chitra(&repack(&value)).is_err() {
-                cannot.insert(key.clone());
+                cannot.insert(format!("{}:{key}", shapely(path)));
             }
         }
         let added: Vec<&String> = cannot
@@ -549,7 +621,7 @@ mod tests {
         // before any of them existed. It opens, and it draws.
         let mut old = base.clone();
         for (path, key) in &all {
-            if ALWAYS.contains(&key.as_str()) {
+            if ALWAYS.contains(&format!("{}:{key}", shapely(path)).as_str()) {
                 continue;
             }
             if let Some(serde_json::Value::Object(m)) = at_path(&mut old, path) {

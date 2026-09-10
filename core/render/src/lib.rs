@@ -439,6 +439,13 @@ fn bounds_in_parent_space_inner(
                 None => Bounds::None,
             }
         }
+        // A copy of something with an effect in it reaches past the box
+        // of what it copies, and by how much is a question in three
+        // spaces at once; the whole page is the answer, as it is for a
+        // copy of an adjustment.
+        NodeKind::Instance { of, .. } if effects && copy_reaches_out(doc, id, *of) => {
+            Bounds::Everything
+        }
         NodeKind::Instance { of, .. } => match local_bounds_of(doc, *of) {
             Ok(Some([x0, y0, x1, y1])) => {
                 transformed_local_bounds(node.transform, (x0, y0, x1, y1))
@@ -461,6 +468,41 @@ fn bounds_in_parent_space_inner(
 /// Groups report document space, because a group's own transform is not
 /// applied to its children (their transforms are absolute), so its local
 /// space and the document's are the same one.
+/// Whether a copy of `of` — or a copy with `instance`'s own layers
+/// standing in — draws anything that reaches beyond its own box.
+///
+/// A copy's box is the box of what it copies, and that box is the one the
+/// handles are drawn round: the layer's own outline, without the reach of
+/// anything's effects. The renderer used the same figure to decide where a
+/// copy may paint, so a copy of a group whose child casts a shadow had
+/// that shadow cut off at the group's contents — a shadow on the original
+/// and none on the copy, from a layer that is meant to be the same layer.
+///
+/// The answer here is deliberately coarse: a copy of something that
+/// reaches out is given the whole page to paint in, the same answer a copy
+/// of an adjustment or a filter already gets. Working out how far, exactly,
+/// would mean carrying reaches written in three different spaces through
+/// the one a copy draws in, and a copy of a subtree with effects in it is
+/// rare enough that the page is a cheaper answer than a wrong one.
+fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
+    fn anywhere(doc: &Document, id: NodeId) -> bool {
+        let Ok(node) = doc.node(id) else {
+            return false;
+        };
+        if !node.effects.is_empty() {
+            return true;
+        }
+        doc.children_of(id)
+            .map(|kids| kids.iter().any(|&k| anywhere(doc, k)))
+            .unwrap_or(false)
+    }
+    anywhere(doc, of)
+        || doc
+            .children_of(instance)
+            .map(|kids| kids.iter().any(|&k| anywhere(doc, k)))
+            .unwrap_or(false)
+}
+
 pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, DocError> {
     let node = doc.node(id)?;
     Ok(match &node.kind {
@@ -1044,6 +1086,9 @@ fn render_child(
                 // stands in for one of the original's layers with a
                 // different one, what it covers is its own.
                 let extent = match local_bounds_of(doc, child)? {
+                    // …unless something it copies reaches past its own
+                    // box, in which case so does the copy.
+                    Some(_) if copy_reaches_out(doc, child, *of) => Bounds::Everything,
                     Some([x0, y0, x1, y1]) => transformed_local_bounds(t, (x0, y0, x1, y1)),
                     // A copy of an adjustment or a filter reaches as far
                     // as the original would.

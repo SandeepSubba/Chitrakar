@@ -100,6 +100,29 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // A shadow on the top one, and a generous one: an effect reaches
+    // beyond the layer it belongs to, and how far is a figure
+    // (`Effect::reach`) that bounds and dirty regions are grown by. Every
+    // audit here is the better for a layer that draws outside its own box
+    // — a page redrawn a region at a time leaves a trail behind one if
+    // that figure is short, and the layer it belongs to is inside a group,
+    // so the reach has a space to be read in as well.
+    doc.apply(Command::SetEffects {
+        id: over,
+        effects: vec![Effect::DropShadow {
+            dx: 5.0,
+            dy: 4.0,
+            blur: 2.5,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.05,
+                b: 0.15,
+                a: 1.0,
+            },
+            opacity: 0.75,
+        }],
+    })
+    .unwrap();
     doc.apply(Command::AddNode {
         parent: root,
         index: 1,

@@ -8706,6 +8706,155 @@ mod tests {
         }
     }
 
+    /// A copy of a layer casts the same shadow the layer does.
+    ///
+    /// A copy draws what the original draws, where the copy is — that is
+    /// the whole of what a copy is — and the renderer decides where it may
+    /// paint from the box of what it copies. That box is the one the
+    /// handles are drawn round: the layer's own outline, deliberately
+    /// without the reach of anything's effects. So a copy of a group whose
+    /// child casts a shadow had that shadow cut off at the group's
+    /// contents: a shadow on the original, none on the copy, from a layer
+    /// that is meant to be the same layer.
+    ///
+    /// Such a copy is given the whole page to paint in now, which is the
+    /// answer a copy of an adjustment or a filter already got. Working out
+    /// how far, exactly, means carrying reaches written in three spaces
+    /// through the one a copy draws in, and a copy of a subtree with
+    /// effects in it is rare enough that the page is a cheaper answer than
+    /// a wrong one.
+    ///
+    /// The claim is put as a comparison rather than as pixel positions:
+    /// the copy is placed so that what it draws is the original's picture
+    /// shifted by a whole number of pixels, so the two have to be the same
+    /// picture, shadow and all.
+    #[test]
+    fn a_copy_casts_the_same_shadow_the_layer_does() {
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 5.0,
+            blur: 1.5,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        // Copy a group with the shadow on its child, and a plain layer
+        // with the shadow on itself: the first is the one that was wrong,
+        // the second is what should have caught it and did not.
+        for (what, on_the_child) in [("a group's child", true), ("the layer itself", false)] {
+            let mut s = Session::new(96, 48, ColorMode::Rgb);
+            let root = s.document().root();
+            let shaped = |name: &str| {
+                rect_of(
+                    name,
+                    16.0,
+                    12.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.4,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                )
+            };
+            let master = if on_the_child {
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(Node::group("pair")),
+                })
+                .unwrap();
+                let g = s.document().children_of(root).unwrap()[0];
+                s.apply(Command::AddNode {
+                    parent: g,
+                    index: 0,
+                    node: shaped("one"),
+                })
+                .unwrap();
+                let one = s.document().children_of(g).unwrap()[0];
+                s.apply(Command::SetTransform {
+                    id: one,
+                    transform: Transform::translation(6.0, 8.0),
+                })
+                .unwrap();
+                s.apply(Command::SetEffects {
+                    id: one,
+                    effects: vec![shadow.clone()],
+                })
+                .unwrap();
+                g
+            } else {
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: shaped("one"),
+                })
+                .unwrap();
+                let one = s.document().children_of(root).unwrap()[0];
+                s.apply(Command::SetTransform {
+                    id: one,
+                    transform: Transform::translation(6.0, 8.0),
+                })
+                .unwrap();
+                s.apply(Command::SetEffects {
+                    id: one,
+                    effects: vec![shadow.clone()],
+                })
+                .unwrap();
+                one
+            };
+            let alone = s.render().unwrap();
+            let shift = 44u32;
+            let copy = s.make_instance(master).unwrap();
+            // A copy undoes the original's own placement before applying
+            // its own — moving the original moves only the original — so
+            // the copy is put where the original stands, shifted: that is
+            // what makes the two pictures the same picture, offset.
+            let placed = s.document().node(master).unwrap().transform;
+            s.apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(shift as f32, 0.0).compose(placed),
+            })
+            .unwrap();
+            let both = s.render().unwrap();
+
+            // The original's picture, and the copy's, held against each
+            // other column for column.
+            let mut worst = (0.0f32, 0u32, 0u32);
+            let mut ink = 0.0f32;
+            for y in 0..48u32 {
+                for x in 0..(96 - shift) {
+                    let there = alone.get(x, y);
+                    let here = both.get(x + shift, y);
+                    ink += there.a;
+                    let d = (there.r - here.r)
+                        .abs()
+                        .max((there.g - here.g).abs())
+                        .max((there.b - here.b).abs())
+                        .max((there.a - here.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                ink > 200.0,
+                "{what}: there is a picture with a shadow to copy ({ink})"
+            );
+            assert!(
+                worst.0 < 1e-5,
+                "{what}: the copy draws something else ({} at {},{})",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        }
+    }
+
     /// Every command, over the boundary the UI actually talks across.
     ///
     /// Nothing in the app calls `apply`: the UI is TypeScript on the far
