@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~378),
+- **Verify before committing:** `cargo test --workspace` (~379),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -971,6 +971,23 @@ without reading anything else.*
   parts of the fix was checked by breaking it and watching that test
   fail. `a_shadow_turns_with_the_group_it_is_in` pins the renderer's
   half on its own.
+- **And a layer's mask handed back out picks out what it let through:**
+  handing a region to a layer and handing that layer's mask back out are
+  the same carry read in the two directions, and the way in was already
+  pinned. The way out is where the second copy of the carry lived —
+  `Session::carried_into` wrote out, a second time, what
+  `Mask::carried_through` says, so it still had the gaps that one has since
+  had fixed. A brushed coverage's radii and the region a stroke was
+  confined to went through untouched: a piece rubbed out of a layer sitting
+  inside a group scaled by two came back out as a region with the brush
+  still the size it was in there. It delegates now, so the rule is written
+  once and the third caller reads it.
+  Asking it as a *round trip* would have found nothing, and that is the
+  lesson worth keeping: out and back again leaves an untouched radius
+  untouched twice, and the two mistakes cancel exactly. The question has to
+  be one-directional — the mask is handed out and given to a plain
+  full-page layer at the root, and what the two layers show has to coincide,
+  which is the whole meaning of handing a mask out as a region.
 - **A region confines a brush on a mask too:** rubbing a piece out of
   anything but a paint layer goes into that layer's *mask* rather than
   over its pixels — which is what makes it something to change one's mind

@@ -3355,27 +3355,15 @@ impl Session {
     /// a group scaled by two would fade over eight page pixels instead
     /// of four.
     fn carried_into(mask: &chitrakar_doc::Mask, space: Transform) -> Option<chitrakar_doc::Mask> {
-        let into = Self::seen_from(space)?;
-        let shrink = into.a.hypot(into.b).max(into.c.hypot(into.d));
-        let mut mask = mask.clone();
-        mask.feather *= shrink;
-        match &mut mask.kind {
-            chitrakar_doc::MaskKind::Vector { transform, .. }
-            | chitrakar_doc::MaskKind::Raster { transform, .. } => {
-                *transform = into.compose(*transform);
-            }
-            chitrakar_doc::MaskKind::Painted { strokes } => {
-                for stroke in strokes {
-                    for p in &mut stroke.points {
-                        *p = [
-                            into.a * p[0] + into.c * p[1] + into.e,
-                            into.b * p[0] + into.d * p[1] + into.f,
-                        ];
-                    }
-                }
-            }
-        }
-        Some(mask)
+        // The same carry a page being mapped and a group being dissolved
+        // do, read the other way round: `space` is where the coverage is
+        // going and its inverse is the transform that takes it there.
+        // Written out a second time here, this had the gaps that one has
+        // since had fixed — a brushed coverage's radii and the region a
+        // stroke was confined to went through untouched, so a rubbed-out
+        // piece of a layer inside a group scaled by two came back out as
+        // a region with the brush still the size it was inside.
+        Some(mask.carried_through(Self::seen_from(space)?))
     }
 
     /// What is picked out of the page, carried into `space`, ready to
@@ -8539,6 +8527,183 @@ mod tests {
             5,
             "each shape arrived as a layer of its own"
         );
+    }
+
+    /// A layer's mask handed out as a region picks out what that mask
+    /// let through.
+    ///
+    /// Handing a region to a layer and handing the layer's mask back out
+    /// are the same carry read in the two directions, and the way in was
+    /// already pinned. The way out is where the second copy of that carry
+    /// lived: `Session::carried_into` wrote out, a second time, what
+    /// `Mask::carried_through` says — and so it still had the gaps that
+    /// one has since had fixed. A brushed coverage's radii and the region
+    /// a stroke was confined to went through untouched, so a piece rubbed
+    /// out of a layer sitting inside a group scaled by two came back out
+    /// as a region with the brush still the size it was in there. It
+    /// delegates now; the rule is written once.
+    ///
+    /// Asking it as a round trip would have found nothing: out and back
+    /// again leaves an untouched radius untouched twice, and the two
+    /// mistakes cancel. So the question is one-directional — the mask is
+    /// handed out and given to a *plain* full-page layer at the root, and
+    /// what the two layers show has to coincide, which is the whole
+    /// meaning of handing a mask out as a region.
+    #[test]
+    fn a_mask_handed_out_as_a_region_picks_out_what_it_let_through() {
+        for (what, scale) in [
+            ("at the root", 1.0f32),
+            ("inside a group scaled by two", 2.0),
+        ] {
+            for painted in [false, true] {
+                let mut s = Session::new(80, 60, ColorMode::Rgb);
+                let root = s.document().root();
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: rect_of(
+                        "sheet",
+                        80.0,
+                        60.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.8,
+                            g: 0.4,
+                            b: 0.2,
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let sheet = s.document().children_of(root).unwrap()[0];
+                let sheet = if scale != 1.0 {
+                    let g = s.group_nodes(&[sheet], "wrap").unwrap();
+                    s.apply(Command::SetTransform {
+                        id: g,
+                        transform: Transform {
+                            a: scale,
+                            b: 0.0,
+                            c: 0.0,
+                            d: scale,
+                            e: -4.0,
+                            f: -3.0,
+                        },
+                    })
+                    .unwrap();
+                    sheet
+                } else {
+                    sheet
+                };
+                if painted {
+                    // A piece rubbed out of the layer, inside a region, so
+                    // the stroke carries a radius and a clip of its own.
+                    s.pick_region(
+                        VectorShape::Rect {
+                            width: 30.0,
+                            height: 60.0,
+                            radius: 0.0,
+                        },
+                        Transform::translation(10.0, 0.0),
+                        "replace",
+                    )
+                    .unwrap();
+                    s.ensure_painted_mask(sheet).unwrap();
+                    s.paint_begin(
+                        sheet,
+                        14.0,
+                        20.0,
+                        7.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        0.0,
+                        true,
+                        true,
+                    )
+                    .unwrap();
+                    s.paint_extend(50.0, 26.0, 7.0).unwrap();
+                    s.commit_preview();
+                    s.pick_none().unwrap();
+                } else {
+                    s.pick_region(
+                        VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+                        Transform::translation(20.0, 16.0),
+                        "replace",
+                    )
+                    .unwrap();
+                    s.mask_from_selection(sheet, false).unwrap();
+                    s.pick_none().unwrap();
+                }
+                // The mask handed out as a region, and that region given
+                // to a plain full-page layer at the root. What the two
+                // layers show has to coincide: that is what handing a
+                // mask out as a region means.
+                s.pick_layer_mask(sheet, "replace").unwrap();
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: rect_of(
+                        "twin",
+                        80.0,
+                        60.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.2,
+                            g: 0.4,
+                            b: 0.9,
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let twin = s.document().children_of(root).unwrap()[1];
+                s.mask_from_selection(twin, false).unwrap();
+                let alone = |id| {
+                    let mut surface = Surface::new(80, 60);
+                    chitrakar_render::render_showing_at(
+                        s.document(),
+                        &mut surface,
+                        ClipRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: 80,
+                            y1: 60,
+                        },
+                        Transform::default(),
+                        chitrakar_render::Showing::Alone(id),
+                    )
+                    .unwrap();
+                    surface
+                };
+                let (before, after) = (alone(sheet), alone(twin));
+                let mut worst = 0.0f32;
+                for i in 0..before.pixels.len() {
+                    let (p, q) = (before.pixels[i], after.pixels[i]);
+                    worst = worst.max((p.a - q.a).abs());
+                }
+                let kind = if painted {
+                    "a brushed mask"
+                } else {
+                    "a shape mask"
+                };
+                assert!(
+                    worst < 1e-5,
+                    "{kind} {what}: the region picks out somewhere else, by {worst}"
+                );
+                // And it picks out something: a region of nothing, or of
+                // everything, would agree with anything.
+                let shown = (0..60u32)
+                    .flat_map(|y| (0..80u32).map(move |x| (x, y)))
+                    .filter(|(x, y)| after.get(*x, *y).a > 0.5)
+                    .count();
+                assert!(
+                    shown > 250 && 4800 - shown > 250,
+                    "{kind} {what}: the region is a region rather than all or \
+                     nothing of the page ({shown} of 4800 pixels shown)"
+                );
+            }
+        }
     }
 
     /// Every command, over the boundary the UI actually talks across.
