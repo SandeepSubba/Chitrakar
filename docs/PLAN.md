@@ -1250,6 +1250,22 @@ without reading anything else.*
   axis and carries no tilt, so it returns where it crosses the middle of
   the page. Nothing batches a straighten; the engine and the UI both send
   it alone.
+- **And four more after that:** a *gradient* fill — a ramp baked from its
+  stops and read across the shape's own box, which is a different path
+  from a flat colour and is read at every pixel it covers; a *dashed*
+  stroke *with markers* on each end, since a dash pattern walks an outline
+  by length and a marker is a shape placed on a tangent; and a colour
+  authored in **ink**, which on an RGB page resolves through the
+  document's press profile or, without one, through the preview formula.
+  The ink goes on the paint layer on purpose: a second renderer declines
+  ink rather than guessing at a profile, and the paint layer is one the GPU
+  audit removes anyway, so putting it there costs that audit nothing it
+  was not already giving up. The paint layer keeps a second stroke in
+  light beside it, so both ways of authoring a colour are on the page at
+  once and neither branch can be right by accident.
+  Everything held again. The forward-compatibility audit earned its
+  both-directions assertion here: moving the paint stroke to ink left four
+  entries in its list that nothing exercised any more, and it said so.
 - **Four more things the shared fixture had never held:** a layer with a
   *blend mode*, which is the one flag that makes a plain group stop being
   transparent — a group holding something that reads what is under it is

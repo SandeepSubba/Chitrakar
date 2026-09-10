@@ -9,8 +9,9 @@
 //! be the thing that makes those tests fail.
 
 use crate::{
-    BlendMode, Command, Document, Effect, Guide, Mask, MaskKind, Node, NodeId, NodeKind,
-    PaintStroke, Pin, Pinning, RasterRef, Swatch, TextSpec, Transform, VectorShape,
+    BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
+    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, Swatch, TextSpec,
+    Transform, VectorShape,
 };
 use chitrakar_color::ColorMode;
 
@@ -163,10 +164,19 @@ pub fn everything() -> Fixture {
     let stroke = PaintStroke {
         points: vec![[10.0, 40.0], [52.0, 30.0]],
         radii: vec![5.0],
-        color: chitrakar_color::AuthoredColor::Srgb {
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
+        // Laid down in ink rather than in light. A CMYK colour on an RGB
+        // page resolves through the document's press profile — or, without
+        // one, through the preview formula — which is a path nothing else
+        // in this document takes, and one every audit that draws the page
+        // walks. It sits on the paint layer on purpose: that is a layer
+        // the GPU audit takes out anyway, since a second renderer
+        // declines ink rather than guessing at a profile, so putting the
+        // ink here costs that audit nothing it was not already giving up.
+        color: chitrakar_color::AuthoredColor::Cmyk {
+            c: 0.15,
+            m: 0.85,
+            y: 0.35,
+            k: 0.05,
             a: 1.0,
         },
         softness: 0.25,
@@ -179,6 +189,28 @@ pub fn everything() -> Fixture {
         id: painted,
         index: 0,
         stroke: Box::new(stroke.clone()),
+        on_mask: false,
+    })
+    .unwrap();
+    // A second stroke beside it, in light rather than in ink, so both
+    // ways of authoring a colour are on the page at once: a layer with
+    // one of each is also a layer whose strokes cannot be handled by one
+    // branch that happens to be right.
+    doc.apply(Command::AddStroke {
+        id: painted,
+        index: 1,
+        stroke: Box::new(PaintStroke {
+            points: vec![[14.0, 50.0], [46.0, 44.0]],
+            radii: vec![3.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.85,
+                b: 0.45,
+                a: 0.9,
+            },
+            softness: 0.0,
+            ..stroke.clone()
+        }),
         on_mask: false,
     })
     .unwrap();
@@ -359,6 +391,74 @@ pub fn everything() -> Fixture {
             e: 2.0,
             f: 2.0,
         },
+    })
+    .unwrap();
+    // Painted with a gradient rather than a flat colour: a gradient is a
+    // ramp baked from its stops and
+    // read across the shape's own box, which is a different path from a
+    // fill, and a CMYK colour on an RGB page goes through the press
+    // profile — or, without one, the preview formula. Neither was
+    // anywhere in this document, and both are read at every pixel they
+    // cover.
+    doc.apply(Command::SetKind {
+        id: held,
+        kind: Box::new(NodeKind::Vector {
+            shape: VectorShape::Rect {
+                width: 22.0,
+                height: 18.0,
+                radius: 3.0,
+            },
+            fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.15,
+                g: 0.7,
+                b: 0.55,
+                a: 1.0,
+            }),
+            gradient: Some(Gradient::Linear {
+                from: [0.1, 0.0],
+                to: [0.9, 1.0],
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.1,
+                            g: 0.35,
+                            b: 0.8,
+                            a: 1.0,
+                        },
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.95,
+                            g: 0.85,
+                            b: 0.2,
+                            a: 0.8,
+                        },
+                    },
+                ],
+            }),
+            stroke: Some(Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.15,
+                    b: 0.4,
+                    a: 1.0,
+                },
+                width: 1.5,
+                widths: Vec::new(),
+                // Broken into dashes, and with something on each end: a
+                // dash pattern walks the outline by length and a marker is
+                // a shape placed on a tangent, neither of which anything
+                // else here asks for.
+                dash: vec![3.0, 2.0],
+                cap: Default::default(),
+                join: Default::default(),
+                align: None,
+                start_marker: Marker::Arrow,
+                end_marker: Marker::Dot,
+            }),
+        }),
     })
     .unwrap();
     // Pinned to the far corner, which is the only thing that makes a
