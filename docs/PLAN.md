@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~404),
+- **Verify before committing:** `cargo test --workspace` (~405),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1969,11 +1969,19 @@ without reading anything else.*
      faded, masked or held to the one under it as well as on a plain one
      — all three decide what the silhouette is, so all three go into the
      surface the shadow is cast from rather than onto the quad that lays
-     it down. What still goes back is a layer with a blend mode (the CPU
+     it down. Effects inside a frame it draws now
+     (`an_effect_inside_a_frame_ends_where_the_frame_does`): a frame cuts
+     what the layer *lays down* and not the silhouette its effects grew
+     from — a shape half out of a frame casts the whole shape's shadow,
+     cut at the frame's edge, rather than the shadow of the part that
+     shows — and since a frame is whole page pixels, the cut is the
+     rectangle the quads are drawn over rather than a coverage they read.
+     That leaves the mask texture for the mask and leaves what was drawn
+     into the surface uncut, which is exactly the distinction. What still
+     goes back is a layer with a blend mode (the CPU
      brings the effect down by it too, and the one texture the shader has
-     spare is already carrying the layer's coverage for an inner shadow),
-     a layer with effects inside a frame (the CPU cuts the shadow at the
-     frame's edge and not the silhouette it grew from), and a group. An
+     spare is already carrying the layer's coverage for an inner shadow)
+     and a group. An
      outline it draws too
      (`an_outline_is_the_band_the_cpu_measures`): its band is a true
      Euclidean distance from the silhouette — the same one a region is

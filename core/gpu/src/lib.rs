@@ -2038,14 +2038,10 @@ fn one(
         // A blend mode is out: the CPU renderer brings the effect down by
         // it as well as the layer, and this shader has the layer's own
         // coverage where a blend would want what is under it — there is
-        // one texture and two things that want it. A frame above is out
-        // too: the CPU renderer cuts the *shadow* at the frame's edge and
-        // not the silhouette it grew from, and holding the layer to the
-        // frame here would cut the silhouette. And a group is out because
-        // what a group's opacity means to its children is not what a
-        // layer's means to itself.
+        // one texture and two things that want it. And a group is out
+        // because what a group's opacity means to its children is not
+        // what a layer's means to itself.
         if node.blend != BlendMode::Normal
-            || bound.is_some()
             || !matches!(
                 node.kind,
                 NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
@@ -2549,6 +2545,19 @@ fn one(
     // drawing rather than on the way down, since a mask decides what the
     // silhouette is and so what the shadow is a shadow of.
     let mut laid = None;
+    // A frame above cuts what the layer *lays down*, and not the
+    // silhouette its effects grew from: the CPU renderer builds a field
+    // over a window grown past the frame's edge by the effect's own
+    // reach and then writes only inside the frame, so a shadow ends at
+    // the frame while the shape it is a shadow of does not. Whole
+    // pixels, so the cut can be the rectangle the quads are drawn over
+    // rather than a coverage they read — which leaves the mask texture
+    // for the mask, and leaves what was drawn into the surface uncut.
+    let framed = match bound {
+        Some(b) if !shadings.is_empty() => Some(out.page.intersect(b)),
+        _ => None,
+    };
+    let down = framed.unwrap_or(out.page);
     if alone {
         if shadings.is_empty() {
             // The mask and the opacity go on the quad that lays the
@@ -2599,7 +2608,7 @@ fn one(
                     Spread::Still => 0..0,
                 };
                 let quad = out.push(page_quad(
-                    (out.page, out.surface),
+                    (down, out.surface),
                     opacity,
                     [
                         s.offset[0],
@@ -2621,7 +2630,7 @@ fn one(
             })
             .collect();
         let quad = out.push(page_quad(
-            (out.page, out.surface),
+            (down, out.surface),
             if shadings.is_empty() {
                 node.opacity * opacity
             } else {
@@ -2645,8 +2654,17 @@ fn one(
     // What a layer is held to rides the same texture — two
     // coverages a layer is held back by are one coverage, and a
     // fragment reads it once.
-    if node.mask.is_some() || held_to.is_some() || bound.is_some() {
-        let (at, box_) = mask_texture(doc, child, node.mask.as_ref(), held_to, bound, parent, out)?;
+    let coverage = if framed.is_some() { None } else { bound };
+    if node.mask.is_some() || held_to.is_some() || coverage.is_some() {
+        let (at, box_) = mask_texture(
+            doc,
+            child,
+            node.mask.as_ref(),
+            held_to,
+            coverage,
+            parent,
+            out,
+        )?;
         for v in &mut out.vertices[mark.0..] {
             v.mask = box_;
         }
@@ -4501,6 +4519,134 @@ mod tests {
             })
             .unwrap();
         assert!(!GpuRenderer::can_render(&faded), "a copy composited whole");
+    }
+
+    /// A layer with effects inside a frame: the frame cuts what the
+    /// layer lays down, and not the silhouette its effects grew from.
+    ///
+    /// These two are easy to get the wrong way round, and both readings
+    /// look plausible on a page. The CPU renderer builds a field over a
+    /// window grown past the frame's edge by the effect's own reach and
+    /// then writes only inside the frame — so a shape half out of a
+    /// frame casts the shadow of the whole shape, cut off at the
+    /// frame's edge, rather than the shadow of the part that shows.
+    /// Holding the layer to the frame on the way *in* would give the
+    /// second, and a shadow with a straight edge down the middle of it
+    /// is what that looks like.
+    #[test]
+    fn an_effect_inside_a_frame_ends_where_the_frame_does() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let inside = |effects: Vec<E>| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            let root = doc.root();
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.86, 0.88, 0.9, 1.0),
+                ),
+                Transform::default(),
+            );
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::artboard("frame", 36.0, 30.0, Some(WHITE))),
+            })
+            .unwrap();
+            let frame = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: frame,
+                transform: Transform::translation(20.0, 15.0),
+            })
+            .unwrap();
+            // Hung off the frame's right edge, so half the shape is
+            // outside it and the effect has an edge to be cut at.
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: filled(
+                    "shape",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 12.0,
+                        radius: 2.0,
+                    },
+                    ink(0.15, 0.2, 0.55, 1.0),
+                ),
+            })
+            .unwrap();
+            let shape = doc.children_of(frame).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: shape,
+                transform: Transform::translation(26.0, 9.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects { id: shape, effects })
+                .unwrap();
+            doc
+        };
+        let shadow = E::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 1.5,
+            color: ink(0.0, 0.0, 0.0, 1.0),
+            opacity: 0.8,
+        };
+        let outline = E::Outline {
+            width: 3.0,
+            color: ink(0.95, 0.15, 0.1, 1.0),
+            opacity: 1.0,
+        };
+        for (name, effects) in [
+            ("a shadow in a frame", vec![shadow.clone()]),
+            ("an outline in a frame", vec![outline.clone()]),
+            (
+                "an inner shadow in a frame",
+                vec![E::InnerShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: ink(0.0, 0.0, 0.1, 1.0),
+                    opacity: 0.9,
+                }],
+            ),
+            ("both at once", vec![shadow.clone(), outline.clone()]),
+        ] {
+            let doc = inside(effects);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} is drawn rather than handed back"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(mean < 0.004, "{name}: mean {mean:.5}, worst {worst:.3}");
+        }
+
+        // The readings a mean would hide. The frame runs from x = 20 to
+        // x = 56; the shape sits from 46 to 66, so its right half and
+        // everything its outline would put beyond the frame are outside.
+        let drawn = gpu.render(&inside(vec![outline])).unwrap();
+        let red = |x: u32, y: u32| {
+            let p = drawn.get(x, y);
+            p.r > p.b + 0.15
+        };
+        assert!(red(44, 30), "the band shows inside the frame");
+        assert!(!red(57, 30), "and stops dead at the frame's edge");
+        // And the band along the shape's top runs the whole way to that
+        // edge — it is the whole shape's outline, cut, rather than the
+        // outline of the part of the shape that shows.
+        assert!(red(54, 22), "the band is the whole shape's, up to the cut");
     }
 
     #[test]
