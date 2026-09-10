@@ -8231,19 +8231,25 @@ mod tests {
     #[test]
     fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
         let f = chitrakar_doc::fixture::everything();
-        // What the copy is responsible for: every pixel the page loses by
-        // taking it away.
+        // The copy alone, where the page puts it: what it covers is a
+        // question about the copy rather than about the page, and asking
+        // the page would be asking about whatever happens to be drawn
+        // over it as well.
         let changed = |doc: &Document| -> (usize, Option<[u32; 4]>) {
-            let with = render(doc).unwrap();
-            let mut without = doc.clone();
-            without
-                .apply(Command::RemoveNode { id: f.frame_copy })
-                .unwrap();
-            let without = render(&without).unwrap();
+            let mut surface = Surface::new(doc.meta.width, doc.meta.height);
+            let clip = surface.full_clip();
+            render_showing_at(
+                doc,
+                &mut surface,
+                clip,
+                Transform::default(),
+                Showing::Alone(f.frame_copy),
+            )
+            .unwrap();
             let (mut n, mut box_) = (0usize, None::<[u32; 4]>);
-            for y in 0..with.height {
-                for x in 0..with.width {
-                    if with.get(x, y).to_srgb8() == without.get(x, y).to_srgb8() {
+            for y in 0..surface.height {
+                for x in 0..surface.width {
+                    if surface.get(x, y).a <= 0.0 {
                         continue;
                     }
                     n += 1;

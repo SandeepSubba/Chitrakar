@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~399),
+- **Verify before committing:** `cargo test --workspace` (~400),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1984,10 +1984,17 @@ without reading anything else.*
      That found a copy drawing its shadow clipped, turned up the
      clipping wrinkle above, and — once a layer in it reached for a
      palette entry — found a palette change repainting nothing and the
-     GPU declining a page it can draw. A copy of a *frame* went in after
-     that and everything held, which is worth knowing too. What it still
-     lacks is harder to name now — the next thing to try is a document
-     shape rather than a node: two frames, or a copy of a copy.
+     GPU declining a page it can draw. Three shapes have gone in since
+     and every audit held: a copy of a *frame*, a copy of a *copy*, and a
+     second frame. Holding is not nothing — but the copy of a copy was
+     worth more than that. Nothing broke, so the question became what
+     would have to break for the audit to notice, and the answer was
+     nothing: stopping the walk that finds copies of copies after one
+     round left every audit green. So that is now asked directly
+     (`changing_a_layer_repaints_the_copy_of_the_copy_of_it`), and the
+     lesson is the method's own — when the fixture gains something and
+     everything holds, break the code the new thing was meant to exercise
+     and see whether anything notices.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field

@@ -5576,6 +5576,96 @@ mod tests {
         assert_eq!(cached.to_srgb8(), fresh, "cache diverged from full render");
     }
 
+    /// A copy of a copy follows the same original, so changing the
+    /// original has to repaint both — the one that is a picture of the
+    /// layer and the one that is a picture of *that*.
+    ///
+    /// The walk that finds them keeps going until nothing new turns up.
+    /// One round finds the copies of the layer and of the groups above
+    /// it; the copy of *those* is only found by the round after, and a
+    /// walk that stopped early would leave the second copy showing what
+    /// the layer used to be — on the screen, since only the cache would
+    /// be wrong, which is why this asks the cache rather than the render.
+    #[test]
+    fn changing_a_layer_repaints_the_copy_of_the_copy_of_it() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let shape = add_rect(&mut session, "shape", 20.0, 20.0);
+        let copy_of = |session: &mut Session, of: NodeId, name: &str, at: f32| -> NodeId {
+            let root = session.document().root();
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(Node::instance(name, of)),
+                })
+                .unwrap();
+            let id = *session
+                .document()
+                .children_of(root)
+                .unwrap()
+                .last()
+                .unwrap();
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: chitrakar_doc::Transform::translation(at, 30.0),
+                })
+                .unwrap();
+            id
+        };
+        let copy = copy_of(&mut session, shape, "a copy", 40.0);
+        let echo = copy_of(&mut session, copy, "a copy of a copy", 80.0);
+
+        // Draw once so there is a cache to be wrong, and check the two
+        // copies are actually drawing something to be stale. Read out
+        // rather than held on to: the cache is the session's.
+        let read = |session: &mut Session| -> [[u8; 4]; 3] {
+            let (s, _) = session.render_cached().unwrap();
+            [
+                // The shape where it stands, and the two copies where
+                // they were put.
+                s.get(10, 10).to_srgb8(),
+                s.get(50, 40).to_srgb8(),
+                s.get(90, 40).to_srgb8(),
+            ]
+        };
+        let before = read(&mut session);
+        assert_eq!(before[0], before[1], "the copy draws the shape");
+        assert_eq!(
+            before[0], before[2],
+            "and the copy of the copy draws it too"
+        );
+
+        // Now change the original. Both copies are pictures of it.
+        let kind = match session.document().node(shape).unwrap().kind.clone() {
+            NodeKind::Vector { shape, stroke, .. } => NodeKind::Vector {
+                shape,
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.9,
+                    b: 0.3,
+                    a: 1.0,
+                }),
+                stroke,
+                gradient: None,
+            },
+            other => panic!("expected a shape, got {other:?}"),
+        };
+        session
+            .apply(Command::SetKind {
+                id: shape,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        let after = read(&mut session);
+        assert_ne!(after[0], before[0], "the original changed");
+        assert_eq!(after[1], after[0], "the copy followed it");
+        assert_eq!(after[2], after[0], "and so did the copy of the copy");
+        let _ = echo;
+        assert_cache_matches_fresh(&mut session);
+    }
+
     #[test]
     fn a_viewport_shows_the_part_of_the_page_it_is_pointed_at() {
         // The surface is a window onto the document now, not the document:

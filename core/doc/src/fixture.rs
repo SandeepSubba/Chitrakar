@@ -34,6 +34,11 @@ pub struct Fixture {
     /// A copy of the frame, which cuts and grounds what it draws where
     /// the copy is rather than where the frame stands.
     pub frame_copy: NodeId,
+    /// A copy of the copy, which has to be followed one step further to
+    /// reach what it is a picture of.
+    pub echo: NodeId,
+    /// A second frame, so that a page's frames are more than one.
+    pub other_frame: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -634,6 +639,46 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A copy of the copy, and a second frame: two shapes a *document*
+    // can have rather than two kinds of layer. Neither is a new node
+    // kind, and both are things the code has to walk one step further
+    // than it ever has here — a copy that follows a copy to reach what
+    // it is a picture of, and a page whose frames are more than one.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 10,
+        node: Box::new(Node::instance("a copy of a copy", copy)),
+    })
+    .unwrap();
+    let echo = doc.children_of(root).unwrap()[10];
+    doc.apply(Command::SetTransform {
+        id: echo,
+        transform: Transform::translation(2.0, 24.0),
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 11,
+        node: Box::new(Node::artboard(
+            "second frame",
+            16.0,
+            10.0,
+            Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.85,
+                b: 0.95,
+                a: 1.0,
+            }),
+        )),
+    })
+    .unwrap();
+    let other_frame = doc.children_of(root).unwrap()[11];
+    doc.apply(Command::SetTransform {
+        id: other_frame,
+        transform: Transform::translation(30.0, 46.0),
+    })
+    .unwrap();
+
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })
@@ -654,6 +699,8 @@ pub fn everything() -> Fixture {
         borrowed,
         copy,
         frame_copy,
+        echo,
+        other_frame,
         stroke,
     }
 }
