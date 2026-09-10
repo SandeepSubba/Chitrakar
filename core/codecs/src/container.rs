@@ -707,6 +707,38 @@ mod tests {
                 "after {what} the file gave back a different document: {}",
                 first_difference(&want, &got)
             );
+            // And the page it describes, which the account above cannot
+            // see: a resource is spelled out as *how many* bytes it has,
+            // not as which, so pixels that came back changed — a picture
+            // written in a colour type that loses something, an alpha
+            // premultiplied on the way out and not on the way back —
+            // would pass every line of it. The page is where that shows.
+            let (there, here) = (
+                chitrakar_render::render(&doc).unwrap(),
+                chitrakar_render::render(&back).unwrap(),
+            );
+            assert_eq!(
+                (there.width, there.height),
+                (here.width, here.height),
+                "after {what} the page came back a different size"
+            );
+            let mut worst = (0.0f32, 0usize);
+            for (i, (p, q)) in there.pixels.iter().zip(&here.pixels).enumerate() {
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs());
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            assert!(
+                worst.0 < 1e-6,
+                "after {what} the page came back different, by {} at pixel {}",
+                worst.0,
+                worst.1
+            );
             checked += 1;
         }
         assert!(

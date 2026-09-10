@@ -1270,6 +1270,14 @@ without reading anything else.*
   The GPU audit takes the effects off by walking the tree now instead of
   naming a layer, so the fixture can grow another without that going
   quiet, and it asserts that it found some to take off.
+- **And the page the file gives back, not only the account of it:** the
+  file audit compares the document as a spelled-out account, and a
+  resource appears there as *how many* bytes it has rather than as which.
+  So pixels that came back changed — a picture written in a colour type
+  that loses something, an alpha premultiplied on the way out and not on
+  the way back — passed every line of it. The page is now compared as
+  well, for each command, and a single eight-bit step in one channel fails
+  it.
 - **A mask read off an image, in the fixture:** the third mask kind was
   the one nothing in the shared document held. A shape's coverage is its
   own geometry and a brushed one is its strokes; this one has *pixels* — so
