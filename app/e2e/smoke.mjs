@@ -9499,6 +9499,65 @@ assert(
   );
 }
 
+// 9bb. Motion blur: a smear runs the way it is pointed. The whole claim of
+// a directional blur is the direction, and a filter that blurs *something*
+// looks plausible in a screenshot however it was pointed — so the same bar
+// is smeared along itself and across itself, and only the second one
+// spreads.
+{
+  await newDocument(300, 200, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  // A bar across the middle, thin enough that spreading is obvious.
+  await pickTool("Rect");
+  await page.mouse.move(...at(60, 96));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 104), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const above = async () => (await canvasPixel(150, 78))[3];
+  const middle = async () => (await canvasPixel(150, 100))[3];
+  assert((await middle()) > 200, "the bar is solid to begin with");
+  assert((await above()) === 0, "and nothing above it");
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "motion");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Motion Blur" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Distance", 60);
+  await page.waitForTimeout(400);
+  // Pointed along the bar (zero degrees runs across the page), so the rows
+  // above it stay empty and the bar itself stays solid.
+  assert(
+    (await above()) === 0,
+    `smeared along itself the bar has not spread (${await above()})`,
+  );
+  assert(
+    (await middle()) > 200,
+    `and is still solid (${await middle()})`,
+  );
+
+  // Turned a quarter, it runs across the bar instead: the rows above take
+  // ink and the middle thins.
+  await setSlider("Direction", 90);
+  await page.waitForTimeout(400);
+  const spread = await above();
+  assert(spread > 20, `smeared across itself it has spread (${spread})`);
+  assert(
+    (await middle()) < 200,
+    `and the middle is thinner for it (${await middle()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Motion Blur" }).count()) === 0,
+    "and it undoes",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

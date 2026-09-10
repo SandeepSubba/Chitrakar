@@ -472,6 +472,18 @@ pub enum Filter {
     GaussianBlur { sigma: f32 },
     /// Unsharp mask: original + amount × (original − blur(sigma)).
     Sharpen { sigma: f32, amount: f32 },
+    /// A smear along one direction: each pixel becomes the average of the
+    /// ones on a line through it. What a camera does to a moving thing, or
+    /// to a still one while the camera moves, and what a still picture is
+    /// given to say the same.
+    ///
+    /// `distance` is the length of that line in document pixels and
+    /// `degrees` the direction it runs in, measured from the page's own x
+    /// axis and turning the way the page's y does — so zero smears across
+    /// and ninety smears down. The line is centred on the pixel, which is
+    /// what keeps the picture where it was instead of sliding it half the
+    /// distance along.
+    MotionBlur { distance: f32, degrees: f32 },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in

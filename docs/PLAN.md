@@ -110,7 +110,10 @@ without reading anything else.*
   what anyone means by a negative) and
   filter layers (gaussian blur, sharpen, pixelate — squares of one
   colour each, the average of what they covered, which is what a face or
-  a number is taken out of a picture with — noise, which is grain, and a
+  a number is taken out of a picture with — a motion blur, which is a
+  smear along one direction rather than a spread in every one, and so is
+  what a camera does to a moving thing and what a still picture is given
+  to say the same; noise, which is grain, and a
   vignette, which takes the corners of the page down to hold the eye in
   the middle of a picture, or lifts them to take one a lens put there
   back out; it is measured from the middle of the page in document
@@ -659,9 +662,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~382),
+- **Verify before committing:** `cargo test --workspace` (~383),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~987 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~994 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both

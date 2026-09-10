@@ -2545,6 +2545,10 @@ fn filter_of(filter: &chitrakar_doc::Filter, scale: f32) -> Option<Filtering> {
         // axis, so the box passes are no use to it; it is still the
         // CPU's.
         F::Pixelate { .. } => return None,
+        // A smear along a line, which the box passes cannot walk either:
+        // they run along an axis and this one runs at whatever angle it
+        // was given. The CPU's for now.
+        F::MotionBlur { .. } => return None,
     })
 }
 

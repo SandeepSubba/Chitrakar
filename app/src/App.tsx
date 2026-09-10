@@ -3771,6 +3771,10 @@ export function App() {
       name: "Pixelate",
       kind: { Filter: { Pixelate: { size: 12 } } },
     },
+    motion: {
+      name: "Motion Blur",
+      kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
+    },
     noise: {
       name: "Noise",
       kind: {
@@ -10244,6 +10248,20 @@ function KindProps({
         (v) => ({
           Filter: { GaussianBlur: { sigma: v } },
         }),
+      );
+    }
+    if ("MotionBlur" in filter) {
+      return (
+        <>
+          {slider("Distance", filter.MotionBlur.distance, 0, 200, 1, (v) => ({
+            Filter: { MotionBlur: { ...filter.MotionBlur, distance: v } },
+          }))}
+          {/* A direction is a turn rather than a length, so it wraps: a
+              full circle round and it is where it began. */}
+          {slider("Direction", filter.MotionBlur.degrees, -180, 180, 1, (v) => ({
+            Filter: { MotionBlur: { ...filter.MotionBlur, degrees: v } },
+          }))}
+        </>
       );
     }
     if ("Pixelate" in filter) {

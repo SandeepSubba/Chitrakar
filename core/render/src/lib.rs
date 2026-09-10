@@ -598,6 +598,11 @@ pub fn filter_reach(doc: &Document) -> u32 {
             NodeKind::Filter(Filter::Pixelate { size }) => {
                 ((size * max_scale(ancestor_space(doc, *id))).ceil() as u32).saturating_add(1)
             }
+            // Half the line each way, since it is centred on the pixel.
+            NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                (((distance.abs() / 2.0) * scale).ceil() as u32).saturating_add(2)
+            }
             NodeKind::Filter(Filter::GaussianBlur { sigma })
             | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
                 // A filter's radius is written in the space it sits in, so
@@ -4106,6 +4111,73 @@ fn speck(x: i32, y: i32, seed: u32) -> f32 {
     h as f32 / u32::MAX as f32
 }
 
+/// What is already drawn, smeared along one direction: each pixel becomes
+/// the average of the ones on a line through it, indexed like the snapshot
+/// it was taken from.
+///
+/// The length is written in document pixels and the direction with it, so
+/// both go through the view's linear part together — a smear turns and
+/// stretches with the page rather than staying so many screen pixels long.
+/// The line is centred on the pixel, which is what keeps the picture where
+/// it is instead of sliding it half the distance along.
+///
+/// Samples land about a device pixel apart, which is what makes this a box
+/// filter along a line rather than a row of ghosts, and there is a ceiling
+/// on how many: past a few hundred the answer stops changing and the cost
+/// does not. Reading past the region clamps to its edge, the same thing the
+/// running window of a box blur does when it runs off the end of a lane —
+/// and the same reason the caller renders a wider region than it keeps.
+fn smeared(
+    original: &[LinearRgba],
+    clip: ClipRect,
+    distance: f32,
+    degrees: f32,
+    view: Transform,
+) -> Vec<LinearRgba> {
+    let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    if w <= 0 || h <= 0 {
+        return original.to_vec();
+    }
+    let t = degrees.to_radians();
+    let (dx, dy) = (t.cos() * distance, t.sin() * distance);
+    let (ox, oy) = (view.a * dx + view.c * dy, view.b * dx + view.d * dy);
+    let far = (ox * ox + oy * oy).sqrt();
+    if far < 0.5 {
+        return original.to_vec();
+    }
+    // Odd, so that the pixel itself is one of the samples and a smear of
+    // one pixel is the pixel.
+    const MOST: usize = 257;
+    let n = ((far.ceil() as usize).saturating_add(1)).min(MOST) | 1;
+    let half = (n / 2) as f32;
+    let (sx, sy) = (ox / (n as f32 - 1.0), oy / (n as f32 - 1.0));
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = LinearRgba::TRANSPARENT;
+            for k in 0..n {
+                let step = k as f32 - half;
+                let px = (x as f32 + sx * step).round() as i64;
+                let py = (y as f32 + sy * step).round() as i64;
+                let (px, py) = (px.clamp(0, w - 1), py.clamp(0, h - 1));
+                let s = original[(py * w + px) as usize];
+                acc.r += s.r;
+                acc.g += s.g;
+                acc.b += s.b;
+                acc.a += s.a;
+            }
+            let k = 1.0 / n as f32;
+            out.push(LinearRgba {
+                r: acc.r * k,
+                g: acc.g * k,
+                b: acc.b * k,
+                a: acc.a * k,
+            });
+        }
+    }
+    out
+}
+
 /// The average colour of each block of a pixelate grid, indexed by device
 /// pixel.
 ///
@@ -4228,6 +4300,16 @@ fn apply_filter(
                     lerp(o, f, opacity * coverage_at(doc, mask, x, y))
                 });
             }
+        }
+        Filter::MotionBlur { distance, degrees } => {
+            let original = blur::snapshot(dst, clip);
+            let smear = smeared(&original, clip, *distance, *degrees, view);
+            let w = (clip.x1 - clip.x0) as usize;
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                lerp(o, smear[at], weight)
+            });
         }
         Filter::Pixelate { size } => {
             // Averaged over exactly what is being drawn. A block that
@@ -10310,6 +10392,13 @@ mod tests {
             ),
             ("blocks one pixel across", Filter::Pixelate { size: 1.0 }),
             (
+                "a smear of no distance",
+                Filter::MotionBlur {
+                    distance: 0.0,
+                    degrees: 35.0,
+                },
+            ),
+            (
                 "no grain",
                 Filter::Noise {
                     amount: 0.0,
@@ -10388,7 +10477,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 21, "everything with a neutral was asked");
+        assert_eq!(checked, 22, "everything with a neutral was asked");
 
         // A gradient map is the one that has to be asked of a grey
         // picture. It replaces every tone by the colour at that tone's
@@ -10508,6 +10597,124 @@ mod tests {
                 "and they are numbers: {two:?}"
             );
         }
+    }
+
+    /// A smear runs the way it was pointed, and only that way.
+    ///
+    /// The whole claim of a directional blur is the direction: a line
+    /// smeared *along* itself is the same line, and smeared *across*
+    /// itself is a band. Getting the two mixed up — reading the angle in
+    /// the wrong units, turning it the wrong way round, smearing along a
+    /// device axis rather than the page's — gives a filter that blurs
+    /// something and looks plausible in a screenshot.
+    ///
+    /// It is also centred on the pixel, so the picture stays where it is
+    /// rather than sliding half the distance along; a bar smeared should
+    /// grow evenly on both sides.
+    #[test]
+    fn a_smear_runs_the_way_it_was_pointed() {
+        let bar = |degrees: f32| {
+            let mut doc = Document::new(60, 60, ColorMode::Rgb);
+            let root = doc.root();
+            // A horizontal bar across the middle: two pixels tall, so a
+            // smear along it changes nothing and one across it is plain.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("bar", 40.0, 2.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 29.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "smear",
+                    Filter::MotionBlur {
+                        distance: 12.0,
+                        degrees,
+                    },
+                )),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // The bar's own ink, and the rows just outside it.
+        let ink = |s: &Surface, y: u32| (0..60).map(|x| s.get(x, y).a).sum::<f32>();
+        let plain = {
+            let mut doc = Document::new(60, 60, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("bar", 40.0, 2.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 29.0),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        assert!(ink(&plain, 29) > 39.0, "the bar is there to begin with");
+        assert!(ink(&plain, 26) < 0.1, "and nothing three rows above it");
+
+        // Along the bar: the rows above and below stay empty, and the bar
+        // itself is still solid in the middle.
+        let along = bar(0.0);
+        assert!(
+            ink(&along, 26) < 0.1 && ink(&along, 33) < 0.1,
+            "smeared along itself, the bar has not spread ({}, {})",
+            ink(&along, 26),
+            ink(&along, 33)
+        );
+        assert!(
+            along.get(30, 29).a > 0.9,
+            "and is still solid where it was: {}",
+            along.get(30, 29).a
+        );
+
+        // Across it: the rows above and below take ink, evenly, because
+        // the line is centred on the pixel rather than reaching one way.
+        let across = bar(90.0);
+        let (up, down) = (ink(&across, 26), ink(&across, 33));
+        assert!(
+            up > 3.0 && down > 3.0,
+            "smeared across itself, the bar has spread both ways ({up}, {down})"
+        );
+        assert!(
+            (up - down).abs() < up * 0.35,
+            "and about as far each way ({up} against {down})"
+        );
+        assert!(
+            across.get(30, 29).a < 0.5,
+            "with the middle thinned by the spreading: {}",
+            across.get(30, 29).a
+        );
+        // And the ink is conserved: a smear moves light about rather than
+        // making or losing it.
+        let total = |s: &Surface| s.pixels.iter().map(|p| p.a).sum::<f32>();
+        let (was, now) = (total(&plain), total(&across));
+        assert!(
+            (was - now).abs() < was * 0.05,
+            "a smear keeps the ink it was given ({was} against {now})"
+        );
+        // Halfway between the two directions, it runs on the diagonal:
+        // ink appears above the bar's left end and below its right one.
+        let slant = bar(45.0);
+        assert!(
+            slant.get(12, 25).a > 0.02 && slant.get(46, 34).a > 0.02,
+            "smeared at forty-five degrees it runs on the diagonal ({}, {})",
+            slant.get(12, 25).a,
+            slant.get(46, 34).a
+        );
     }
 
     #[test]
@@ -11175,6 +11382,13 @@ mod tests {
                 },
             ),
             ("a pixelate", Filter::Pixelate { size: 7.0 }),
+            (
+                "a smear",
+                Filter::MotionBlur {
+                    distance: 9.0,
+                    degrees: 25.0,
+                },
+            ),
             (
                 "grain",
                 Filter::Noise {

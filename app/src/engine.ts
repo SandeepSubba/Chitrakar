@@ -167,6 +167,7 @@ export type Filter =
    * grid is anchored in the document, so a block stays the same block
    * when the page is panned or zoomed. */
   | { Pixelate: { size: number } }
+  | { MotionBlur: { distance: number; degrees: number } }
   /** Grain: a function of where a speck sits in the document and of the
    * seed, so the same page grains the same way every time it is drawn. */
   | { Noise: { amount: number; grain: number; mono: boolean; seed: number } }
