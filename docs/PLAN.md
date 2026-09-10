@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~377),
+- **Verify before committing:** `cargo test --workspace` (~378),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1218,6 +1218,25 @@ without reading anything else.*
   five audits accepted the new variant as it stood, so this one found a
   hole rather than a bug — but it is the hole the other five were
   looking through.
+- **A page of shapes, out through SVG and back in, is the same page:**
+  five doors lead out of this editor and SVG is the only one it can also
+  walk back through — `place_svg` brings a file in as editable layers — so
+  the writer and the reader can be held against each other rather than
+  each being trusted on its own. The audit below asks only that each door
+  opens on whatever state a command left behind;
+  `a_page_of_shapes_survives_being_written_as_svg_and_read_back` asks what
+  came out the other side, and a shape whose fill-rule, handles or nested
+  transform is written in a way this editor's own reader cannot make sense
+  of is a file somebody opens in a year to find their drawing rearranged.
+  Shapes rather than everything, deliberately: SVG carries no adjustment,
+  no filter and no live raster, so those are lost by design and have
+  nothing to be held to. What is asked is what SVG *does* carry — rects,
+  ellipses, paths with handles, fills, strokes, opacity, groups with
+  transforms of their own, and a hole read by the even-odd rule. The one
+  thing that cannot come back exactly is colour, since a fill goes out as
+  eight bits a channel; that is a twentieth of a step of linear light here
+  and is what the tolerance is for. It came back right, and each half of
+  the check was verified by breaking the writer.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an

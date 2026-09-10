@@ -8312,6 +8312,235 @@ mod tests {
         }
     }
 
+    /// A page of shapes, out through SVG and back in, is the same page.
+    ///
+    /// Five doors lead out of this editor and SVG is the only one it can
+    /// also walk back through: `place_svg` brings a file in as editable
+    /// layers, so the writer and the reader can be held against each
+    /// other rather than each being trusted on its own. The other audit
+    /// of the exports asks only that each door opens on whatever state a
+    /// command left behind; this one asks what came out the other side.
+    /// A shape whose fill-rule, handles or nested transform is written in
+    /// a way this editor's own reader cannot make sense of is a file
+    /// somebody opens in a year to find their drawing rearranged, and
+    /// nothing else would have said so.
+    ///
+    /// Shapes rather than everything, deliberately: SVG carries no
+    /// adjustment, no filter and no live raster, so a picture or a curves
+    /// layer is lost by design and has nothing to be held to. What is
+    /// asked here is what SVG *does* carry — rects, ellipses, paths with
+    /// handles, fills, strokes, opacity, groups with transforms of their
+    /// own, and a hole read by the even-odd rule.
+    ///
+    /// The one thing that cannot come back exactly is colour: a fill goes
+    /// out as eight bits a channel, so it returns quantized. That is a
+    /// twentieth of a step of linear light at its worst here, and it is
+    /// what the tolerance is for — anything structural is worth far more
+    /// than that.
+    #[test]
+    fn a_page_of_shapes_survives_being_written_as_svg_and_read_back() {
+        let mut s = Session::new(120, 90, ColorMode::Rgb);
+        let root = s.document().root();
+        // A rect, an ellipse, a path with handles, each placed and coloured.
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: rect_of(
+                "box",
+                40.0,
+                30.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.4,
+                    b: 0.2,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let boxed = s.document().children_of(root).unwrap()[0];
+        s.apply(Command::SetTransform {
+            id: boxed,
+            transform: Transform::translation(10.0, 12.0),
+        })
+        .unwrap();
+        let mut oval = Node::vector("oval", VectorShape::Ellipse { rx: 18.0, ry: 12.0 });
+        if let NodeKind::Vector { fill, .. } = &mut oval.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.5,
+                b: 0.85,
+                a: 1.0,
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(oval),
+        })
+        .unwrap();
+        let oval_id = s.document().children_of(root).unwrap()[1];
+        s.apply(Command::SetTransform {
+            id: oval_id,
+            transform: Transform::translation(60.0, 40.0),
+        })
+        .unwrap();
+
+        // A stroked path with handles, at half opacity, turned.
+        let mut curve = Node::vector(
+            "curve",
+            VectorShape::Path {
+                points: vec![[0.0, 20.0], [20.0, 0.0], [40.0, 24.0]],
+                closed: false,
+                smooth: false,
+                handles: vec![
+                    [0.0, 0.0, 8.0, -6.0],
+                    [-8.0, 6.0, 8.0, 6.0],
+                    [-8.0, -6.0, 0.0, 0.0],
+                ],
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut curve.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.6,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                width: 3.0,
+                widths: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                dash: Vec::new(),
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(curve),
+        })
+        .unwrap();
+        let curve_id = s.document().children_of(root).unwrap()[2];
+        let (c, sn) = (0.3f32.cos(), 0.3f32.sin());
+        s.apply(Command::SetTransform {
+            id: curve_id,
+            transform: Transform::translation(20.0, 50.0).compose(Transform {
+                a: c,
+                b: sn,
+                c: -sn,
+                d: c,
+                e: 0.0,
+                f: 0.0,
+            }),
+        })
+        .unwrap();
+        s.apply(Command::SetOpacity {
+            id: curve_id,
+            opacity: 0.5,
+        })
+        .unwrap();
+
+        // A group with a child, so nested transforms are asked; a shape
+        // with a hole in it, so the fill rule is; and a gradient.
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::group("nest")),
+        })
+        .unwrap();
+        let nest = s.document().children_of(root).unwrap()[3];
+        s.apply(Command::SetTransform {
+            id: nest,
+            transform: Transform::translation(70.0, 8.0),
+        })
+        .unwrap();
+        s.apply(Command::AddNode {
+            parent: nest,
+            index: 0,
+            node: rect_of(
+                "inside",
+                20.0,
+                14.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.8,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let mut holed = Node::vector(
+            "ring",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 24.0], [0.0, 24.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: vec![vec![[8.0, 6.0], [22.0, 6.0], [22.0, 18.0], [8.0, 18.0]]],
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut holed.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.6,
+                g: 0.2,
+                b: 0.7,
+                a: 1.0,
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 4,
+            node: Box::new(holed),
+        })
+        .unwrap();
+        let ring = s.document().children_of(root).unwrap()[4];
+        s.apply(Command::SetTransform {
+            id: ring,
+            transform: Transform::translation(6.0, 58.0),
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        let svg = s.export_svg().unwrap();
+        // The reader has to be given something to read, and the writer
+        // has to have written each kind of thing.
+        for wanted in [
+            "<rect",
+            "<ellipse",
+            "<path",
+            "<g ",
+            "fill-rule=\"evenodd\"",
+            "opacity=",
+            "stroke-width=",
+        ] {
+            assert!(svg.contains(wanted), "the SVG says {wanted}: {svg}");
+        }
+
+        let mut back = Session::new(120, 90, ColorMode::Rgb);
+        back.place_svg(svg.as_bytes(), "again")
+            .unwrap_or_else(|e| panic!("reading back what was written: {e}"));
+        let (worst, x, y) = apart(&before, &back.render().unwrap());
+        assert!(
+            worst < 0.08,
+            "the page came back different ({worst} at {x},{y})"
+        );
+        // And it came back as layers rather than as one picture, which is
+        // the point of reading an SVG rather than a PNG.
+        let root = back.document().root();
+        let group = back.document().children_of(root).unwrap()[0];
+        assert_eq!(
+            back.document().children_of(group).unwrap().len(),
+            5,
+            "each shape arrived as a layer of its own"
+        );
+    }
+
     /// Every command, over the boundary the UI actually talks across.
     ///
     /// Nothing in the app calls `apply`: the UI is TypeScript on the far
