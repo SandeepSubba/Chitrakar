@@ -662,7 +662,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~384),
+- **Verify before committing:** `cargo test --workspace` (~385),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~994 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1352,6 +1352,26 @@ without reading anything else.*
   whenever a fixture's pixels changed. A segment is data now when it is an
   index *or* the key of one of the three objects keyed by data, which is
   the rule that was meant all along.
+- **A file that says its layers are not a tree used to crash on being
+  opened:** a file names the layers there are and names what each group
+  holds as two separate lists, and nothing about the format stops one of
+  them naming a layer that is not in the other, naming the same layer
+  twice, or naming one of its own ancestors. Every command in this editor
+  keeps the layers a tree, so nothing that has been *applied* can be in
+  that state — which is exactly why nothing looked.
+  A group holding its own ancestor is a walk that never ends: such a file
+  opened, and drawing it overflowed the stack and took the process with it.
+  That is a crash from being handed a file, which is the worst way for "a
+  file that says anything is refused rather than believed" to be untrue.
+  `Document::check_structure` walks from the root and refuses a layer
+  reached twice, a child that is not there, and a root that is not there,
+  then asks the copy-cycle check — in that order, since that check walks
+  the layers and would go round a cycle in them forever. Seven ways of
+  saying it are tried, an `Instance` of itself among them.
+  Refused where the counter beside it is repaired, and it is the same
+  distinction: a counter is bookkeeping with a right answer to put in it,
+  where a cycle is not something anybody meant and has no reading that
+  keeps their work.
 - **A file whose id counter is behind the ids in it used to eat a layer:**
   the counter is bookkeeping — nothing looks at it and it is only ever
   handed out — but it is written into the file with everything else, and a

@@ -25,6 +25,11 @@ pub enum ContainerError {
     UnsupportedVersion { found: u32, supported: u32 },
     #[error("that file says its page is {width}x{height}, which is more than can be drawn")]
     BadCanvas { width: u32, height: u32 },
+    /// The layers a file names and what it says each group holds are two
+    /// separate lists, and they can disagree in ways no document this
+    /// editor makes ever does.
+    #[error("that file's layers do not make sense together: {0}")]
+    BadStructure(chitrakar_doc::DocError),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,6 +140,15 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // under it. Bookkeeping rather than artwork, so it is put right rather
     // than being grounds to refuse the file.
     doc.settle_next_id();
+    // And that the layers are a tree at all. A file names the layers and
+    // names what each group holds as two separate lists, and nothing about
+    // the format stops one of them naming a layer that is not in the other
+    // or naming one of its own ancestors — which is a walk that never
+    // ends, so opening such a file and drawing it took the process with
+    // it. Refused rather than repaired: there is no version of a cycle
+    // that is what somebody meant.
+    doc.check_structure()
+        .map_err(ContainerError::BadStructure)?;
     // A page that opens has to be one the engine could draw: the surface
     // is sixteen bytes a pixel, so a file claiming an enormous one would
     // ask for memory nobody has rather than fail honestly here.
@@ -457,6 +471,149 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A file that says its layers are not a tree is refused, rather than
+    /// opened and then drawn until the stack runs out.
+    ///
+    /// A file names the layers there are and names what each group holds as
+    /// two separate lists, and nothing about the format stops one of them
+    /// naming a layer that is not in the other, naming the same layer
+    /// twice, or naming one of its own ancestors. Every command in this
+    /// editor keeps the layers a tree, so nothing that has been *applied*
+    /// can be in that state — which is exactly why nothing looked.
+    ///
+    /// A group holding its own ancestor is a walk that never ends. Such a
+    /// file opened, and drawing it overflowed the stack and took the
+    /// process with it: a crash from being handed a file, which is the
+    /// worst way for "a file that says anything is refused rather than
+    /// believed" to be untrue.
+    ///
+    /// Refused where the id counter beside it is repaired, and the
+    /// difference is the same one: a counter is bookkeeping and there is a
+    /// right answer to put in it, where a cycle is not something anybody
+    /// meant and has no reading that keeps their work.
+    #[test]
+    fn a_file_whose_layers_are_not_a_tree_is_refused() {
+        let mut doc = Document::new(20, 16, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("outer")),
+        })
+        .unwrap();
+        let outer = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: outer,
+            index: 0,
+            node: Box::new(Node::group("inner")),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::vector(
+                "shape",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 6.0,
+                    height: 4.0,
+                    radius: 0.0,
+                },
+            )),
+        })
+        .unwrap();
+        let shape = doc.children_of(root).unwrap()[1];
+        let good = save_chitra(&doc).unwrap();
+        assert!(load_chitra(&good).is_ok(), "the honest one opens");
+        let (outer, inner, shape) = (outer.0, doc.children_of(outer).unwrap()[0].0, shape.0);
+
+        let rewrite = |patch: &dyn Fn(&mut serde_json::Value)| -> Vec<u8> {
+            let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+            let mut manifest = String::new();
+            zip.by_name(MANIFEST_PATH)
+                .unwrap()
+                .read_to_string(&mut manifest)
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+            patch(&mut value);
+            let others: Vec<String> = zip
+                .file_names()
+                .filter(|n| *n != MANIFEST_PATH)
+                .map(String::from)
+                .collect();
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(value.to_string().as_bytes()).unwrap();
+                for name in others {
+                    let mut body = Vec::new();
+                    zip.by_name(&name).unwrap().read_to_end(&mut body).unwrap();
+                    w.start_file(&name, SimpleFileOptions::default()).unwrap();
+                    w.write_all(&body).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            out
+        };
+
+        for (what, patch) in [
+            (
+                "a group holding one of its own ancestors",
+                Box::new(move |v: &mut serde_json::Value| {
+                    v["document"]["children"][inner.to_string()] = serde_json::json!([outer]);
+                }) as Box<dyn Fn(&mut serde_json::Value)>,
+            ),
+            (
+                "a group holding itself",
+                Box::new(move |v: &mut serde_json::Value| {
+                    v["document"]["children"][outer.to_string()] = serde_json::json!([outer]);
+                }),
+            ),
+            (
+                "the same layer named twice",
+                Box::new(move |v: &mut serde_json::Value| {
+                    v["document"]["children"]["0"] = serde_json::json!([outer, outer]);
+                }),
+            ),
+            (
+                "two groups both holding one layer",
+                Box::new(move |v: &mut serde_json::Value| {
+                    v["document"]["children"][outer.to_string()] =
+                        serde_json::json!([inner, shape]);
+                }),
+            ),
+            (
+                "a child that is not in the file",
+                Box::new(|v: &mut serde_json::Value| {
+                    v["document"]["children"]["0"] = serde_json::json!([9999]);
+                }),
+            ),
+            (
+                "a root that is not in the file",
+                Box::new(|v: &mut serde_json::Value| {
+                    v["document"]["root"] = serde_json::json!(4242);
+                }),
+            ),
+            (
+                "a copy of itself",
+                Box::new(move |v: &mut serde_json::Value| {
+                    v["document"]["nodes"][shape.to_string()]["kind"] =
+                        serde_json::json!({ "Instance": { "of": shape, "replaces": [] } });
+                }),
+            ),
+        ] {
+            let bytes = rewrite(&*patch);
+            let refused = load_chitra(&bytes);
+            assert!(refused.is_err(), "{what} is refused rather than opened");
+            let said = refused.unwrap_err().to_string();
+            assert!(
+                said.contains("do not make sense together"),
+                "{what} is refused for the right reason: {said}"
+            );
         }
     }
 

@@ -71,6 +71,8 @@ pub enum DocError {
     BadCanvasSize(u32, u32),
     #[error("that would make a copy of itself")]
     InstanceCycle,
+    #[error("the layers are not a tree: {0:?} is reached more than once")]
+    NotATree(NodeId),
 }
 
 /// How large a page may be. The renderer's surface is sixteen bytes a
@@ -904,6 +906,55 @@ impl Document {
                 Ok(Command::Batch(inverses))
             }
         }
+    }
+
+    /// Whether the layers form a tree, and refusing to say yes when they
+    /// do not.
+    ///
+    /// Every command in this editor keeps them one, so nothing that has
+    /// been applied can fail this. A *file* can: it says which layers
+    /// there are and which layers each group holds as two separate lists,
+    /// and nothing about the format stops one of those lists naming a
+    /// layer that is not in the other, or naming the same layer twice, or
+    /// naming one of its own ancestors.
+    ///
+    /// The last of those is why this exists rather than being tidiness. A
+    /// group holding its own ancestor is a walk that never ends: opening
+    /// such a file and drawing it overflowed the stack and took the
+    /// process with it, which is a crash from being handed a file. So
+    /// this is refused where the id counter was repaired — there is no
+    /// version of a cycle that is what somebody meant, and no reading of
+    /// it that keeps their work.
+    ///
+    /// The order matters: the tree is checked before the copies are,
+    /// because the check for a copy of itself walks the layers and would
+    /// go round a cycle in them forever.
+    pub fn check_structure(&self) -> Result<(), DocError> {
+        if !self.nodes.contains_key(&self.root) {
+            return Err(DocError::UnknownNode(self.root));
+        }
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(self.root);
+        let mut stack = vec![self.root];
+        while let Some(id) = stack.pop() {
+            let kids = match self.children.get(&id) {
+                Some(kids) => kids.clone(),
+                None => continue,
+            };
+            for kid in kids {
+                if !self.nodes.contains_key(&kid) {
+                    return Err(DocError::UnknownNode(kid));
+                }
+                if !seen.insert(kid) {
+                    return Err(DocError::NotATree(kid));
+                }
+                stack.push(kid);
+            }
+        }
+        if self.instance_cycle() {
+            return Err(DocError::InstanceCycle);
+        }
+        Ok(())
     }
 
     /// Move the id counter past every id in the document, if it is behind.
