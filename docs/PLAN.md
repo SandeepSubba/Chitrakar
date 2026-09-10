@@ -1086,6 +1086,36 @@ without reading anything else.*
   change, and everything the layer says about how it is drawn is in that
   one comparison. The lock and the pin cannot show on a page, so those are
   said field by field beside it. Block 9az drives it through the panel.
+- **Known wrinkle, found and left for a decision — what a clipped layer
+  is confined to:** a layer held to the one below it is confined to that
+  layer's *picture*, without the reach of its effects: the cover is taken
+  from the base's own staged surface before its shadow and its outline are
+  drawn. A *group* used as the base is confined to its composite, which
+  does include its children's effects, because that is what the group's
+  picture is. So wrapping a clip base in a group — which changes nothing
+  else about a page — changes what is held to it, by four fifths of a
+  step where the base's outline lies. Reproduced: a base with a drop
+  shadow or an outline, one layer clipped to it, wrapped in a group of its
+  own.
+  Both readings are defensible on their own (Photoshop clips to the base's
+  transparency and draws the base's styles over the whole run; a group's
+  silhouette plainly includes what its children cast) and they are not
+  consistent with each other. Making them agree is a choice about what
+  clipping *means* rather than a fix, and it is not free either way:
+  including effects means the cover has to be taken after the effect
+  passes, which currently blend into the page rather than into the layer's
+  own surface; excluding them means a group would have to be drawn twice.
+  Left as it is, deliberately, and written down here so the next person to
+  look at clipping starts from the reproduction rather than from the
+  symptom.
+  It was found by making the shared fixture's top shape *clipped* — which
+  is not in the fixture, and for this reason: two audits' claims stop
+  holding once a clip base is in the document, and one of them
+  ("invisible is the same as not there") stops holding for a good reason
+  of its own, since hiding a clip base takes what is held to it along
+  while deleting the base lets that layer out. Accommodating both to gain
+  clipping coverage everywhere else was the trade, and it was not worth
+  weakening them for.
 - **A copy of a layer casts the same shadow the layer does:** found by
   giving the shared fixture a drop shadow, which is worth recording as a
   method — the fixture had one of every node *kind* and no effect on any of
