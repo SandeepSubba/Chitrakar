@@ -9043,6 +9043,124 @@ assert(
   await touch.close();
 }
 
+// 9aw. Dissolving a group answers for what the group itself was
+// carrying. A group is somewhere to put layers and also a layer in its
+// own right: it can be hidden, or made half-transparent, and those two
+// are not the same kind of thing. Hidden means the same said of each
+// layer inside, so it comes out with them. Half-transparent does not —
+// a group is drawn by compositing its layers onto a surface of its own
+// and then treating that surface as one layer — so it is refused out
+// loud rather than quietly dropped, which would leave a page that
+// changed with nothing said.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const draw = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await draw(40, 40, 180, 160);
+  await draw(120, 100, 300, 240);
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: ["Control"] });
+  await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(300);
+  const groupRow = page.locator(".panel ul li", { hasText: "Group 1" }).first();
+  assert((await groupRow.count()) === 1, "two shapes wrapped in a group");
+
+  // Half-transparent, and asked to dissolve: it says what it is carrying
+  // and leaves the group alone.
+  await groupRow.click();
+  await page.waitForTimeout(200);
+  await page.locator('input[aria-label="Layer opacity"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "0.5");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const faded = await canvasPixel(80, 80);
+  assert(faded[3] < 200, `the group as a whole is half-transparent (${faded[3]})`);
+  lastDialog = "";
+  await page.click('button[title="Ungroup selected group"]');
+  await page.waitForTimeout(300);
+  assert(
+    lastDialog.includes("an opacity of its own"),
+    `it says what the group is carrying (${lastDialog})`,
+  );
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 1,
+    "and the group is still there",
+  );
+  const still = await canvasPixel(80, 80);
+  assert(
+    Math.abs(still[3] - faded[3]) <= 1,
+    `with the page exactly as it was (${still[3]} vs ${faded[3]})`,
+  );
+
+  // Cleared, it dissolves — and the page is what it was before the
+  // opacity, not what it was with it.
+  await page.locator(".panel ul li", { hasText: "Group 1" }).first().click();
+  await page.locator('input[aria-label="Layer opacity"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "1");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Group 1" }).first().click();
+  await page.click('button[title="Ungroup selected group"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 0 &&
+      (await page.locator(".panel ul li", { hasText: "Rect" }).count()) === 2,
+    "cleared, the group dissolves and its shapes are loose",
+  );
+  assert((await canvasPixel(80, 80))[3] === 255, "at full strength again");
+
+  // A hidden group hands that to its layers rather than letting them
+  // reappear. Wrap them again, hide the wrapper, dissolve it.
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: ["Control"] });
+  await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(300);
+  const wrap = page.locator(".panel ul li", { hasText: "Group 2" }).first();
+  await wrap.locator("button.visibility").first().click();
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(80, 80))[3] === 0, "the hidden group draws nothing");
+  await wrap.click();
+  await page.click('button[title="Ungroup selected group"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Group 2" }).count()) === 0,
+    "the hidden group dissolves",
+  );
+  assert(
+    (await canvasPixel(80, 80))[3] === 0,
+    "and its shapes do not reappear on the page",
+  );
+  assert(
+    (await page.locator(".panel ul li button[title^='Show layer']").count()) === 2,
+    "each of them says it is hidden itself",
+  );
+  // One undo puts the group back, hidden, with its layers shown again.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Group 2" }).count()) === 1 &&
+      (await page.locator(".panel ul li button[title^='Show layer']").count()) === 1,
+    "and one undo takes the whole thing back",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

@@ -3942,6 +3942,20 @@ impl Session {
 
     /// Dissolve a group: its children move to its position in the parent,
     /// the empty group is removed. One undo step.
+    ///
+    /// A group is not only a place to put layers — it is also a thing that
+    /// can be given a transform, an opacity, a blend mode, a mask, effects,
+    /// or a clip to the layer below. Some of that can be handed to the
+    /// children on the way out and some cannot, and the difference is not a
+    /// matter of taste: a group is drawn by compositing its children onto a
+    /// surface of its own and then treating that surface as one layer. Being
+    /// hidden or locked means the same thing said of each child; being
+    /// half-transparent does not, because two children overlapping inside a
+    /// 50% group show one edge and at 50% each show two. So the ones that
+    /// carry are carried, and the ones that do not are said out loud rather
+    /// than dropped on the floor — a layer that comes out of a group looking
+    /// different from how it went in is the kind of thing that gets noticed
+    /// three edits later, with no way back but undo.
     pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
         if !matches!(self.doc.node(id)?.kind, NodeKind::Group) {
             return Err(EngineError::BadCommand("not a group".into()));
@@ -3958,16 +3972,72 @@ impl Session {
             .position(|s| *s == id)
             .unwrap();
         let children = self.doc.children_of(id)?.to_vec();
+        {
+            // What this group says about itself as a whole, and so has
+            // nobody inside to say it instead.
+            let g = self.doc.node(id)?;
+            let mut whole: Vec<&str> = Vec::new();
+            if g.opacity < 1.0 {
+                whole.push("an opacity of its own");
+            }
+            if g.blend != chitrakar_doc::BlendMode::Normal {
+                whole.push("a blend mode");
+            }
+            if g.mask.is_some() {
+                whole.push("a mask");
+            }
+            if !g.effects.is_empty() {
+                whole.push("effects");
+            }
+            // The bottom layer of a parent has nothing under it to be
+            // confined to, so the flag is ignored there — and refusing
+            // over a flag that is doing nothing would be refusing over
+            // nothing. Above the bottom it is real: the children would
+            // each end up clipped to the layer under the group rather
+            // than to whatever they were clipped to inside it.
+            if g.clipped && position > 0 {
+                whole.push("a clip to the layer below");
+            }
+            if !whole.is_empty() {
+                let list = match whole.len() {
+                    1 => whole[0].to_string(),
+                    n => format!("{} and {}", whole[..n - 1].join(", "), whole[n - 1]),
+                };
+                return Err(EngineError::BadCommand(format!(
+                    "this group carries {list}, which describes the group as one \
+                     layer — there is nothing inside it to hand that to. Clear it \
+                     first, or leave the group as it is."
+                )));
+            }
+        }
         // The group's transform reached its children while they were inside
         // it; once they leave, each has to carry that part itself or the
         // whole group would jump back to where it was before it was moved.
         let group_t = self.doc.node(id)?.transform;
+        // Hidden and locked, on the other hand, mean exactly the same
+        // thing said of every child, so they come out with them: a
+        // hidden group whose layers reappear on being dissolved is the
+        // picture changing behind the user's back.
+        let hidden = !self.doc.node(id)?.visible;
+        let locked = self.doc.node(id)?.locked;
         let mut cmds: Vec<Command> = Vec::new();
         for (i, child) in children.iter().enumerate() {
             if group_t != Transform::default() {
                 cmds.push(Command::SetTransform {
                     id: *child,
                     transform: group_t.compose(self.doc.node(*child)?.transform),
+                });
+            }
+            if hidden {
+                cmds.push(Command::SetVisible {
+                    id: *child,
+                    visible: false,
+                });
+            }
+            if locked {
+                cmds.push(Command::SetLocked {
+                    id: *child,
+                    locked: true,
                 });
             }
             cmds.push(Command::MoveNode {
@@ -6937,6 +7007,291 @@ mod tests {
                 to.render().is_ok(),
                 "the document {what} arrived in still draws"
             );
+        }
+    }
+
+    /// Every kind of layer goes into a group and comes back out again.
+    ///
+    /// Grouping is the one edit that changes a layer's parent without
+    /// changing the layer, and the way it goes wrong is quiet: the page
+    /// looks right while the layers are wrapped, and something is
+    /// different once they are loose again. What differs depends on the
+    /// kind — a picture's transform has to be composed on the way out, an
+    /// adjustment stops seeing the layers it used to — so the fixture's
+    /// ten kinds each go in alone and come back, and both the page and the
+    /// node are held against what they were.
+    ///
+    /// Three of the ten are expected to look different *while* wrapped,
+    /// and it is not a bug but the whole point of putting an adjustment in
+    /// a group: a layer that draws by reading what is under it reads only
+    /// its own group's contents once it is in one. That is asserted too,
+    /// so that it changing is noticed.
+    #[test]
+    fn every_kind_of_layer_goes_into_a_group_and_comes_back() {
+        let f = chitrakar_doc::fixture::everything();
+        for (what, id, confined) in [
+            ("a group", f.group, false),
+            ("a shape", f.under, false),
+            ("a paint layer", f.painted, false),
+            ("a picture", f.picture, false),
+            ("a block of text", f.words, false),
+            ("a frame", f.frame, false),
+            ("an adjustment", f.lifted, true),
+            ("a filter", f.softened, true),
+            ("a clone layer", f.borrowed, true),
+            ("a copy of another layer", f.copy, false),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            let before = s.render().unwrap();
+            let was = format!("{:?}", s.document().node(id).unwrap());
+            let g = s
+                .group_nodes(&[id], "wrap")
+                .unwrap_or_else(|e| panic!("grouping {what}: {e}"));
+            let wrapped = s.render().unwrap();
+            assert_eq!(
+                wrapped.pixels == before.pixels,
+                !confined,
+                "{what}: wrapping it changed the page, or failed to"
+            );
+            // And it is one undo step, not one per layer moved.
+            assert_eq!(
+                s.history_labels().0.last().map(String::as_str),
+                Some("Group into wrap"),
+                "{what}: grouping is one step"
+            );
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("ungrouping {what}: {e}"));
+            let after = s.render().unwrap();
+            assert_eq!(
+                after.pixels, before.pixels,
+                "{what}: the page did not come back"
+            );
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap()),
+                was,
+                "{what}: the layer did not come back"
+            );
+            // Both halves undo, one step each, back to the start.
+            s.undo().unwrap();
+            s.undo().unwrap();
+            assert_eq!(
+                s.render().unwrap().pixels,
+                before.pixels,
+                "{what}: two undos put it back"
+            );
+        }
+    }
+
+    /// A group is a layer too, and dissolving one has to answer for what
+    /// the group itself was carrying.
+    ///
+    /// The group's transform was already handed to its children. The rest
+    /// splits in two. Hidden and locked mean exactly the same thing said
+    /// of each child, so they come out with them — and a hidden group
+    /// whose layers reappear on being dissolved is the kind of bug that
+    /// gets found by somebody's client. Opacity, blend, mask and effects
+    /// describe the group's composite, which no child can stand in for;
+    /// those are refused out loud, because a page that quietly changes is
+    /// worse than an edit that declines.
+    #[test]
+    fn dissolving_a_group_answers_for_what_the_group_carried() {
+        let f = chitrakar_doc::fixture::everything();
+        // The two that carry: the page is exactly what it was with the
+        // group still there, and every child says it itself.
+        for (what, cmd, reads) in [
+            (
+                "hidden",
+                Command::SetVisible {
+                    id: NodeId(0),
+                    visible: false,
+                },
+                true,
+            ),
+            (
+                "locked",
+                Command::SetLocked {
+                    id: NodeId(0),
+                    locked: true,
+                },
+                false,
+            ),
+        ] {
+            // The wrapper's id is not known until it exists, so the
+            // command is rebuilt against it.
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            let cmd = match cmd {
+                Command::SetVisible { visible, .. } => Command::SetVisible { id: g, visible },
+                Command::SetLocked { locked, .. } => Command::SetLocked { id: g, locked },
+                other => other,
+            };
+            s.apply(cmd).unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("a {what} group: {e}"));
+            let child = s.document().node(f.over).unwrap();
+            if reads {
+                assert!(!child.visible, "a {what} group hands that to its layers");
+                assert_eq!(
+                    s.render().unwrap().pixels,
+                    before.pixels,
+                    "a {what} group's layers do not reappear"
+                );
+            } else {
+                assert!(child.locked, "a {what} group hands that to its layers");
+            }
+            // And one undo takes the whole thing back.
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(f.over).unwrap()),
+                format!(
+                    "{:?}",
+                    Session::from_document(f.doc.clone())
+                        .document()
+                        .node(f.over)
+                        .unwrap()
+                ),
+                "undoing a {what} group's dissolve puts the layer back"
+            );
+        }
+
+        // The four that cannot: each refused, and each named.
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 2.0,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        for (what, said) in [
+            ("opacity", "an opacity of its own"),
+            ("blend", "a blend mode"),
+            ("mask", "a mask"),
+            ("effects", "effects"),
+            ("clip", "a clip to the layer below"),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            s.apply(match what {
+                "opacity" => Command::SetOpacity {
+                    id: g,
+                    opacity: 0.5,
+                },
+                "blend" => Command::SetBlendMode {
+                    id: g,
+                    blend: chitrakar_doc::BlendMode::Multiply,
+                },
+                "mask" => Command::SetMask {
+                    id: g,
+                    mask: Some(Box::new(mask.clone())),
+                },
+                "effects" => Command::SetEffects {
+                    id: g,
+                    effects: vec![outline.clone()],
+                },
+                _ => Command::SetClipped {
+                    id: g,
+                    clipped: true,
+                },
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            let refused = s
+                .ungroup_node(g)
+                .expect_err("a group carrying its own {what} cannot just be dissolved")
+                .to_string();
+            assert!(
+                refused.contains(said),
+                "the refusal names what it is: {refused}"
+            );
+            // A refusal leaves everything alone — no half-dissolved group.
+            assert!(s.document().node(g).is_ok(), "the group is still there");
+            assert_eq!(
+                s.render().unwrap().pixels,
+                before.pixels,
+                "and the page is untouched"
+            );
+            // Clearing it is the way through, and then it dissolves.
+            s.apply(match what {
+                "opacity" => Command::SetOpacity {
+                    id: g,
+                    opacity: 1.0,
+                },
+                "blend" => Command::SetBlendMode {
+                    id: g,
+                    blend: chitrakar_doc::BlendMode::Normal,
+                },
+                "mask" => Command::SetMask { id: g, mask: None },
+                "effects" => Command::SetEffects {
+                    id: g,
+                    effects: vec![],
+                },
+                _ => Command::SetClipped {
+                    id: g,
+                    clipped: false,
+                },
+            })
+            .unwrap();
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("cleared, a {what} group dissolves: {e}"));
+        }
+
+        // More than one thing at once is said as a list.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            s.apply(Command::SetOpacity {
+                id: g,
+                opacity: 0.5,
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id: g,
+                effects: vec![outline.clone()],
+            })
+            .unwrap();
+            let refused = s.ungroup_node(g).unwrap_err().to_string();
+            assert!(
+                refused.contains("an opacity of its own and effects"),
+                "both are named: {refused}"
+            );
+        }
+
+        // A clip that is not doing anything is not worth refusing over:
+        // the bottom layer of a parent has nothing under it to be
+        // confined to, so the flag there is already ignored.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.under], "wrap").unwrap();
+            assert_eq!(
+                s.document()
+                    .children_of(s.document().parent_of(g).unwrap())
+                    .unwrap()[0],
+                g,
+                "the wrapper is the bottom-most of its parent"
+            );
+            s.apply(Command::SetClipped {
+                id: g,
+                clipped: true,
+            })
+            .unwrap();
+            s.ungroup_node(g)
+                .expect("a clip with nothing under it does not stop a dissolve");
         }
     }
 

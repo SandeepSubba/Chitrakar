@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~360),
+- **Verify before committing:** `cargo test --workspace` (~362),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~954 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~966 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -896,6 +896,44 @@ without reading anything else.*
   is exactly why it was missed, and there duplicating a group holding
   an original and a copy of it gave a group whose copy went on watching
   the *old* original — two things linked in a way nobody asked for.
+- **Every kind of layer, into a group and back out:** grouping is the
+  one edit that changes a layer's parent without changing the layer,
+  and the way it goes wrong is quiet — the page looks right while the
+  layers are wrapped and something is different once they are loose.
+  `every_kind_of_layer_goes_into_a_group_and_comes_back` puts each of
+  the fixture's ten in alone, checks the page and the node, dissolves
+  the group and checks both again; the three that draw by reading what
+  is under them (an adjustment, a filter, a clone layer) are asserted
+  to look *different* while wrapped, because that confinement is the
+  whole point of putting an adjustment in a group.
+  `dissolving_a_group_answers_for_what_the_group_carried` asks the
+  other half of the question, and that is where the defect was. A group
+  is somewhere to put layers and also a layer in its own right: it can
+  be hidden, locked, made half-transparent, given a blend mode, a mask,
+  effects, a clip to the layer below. Its transform was already handed
+  to its children on the way out; everything else was dropped on the
+  floor. Some of it can be carried and some cannot, and the difference
+  is not a matter of taste — a group is drawn by compositing its
+  children onto a surface of its own and then treating that surface as
+  one layer, so hidden and locked mean exactly the same thing said of
+  each child, while half-transparent does not (two children overlapping
+  inside a 50% group show one edge; at 50% each they show two). Hidden
+  and locked are now carried — a hidden group whose layers reappear on
+  being dissolved is the picture changing behind the user's back —
+  and opacity, blend, mask, effects and a clip that actually bites are
+  refused by name, with the page left untouched, because a page that
+  quietly changes is worse than an edit that declines. Measured rather
+  than reasoned: each of the seven was tried both ways over the
+  fixture and the differing-pixel count read off, which is how the
+  ones that look carryable but are not (a clip, an opacity multiplied
+  into a child that has a drop shadow) were told apart from the two
+  that are. A clip on the bottom-most layer of a parent has nothing
+  under it to be confined to and is already ignored by the renderer,
+  so refusing over it would be refusing over nothing: that case
+  dissolves. What grouping does to a clipped layer is left as it is —
+  it loses the clip, which is what every other editor does too, and
+  moving the flag onto the wrapper would make the group undissolvable
+  by the rule just stated.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an
