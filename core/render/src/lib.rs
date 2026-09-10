@@ -1587,8 +1587,7 @@ fn outline_band(
     layer_opacity: f32,
 ) -> Surface {
     let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
-    let far = width + 4.0;
-    let mut dist = vec![far; w * h];
+    let mut inside = vec![false; w * h];
     for y in 0..h {
         for x in 0..w {
             let i = at_in(origin, layer.width, x as u32 + clip.x0, y as u32 + clip.y0);
@@ -1596,62 +1595,24 @@ fn outline_band(
             // opacity already applied, so half of *that* is where its edge
             // is: a layer at a third opacity would otherwise have no
             // inside at all, and cast no outline.
-            if layer.pixels[i].a >= 0.5 * layer_opacity.max(1e-3) {
-                dist[y * w + x] = 0.0;
-            }
+            inside[y * w + x] = layer.pixels[i].a >= 0.5 * layer_opacity.max(1e-3);
         }
     }
-    // Chamfer weights: a step sideways costs one, a diagonal costs root two.
-    const D1: f32 = 1.0;
-    const D2: f32 = std::f32::consts::SQRT_2;
-    let relax = |dist: &mut Vec<f32>, at: usize, from: usize, cost: f32| {
-        let candidate = dist[from] + cost;
-        if candidate < dist[at] {
-            dist[at] = candidate;
-        }
-    };
-    for y in 0..h {
-        for x in 0..w {
-            let at = y * w + x;
-            if y > 0 {
-                relax(&mut dist, at, at - w, D1);
-                if x > 0 {
-                    relax(&mut dist, at, at - w - 1, D2);
-                }
-                if x + 1 < w {
-                    relax(&mut dist, at, at - w + 1, D2);
-                }
-            }
-            if x > 0 {
-                relax(&mut dist, at, at - 1, D1);
-            }
-        }
-    }
-    for y in (0..h).rev() {
-        for x in (0..w).rev() {
-            let at = y * w + x;
-            if y + 1 < h {
-                relax(&mut dist, at, at + w, D1);
-                if x > 0 {
-                    relax(&mut dist, at, at + w - 1, D2);
-                }
-                if x + 1 < w {
-                    relax(&mut dist, at, at + w + 1, D2);
-                }
-            }
-            if x + 1 < w {
-                relax(&mut dist, at, at + 1, D1);
-            }
-        }
-    }
+    // A true distance, the same one a region is grown by. A chamfer
+    // sweep — a step sideways costing one and a diagonal root two — was
+    // cheaper and is wrong by up to a thirteenth, worst at an eighth of
+    // a turn: an outline round a disc reached a pixel and a third less
+    // far at 22.5° than it did along the axis, which is a circle drawn
+    // as an octagon. One idea of distance in the file rather than two.
+    let dist = squared_distance(&inside, w, h);
     let mut out = Surface::new(layer.width, layer.height);
     for y in 0..h {
         for x in 0..w {
-            // The chamfer counts steps between pixel centres, and the
-            // centre of an edge pixel already sits half a pixel inside the
-            // shape — so the distance to the edge itself is one less half
-            // at each end.
-            let cover = (width + 1.0 - dist[y * w + x]).clamp(0.0, 1.0);
+            // The distance counts from pixel centre to pixel centre, and
+            // the centre of an edge pixel already sits half a pixel
+            // inside the shape — so the distance to the edge itself is
+            // one less half at each end.
+            let cover = (width + 1.0 - dist[y * w + x].sqrt() as f32).clamp(0.0, 1.0);
             if cover <= 0.0 {
                 continue;
             }
@@ -8294,6 +8255,91 @@ mod tests {
             recoloured.get(60, 60).to_srgb8(),
             [0, 0, 255, 255],
             "the clone follows its source rather than keeping a copy"
+        );
+    }
+
+    /// An outline round a disc is round.
+    ///
+    /// Its band is a *distance* from the layer's silhouette, and how that
+    /// distance is worked out shows. A chamfer sweep — a step sideways
+    /// costing one and a diagonal costing root two — is cheap and wrong
+    /// by up to a thirteenth, worst at an eighth of a turn: the band
+    /// reached nearly a pixel less far there than along the axis, which
+    /// is a circle drawn as an octagon. The true distance a region is
+    /// grown by is the one it uses now.
+    ///
+    /// Measured as a shape rather than along a ray, which a pixel grid
+    /// quantises: the furthest painted pixel and the nearest bare one,
+    /// both by their true distance from the middle. A round band puts
+    /// those within a fifth of a pixel of each other; a band short in
+    /// some directions leaves a gap between them.
+    #[test]
+    fn an_outline_round_a_disc_is_round() {
+        let mut doc = Document::new(160, 160, ColorMode::Rgb);
+        let root = doc.root();
+        let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 30.0, ry: 30.0 });
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(disc),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(50.0, 50.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![Effect::Outline {
+                width: 20.0,
+                color: AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+
+        let (mut furthest_on, mut nearest_off) = (0.0f32, f32::MAX);
+        for y in 0..page.height {
+            for x in 0..page.width {
+                let (dx, dy) = (x as f32 + 0.5 - 80.0, y as f32 + 0.5 - 80.0);
+                let r = (dx * dx + dy * dy).sqrt();
+                // Past the disc's own edge, where the band is all there is.
+                if r < 32.0 {
+                    continue;
+                }
+                if page.get(x, y).a > 0.5 {
+                    furthest_on = furthest_on.max(r);
+                } else {
+                    nearest_off = nearest_off.min(r);
+                }
+            }
+        }
+        let gap = furthest_on - nearest_off;
+        assert!(
+            gap < 0.5,
+            "the band's edge is ragged: painted out to {furthest_on:.2} \
+             and bare from {nearest_off:.2} ({gap:.2} of raggedness)"
+        );
+        // And it is the width it was asked for, not merely even.
+        assert!(
+            (furthest_on - 50.0).abs() < 1.0,
+            "a disc of 30 with a band of 20 reaches about 50, not {furthest_on:.2}"
         );
     }
 

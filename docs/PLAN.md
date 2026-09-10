@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~402),
+- **Verify before committing:** `cargo test --workspace` (~403),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1909,6 +1909,15 @@ without reading anything else.*
   container writes a file per entry in that order). A hash map's order
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
+- **One idea of distance.** An outline's band is how far a pixel is from
+  the layer's silhouette, and it was worked out by a chamfer sweep — a
+  step sideways costing one, a diagonal root two — while a region grown
+  by a distance used a true Euclidean one. The chamfer is wrong by up to
+  a thirteenth, worst at an eighth of a turn: a band round a disc reached
+  nearly a pixel less far there than along the axis, which is a circle
+  drawn as an octagon. Both are the true distance now
+  (`an_outline_round_a_disc_is_round`), which is also what makes an
+  outline something the GPU backend could draw.
 - **Picking reads what a layer shows, not only its shape.** A mask and
   being held to the layer under it are both ways of a layer being
   somewhere it is not, and hit-testing used to look at neither: a shape
@@ -1957,10 +1966,12 @@ without reading anything else.*
      spare is already carrying the layer's coverage for an inner shadow),
      a layer with effects inside a frame (the CPU cuts the shadow at the
      frame's edge and not the silhouette it grew from), and a group. An
-     outline stays the CPU's for a better reason: its band is a true
-     distance, swept by a chamfer transform whose two passes each read
-     what the one before wrote, and a parallel answer to that is a
-     different band rather than the same one arrived at faster. The
+     outline stays the CPU's, but for a smaller reason than it was: its
+     band is a true distance now — the same one a region is grown by —
+     rather than the chamfer approximation it used to be, and a true
+     distance *is* something a shader can find, by searching a disc as
+     wide as the band. Capped the way the pixelate's walk is capped,
+     that is the shape of the remaining work. The
      shared fixture still has its effects stripped before the audit
      compares, because two of the three layers carrying one are a blended
      layer and an outline. Both filters that used to be handed
