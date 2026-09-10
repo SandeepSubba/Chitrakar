@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~396),
+- **Verify before committing:** `cargo test --workspace` (~397),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1926,16 +1926,20 @@ without reading anything else.*
   1. The GPU backend, in two halves. What is left to *teach* it:
      live effects (a drop shadow, an inner shadow, an outline), which
      are the blur passes again read off a layer's own silhouette rather
-     than off what is under it; pixelate, whose neighbourhood is a block
-     rather than an axis — separable, and so within reach of the pass
-     machinery, but only where the space it sits in is upright, since the
-     grid is laid out in the document and a turned one is not
-     axis-aligned on the page; and the one node kind it has never drawn —
-     a paint layer, whose strokes carry a softness, an erase and a heal
-     the stroke geometry does not. A motion blur it now draws: one pass
-     along the line rather than the blur's six along the axes, with the
-     taps worked out where the CPU renderer works them out, so the two
-     land on the same picture (`a_smear_runs_the_way_the_cpu_runs_it`).
+     than off what is under it; and the one node kind it has never drawn
+     — a paint layer, whose strokes carry a softness, an erase and a heal
+     the stroke geometry does not. Both filters that used to be handed
+     back it now draws: a motion blur as one pass along the line rather
+     than the blur's six along the axes
+     (`a_smear_runs_the_way_the_cpu_runs_it`), and a pixelate as two, one
+     along each axis, since a block's average separates wherever the grid
+     is upright on the page — which is the condition it is drawn under, a
+     turned one going back because the blocks then lie at an angle and
+     neither pass can walk them
+     (`a_grid_of_squares_falls_where_the_cpu_puts_it`). Both work their
+     geometry out where the CPU renderer works its own out and from the
+     same numbers, which is what makes the two land on the same picture
+     rather than on two plausible ones.
      What is
      left to *wire*: it draws the page at its own size, and the app
      shows a viewport — a scale and an origin — so presenting from it

@@ -844,6 +844,77 @@ fn fs_smear(in: ImageOut) -> @location(0) vec4f {
     return sum / f32(n);
 }
 
+// Which block of a pixelate grid a pixel falls in, along one axis.
+//
+// The grid is laid out in the document rather than on the page, so the
+// answer is where the pixel's centre lands once mapped back out of the
+// space the filter sits in. Worked out here from the same numbers as the
+// CPU renderer and in the same order, because a pixel that fell on one
+// side of a block's edge there and the other side here would put a whole
+// row in the wrong square.
+fn block_of(p: f32, inv: f32, origin: f32, side: f32) -> f32 {
+    return floor((inv * ((p + 0.5) - origin)) / side);
+}
+
+fn block_tap(here: vec2f, q: f32, vertical: bool) -> vec4f {
+    var at = here;
+    if vertical {
+        at.y = q;
+    } else {
+        at.x = q;
+    }
+    return textureLoad(image, vec2i(at), 0);
+}
+
+// One pass of a pixelate along an axis: the average of the run of texels
+// this one shares a block with.
+//
+// A block's average is separable where the grid is axis-aligned on the
+// page — every pixel of a column is in the same column of blocks — so
+// two of these are the whole filter, and the run each pass walks is
+// found by asking `block_of` outward until the answer changes rather
+// than by solving for the run's ends, which would be a rearrangement of
+// the CPU's question rather than the question. Running off the page
+// stops the walk, which is how a block hanging over the edge comes out
+// as the average of the part inside it, exactly as it does there.
+//
+// `params` is the inverse scale along this axis, the origin it is
+// measured from, the block's side in document units, and which axis.
+@fragment
+fn fs_block(in: ImageOut) -> @location(0) vec4f {
+    let inv = in.params.x;
+    let origin = in.params.y;
+    let side = in.params.z;
+    let vertical = in.params.w != 0.0;
+    let here = floor(in.uv * page.size);
+    let limit = select(page.size.x, page.size.y, vertical);
+    let p = select(here.x, here.y, vertical);
+    let c = block_of(p, inv, origin, side);
+    var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+    var n = 0.0;
+    // Outward from this pixel both ways while the block holds. The
+    // ceiling is a belt: the page is handed back before it is reached.
+    var q = p;
+    loop {
+        if q < 0.0 || q >= limit || block_of(q, inv, origin, side) != c || p - q > 256.0 {
+            break;
+        }
+        sum = sum + block_tap(here, q, vertical);
+        n = n + 1.0;
+        q = q - 1.0;
+    }
+    q = p + 1.0;
+    loop {
+        if q < 0.0 || q >= limit || block_of(q, inv, origin, side) != c || q - p > 256.0 {
+            break;
+        }
+        sum = sum + block_tap(here, q, vertical);
+        n = n + 1.0;
+        q = q + 1.0;
+    }
+    return sum / max(n, 1.0);
+}
+
 // A blur layer coming back down: what was under it, and the blurred copy
 // of it that the box passes left in a texture, weighed by the layer's
 // opacity and its mask.

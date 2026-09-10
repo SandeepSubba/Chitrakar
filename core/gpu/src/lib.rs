@@ -213,6 +213,13 @@ enum Draw {
         along: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
     },
+    /// A pixelate: two passes on the same scratch pair, one along each
+    /// axis, coming back down the way a blur's does. `steps` is the two
+    /// quads, each carrying the grid along its own axis.
+    Blocks {
+        steps: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -245,6 +252,7 @@ pub struct GpuRenderer {
     /// and no stencil, since it draws one quad over the whole page.
     box_blur: wgpu::RenderPipeline,
     smear: wgpu::RenderPipeline,
+    blocks: wgpu::RenderPipeline,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -616,6 +624,32 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // Two of these make a pixelate: one pass along each axis, on the
+        // same pair.
+        let blocks = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pixelate"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_block"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         // And the blurred page coming back down, weighed by the layer's
         // opacity and its mask, over what it was taken from.
         let blur_down = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -784,6 +818,7 @@ impl GpuRenderer {
             adjust,
             box_blur,
             smear,
+            blocks,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -1048,7 +1083,9 @@ impl GpuRenderer {
         let blurring = passes.iter().any(|p| {
             matches!(
                 p.lay,
-                Some(Opening::Blur { .. }) | Some(Opening::Smear { .. })
+                Some(Opening::Blur { .. })
+                    | Some(Opening::Smear { .. })
+                    | Some(Opening::Blocks { .. })
             )
         });
         let scratch: Vec<_> = if !blurring {
@@ -1157,6 +1194,41 @@ impl GpuRenderer {
                     pass.draw(along(round % 2), 0..1);
                 }
             }
+            // The two block passes, before the pass that lays their
+            // result down: the copy of what is under the layer goes in,
+            // one averaging along each axis, and the second scratch
+            // texture holds the grid.
+            if let (Some(Opening::Blocks { steps, .. }), Some((_, backdrop)), Some(quads)) =
+                (&step.lay, &under, &quads)
+            {
+                let along =
+                    |axis: usize| steps.start + 6 * axis as u32..steps.start + 6 * axis as u32 + 6;
+                for round in 0..2 {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("pixelate"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &scratch[round].0,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.blocks);
+                    pass.set_bind_group(0, &bind, &[]);
+                    // The first reads the copy; the second reads what the
+                    // first wrote.
+                    pass.set_bind_group(1, if round == 0 { backdrop } else { &scratch[0].1 }, &[]);
+                    pass.set_bind_group(2, &self.open, &[]);
+                    pass.set_bind_group(3, &self.open, &[]);
+                    pass.set_vertex_buffer(0, quads.slice(..));
+                    pass.draw(along(round), 0..1);
+                }
+            }
             // The one smearing pass, before the pass that lays its result
             // down: the copy of what is under the layer goes in, and the
             // averaging along the line leaves its answer on the first
@@ -1262,6 +1334,12 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[0].1, &[]);
                             (quad, mask)
                         }
+                        Opening::Blocks { quad, mask, .. } => {
+                            // Two passes end on the second of the pair.
+                            pass.set_pipeline(&self.blur_down);
+                            pass.set_bind_group(1, &scratch[1].1, &[]);
+                            (quad, mask)
+                        }
                         Opening::Adjust { quad, mask, table } => {
                             pass.set_pipeline(&self.adjust);
                             if let Some(at) = table {
@@ -1333,7 +1411,8 @@ impl GpuRenderer {
                         | Draw::Close { .. }
                         | Draw::Adjust { .. }
                         | Draw::Blur { .. }
-                        | Draw::Smear { .. } => {}
+                        | Draw::Smear { .. }
+                        | Draw::Blocks { .. } => {}
                     }
                 }
             }
@@ -1733,6 +1812,14 @@ fn one(
                         [0.0; 3],
                     ));
                     out.draws.push(Item::of(Draw::Blur { steps, quad }));
+                }
+                Filtering::Blocks { across, down } => {
+                    let mut steps = out.push(page_quad(doc, 1.0, across, [0.0; 4], [0.0; 3]));
+                    steps.end = out.push(page_quad(doc, 1.0, down, [0.0; 4], [0.0; 3])).end;
+                    // Laid down the way a blur is: nothing is added back,
+                    // so the amount that makes a sharpen is zero.
+                    let quad = out.push(page_quad(doc, alpha, [0.0; 4], [0.0; 4], [0.0; 3]));
+                    out.draws.push(Item::of(Draw::Blocks { steps, quad }));
                 }
                 Filtering::Smear { taps, step } => {
                     let along = out.push(page_quad(
@@ -2637,11 +2724,45 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
             },
             _ => Filtering::Nothing,
         },
-        // A grid of squares, each the average of what it covered. It
-        // reads a neighbourhood the way a blur does but not along an
-        // axis, so the box passes are no use to it; it is still the
-        // CPU's.
-        F::Pixelate { .. } => return None,
+        // A grid of squares, each the average of what it covered. The
+        // grid is laid out in the document rather than on the page, so
+        // which block a pixel belongs to is decided by where it lands
+        // once mapped back out of the space the filter sits in — and
+        // where that space is upright, which column a pixel is in
+        // depends on x alone and which row on y alone. That makes the
+        // block's average separable: two passes, one along each axis,
+        // and the second averages the first's row means over the rows of
+        // the block, which is the block. Turned, the blocks lie at an
+        // angle on the page and neither pass can walk them, so that page
+        // stays the CPU's.
+        F::Pixelate { size } => {
+            // Exactly upright, not nearly: the two renderers work the
+            // block out from the same arithmetic, and a hair of shear
+            // here would be a term the CPU adds and this does not —
+            // which near a block's edge is a whole row in the wrong
+            // square.
+            let det = view.a * view.d - view.b * view.c;
+            if view.b != 0.0 || view.c != 0.0 || det.abs() < 1e-9 {
+                return None;
+            }
+            // The same inverse the CPU renderer builds, from the same
+            // determinant, so the two agree to the last bit.
+            let (ia, id) = (view.d / det, view.a / det);
+            // A block smaller than a device pixel is not a block anyone
+            // asked for, which is the floor the CPU renderer puts on it.
+            let side = size.max(1.0 / scale.max(1e-6));
+            // How far a pass has to walk. A block wider than this is
+            // rare, and the walk would be long enough to be worth
+            // handing back rather than growing a loop nobody can bound.
+            const REACH: f32 = 128.0;
+            if side / ia.abs() > REACH || side / id.abs() > REACH {
+                return None;
+            }
+            Filtering::Blocks {
+                across: [ia, view.e, side, 0.0],
+                down: [id, view.f, side, 1.0],
+            }
+        }
         // A smear along a line. The box passes cannot walk it — they run
         // along an axis and this one runs at whatever angle it was given
         // — so it takes a pass of its own, with the taps worked out here
@@ -2681,6 +2802,11 @@ enum Filtering {
     /// apart along a line: a smear, which has an angle and so cannot be
     /// separated into a turn along each axis the way a blur is.
     Smear { taps: f32, step: [f32; 2] },
+    /// Two passes, one along each axis: a pixelate, whose block average
+    /// separates where the grid is upright on the page. Each carries the
+    /// inverse scale along its axis, the origin it is measured from, the
+    /// block's side, and which axis it is.
+    Blocks { across: [f32; 4], down: [f32; 4] },
     /// A filter that was asked for nothing: a blur of no radius, a
     /// sharpen of no amount. The CPU renderer draws nothing for these,
     /// and neither does this.
@@ -2775,6 +2901,14 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
     },
+    /// A pixelate. Its two passes have run on the scratch pair by the
+    /// time this opens the pass, ending on the second of them, so what
+    /// is left is a blur's quad again.
+    Blocks {
+        steps: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
 }
 
 impl Opening {
@@ -2782,7 +2916,10 @@ impl Opening {
     fn reads_under(&self) -> bool {
         match self {
             Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
-            Opening::Adjust { .. } | Opening::Blur { .. } | Opening::Smear { .. } => true,
+            Opening::Adjust { .. }
+            | Opening::Blur { .. }
+            | Opening::Smear { .. }
+            | Opening::Blocks { .. } => true,
         }
     }
 }
@@ -2807,7 +2944,8 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             | Draw::Close { .. }
             | Draw::Adjust { .. }
             | Draw::Blur { .. }
-            | Draw::Smear { .. } => {}
+            | Draw::Smear { .. }
+            | Draw::Blocks { .. } => {}
             _ => continue,
         }
         passes.push(Pass {
@@ -2855,7 +2993,15 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     mask: item.mask,
                 });
             }
-            _ => unreachable!("only the five above cut a pass"),
+            Draw::Blocks { steps, quad } => {
+                clear = false;
+                lay = Some(Opening::Blocks {
+                    steps: steps.clone(),
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
+            }
+            _ => unreachable!("only the six above cut a pass"),
         }
         start = i + 1;
     }
@@ -5361,10 +5507,9 @@ mod tests {
             }
         }
 
-        // A grid of squares reads a neighbourhood that is not along an
-        // axis, so the box passes are no use to it and it is still the
-        // CPU's.
-        assert!(!GpuRenderer::can_render(&with(F::Pixelate { size: 6.0 })));
+        // A grid of squares upright on the page is two passes; the
+        // pixelate test below holds them to the CPU's own grid.
+        assert!(GpuRenderer::can_render(&with(F::Pixelate { size: 6.0 })));
 
         // And a filter carrying a blend mode goes back too: the CPU
         // renderer writes a filter straight into what it read and never
@@ -5428,6 +5573,300 @@ mod tests {
         assert!(
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
+        );
+    }
+
+    /// A pixelate: two passes, one along each axis, which together are
+    /// the average over each block of the grid.
+    ///
+    /// The grid is laid out in the document rather than on the page, so
+    /// which square a pixel lands in has to be worked out the same way on
+    /// both sides — a pixel falling one side of a block's edge here and
+    /// the other side there puts a whole row in the wrong square, which
+    /// no amount of "looks blocky" would catch.
+    #[test]
+    fn a_grid_of_squares_falls_where_the_cpu_puts_it() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // A page with structure both ways, so a grid that has slipped
+        // along either axis shows.
+        let page = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.12,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "bar",
+                    VectorShape::Rect {
+                        width: 41.0,
+                        height: 7.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.95,
+                        g: 0.9,
+                        b: 0.5,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(9.0, 16.0),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "post",
+                    VectorShape::Rect {
+                        width: 5.0,
+                        height: 31.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.3,
+                        g: 0.8,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(38.0, 4.0),
+            );
+            doc
+        };
+        let with = |filter: F| {
+            let mut doc = page();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            doc
+        };
+
+        // Sizes that divide the page and sizes that do not, since a block
+        // hanging over the edge is averaged from the part inside it.
+        for size in [2.0f32, 5.0, 7.0, 12.5] {
+            let doc = with(F::Pixelate { size });
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a grid of {size} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.002,
+                "a grid of {size}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // The grid lives in the space the filter sits in, so a group that
+        // scales it makes the squares bigger on the page and one that
+        // shifts it moves where their edges fall. Both are where the
+        // origin and the inverse scale earn their keep: a grid worked out
+        // from the page alone would agree with the CPU only at identity.
+        // The whole page inside the group, with the filter last in it, so
+        // there is something under the filter for it to work on: a group
+        // holding nothing but a filter is a filter with nothing below it,
+        // which draws the page unchanged and would have made every case
+        // here agree by drawing nothing.
+        let inside = |at: Transform, size: f32| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("held")),
+            })
+            .unwrap();
+            let group = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: group,
+                transform: at,
+            })
+            .unwrap();
+            for (i, (name, w, h, colour, x, y)) in [
+                ("back", 60.0, 40.0, [0.1, 0.12, 0.2], 0.0, 0.0),
+                ("bar", 41.0, 7.0, [0.95, 0.9, 0.5], 9.0, 16.0),
+                ("post", 5.0, 31.0, [0.3, 0.8, 0.6], 38.0, 4.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: group,
+                    index: i,
+                    node: filled(
+                        name,
+                        VectorShape::Rect {
+                            width: w,
+                            height: h,
+                            radius: 0.0,
+                        },
+                        AuthoredColor::Srgb {
+                            r: colour[0],
+                            g: colour[1],
+                            b: colour[2],
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let id = doc.children_of(group).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: 3,
+                node: Box::new(Node::filter("f", F::Pixelate { size })),
+            })
+            .unwrap();
+            doc
+        };
+        for (name, at, size) in [
+            (
+                "scaled",
+                Transform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 0.0,
+                    f: 0.0,
+                },
+                5.0,
+            ),
+            (
+                "shifted",
+                Transform {
+                    a: 1.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.0,
+                    e: 3.5,
+                    f: -2.25,
+                },
+                5.0,
+            ),
+            (
+                "both, and mirrored",
+                Transform {
+                    a: -1.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.25,
+                    e: 47.0,
+                    f: 1.0,
+                },
+                5.0,
+            ),
+            // Shrunk, with a block smaller than a device pixel asked
+            // for: not a block anyone means, and both renderers put the
+            // same floor of one device pixel under it.
+            (
+                "shrunk, with a block finer than a pixel",
+                Transform {
+                    a: 0.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.5,
+                    e: 6.0,
+                    f: 4.0,
+                },
+                0.4,
+            ),
+        ] {
+            let doc = inside(at, size);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a grid {name} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.002,
+                "a grid {name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // And it is a grid rather than a smoothing: inside one square
+        // every pixel is the same colour, and the square beside it is a
+        // different one where the picture underneath changes.
+        let blocky = gpu.render(&with(F::Pixelate { size: 5.0 })).unwrap();
+        let square = |x: u32, y: u32| blocky.get(x, y).to_srgb8();
+        assert_eq!(
+            square(11, 16),
+            square(13, 18),
+            "one square is one colour throughout"
+        );
+        assert_ne!(
+            square(11, 16),
+            square(11, 11),
+            "and the square above it, over the bar's edge, is another"
+        );
+
+        // A turned filter is handed back: the blocks lie at an angle on
+        // the page and neither pass can walk them.
+        let mut turned = page();
+        let root = turned.root();
+        turned
+            .apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::group("tilted")),
+            })
+            .unwrap();
+        let group = turned.children_of(root).unwrap()[3];
+        turned
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 0.9,
+                    b: 0.4,
+                    c: -0.4,
+                    d: 0.9,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            })
+            .unwrap();
+        turned
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::filter("f", F::Pixelate { size: 5.0 })),
+            })
+            .unwrap();
+        assert!(!GpuRenderer::can_render(&turned), "a turned grid goes back");
+
+        // And so does a block wider than a pass is willing to walk.
+        assert!(
+            !GpuRenderer::can_render(&with(F::Pixelate { size: 200.0 })),
+            "a block wider than the walk goes back"
         );
     }
 
