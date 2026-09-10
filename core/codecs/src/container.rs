@@ -140,6 +140,11 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // under it. Bookkeeping rather than artwork, so it is put right rather
     // than being grounds to refuse the file.
     doc.settle_next_id();
+    // And the colours that stand for palette entries, if the file says one
+    // means something the palette disagrees with. Bookkeeping too: the
+    // palette is where the name is defined, so the page is drawn in what
+    // it says rather than in whatever the layer was carrying.
+    doc.settle_swatches();
     // And that the layers are a tree at all. A file names the layers and
     // names what each group holds as two separate lists, and nothing about
     // the format stops one of them naming a layer that is not in the other
@@ -497,6 +502,176 @@ mod tests {
     /// the artwork, and throwing somebody's work away over a number nobody
     /// sees would be the wrong trade.
     #[test]
+    fn a_colour_kept_by_name_comes_back_by_name_and_says_what_the_palette_says() {
+        let f = chitrakar_doc::fixture::everything();
+        let bytes = save_chitra(&f.doc).unwrap();
+        let back = load_chitra(&bytes).unwrap();
+        let fill_of = |doc: &Document, id: chitrakar_doc::NodeId| match &doc.node(id).unwrap().kind
+        {
+            chitrakar_doc::NodeKind::Vector { fill, .. } => {
+                fill.clone().expect("the shape is filled")
+            }
+            other => panic!("expected a shape, got {other:?}"),
+        };
+        let saved = fill_of(&back, f.under);
+        assert_eq!(
+            saved.swatch_name(),
+            Some("ink"),
+            "the reference survives the round trip, not just the colour"
+        );
+        assert_eq!(saved, fill_of(&f.doc, f.under), "and means the same");
+
+        // A file can disagree with itself: a layer saying "ink" is yellow
+        // while the palette says "ink" is blue. Nobody typed that, but a
+        // file written by something that changed the palette without
+        // walking the page would say it, and a hand-edited one certainly
+        // can. The palette is where the name is defined, so that is what
+        // opens.
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        zip.by_name(MANIFEST_PATH)
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        let yellow = serde_json::json!({ "Srgb": { "r": 1.0, "g": 1.0, "b": 0.0, "a": 1.0 } });
+        let nodes = value["document"]["nodes"]
+            .as_object_mut()
+            .expect("the manifest lists its layers");
+        let mut lied = 0;
+        for (_, node) in nodes.iter_mut() {
+            let Some(named) = node.pointer_mut("/kind/Vector/fill/Named") else {
+                continue;
+            };
+            named["means"] = yellow.clone();
+            lied += 1;
+        }
+        assert_eq!(lied, 1, "one layer in the fixture reaches for the palette");
+        let rest: Vec<(String, Vec<u8>)> = zip
+            .file_names()
+            .filter(|n| *n != MANIFEST_PATH)
+            .map(String::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|n| {
+                let mut b = Vec::new();
+                zip.by_name(&n).unwrap().read_to_end(&mut b).unwrap();
+                (n, b)
+            })
+            .collect();
+        let mut out = Vec::new();
+        {
+            let mut w = ZipWriter::new(Cursor::new(&mut out));
+            w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(value.to_string().as_bytes()).unwrap();
+            for (name, body) in &rest {
+                w.start_file(name, SimpleFileOptions::default()).unwrap();
+                w.write_all(body).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let settled = load_chitra(&out).expect("a file that disagrees with itself still opens");
+        assert_eq!(
+            fill_of(&settled, f.under),
+            saved,
+            "and opens saying what its palette says"
+        );
+    }
+
+    #[test]
+    fn a_colour_naming_a_colour_naming_a_colour_cannot_go_on_for_ever() {
+        // What a name means could itself be a name: a chain a hand-written
+        // file can make as long as it likes, and one nothing in the editor
+        // makes. `AuthoredColor::flat` walks such a chain without
+        // recursing, and so does everything that reads a colour through
+        // it — but reading the file into memory in the first place is a
+        // recursion of its own, and what holds that line is the JSON
+        // parser's nesting limit rather than anything here. Pinned,
+        // because it is the reason a named colour is allowed to hold
+        // another one at all.
+        let mut doc = Document::new(16, 12, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "shape",
+            chitrakar_doc::VectorShape::Rect {
+                width: 8.0,
+                height: 8.0,
+                radius: 0.0,
+            },
+        );
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(red.clone());
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let bytes = save_chitra(&doc).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        zip.by_name(MANIFEST_PATH)
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let base: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+
+        // Written as text rather than built as a `serde_json::Value`: a
+        // tree that deep cannot be built, printed or dropped without the
+        // same recursion this is about, so the test would fall over
+        // before the code under it was asked anything.
+        let chained = |deep: usize| -> Vec<u8> {
+            let mut value = base.clone();
+            value["document"]["nodes"][id.0.to_string()]["kind"]["Vector"]["fill"] =
+                serde_json::Value::String("the chain goes here".into());
+            let mut colour = String::from(r#"{"Srgb":{"r":1.0,"g":0.0,"b":0.0,"a":1.0}}"#);
+            for _ in 0..deep {
+                colour = format!(r#"{{"Named":{{"name":"x","means":{colour}}}}}"#);
+            }
+            let text = value
+                .to_string()
+                .replace(r#""the chain goes here""#, &colour);
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(text.as_bytes()).unwrap();
+                w.finish().unwrap();
+            }
+            out
+        };
+
+        // A short chain is a colour like any other, and draws as the one
+        // at its end.
+        let shallow = load_chitra(&chained(8)).expect("a short chain opens");
+        let drawn = chitrakar_render::render(&shallow).unwrap().get(4, 4);
+        assert_eq!(
+            drawn.to_srgb8(),
+            [255, 0, 0, 255],
+            "and draws as the colour it ends in"
+        );
+
+        // A long one is refused, with a reason, rather than taking the
+        // process down on the way in.
+        let err = load_chitra(&chained(5_000)).expect_err("a chain past the limit is refused");
+        let said = err.to_string();
+        assert!(
+            said.contains("recursion") || said.contains("manifest"),
+            "and says why: {said}"
+        );
+    }
+
+    #[test]
     fn a_file_whose_id_counter_is_behind_does_not_eat_a_layer() {
         let mut doc = Document::new(20, 16, ColorMode::Rgb);
         let root = doc.root();
@@ -847,6 +1022,11 @@ mod tests {
             "/document/nodes/*/kind/Clone/strokes/*:points",
             "/document/nodes/*/kind/Clone/strokes/*:radii",
             "/document/nodes/*/kind/Instance:of",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:a",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:c",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:k",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:m",
+            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:y",
             "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:a",
             "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:b",
             "/document/nodes/*/kind/Paint/strokes/*/color/Srgb:g",
@@ -861,20 +1041,21 @@ mod tests {
             "/document/nodes/*/kind/Text/fill/Srgb:b",
             "/document/nodes/*/kind/Text/fill/Srgb:g",
             "/document/nodes/*/kind/Text/fill/Srgb:r",
-            "/document/nodes/*/kind/Text:fill",
-            "/document/nodes/*/kind/Text:size",
-            "/document/nodes/*/kind/Text:text",
-            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:a",
-            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:c",
-            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:k",
-            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:m",
-            "/document/nodes/*/kind/Paint/strokes/*/color/Cmyk:y",
             "/document/nodes/*/kind/Text/runs/*/fill/Srgb:a",
             "/document/nodes/*/kind/Text/runs/*/fill/Srgb:b",
             "/document/nodes/*/kind/Text/runs/*/fill/Srgb:g",
             "/document/nodes/*/kind/Text/runs/*/fill/Srgb:r",
             "/document/nodes/*/kind/Text/runs/*:end",
             "/document/nodes/*/kind/Text/runs/*:start",
+            "/document/nodes/*/kind/Text:fill",
+            "/document/nodes/*/kind/Text:size",
+            "/document/nodes/*/kind/Text:text",
+            "/document/nodes/*/kind/Vector/fill/Named/means/Srgb:a",
+            "/document/nodes/*/kind/Vector/fill/Named/means/Srgb:b",
+            "/document/nodes/*/kind/Vector/fill/Named/means/Srgb:g",
+            "/document/nodes/*/kind/Vector/fill/Named/means/Srgb:r",
+            "/document/nodes/*/kind/Vector/fill/Named:means",
+            "/document/nodes/*/kind/Vector/fill/Named:name",
             "/document/nodes/*/kind/Vector/fill/Srgb:a",
             "/document/nodes/*/kind/Vector/fill/Srgb:b",
             "/document/nodes/*/kind/Vector/fill/Srgb:g",
@@ -890,13 +1071,13 @@ mod tests {
             "/document/nodes/*/kind/Vector/gradient/Linear:to",
             "/document/nodes/*/kind/Vector/shape/Rect:height",
             "/document/nodes/*/kind/Vector/shape/Rect:width",
-            "/document/nodes/*/kind/Vector:shape",
-            "/document/nodes/*/kind/Vector/stroke:color",
-            "/document/nodes/*/kind/Vector/stroke:width",
             "/document/nodes/*/kind/Vector/stroke/color/Srgb:a",
             "/document/nodes/*/kind/Vector/stroke/color/Srgb:b",
             "/document/nodes/*/kind/Vector/stroke/color/Srgb:g",
             "/document/nodes/*/kind/Vector/stroke/color/Srgb:r",
+            "/document/nodes/*/kind/Vector/stroke:color",
+            "/document/nodes/*/kind/Vector/stroke:width",
+            "/document/nodes/*/kind/Vector:shape",
             "/document/nodes/*/mask/kind/Raster/transform:a",
             "/document/nodes/*/mask/kind/Raster/transform:b",
             "/document/nodes/*/mask/kind/Raster/transform:c",
@@ -935,6 +1116,12 @@ mod tests {
             "/document/nodes/*:visible",
             "/document/resources/*:height",
             "/document/resources/*:width",
+            "/document/swatches/*/color/Srgb:a",
+            "/document/swatches/*/color/Srgb:b",
+            "/document/swatches/*/color/Srgb:g",
+            "/document/swatches/*/color/Srgb:r",
+            "/document/swatches/*:color",
+            "/document/swatches/*:name",
             "/document:children",
             "/document:meta",
             "/document:next_id",
@@ -1462,9 +1649,9 @@ mod tests {
             ..
         } = &mut shape.kind
         {
-            *fill = Some(red);
+            *fill = Some(red.clone());
             *stroke = Some(chitrakar_doc::Stroke {
-                color: blue,
+                color: blue.clone(),
                 width: 3.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
@@ -1480,11 +1667,11 @@ mod tests {
                 stops: vec![
                     chitrakar_doc::GradientStop {
                         offset: 0.0,
-                        color: red,
+                        color: red.clone(),
                     },
                     chitrakar_doc::GradientStop {
                         offset: 1.0,
-                        color: blue,
+                        color: blue.clone(),
                     },
                 ],
             });
@@ -1496,7 +1683,7 @@ mod tests {
                 dx: 3.0,
                 dy: 3.0,
                 blur: 2.0,
-                color: blue,
+                color: blue.clone(),
                 opacity: 0.7,
             }],
         })
@@ -1510,7 +1697,7 @@ mod tests {
             stroke: Box::new(chitrakar_doc::PaintStroke {
                 points: vec![[10.0, 90.0], [60.0, 100.0], [110.0, 90.0]],
                 radii: vec![9.0, 5.0, 7.0],
-                color: blue,
+                color: blue.clone(),
                 softness: 0.4,
                 erase: false,
                 source: [0.0, 0.0],
@@ -1527,7 +1714,7 @@ mod tests {
                     strokes: vec![chitrakar_doc::PaintStroke {
                         points: vec![[60.0, 95.0]],
                         radii: vec![8.0],
-                        color: red,
+                        color: red.clone(),
                         softness: 0.0,
                         erase: true,
                         source: [0.0, 0.0],
@@ -1546,7 +1733,7 @@ mod tests {
             &mut doc,
             Box::new(Node::text(
                 "words",
-                chitrakar_doc::TextSpec::new("Chitrakar", 14.0, red),
+                chitrakar_doc::TextSpec::new("Chitrakar", 14.0, red.clone()),
             )),
         );
         add(
@@ -1576,11 +1763,11 @@ mod tests {
                     stops: vec![
                         chitrakar_doc::GradientStop {
                             offset: 0.0,
-                            color: blue,
+                            color: blue.clone(),
                         },
                         chitrakar_doc::GradientStop {
                             offset: 0.6,
-                            color: red,
+                            color: red.clone(),
                         },
                     ],
                 },
@@ -1593,7 +1780,7 @@ mod tests {
         // fields carry, so a file written today still reads as itself.
         let frame = add(
             &mut doc,
-            Box::new(Node::artboard("frame", 40.0, 40.0, Some(blue))),
+            Box::new(Node::artboard("frame", 40.0, 40.0, Some(blue.clone()))),
         );
         doc.apply(Command::SetTransform {
             id: frame,
@@ -1622,7 +1809,7 @@ mod tests {
                     height: 15.0,
                     radius: 0.0,
                 },
-                fill: Some(red),
+                fill: Some(red.clone()),
                 stroke: None,
                 gradient: None,
             }),
@@ -1660,7 +1847,7 @@ mod tests {
             id: over,
             kind: Box::new(chitrakar_doc::NodeKind::Vector {
                 shape: VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
-                fill: Some(blue),
+                fill: Some(blue.clone()),
                 stroke: None,
                 gradient: None,
             }),
@@ -1707,7 +1894,7 @@ mod tests {
             stroke: Box::new(chitrakar_doc::PaintStroke {
                 points: vec![[10.0, 20.0], [100.0, 30.0]],
                 radii: vec![6.0],
-                color: red,
+                color: red.clone(),
                 softness: 0.0,
                 erase: false,
                 source: [0.0, 0.0],

@@ -32,9 +32,18 @@ export type BlendMode =
   | "Color"
   | "Luminosity";
 
-export type AuthoredColor =
+/** A colour with components of its own, as opposed to one standing for a
+ * swatch. */
+export type SolidColor =
   | { Srgb: { r: number; g: number; b: number; a: number } }
   | { Cmyk: { c: number; m: number; y: number; k: number; a: number } };
+
+export type AuthoredColor =
+  | SolidColor
+  /** A colour standing for one of the document's swatches: the name it
+   * goes by, and what that name means at the moment. Changing the entry
+   * in the palette changes every colour that reached for it. */
+  | { Named: { name: string; means: AuthoredColor } };
 
 export type VectorShape =
   | { Rect: { width: number; height: number; radius: number } }
@@ -465,8 +474,21 @@ export function hexToCmykColor(hex: string, alpha = 1): AuthoredColor {
   };
 }
 
+/** The colour itself, with any swatch name peeled off. */
+export function flatColor(color: AuthoredColor): SolidColor {
+  let at = color;
+  while ("Named" in at) at = at.Named.means;
+  return at;
+}
+
+/** The swatch a colour stands for, if it stands for one. */
+export function swatchName(color: AuthoredColor): string | null {
+  return "Named" in color ? color.Named.name : null;
+}
+
 /** Render an authored color as "#rrggbb" for a color input (alpha dropped). */
-export function colorToHex(color: AuthoredColor): string {
+export function colorToHex(named: AuthoredColor): string {
+  const color = flatColor(named);
   const c =
     "Srgb" in color
       ? color.Srgb

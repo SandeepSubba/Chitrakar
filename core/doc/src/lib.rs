@@ -202,6 +202,38 @@ pub struct Document {
     regions: Vec<KeptRegion>,
 }
 
+/// Which of a document's colours a command can have left disagreeing
+/// with its palette — see [`Document::unsettled_by`].
+enum Unsettled {
+    Nothing,
+    Layer(NodeId),
+    /// The region picked out of the page and the ones kept by name:
+    /// colours nothing draws, but written down all the same.
+    Regions,
+    Everything,
+}
+
+/// Point one colour at what the palette says its name means, and answer
+/// whether that changed it. A name the palette does not have is left
+/// alone, which is what makes taking an entry out leave the page looking
+/// exactly as it did.
+fn settle_color(
+    palette: &HashMap<String, chitrakar_color::AuthoredColor>,
+    color: &mut chitrakar_color::AuthoredColor,
+) -> bool {
+    let chitrakar_color::AuthoredColor::Named { name, means } = color else {
+        return false;
+    };
+    let Some(says) = palette.get(name.as_str()) else {
+        return false;
+    };
+    if **means == *says {
+        return false;
+    }
+    **means = says.clone();
+    true
+}
+
 /// A region kept by name, ready to be picked out again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeptRegion {
@@ -505,6 +537,7 @@ impl Document {
                 | Command::RestoreSubtree { .. }
                 | Command::Batch(_)
         );
+        let unsettled = Self::unsettled_by(&cmd);
         let inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
@@ -519,7 +552,67 @@ impl Document {
             let _ = self.apply_inner(inverse);
             return Err(DocError::InstanceCycle);
         }
+        match unsettled {
+            Unsettled::Nothing => {}
+            Unsettled::Layer(id) => self.settle_layer_swatches(id),
+            Unsettled::Regions => self.settle_region_swatches(),
+            Unsettled::Everything => {
+                self.settle_swatches();
+            }
+        }
         Ok(inverse)
+    }
+
+    /// Which colours a command can have left disagreeing with the
+    /// palette, so that they can be pointed at it again.
+    ///
+    /// Two ways that happens. The palette itself changes, and every
+    /// colour that reached for an entry now means something else — that
+    /// is the whole point of reaching for one. Or a colour *arrives*
+    /// already standing for a name and carrying its own idea of what the
+    /// name means: a layer restored, a kind or an effect list replaced, a
+    /// stroke laid down. Nothing in the editor makes one of those
+    /// disagree — a swatch reached for is built from the entry as it
+    /// reads — but a layer arriving from a document with a palette of its
+    /// own can, and there is no reason for it to draw in the other
+    /// document's colour here.
+    fn unsettled_by(cmd: &Command) -> Unsettled {
+        match cmd {
+            Command::SetKind { id, .. }
+            | Command::SetEffects { id, .. }
+            | Command::SetMask { id, .. }
+            | Command::AddStroke { id, .. }
+            | Command::SetStroke { id, .. } => Unsettled::Layer(*id),
+            Command::SetSelection { .. } | Command::SetRegions { .. } => Unsettled::Regions,
+            // A batch is nothing of its own: every command in it goes
+            // through `apply` itself and answers for what it brought. Which
+            // matters as much for what it saves as for what it settles — a
+            // drag of several layers at once is a batch of transforms a
+            // frame, and calling that "everything" would walk the artwork
+            // sixty times a second for a colour nothing in it had.
+            Command::Batch(_) => Unsettled::Nothing,
+            // A palette change reaches every layer; the other two bring
+            // colours in without saying where they land.
+            Command::SetSwatches { .. }
+            | Command::AddNode { .. }
+            | Command::RestoreSubtree { .. } => Unsettled::Everything,
+            Command::RemoveNode { .. }
+            | Command::MoveNode { .. }
+            | Command::RemoveStroke { .. }
+            | Command::SetName { .. }
+            | Command::SetOpacity { .. }
+            | Command::SetVisible { .. }
+            | Command::SetLocked { .. }
+            | Command::SetClipped { .. }
+            | Command::SetPinning { .. }
+            | Command::SetBlendMode { .. }
+            | Command::SetTransform { .. }
+            | Command::SetGuides { .. }
+            | Command::ResizeCanvas { .. }
+            | Command::TurnCanvas { .. }
+            | Command::StraightenCanvas { .. }
+            | Command::MirrorCanvas { .. } => Unsettled::Nothing,
+        }
     }
 
     /// Whether any layer can reach itself through what it holds and what
@@ -865,6 +958,10 @@ impl Document {
             }
             Command::SetSwatches { swatches } => {
                 let prev = std::mem::replace(&mut self.swatches, swatches);
+                // Every colour that reached for an entry follows — see
+                // `unsettled_by`, which is where that happens, so that a
+                // palette change and a layer arriving are settled the
+                // same way.
                 Ok(Command::SetSwatches { swatches: prev })
             }
             Command::SetSelection { selection } => {
@@ -1028,6 +1125,102 @@ impl Document {
             .max()
             .unwrap_or(1);
         self.next_id = self.next_id.max(past);
+    }
+
+    /// Point every colour that stands for a swatch at what the palette
+    /// now says it means, and answer how many were re-pointed.
+    ///
+    /// A colour reaching for a palette entry carries what that entry
+    /// means as well as its name (see [`AuthoredColor::Named`]), so that
+    /// it is still a colour away from this document — pasted into another
+    /// file, handed to an exporter, or left behind when the name is taken
+    /// out of the palette. This is the other half of that bargain: after
+    /// it, no colour in the document disagrees with the palette about a
+    /// name the palette has.
+    ///
+    /// A name the palette does not have is left alone, which is what
+    /// makes taking an entry out of the palette leave the page looking
+    /// exactly as it did.
+    ///
+    /// Anything that deserializes a `Document` owes this call, as it owes
+    /// [`Document::settle_next_id`]: a file can say a red called "Ink"
+    /// while its palette says "Ink" is blue, and the palette is the one
+    /// that decides.
+    ///
+    /// [`AuthoredColor::Named`]: chitrakar_color::AuthoredColor::Named
+    pub fn settle_swatches(&mut self) -> usize {
+        // A document with no palette has nothing that could disagree with
+        // it, and this runs after every command that could have brought a
+        // colour in — a drag of several layers at once asks for it a
+        // hundred times a second.
+        if self.swatches.is_empty() {
+            return 0;
+        }
+        let palette = self.palette();
+        let mut moved = 0;
+        let mut settle = |color: &mut chitrakar_color::AuthoredColor| {
+            if settle_color(&palette, color) {
+                moved += 1;
+            }
+        };
+        for node in self.nodes.values_mut() {
+            node.each_color_mut(&mut settle);
+        }
+        // The colours nothing draws are kept in step too — see
+        // [`Mask::each_color_mut`].
+        if let Some(picked) = &mut self.selection {
+            picked.each_color_mut(&mut settle);
+        }
+        for kept in &mut self.regions {
+            kept.mask.each_color_mut(&mut settle);
+        }
+        moved
+    }
+
+    /// [`Document::settle_swatches`] for one layer — what a command that
+    /// brings colours in on a layer owes, without walking a document that
+    /// a long brush stroke could make large.
+    fn settle_layer_swatches(&mut self, id: NodeId) {
+        if self.swatches.is_empty() {
+            return;
+        }
+        let palette = self.palette();
+        if let Some(node) = self.nodes.get_mut(&id) {
+            node.each_color_mut(&mut |color| {
+                settle_color(&palette, color);
+            });
+        }
+    }
+
+    /// The same for the region picked out of the page and the ones kept by
+    /// name. A marquee drag lands one of these a frame, so it is worth not
+    /// walking the artwork for a colour no part of the artwork holds.
+    fn settle_region_swatches(&mut self) {
+        if self.swatches.is_empty() {
+            return;
+        }
+        let palette = self.palette();
+        let mut settle = |color: &mut chitrakar_color::AuthoredColor| {
+            settle_color(&palette, color);
+        };
+        if let Some(picked) = &mut self.selection {
+            picked.each_color_mut(&mut settle);
+        }
+        for kept in &mut self.regions {
+            kept.mask.each_color_mut(&mut settle);
+        }
+    }
+
+    /// What each name in the palette means.
+    ///
+    /// A palette entry is a definition, so it is read flat: an entry that
+    /// names another entry is not something the editor makes, and
+    /// following one would be a lookup with no end in sight.
+    fn palette(&self) -> HashMap<String, chitrakar_color::AuthoredColor> {
+        self.swatches
+            .iter()
+            .map(|sw| (sw.name.clone(), sw.color.flat().clone()))
+            .collect()
     }
 
     /// The id the next added node will get — lets callers build a [`Batch`]
@@ -2155,5 +2348,227 @@ mod tests {
         let restored: Document = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.node_count(), doc.node_count());
         assert_eq!(restored.meta.width, 640);
+    }
+
+    /// A colour can reach for a palette entry by name, and then changing
+    /// the entry changes it: what makes a palette a set of decisions
+    /// rather than a set of colours kept handy. The layer next to it,
+    /// carrying its own copy of the same colour, does not follow — which
+    /// is the difference between the two, and the reason the reference is
+    /// worth having.
+    #[test]
+    fn a_colour_that_stands_for_a_swatch_follows_the_palette() {
+        let f = fixture::everything();
+        let mut doc = f.doc;
+        let ink = |doc: &Document, id: NodeId| -> chitrakar_color::AuthoredColor {
+            match &doc.node(id).unwrap().kind {
+                NodeKind::Vector { fill, .. } => fill.clone().expect("the shape is filled"),
+                other => panic!("expected a shape, got {other:?}"),
+            }
+        };
+        let was = ink(&doc, f.under);
+        assert_eq!(
+            was.swatch_name(),
+            Some("ink"),
+            "the fixture's lower shape reaches for the palette"
+        );
+        assert_eq!(
+            was.flat(),
+            &chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.45,
+                b: 0.8,
+                a: 1.0
+            },
+            "and means what the palette says it means"
+        );
+        let others_own = ink(&doc, f.over);
+        assert_eq!(others_own.swatch_name(), None, "the other one does not");
+
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.1,
+            b: 0.1,
+            a: 1.0,
+        };
+        let undo = doc
+            .apply(Command::SetSwatches {
+                swatches: vec![Swatch {
+                    name: "ink".into(),
+                    color: red.clone(),
+                }],
+            })
+            .unwrap();
+        let now = ink(&doc, f.under);
+        assert_eq!(now.swatch_name(), Some("ink"), "still by name");
+        assert_eq!(now.flat(), &red, "and now means red");
+        assert_eq!(
+            ink(&doc, f.over),
+            others_own,
+            "the shape carrying its own colour is untouched"
+        );
+
+        doc.apply(undo).unwrap();
+        assert_eq!(
+            ink(&doc, f.under),
+            was,
+            "and putting the palette back puts the colour back"
+        );
+
+        // Taking the entry out is not the same as changing it: nothing in
+        // the palette says what "ink" means any more, so the layer keeps
+        // the colour it was carrying and the page looks as it did.
+        doc.apply(Command::SetSwatches {
+            swatches: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            ink(&doc, f.under),
+            was,
+            "a name the palette has lost is left alone"
+        );
+
+        // And a colour arriving with its own idea of what a name means —
+        // which a layer from a document with a palette of its own would
+        // carry — lands saying what this palette says, inside a batch as
+        // much as on its own.
+        doc.apply(Command::SetSwatches {
+            swatches: vec![Swatch {
+                name: "ink".into(),
+                color: red.clone(),
+            }],
+        })
+        .unwrap();
+        let mut kind = doc.node(f.over).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, .. } = &mut kind {
+            *fill = Some(
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                }
+                .standing_for("ink"),
+            );
+        }
+        doc.apply(Command::Batch(vec![Command::SetKind {
+            id: f.over,
+            kind: Box::new(kind),
+        }]))
+        .unwrap();
+        assert_eq!(
+            ink(&doc, f.over).flat(),
+            &red,
+            "an arriving colour lands in the palette's colour, not its own"
+        );
+    }
+
+    /// A file can say a colour called one thing while the palette says
+    /// that name means another; the palette is where the name is defined,
+    /// so settling reads the file the palette's way. Every colour a layer
+    /// can hold is asked, not only its fill.
+    #[test]
+    fn settling_makes_every_colour_agree_with_the_palette() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let root = doc.root();
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let stale = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }
+        .standing_for("ink");
+        let mut node = Node::vector(
+            "shape",
+            VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = &mut node.kind
+        {
+            *fill = Some(stale.clone());
+            *stroke = Some(Stroke {
+                color: stale.clone(),
+                width: 1.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                align: None,
+                start_marker: Marker::None,
+                end_marker: Marker::None,
+            });
+            *gradient = Some(Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![GradientStop {
+                    offset: 0.0,
+                    color: stale.clone(),
+                }],
+            });
+        }
+        node.effects = vec![Effect::Outline {
+            width: 1.0,
+            color: stale.clone(),
+            opacity: 1.0,
+        }];
+        // And in the mask, which nothing draws in colour at all: the
+        // walk is meant to be total, and a colour left disagreeing is a
+        // lie written in the file even where it cannot be seen.
+        node.mask = Some(Mask {
+            kind: MaskKind::Painted {
+                strokes: vec![PaintStroke {
+                    points: vec![[1.0, 1.0]],
+                    radii: vec![2.0],
+                    color: stale.clone(),
+                    softness: 0.0,
+                    erase: false,
+                    source: [0.0, 0.0],
+                    heal: false,
+                    clip: None,
+                }],
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        // Set the palette straight into the field, the way loading a file
+        // does, so nothing has settled it yet.
+        doc.swatches = vec![Swatch {
+            name: "ink".into(),
+            color: ink.clone(),
+        }];
+
+        let id = doc.children_of(root).unwrap()[0];
+        assert_eq!(doc.settle_swatches(), 5, "fill, stroke, stop, effect, mask");
+        assert_eq!(doc.settle_swatches(), 0, "and nothing left to settle");
+        let mut seen = Vec::new();
+        doc.nodes
+            .get_mut(&id)
+            .unwrap()
+            .each_color_mut(&mut |c: &mut chitrakar_color::AuthoredColor| seen.push(c.clone()));
+        assert_eq!(seen.len(), 5, "five colours on the layer");
+        for c in &seen {
+            assert_eq!(c.swatch_name(), Some("ink"), "each still by name");
+            assert_eq!(c.flat(), &ink, "and each says what the palette says");
+        }
     }
 }

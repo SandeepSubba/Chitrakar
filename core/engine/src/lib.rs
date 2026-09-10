@@ -293,8 +293,10 @@ impl Session {
             // Guides are not artwork: nothing renders them, so nothing
             // needs repainting when they change; nor does a lock.
             | Command::SetGuides { .. }
-            // Nor does the palette: it is what colours are picked from,
-            // not anything the page draws.
+            // The palette is not one node's business either: a colour
+            // standing for an entry can be anywhere, so a change to it is
+            // dirty everywhere (see `apply_internal`) rather than
+            // somewhere.
             | Command::SetSwatches { .. }
             // Nor the regions kept by name: a region put away is not on
             // the page any more than a colour in the palette is.
@@ -460,9 +462,11 @@ impl Session {
     }
 
     fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
-        // Both touch more than one node, so the whole canvas is the only
+        // Each touches more than one node, so the whole canvas is the only
         // safe dirty region — and a resize changes what "the whole canvas"
-        // even means.
+        // even means. A palette change is in that company because a
+        // colour can stand for a swatch: any layer anywhere may have
+        // reached for the entry that just changed.
         let batch = matches!(
             cmd,
             Command::Batch(_)
@@ -470,6 +474,7 @@ impl Session {
                 | Command::TurnCanvas { .. }
                 | Command::StraightenCanvas { .. }
                 | Command::MirrorCanvas { .. }
+                | Command::SetSwatches { .. }
         );
         let target = Self::command_target(&cmd);
         let pre = self
@@ -1663,7 +1668,7 @@ impl Session {
                 kind: Box::new(NodeKind::Artboard {
                     width,
                     height,
-                    background: *background,
+                    background: background.clone(),
                     export_scale: *export_scale,
                 }),
             },
@@ -2021,7 +2026,7 @@ impl Session {
         else {
             return Err(EngineError::BadCommand("not a shape layer".into()));
         };
-        let (fill, stroke, gradient) = (*fill, stroke.clone(), gradient.clone());
+        let (fill, stroke, gradient) = (fill.clone(), stroke.clone(), gradient.clone());
         let t = node.transform;
         let chitrakar_doc::VectorShape::Path {
             mut points,
@@ -3726,8 +3731,8 @@ impl Session {
                 stroke,
                 gradient,
                 ..
-            } => (*fill, stroke.clone(), gradient.clone()),
-            chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill), None, None),
+            } => (fill.clone(), stroke.clone(), gradient.clone()),
+            chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill.clone()), None, None),
             _ => (None, None, None),
         };
         let style = Style {
@@ -3767,16 +3772,16 @@ impl Session {
                         id,
                         kind: Box::new(chitrakar_doc::NodeKind::Vector {
                             shape: shape.clone(),
-                            fill: style.fill,
+                            fill: style.fill.clone(),
                             stroke: style.stroke.clone(),
                             gradient: style.gradient.clone(),
                         }),
                     });
                 }
                 chitrakar_doc::NodeKind::Text(spec) if paints => {
-                    if let Some(fill) = style.fill {
+                    if let Some(ref fill) = style.fill {
                         let mut spec = spec.clone();
-                        spec.fill = fill;
+                        spec.fill = fill.clone();
                         cmds.push(Command::SetKind {
                             id,
                             kind: Box::new(chitrakar_doc::NodeKind::Text(spec)),
@@ -5167,7 +5172,7 @@ mod tests {
                 kept.set_viewport(1.9, -14.5, -9.25, 130, 100);
                 kept.render_cached().expect("the page draws");
                 let (x, y, r) = path[0];
-                kept.paint_begin(layer, x, y, r, ink, 0.35, erase, on_mask)
+                kept.paint_begin(layer, x, y, r, ink.clone(), 0.35, erase, on_mask)
                     .unwrap();
                 for (n, &(x, y, r)) in path.iter().enumerate().skip(1) {
                     kept.paint_extend(x, y, r).unwrap();
@@ -5337,7 +5342,7 @@ mod tests {
         let was = state(brush.document());
         let clean = brush.render_cached().expect("the page draws").0.clone();
         brush
-            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink, 0.2, false, false)
+            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink.clone(), 0.2, false, false)
             .unwrap();
         for step in 1..4 {
             brush
@@ -9867,7 +9872,7 @@ mod tests {
             )
             .unwrap();
         session
-            .paint_begin(layer, 10.0, 30.0, 6.0, ink, 0.0, false, false)
+            .paint_begin(layer, 10.0, 30.0, 6.0, ink.clone(), 0.0, false, false)
             .unwrap();
         for x in [30.0, 60.0, 90.0, 110.0] {
             session.paint_extend(x, 30.0, 6.0).unwrap();
@@ -11602,11 +11607,11 @@ mod tests {
         // covering exactly what was picked.
         let mut session = Session::new(120, 80, ColorMode::Rgb);
         assert!(
-            session.fill_selection(ink).is_err(),
+            session.fill_selection(ink.clone()).is_err(),
             "nothing picked out is nothing to fill"
         );
         picked(&mut session);
-        let id = session.fill_selection(ink).unwrap();
+        let id = session.fill_selection(ink.clone()).unwrap();
         assert_eq!(
             session.history_labels().0.last().map(String::as_str),
             Some("Fill what is picked")
@@ -11991,6 +11996,75 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
     }
 
+    /// A palette entry can be ink: a CMYK document's swatches are
+    /// authored like any other colour in it. So a layer that reaches for
+    /// one has to print through the press profile exactly as the ink
+    /// itself does — a name is a reference, not a fourth colour space,
+    /// and reading past it as sRGB would quietly take a colour off the
+    /// press.
+    ///
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn an_ink_reached_for_by_name_still_goes_through_the_press() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let cyan = chitrakar_color::AuthoredColor::Cmyk {
+            c: 1.0,
+            m: 0.0,
+            y: 0.0,
+            k: 0.0,
+            a: 1.0,
+        };
+        let page = |fill: chitrakar_color::AuthoredColor, press: bool| {
+            let mut session = Session::new(4, 4, ColorMode::Cmyk);
+            let root = session.document().root();
+            let mut node = Node::vector(
+                "ink",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 4.0,
+                    height: 4.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
+                *f = Some(fill);
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetSwatches {
+                    swatches: vec![chitrakar_doc::Swatch {
+                        name: "spot".into(),
+                        color: cyan.clone(),
+                    }],
+                })
+                .unwrap();
+            if press {
+                session.set_cmyk_profile(icc.clone()).unwrap();
+            }
+            session.render().unwrap().get(0, 0).to_srgb8()
+        };
+        let named = page(cyan.standing_for("spot"), true);
+        assert_eq!(
+            named,
+            page(cyan.clone(), true),
+            "the ink called spot prints as that ink"
+        );
+        assert_ne!(
+            named,
+            page(cyan.standing_for("spot"), false),
+            "and the press is what it went through, not the device formula"
+        );
+    }
+
     /// A gradient map's stops are authored ink like any other colour in a
     /// CMYK document, so they resolve through the press profile too — the
     /// map is what decides what the page is made of, and it would be an
@@ -12049,7 +12123,7 @@ mod tests {
                         stops: vec![
                             chitrakar_doc::GradientStop {
                                 offset: 0.0,
-                                color: cyan,
+                                color: cyan.clone(),
                             },
                             chitrakar_doc::GradientStop {
                                 offset: 1.0,
@@ -13484,7 +13558,7 @@ mod save_probe {
         let blue = r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#;
         let color: chitrakar_color::AuthoredColor = serde_json::from_str(blue).unwrap();
         session
-            .paint_begin(layer, 10.0, 30.0, 4.0, color, 0.3, false, false)
+            .paint_begin(layer, 10.0, 30.0, 4.0, color.clone(), 0.3, false, false)
             .unwrap();
         for x in 1..=20 {
             session.paint_extend(10.0 + x as f32, 30.0, 4.0).unwrap();
@@ -13540,7 +13614,7 @@ mod save_probe {
             },
         );
         if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut source.kind {
-            *fill = Some(red);
+            *fill = Some(red.clone());
         }
         session
             .apply(Command::AddNode {
@@ -13555,7 +13629,7 @@ mod save_probe {
                 id: from,
                 effects: vec![chitrakar_doc::Effect::Outline {
                     width: 2.0,
-                    color: red,
+                    color: red.clone(),
                     opacity: 1.0,
                 }],
             })
@@ -13584,7 +13658,7 @@ mod save_probe {
                 index: 2,
                 node: Box::new(chitrakar_doc::Node::text(
                     "words",
-                    chitrakar_doc::TextSpec::new("hi", 12.0, red),
+                    chitrakar_doc::TextSpec::new("hi", 12.0, red.clone()),
                 )),
             })
             .unwrap();
@@ -13608,7 +13682,7 @@ mod save_probe {
             matches!(shape, chitrakar_doc::VectorShape::Ellipse { .. }),
             "it kept its own shape"
         );
-        assert_eq!(*fill, Some(red), "and took the fill");
+        assert_eq!(*fill, Some(red.clone()), "and took the fill");
         assert_eq!(node.effects.len(), 1, "and the effects");
         assert_eq!(node.opacity, 0.5, "and the opacity");
 
@@ -13751,7 +13825,7 @@ mod save_probe {
             },
         );
         if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut patch.kind {
-            *fill = Some(red);
+            *fill = Some(red.clone());
         }
         session
             .apply(Command::AddNode {
@@ -13813,7 +13887,7 @@ mod save_probe {
             },
         );
         if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut shape.kind {
-            *fill = Some(red);
+            *fill = Some(red.clone());
         }
         session
             .apply(Command::AddNode {
@@ -13873,7 +13947,7 @@ mod save_probe {
             a: 1.0,
         };
         if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut rect.kind {
-            *fill = Some(red);
+            *fill = Some(red.clone());
         }
         session
             .apply(Command::AddNode {
@@ -13899,7 +13973,7 @@ mod save_probe {
             "asking twice leaves the one that is already there"
         );
         session
-            .paint_begin(photo, 70.0, 70.0, 8.0, red, 0.0, true, true)
+            .paint_begin(photo, 70.0, 70.0, 8.0, red.clone(), 0.0, true, true)
             .unwrap();
         session.commit_preview();
         assert_eq!(
@@ -14030,7 +14104,7 @@ mod save_probe {
             serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
         // A long stroke across the page, then a dab in one corner.
         session
-            .paint_begin(layer, 20.0, 20.0, 6.0, color, 0.0, false, false)
+            .paint_begin(layer, 20.0, 20.0, 6.0, color.clone(), 0.0, false, false)
             .unwrap();
         session.paint_extend(380.0, 380.0, 6.0).unwrap();
         session.commit_preview();

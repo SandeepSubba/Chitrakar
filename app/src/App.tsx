@@ -27,6 +27,7 @@ import {
   getWasmMemory,
   hexColor,
   hexToCmykColor,
+  swatchName,
   initEngine,
   nodePayload,
   sendCommand,
@@ -908,6 +909,13 @@ export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
   const [tool, setTool] = useState<Tool>("Move");
   const [fill, setFill] = useState("#6c8cff");
+  /** The palette entry the colour in hand was taken from, if it was taken
+   * from one. A shape drawn now stands for that entry rather than holding
+   * a copy of it — which is what makes reaching for a palette colour mean
+   * something for the layer drawn next as well as for the one already
+   * picked. Typing a colour, or lifting one off the page, lets go of it:
+   * what came out of the palette is what follows it. */
+  const [inkFrom, setInkFrom] = useState<string | null>(null);
   const [brushSize, setBrushSize] = useState(8);
   /** The paint brush: how wide it is in document pixels, how much of that
    * width its edge fades over, and whether it is rubbing paint out
@@ -1613,7 +1621,7 @@ export function App() {
   const fillSelection = () => {
     if (!session) return;
     try {
-      const paint = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+      const paint = currentInk();
       const id = session.fill_selection(JSON.stringify(paint)) as number;
       setSelected(id as NodeId);
       setMultiSel([]);
@@ -1685,11 +1693,7 @@ export function App() {
                       subpaths: [],
                     },
                   },
-                  fill: closed
-                    ? cmyk
-                      ? hexToCmykColor(fill)
-                      : hexColor(fill)
-                    : null,
+                  fill: closed ? currentInk() : null,
                   stroke: closed
                     ? null
                     : {
@@ -2491,7 +2495,7 @@ export function App() {
           x,
           y,
           paintSize / 2,
-          JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
+          JSON.stringify(currentInk()),
           paintSoftness,
           false,
           false,
@@ -2513,7 +2517,10 @@ export function App() {
       // not have to be put down to pick a colour up.
       if (e.altKey) {
         const hex = colorUnder(session, x, y);
-        if (hex) setFill(hex);
+        if (hex) {
+          setFill(hex);
+          setInkFrom(null);
+        }
         return;
       }
       // Rubbing at a layer that is not a paint layer takes a piece out
@@ -2554,7 +2561,7 @@ export function App() {
           start[0],
           start[1],
           paintSize / 2,
-          JSON.stringify(cmyk ? hexToCmykColor(fill) : hexColor(fill)),
+          JSON.stringify(currentInk()),
           paintSoftness,
           erasing,
           onMask,
@@ -2589,7 +2596,7 @@ export function App() {
               Text: {
                 text: "Text",
                 size: 48,
-                fill: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                fill: currentInk(),
                 align: "Left",
                 line_height: 1,
                 letter_spacing: 0,
@@ -3267,7 +3274,7 @@ export function App() {
                 },
                 fill: null,
                 stroke: {
-                  color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                  color: currentInk(),
                   width: brushSize,
                   widths,
                   dash: [],
@@ -3363,7 +3370,7 @@ export function App() {
     const path = (points: [number, number][], closed: boolean) => ({
       Path: { points, closed, smooth: false, handles: [], subpaths: [] },
     });
-    const ink = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+    const ink = currentInk();
     let shape;
     let paint: { fill: AuthoredColor | null; stroke: Stroke | null } = {
       fill: ink,
@@ -5119,12 +5126,39 @@ export function App() {
     return () => clearTimeout(id);
   }, [session, selected, selectedKind, layers, saveTick]);
 
-  /** Draw with this colour from now on, and give it to the picked shape
-   * or block of text — what the eyedropper does with the colour it
-   * lifts, and what clicking a colour in the palette does with that. */
-  const applyColour = (hex: string) => {
+  /** The colour to draw in: what the colour well says, standing for the
+   * palette entry it came out of when it came out of one. */
+  const currentInk = (): AuthoredColor => {
+    const flat = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+    return inkFrom ? { Named: { name: inkFrom, means: flat } } : flat;
+  };
+
+  /** The palette entry the picked layer's colour stands for, if it stands
+   * for one. Shown on the entry itself: a colour reached for by name has
+   * to look different from the same colour typed in, since only one of
+   * them follows the palette. */
+  const linkedSwatch = ((): string | null => {
+    if (!selectedKind || typeof selectedKind !== "object") return null;
+    const paint =
+      "Vector" in selectedKind
+        ? selectedKind.Vector.fill
+        : "Text" in selectedKind
+          ? selectedKind.Text.fill
+          : null;
+    return paint ? swatchName(paint) : null;
+  })();
+
+  /** Give the picked shape or block of text a colour, and draw with it
+   * from here on. With `named`, the colour stands for that palette entry
+   * rather than being a copy of it: change the entry later and this layer
+   * follows. */
+  const applyColour = (hex: string, named?: string) => {
     setFill(hex);
-    const colour = cmyk ? hexToCmykColor(hex) : hexColor(hex);
+    setInkFrom(named ?? null);
+    const flat = cmyk ? hexToCmykColor(hex) : hexColor(hex);
+    const colour: AuthoredColor = named
+      ? { Named: { name: named, means: flat } }
+      : flat;
     if (selectedKind && typeof selectedKind === "object") {
       if ("Vector" in selectedKind) {
         setKind(
@@ -7037,7 +7071,10 @@ export function App() {
           <input
             type="color"
             value={fill}
-            onChange={(e) => setFill(e.target.value)}
+            onChange={(e) => {
+              setFill(e.target.value);
+              setInkFrom(null);
+            }}
             title="Fill color"
             aria-label="Fill colour"
             className="fill-swatch"
@@ -7045,22 +7082,44 @@ export function App() {
           {/* The document's own colours, kept by name and saved with it:
               a page's palette is chosen once and reached for, rather than
               typed again every time. Clicking one draws with it — and
-              gives it to the picked shape or block of text, the way the
-              eyedropper does. Alt-clicking takes it out of the palette. */}
+              gives it to the picked shape or block of text, which then
+              stands for the entry rather than holding a copy of it, so
+              shift-clicking the entry later to say what it now means
+              recolours everything that reached for it. That is the whole
+              of what a palette is for: one decision in one place, not the
+              same colour typed into a dozen layers. Alt-clicking takes it
+              out of the palette, and the layers that used it keep the
+              colour they were drawn in. */}
           <div className="palette" role="group" aria-label="Palette">
             {swatches.map((sw, i) => (
               <button
                 key={i}
                 className="swatch"
                 style={{ background: colorToHex(sw.color) }}
-                title={`${sw.name} — alt-click to take it out`}
+                title={`${sw.name} — shift-click to make it mean the colour in hand, alt-click to take it out`}
                 aria-label={`Colour ${sw.name}`}
+                aria-pressed={linkedSwatch === sw.name}
                 onClick={(e) => {
                   if (e.altKey) {
                     setPalette(swatches.filter((_, j) => j !== i));
                     return;
                   }
-                  applyColour(colorToHex(sw.color));
+                  if (e.shiftKey) {
+                    setPalette(
+                      swatches.map((other, j) =>
+                        j === i
+                          ? {
+                              name: other.name,
+                              color: cmyk
+                                ? hexToCmykColor(fill)
+                                : hexColor(fill),
+                            }
+                          : other,
+                      ),
+                    );
+                    return;
+                  }
+                  applyColour(colorToHex(sw.color), sw.name);
                 }}
               />
             ))}
@@ -8832,6 +8891,14 @@ const KEY_HELP: [string, [string, string][]][] = [
       [
         "Click a kept region",
         "Pick it out again; shift adds it, alt takes it away, both keep the overlap, ctrl-click forgets it",
+      ],
+      [
+        "Click a swatch",
+        "Draw in that colour, and give it to the picked layer by name",
+      ],
+      [
+        "Shift-click a swatch",
+        "Say what that entry now means — everything that reached for it follows",
       ],
       ["Alt-click a swatch", "Take that colour out of the palette"],
       ["Delete", "Delete the picked layers"],

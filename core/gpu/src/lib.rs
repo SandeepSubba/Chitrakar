@@ -1565,7 +1565,7 @@ fn one(
             doc,
             child,
             shape,
-            *fill,
+            fill.clone(),
             stroke.as_ref(),
             gradient.as_ref(),
             t,
@@ -1613,7 +1613,7 @@ fn one(
             out.draws.push(Item::of(Draw::Image { quad, texture: at }));
         }
         NodeKind::Text(spec) => {
-            let color = premultiplied_color(spec.fill, alpha)?;
+            let color = premultiplied_color(spec.fill.clone(), alpha)?;
             text(spec, t, color, out)?;
         }
         NodeKind::Adjustment(adj) => {
@@ -1725,7 +1725,7 @@ fn one(
                         height: *height,
                         radius: 0.0,
                     },
-                    Some(*ground),
+                    Some(ground.clone()),
                     None,
                     None,
                     t,
@@ -2003,7 +2003,7 @@ fn vector(
         },
     };
     let ink = match stroke {
-        Some(s) if s.width > 0.0 => Some((premultiplied_color(s.color, alpha)?, s)),
+        Some(s) if s.width > 0.0 => Some((premultiplied_color(s.color.clone(), alpha)?, s)),
         _ => None,
     };
     if paint.is_none() && ink.is_none() {
@@ -2080,10 +2080,13 @@ fn vector(
 /// layer's opacity. `None` declines the page: ink authored for a press
 /// resolves through the document's profile, which is the CPU's business.
 fn premultiplied_color(color: chitrakar_color::AuthoredColor, alpha: f32) -> Option<[f32; 4]> {
-    let chitrakar_color::AuthoredColor::Srgb { .. } = color else {
+    // A colour standing for a swatch is whatever that swatch means, which
+    // is what decides here: a name for an sRGB is drawable, a name for an
+    // ink is the CPU's business exactly as the ink itself is.
+    let chitrakar_color::AuthoredColor::Srgb { .. } = color.flat() else {
         return None;
     };
-    let c = chitrakar_color::to_working(color);
+    let c = chitrakar_color::to_working(&color);
     Some([c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha])
 }
 
@@ -2287,10 +2290,10 @@ const RAMP: u32 = 512;
 fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
     let mut stops = Vec::with_capacity(g.stops().len());
     for stop in g.stops() {
-        let chitrakar_color::AuthoredColor::Srgb { .. } = stop.color else {
+        let chitrakar_color::AuthoredColor::Srgb { .. } = stop.color.flat() else {
             return None;
         };
-        stops.push((stop.offset, chitrakar_color::to_working(stop.color)));
+        stops.push((stop.offset, chitrakar_color::to_working(&stop.color)));
     }
     stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut texels = Vec::with_capacity(RAMP as usize * 4);
@@ -3661,7 +3664,7 @@ mod tests {
             .iter()
             .map(|(offset, color)| chitrakar_doc::GradientStop {
                 offset: *offset,
-                color: *color,
+                color: color.clone(),
             })
             .collect()
     }

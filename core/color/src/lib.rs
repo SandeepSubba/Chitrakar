@@ -23,7 +23,7 @@ pub enum ColorMode {
 /// A color value as authored by the user, preserved losslessly in the
 /// document. Rendering converts it to [`LinearRgba`] via the document's
 /// working space.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AuthoredColor {
     /// Non-linear sRGB components in 0..=1.
     Srgb { r: f32, g: f32, b: f32, a: f32 },
@@ -35,6 +35,63 @@ pub enum AuthoredColor {
         k: f32,
         a: f32,
     },
+    /// A colour that stands for one of the document's swatches: the name
+    /// it goes by, and what that name means at the moment.
+    ///
+    /// The colour is *carried* rather than looked up. A colour that knows
+    /// what it looks like is still a colour away from the document it was
+    /// authored in — pasted into another file, read by an exporter, or in
+    /// a palette the name has since been taken out of — and nothing in
+    /// the renderer has to learn about palettes. What makes the link live
+    /// is the other direction: `Document::settle_swatches` re-points every
+    /// one of these at what the palette now says, so changing one entry
+    /// recolours every layer that reached for it.
+    Named {
+        name: String,
+        means: Box<AuthoredColor>,
+    },
+}
+
+impl AuthoredColor {
+    /// The colour itself, with any names peeled off — what to match on
+    /// when what is wanted is the components rather than the reference.
+    ///
+    /// Iterative on purpose: a name meaning a name is not a thing the
+    /// editor makes, but a hand-written file can say it, and a colour is
+    /// walked once per layer per frame.
+    pub fn flat(&self) -> &AuthoredColor {
+        let mut at = self;
+        while let AuthoredColor::Named { means, .. } = at {
+            at = means;
+        }
+        at
+    }
+
+    /// The alpha the colour was authored with.
+    pub fn alpha(&self) -> f32 {
+        match *self.flat() {
+            AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
+            // `flat` returns one of the two above.
+            AuthoredColor::Named { .. } => unreachable!(),
+        }
+    }
+
+    /// The swatch this colour stands for, if it stands for one.
+    pub fn swatch_name(&self) -> Option<&str> {
+        match self {
+            AuthoredColor::Named { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The same colour standing for `name` instead of nothing — or for a
+    /// different name, since a colour stands for one swatch at a time.
+    pub fn standing_for(&self, name: impl Into<String>) -> AuthoredColor {
+        AuthoredColor::Named {
+            name: name.into(),
+            means: Box::new(self.flat().clone()),
+        }
+    }
 }
 
 /// Premultiplied, linear-light RGBA. The engine's working pixel format.
@@ -118,8 +175,8 @@ pub fn linear_to_srgb(v: f32) -> f32 {
 /// Naive device conversion of authored colors to linear RGB for compositing.
 /// Placeholder until the ICC engine lands in Phase 3: CMYK uses the standard
 /// uncalibrated formula, which is good enough for on-screen editing previews.
-pub fn to_working(color: AuthoredColor) -> LinearRgba {
-    match color {
+pub fn to_working(color: &AuthoredColor) -> LinearRgba {
+    match *color.flat() {
         AuthoredColor::Srgb { r, g, b, a } => LinearRgba {
             r: srgb_to_linear(r) * a,
             g: srgb_to_linear(g) * a,
@@ -135,6 +192,8 @@ pub fn to_working(color: AuthoredColor) -> LinearRgba {
                 a,
             }
         }
+        // `flat` returns one of the two above.
+        AuthoredColor::Named { .. } => unreachable!(),
     }
 }
 
@@ -201,9 +260,40 @@ mod tests {
         assert_eq!(LinearRgba::TRANSPARENT.over(dst), dst);
     }
 
+    /// A name is a reference and not a colour space: what a named colour
+    /// looks like is what it stands for. Including in the case nothing
+    /// here makes but a hand-written file can say — a name meaning a name
+    /// — which is read through rather than followed one step.
+    #[test]
+    fn a_named_colour_is_the_colour_it_stands_for() {
+        let green = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.6,
+            b: 0.2,
+            a: 0.5,
+        };
+        let named = green.standing_for("brand");
+        assert_eq!(named.swatch_name(), Some("brand"));
+        assert_eq!(named.flat(), &green);
+        assert_eq!(named.alpha(), 0.5);
+        assert_eq!(to_working(&named), to_working(&green));
+        // Standing for a second name replaces the first rather than
+        // stacking on it: a colour stands for one swatch at a time.
+        let again = named.standing_for("other");
+        assert_eq!(again.swatch_name(), Some("other"));
+        assert_eq!(again.flat(), &green);
+        // And a chain written by hand still reads as the colour at its end.
+        let chain = AuthoredColor::Named {
+            name: "outer".into(),
+            means: Box::new(named.clone()),
+        };
+        assert_eq!(chain.flat(), &green);
+        assert_eq!(to_working(&chain), to_working(&green));
+    }
+
     #[test]
     fn cmyk_black_maps_to_black() {
-        let px = to_working(AuthoredColor::Cmyk {
+        let px = to_working(&AuthoredColor::Cmyk {
             c: 0.0,
             m: 0.0,
             y: 0.0,

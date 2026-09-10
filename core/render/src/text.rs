@@ -933,7 +933,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
                 name: face_name(&styling),
             },
             em: px * upem / fonts.font.height_unscaled(),
-            fill: styling.fill,
+            fill: styling.fill.clone(),
             lean: if synthesized_lean(&styling) {
                 SLANT
             } else {
@@ -1219,7 +1219,7 @@ impl Palette {
                 .iter()
                 .position(|c| *c == styling.fill)
                 .unwrap_or_else(|| {
-                    colors.push(styling.fill);
+                    colors.push(styling.fill.clone());
                     colors.len() - 1
                 });
             cuts.push(Cut {

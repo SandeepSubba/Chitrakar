@@ -1187,7 +1187,7 @@ fn render_child(
                     x1: (fx1.round().max(0.0) as u32).min(dst.width),
                     y1: (fy1.round().max(0.0) as u32).min(dst.height),
                 };
-                let ground = background.map(|c| resolve_color(doc, c));
+                let ground = background.as_ref().map(|c| resolve_color(doc, c));
                 let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
                 let plain =
                     node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none();
@@ -1333,15 +1333,15 @@ fn render_child(
                 // A gradient paints in place of the flat fill.
                 let fill_paint = match gradient {
                     Some(g) => Paint::from_gradient(doc, g, &flatten_shape(shape), node.opacity),
-                    None => {
-                        fill.map(|c| Paint::Solid(scale_alpha(resolve_color(doc, c), node.opacity)))
-                    }
+                    None => fill
+                        .as_ref()
+                        .map(|c| Paint::Solid(scale_alpha(resolve_color(doc, c), node.opacity))),
                 };
                 if let Some(paint) = fill_paint {
                     paint_shape(dst, doc, shape, t, &paint, blend, clip, None, mask);
                 }
                 if let Some(stroke) = stroke {
-                    let color = scale_alpha(resolve_color(doc, stroke.color), node.opacity);
+                    let color = scale_alpha(resolve_color(doc, &stroke.color), node.opacity);
                     let pieces = stroke_pieces(&flatten_shape(shape), stroke);
                     paint_shape(
                         dst,
@@ -1453,7 +1453,7 @@ fn draw_effect(
             if *opacity <= 0.0 {
                 return;
             }
-            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let tint = scale_alpha(resolve_color(doc, color), *opacity);
             let field = silhouette(layer, origin, layer_clip, tint, false, blur * scale);
             stamp(
                 dst,
@@ -1479,7 +1479,7 @@ fn draw_effect(
             // Cast from the hole around the layer instead of the layer, then
             // kept inside it: what shows is the part of that shadow the
             // silhouette itself covers, which is the edge, from inside.
-            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let tint = scale_alpha(resolve_color(doc, color), *opacity);
             let field = silhouette(layer, origin, layer_clip, tint, true, blur * scale);
             stamp(
                 dst,
@@ -1501,7 +1501,7 @@ fn draw_effect(
             if *opacity <= 0.0 || w <= 0.0 {
                 return;
             }
-            let tint = scale_alpha(resolve_color(doc, *color), *opacity);
+            let tint = scale_alpha(resolve_color(doc, color), *opacity);
             let field = outline_band(layer, origin, layer_clip, tint, w, layer_opacity);
             stamp(
                 dst,
@@ -1712,9 +1712,11 @@ fn stamp(
 /// Authored color → working space: CMYK goes through the document's press
 /// profile when one is set; everything else (and profileless CMYK) uses the
 /// device formulas in `chitrakar_color`.
-fn resolve_color(doc: &Document, color: AuthoredColor) -> LinearRgba {
-    if let (AuthoredColor::Cmyk { c, m, y, k, a }, Some(cms)) = (color, doc.cmyk_cms()) {
-        return cms.to_working(c, m, y, k, a);
+fn resolve_color(doc: &Document, color: &AuthoredColor) -> LinearRgba {
+    // A swatch's colour is a colour: a name meaning an ink still resolves
+    // through the press profile, which is why this reads past the name.
+    if let (AuthoredColor::Cmyk { c, m, y, k, a }, Some(cms)) = (color.flat(), doc.cmyk_cms()) {
+        return cms.to_working(*c, *m, *y, *k, *a);
     }
     to_working(color)
 }
@@ -3352,7 +3354,7 @@ impl Paint {
         let mut stops: Vec<(f32, LinearRgba)> = g
             .stops()
             .iter()
-            .map(|s| (s.offset, scale_alpha(resolve_color(doc, s.color), opacity)))
+            .map(|s| (s.offset, scale_alpha(resolve_color(doc, &s.color), opacity)))
             .collect();
         if stops.is_empty() {
             return None;
@@ -4694,7 +4696,7 @@ fn lay_strokes(
             .clip
             .as_deref()
             .map(|m| mask_plane_over(doc, m, t, bbox, (dst.width, dst.height)));
-        let color = resolve_color(doc, stroke.color);
+        let color = resolve_color(doc, &stroke.color);
         for py in bbox.y0..bbox.y1 {
             for px in bbox.x0..bbox.x1 {
                 let at = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
@@ -5504,14 +5506,14 @@ fn draw_text(
     };
     let [bx0, by0, bx1, by1] = text::bounds(spec);
     let (raster, scale) = text_raster(spec, t);
-    let color = resolve_color(doc, spec.fill);
+    let color = resolve_color(doc, &spec.fill);
     // A block whose style runs ask for more than one colour says per
     // pixel which is which; one that does not leaves this empty and is
     // painted in the block's own fill throughout.
     let palette: Vec<LinearRgba> = raster
         .colors
         .iter()
-        .map(|c| resolve_color(doc, *c))
+        .map(|c| resolve_color(doc, c))
         .collect();
     // The box is the block's natural size, not the raster's: those agree
     // only while the raster is at natural scale, and a minified one would
@@ -5666,10 +5668,12 @@ fn curve_lut_of(adj: &Adjustment) -> CurveLuts {
 /// working space, and in order along the ramp.
 fn sorted_ramp(
     stops: &[chitrakar_doc::GradientStop],
-    resolve: impl Fn(AuthoredColor) -> LinearRgba,
+    resolve: impl Fn(&AuthoredColor) -> LinearRgba,
 ) -> Vec<(f32, LinearRgba)> {
-    let mut ramp: Vec<(f32, LinearRgba)> =
-        stops.iter().map(|s| (s.offset, resolve(s.color))).collect();
+    let mut ramp: Vec<(f32, LinearRgba)> = stops
+        .iter()
+        .map(|s| (s.offset, resolve(&s.color)))
+        .collect();
     ramp.sort_by(|a, b| a.0.total_cmp(&b.0));
     ramp
 }
@@ -6598,8 +6602,8 @@ mod tests {
         };
         let page = |mode| {
             let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
-            add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey));
-            let top = add(&mut doc, filled_rect("over", 2480.0, 3508.0, grey));
+            add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey.clone()));
+            let top = add(&mut doc, filled_rect("over", 2480.0, 3508.0, grey.clone()));
             doc.apply(Command::SetBlendMode {
                 id: top,
                 blend: mode,
@@ -6685,7 +6689,7 @@ mod tests {
             a: 1.0,
         };
         let mut doc = Document::new(2480, 3508, ColorMode::Rgb);
-        add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey));
+        add(&mut doc, filled_rect("under", 2480.0, 3508.0, grey.clone()));
         add(
             &mut doc,
             Box::new(Node::adjustment(
@@ -6765,8 +6769,8 @@ mod tests {
         };
         let over = |mode| {
             let mut doc = Document::new(4, 4, ColorMode::Rgb);
-            add(&mut doc, filled_rect("under", 4.0, 4.0, grey));
-            let top = add(&mut doc, filled_rect("over", 4.0, 4.0, grey));
+            add(&mut doc, filled_rect("under", 4.0, 4.0, grey.clone()));
+            let top = add(&mut doc, filled_rect("over", 4.0, 4.0, grey.clone()));
             doc.apply(Command::SetBlendMode {
                 id: top,
                 blend: mode,
@@ -6808,7 +6812,7 @@ mod tests {
         };
         let paint = |mode| {
             let mut doc = Document::new(4, 4, ColorMode::Rgb);
-            add(&mut doc, filled_rect("under", 4.0, 4.0, grey));
+            add(&mut doc, filled_rect("under", 4.0, 4.0, grey.clone()));
             let top = add(&mut doc, filled_rect("over", 4.0, 4.0, RED));
             doc.apply(Command::SetBlendMode {
                 id: top,
@@ -7858,7 +7862,7 @@ mod tests {
             a: 1.0,
         };
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
-        add(&mut doc, filled_rect("page", 40.0, 40.0, grey));
+        add(&mut doc, filled_rect("page", 40.0, 40.0, grey.clone()));
         add(&mut doc, filled_rect("patch", 20.0, 20.0, grey));
         let plain = render(&doc).unwrap();
         let adj = add(
@@ -7975,7 +7979,7 @@ mod tests {
             vec![stroke(
                 &[[10.0, 20.0], [30.0, 20.0], [10.0, 20.0]],
                 4.0,
-                half,
+                half.clone(),
             )],
         );
         let crossed = render(&doc).unwrap().get(20, 20).a;
@@ -7985,7 +7989,7 @@ mod tests {
         painted(
             &mut twice,
             vec![
-                stroke(&[[10.0, 20.0], [30.0, 20.0]], 4.0, half),
+                stroke(&[[10.0, 20.0], [30.0, 20.0]], 4.0, half.clone()),
                 stroke(&[[10.0, 20.0], [30.0, 20.0]], 4.0, half),
             ],
         );
@@ -8159,7 +8163,7 @@ mod tests {
             doc.apply(Command::AddNode {
                 parent: root,
                 index: 0,
-                node: filled_rect("patch", 20.0, 20.0, patch),
+                node: filled_rect("patch", 20.0, 20.0, patch.clone()),
             })
             .unwrap();
             let id = doc.children_of(root).unwrap()[0];
@@ -8211,6 +8215,62 @@ mod tests {
         );
     }
 
+    /// A colour standing for a palette entry draws as the colour that
+    /// entry means — the name is a reference, not a fourth colour space —
+    /// and changing the entry changes the pixels. Which is the whole of
+    /// what a named colour is for: recolouring a page from one place.
+    #[test]
+    fn a_colour_that_stands_for_a_swatch_draws_as_what_it_means() {
+        let blue = AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.3,
+            b: 0.9,
+            a: 1.0,
+        };
+        let red = AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let page = |fill: AuthoredColor, palette: Vec<chitrakar_doc::Swatch>| {
+            let mut doc = Document::new(8, 8, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("shape", 8.0, 8.0, fill),
+            })
+            .unwrap();
+            doc.apply(Command::SetSwatches { swatches: palette })
+                .unwrap();
+            render(&doc).unwrap().get(4, 4).to_srgb8()
+        };
+        let ink = |color: AuthoredColor| {
+            vec![chitrakar_doc::Swatch {
+                name: "ink".into(),
+                color,
+            }]
+        };
+        assert_eq!(
+            page(blue.standing_for("ink"), ink(blue.clone())),
+            page(blue.clone(), Vec::new()),
+            "a blue called ink draws as that blue"
+        );
+        assert_eq!(
+            page(blue.standing_for("ink"), ink(red.clone())),
+            page(red.clone(), Vec::new()),
+            "and once the palette says ink is red, as that red"
+        );
+        // The name is not a colour of its own: a layer carrying the blue
+        // outright is left where it was by the same palette change.
+        assert_eq!(
+            page(blue.clone(), ink(red.clone())),
+            page(blue.clone(), Vec::new()),
+            "an unnamed colour does not follow the palette"
+        );
+    }
+
     /// Healing lays the source's texture down in the colour of the place
     /// it lands, so a patch lifted from somewhere darker does not show
     /// as a disc of the wrong colour.
@@ -8235,13 +8295,13 @@ mod tests {
             doc.apply(Command::AddNode {
                 parent: root,
                 index: 0,
-                node: filled_rect("field", 80.0, 80.0, light),
+                node: filled_rect("field", 80.0, 80.0, light.clone()),
             })
             .unwrap();
             doc.apply(Command::AddNode {
                 parent: root,
                 index: 1,
-                node: filled_rect("patch", 24.0, 24.0, dark),
+                node: filled_rect("patch", 24.0, 24.0, dark.clone()),
             })
             .unwrap();
             let patch = doc.children_of(root).unwrap()[1];
@@ -8257,7 +8317,7 @@ mod tests {
             })
             .unwrap();
             let clone = doc.children_of(root).unwrap()[2];
-            let mut s = stroke(&[[60.0, 60.0]], 8.0, light);
+            let mut s = stroke(&[[60.0, 60.0]], 8.0, light.clone());
             s.source = [-44.0, -44.0]; // reads the dark patch
             s.heal = heal;
             doc.apply(Command::AddStroke {
@@ -8410,7 +8470,7 @@ mod tests {
             b: 0.5,
             a: 1.0,
         };
-        let under = to_working(grey);
+        let under = to_working(&grey);
         let warm = apply_adjustment(
             &chitrakar_doc::Adjustment::WhiteBalance {
                 temperature: 0.5,
@@ -8460,7 +8520,7 @@ mod tests {
     fn vibrance_lifts_the_dull_and_spares_the_vivid() {
         let lift = chitrakar_doc::Adjustment::Vibrance { amount: 1.0 };
         let moved = |c: AuthoredColor| {
-            let before = to_working(c);
+            let before = to_working(&c);
             let after = apply_adjustment(&lift, None, before);
             let chroma = |p: LinearRgba| p.r.max(p.g).max(p.b) - p.r.min(p.g).min(p.b);
             chroma(after) - chroma(before)
@@ -8483,7 +8543,7 @@ mod tests {
             "and a vivid one moves less than it does ({vivid} against {dull})"
         );
         // Grey has no colour to lift, so it stays grey.
-        let grey = to_working(AuthoredColor::Srgb {
+        let grey = to_working(&AuthoredColor::Srgb {
             r: 0.5,
             g: 0.5,
             b: 0.5,
@@ -8501,7 +8561,7 @@ mod tests {
     /// the whole reason to have the weights at all.
     #[test]
     fn black_and_white_is_mixed_by_its_weights() {
-        let srgb = |r: f32, g: f32, b: f32| to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let srgb = |r: f32, g: f32, b: f32| to_working(&AuthoredColor::Srgb { r, g, b, a: 1.0 });
         let grey = |adj: &Adjustment, c: LinearRgba| {
             let out = apply_adjustment(adj, None, c);
             assert!(
@@ -8579,7 +8639,7 @@ mod tests {
             ],
         };
         let srgb = |v: f32| {
-            to_working(AuthoredColor::Srgb {
+            to_working(&AuthoredColor::Srgb {
                 r: v,
                 g: v,
                 b: v,
@@ -8611,7 +8671,7 @@ mod tests {
         let blue = apply_adjustment(
             &map,
             None,
-            to_working(AuthoredColor::Srgb {
+            to_working(&AuthoredColor::Srgb {
                 r: 0.0,
                 g: 0.34,
                 b: 1.0,
@@ -8643,7 +8703,7 @@ mod tests {
     /// and a grey has no hue to speak to at all.
     #[test]
     fn a_band_of_colour_is_spoken_to_on_its_own() {
-        let colour = |r: f32, g: f32, b: f32| to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let colour = |r: f32, g: f32, b: f32| to_working(&AuthoredColor::Srgb { r, g, b, a: 1.0 });
         let sat_of = |p: LinearRgba| {
             let (_, s, _) = to_hsl(
                 chitrakar_color::linear_to_srgb(p.r),
@@ -8753,7 +8813,7 @@ mod tests {
     #[test]
     fn the_ramp_table_agrees_with_the_ramp() {
         let stop = |at: f32, r: f32, g: f32, b: f32| {
-            (at, to_working(AuthoredColor::Srgb { r, g, b, a: 1.0 }))
+            (at, to_working(&AuthoredColor::Srgb { r, g, b, a: 1.0 }))
         };
         // Stops that are not evenly spaced, so the table's entries and
         // the ramp's corners do not line up.
@@ -8854,7 +8914,7 @@ mod tests {
     #[test]
     fn shadows_and_highlights_move_their_own_ends() {
         let grey = |v: f32| {
-            to_working(AuthoredColor::Srgb {
+            to_working(&AuthoredColor::Srgb {
                 r: v,
                 g: v,
                 b: v,
@@ -8905,7 +8965,7 @@ mod tests {
 
         // A lifted shadow is the colour it was: the three channels are
         // scaled together, so the ratios between them hold.
-        let blue = to_working(AuthoredColor::Srgb {
+        let blue = to_working(&AuthoredColor::Srgb {
             r: 0.05,
             g: 0.1,
             b: 0.2,
@@ -8930,7 +8990,7 @@ mod tests {
     #[test]
     fn colour_balance_reaches_one_range_of_tone_at_a_time() {
         let grey = |v: f32| {
-            to_working(AuthoredColor::Srgb {
+            to_working(&AuthoredColor::Srgb {
                 r: v,
                 g: v,
                 b: v,
@@ -9040,7 +9100,7 @@ mod tests {
     #[test]
     fn a_negative_is_taken_where_a_picture_is_seen() {
         let srgb = |v: f32| {
-            to_working(AuthoredColor::Srgb {
+            to_working(&AuthoredColor::Srgb {
                 r: v,
                 g: v,
                 b: v,
@@ -12147,13 +12207,13 @@ mod tests {
         doc.apply(Command::AddNode {
             parent: root,
             index: 0,
-            node: filled_rect("a", 2.0, 2.0, grey),
+            node: filled_rect("a", 2.0, 2.0, grey.clone()),
         })
         .unwrap();
         doc.apply(Command::AddNode {
             parent: root,
             index: 1,
-            node: filled_rect("b", 2.0, 2.0, grey),
+            node: filled_rect("b", 2.0, 2.0, grey.clone()),
         })
         .unwrap();
         let top = doc.children_of(root).unwrap()[1];
@@ -12164,7 +12224,7 @@ mod tests {
         .unwrap();
 
         let s = render(&doc).unwrap();
-        let single = to_working(grey);
+        let single = to_working(&grey);
         assert!(s.get(0, 0).r < single.r, "multiply must darken");
     }
 

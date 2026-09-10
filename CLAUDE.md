@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~386)
+cargo test --workspace                      # engine tests (~394)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
@@ -62,7 +62,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~994 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1004 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -89,6 +89,26 @@ after the region is let go of — under the clip the stroke is whole. That
 holds for a mask brushed by hand as much as for a layer: a mask is
 brushed with the same tool and the same strokes, so it is confined the
 same way, and both paths read the clip.
+
+## Colour by name
+
+A document's palette (`Document::swatches`, `Command::SetSwatches`) is
+reached for rather than copied from: `AuthoredColor::Named { name, means }`
+is a colour standing for an entry. It carries what the name means as well
+as the name, so it is still a colour away from the document — exported, or
+in a palette the name has been taken out of — and no renderer or exporter
+has to learn about palettes: they read past the name with
+`AuthoredColor::flat()`.
+
+The live half is `Document::settle_swatches`, which points every named
+colour at what the palette now says. `Document::unsettled_by` decides when:
+a palette change unsettles everything, and a command that brings colours
+in on a layer unsettles that layer (a layer arriving from a document with
+a palette of its own can carry another file's idea of a name). It is only
+as good as `Node::each_color_mut` is complete, which is why that walk
+matches every `NodeKind` and `Effect` exhaustively rather than falling
+through — a new kind of layer will not compile until it says whether it
+holds a colour.
 
 ## Claude Code plugin
 

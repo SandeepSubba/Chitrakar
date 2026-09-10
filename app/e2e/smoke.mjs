@@ -9558,6 +9558,91 @@ assert(
   );
 }
 
+// 9bc. A palette entry is a decision in one place. A layer that reached
+// for one follows it when it changes; a layer holding the same colour
+// outright does not. That difference is the whole of what a palette is
+// for, and neither layer looks any different in a screenshot — so the
+// test is the recolour.
+{
+  await newDocument(300, 200, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await setColor("Fill colour", "#ff0066");
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(250);
+  const swatch = page.locator(".palette .swatch:not(.add)").first();
+
+  // Two rectangles in that pink, drawn before the palette was reached for,
+  // so both hold their own copy of it.
+  const rect = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect(20, 40, 130, 160);
+  await rect(170, 40, 280, 160);
+  await pickTool("Move");
+  const left = () => canvasPixel(75, 100);
+  const right = () => canvasPixel(225, 100);
+  const pink = (px) => px[0] > 200 && px[1] < 70 && px[2] > 50 && px[2] < 170;
+  assert(pink(await left()), `the left one is pink (${await left()})`);
+  assert(pink(await right()), `and so is the right one (${await right()})`);
+
+  // Give the palette colour to the one on the right — by name, which the
+  // palette itself shows.
+  assert(
+    (await swatch.getAttribute("aria-pressed")) === "false",
+    "nothing reaches for the entry yet",
+  );
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await swatch.click();
+  await page.waitForTimeout(300);
+  assert(
+    (await swatch.getAttribute("aria-pressed")) === "true",
+    "the picked layer now stands for the entry",
+  );
+  assert(pink(await right()), `and looks no different for it (${await right()})`);
+
+  // Say what the entry now means. Only the layer that reached for it moves.
+  await setColor("Fill colour", "#00cc44");
+  await page.waitForTimeout(200);
+  assert(pink(await right()), "typing a colour does not touch the page");
+  await swatch.click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(400);
+  const green = (px) => px[1] > 140 && px[0] < 90;
+  assert(
+    green(await right()),
+    `the layer that reached for the entry follows it (${await right()})`,
+  );
+  assert(
+    pink(await left()),
+    `the one holding its own copy does not (${await left()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(pink(await right()), `and one undo puts it back (${await right()})`);
+
+  // A colour taken out of the palette stays in hand: the next shape drawn
+  // reaches for the entry too, without being told to again.
+  await swatch.click();
+  await page.waitForTimeout(250);
+  await rect(60, 60, 240, 140);
+  await pickTool("Move");
+  await setColor("Fill colour", "#2244ee");
+  await swatch.click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(400);
+  const blue = await canvasPixel(150, 100);
+  assert(
+    blue[2] > 180 && blue[0] < 90,
+    `a shape drawn with a palette colour in hand follows it (${blue})`,
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

@@ -633,13 +633,18 @@ impl Page {
     /// The operator setting a colour, for filling (`stroke` false) or
     /// stroking: ink when the document is in ink, sRGB otherwise. Alpha
     /// is not here; it goes into the graphics state.
-    fn color_op(&self, color: AuthoredColor, stroke: bool) -> Result<String, PdfError> {
+    fn color_op(&self, color: &AuthoredColor, stroke: bool) -> Result<String, PdfError> {
+        // A PDF carries no palette of ours, so a colour standing for a
+        // swatch prints as what that swatch means.
+        let color = color.flat();
         let (space_op, set_op, rgb_op) = if stroke {
             ("CS", "SC", "RG")
         } else {
             ("cs", "sc", "rg")
         };
         match (&self.separate, color) {
+            // `flat` returns one of the two below.
+            (_, AuthoredColor::Named { .. }) => unreachable!(),
             (Some(_), AuthoredColor::Cmyk { c, m, y, k, .. }) => Ok(format!(
                 "/CS0 {space_op} {} {} {} {} {set_op}",
                 num(c.clamp(0.0, 1.0)),
@@ -648,7 +653,7 @@ impl Page {
                 num(k.clamp(0.0, 1.0))
             )),
             (Some(sep), AuthoredColor::Srgb { r, g, b, .. }) => {
-                let ink = sep.separate(&[r, g, b]).map_err(PdfError::Color)?;
+                let ink = sep.separate(&[*r, *g, *b]).map_err(PdfError::Color)?;
                 Ok(format!(
                     "/CS0 {space_op} {} {} {} {} {set_op}",
                     num(ink[0] as f32 / 255.0),
@@ -658,15 +663,17 @@ impl Page {
                 ))
             }
             (None, color) => {
-                let opaque = match color {
+                let opaque = match *color {
                     AuthoredColor::Srgb { r, g, b, .. } => AuthoredColor::Srgb { r, g, b, a: 1.0 },
                     AuthoredColor::Cmyk { c, m, y, k, .. } => {
                         AuthoredColor::Cmyk { c, m, y, k, a: 1.0 }
                     }
+                    // `flat` returns one of the two above.
+                    AuthoredColor::Named { .. } => unreachable!(),
                 };
                 // Through the naive formula, as the renderer shows it
                 // without a profile.
-                let [r, g, b, _] = chitrakar_color::to_working(opaque).to_srgb8();
+                let [r, g, b, _] = chitrakar_color::to_working(&opaque).to_srgb8();
                 Ok(format!(
                     "{} {} {} {rgb_op}",
                     num(r as f32 / 255.0),
@@ -737,7 +744,7 @@ impl Page {
                 // with it.
                 let rect = format!("0 0 {} {} re\n", num(*width), num(*height));
                 if let Some(color) = background {
-                    let _ = writeln!(self.content, "{}", self.color_op(*color, false)?);
+                    let _ = writeln!(self.content, "{}", self.color_op(color, false)?);
                     let _ = writeln!(self.content, "{rect}f");
                 }
                 let _ = writeln!(self.content, "{rect}W n");
@@ -754,14 +761,10 @@ impl Page {
                 stroke,
                 ..
             } => {
-                let alpha = |c: Option<AuthoredColor>| {
-                    c.map_or(1.0, |c| match c {
-                        AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
-                    })
-                };
+                let alpha = |c: Option<&AuthoredColor>| c.map_or(1.0, |c| c.alpha());
                 let gs = self.gstate(
-                    node.opacity * alpha(*fill),
-                    node.opacity * alpha(stroke.as_ref().map(|s| s.color)),
+                    node.opacity * alpha(fill.as_ref()),
+                    node.opacity * alpha(stroke.as_ref().map(|s| &s.color)),
                     node.blend,
                 );
                 if let Some(gs) = gs {
@@ -769,7 +772,7 @@ impl Page {
                 }
                 let path = path_ops(shape);
                 if let Some(fill) = fill {
-                    let _ = writeln!(self.content, "{}", self.color_op(*fill, false)?);
+                    let _ = writeln!(self.content, "{}", self.color_op(fill, false)?);
                     let rule = if matches!(shape, VectorShape::Path { .. }) {
                         "f*"
                     } else {
@@ -779,7 +782,7 @@ impl Page {
                 }
                 if let Some(stroke) = stroke {
                     if stroke.width > 0.0 {
-                        let _ = writeln!(self.content, "{}", self.color_op(stroke.color, true)?);
+                        let _ = writeln!(self.content, "{}", self.color_op(&stroke.color, true)?);
                         // PDF's own dash: the same lengths on and off,
                         // starting at the beginning of the line.
                         let dash: Vec<String> = stroke.dash.iter().map(|d| num(*d)).collect();
@@ -852,7 +855,7 @@ impl Page {
                                     let _ = writeln!(
                                         self.content,
                                         "{}\n{piece}f",
-                                        self.color_op(stroke.color, false)?
+                                        self.color_op(&stroke.color, false)?
                                     );
                                 }
                             }
@@ -880,9 +883,7 @@ impl Page {
                 }
             }
             NodeKind::Text(spec) => {
-                let alpha = match spec.fill {
-                    AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
-                };
+                let alpha = spec.fill.alpha();
                 if let Some(gs) = self.gstate(node.opacity * alpha, 1.0, node.blend) {
                     let _ = writeln!(self.content, "/{gs} gs");
                 }
@@ -900,7 +901,7 @@ impl Page {
                     let heavy = if run.thicken > 0.0 {
                         format!(
                             "\n{}\n{} w\n2 Tr",
-                            self.color_op(run.fill, true)?,
+                            self.color_op(&run.fill, true)?,
                             num(run.thicken)
                         )
                     } else {
@@ -910,7 +911,7 @@ impl Page {
                         self.content,
                         "BT\n/{font} {} Tf\n{}{heavy}",
                         num(run.em),
-                        self.color_op(run.fill, false)?
+                        self.color_op(&run.fill, false)?
                     );
                     // Each glyph on its own matrix: the shaper's position,
                     // turned the way its baseline runs, y turned back up for
@@ -939,7 +940,7 @@ impl Page {
                     let _ = writeln!(
                         self.content,
                         "{}\n{} {} {} {} re f",
-                        self.color_op(*fill, false)?,
+                        self.color_op(fill, false)?,
                         num(*x0),
                         num(*y0),
                         num(x1 - x0),

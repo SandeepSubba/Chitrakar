@@ -395,7 +395,17 @@ without reading anything else.*
   is being drawn with, saved with the file, clicked to draw with and to
   give to the picked shape or block of text, alt-clicked to take out
   again. In a CMYK document they are ink, and resolve through the press
-  profile exactly as a fill does.
+  profile exactly as a fill does. A colour reached for in the palette
+  *stands for* the entry rather than being a copy of it — the palette
+  marks the entry the picked layer reaches for, and the colour stays in
+  hand, so the next shape drawn reaches for it too — and shift-clicking
+  an entry to say what it now means recolours everything that reached
+  for it. Which is what makes a palette a set of decisions rather than a
+  set of colours kept handy: one place to change a brand blue, not a
+  dozen layers to find. A named colour carries what the name means as
+  well as the name, so it is still a colour away from the document it
+  was authored in — exported, or in a palette the name has since been
+  taken out of, where the layer keeps the colour it was drawn in.
   A right-click on the canvas offers what can be done with what is under
   the pointer, where the pointer is: cut, copy, duplicate, the front and
   the back, lock and hide, group and ungroup, delete, and the one thing
@@ -662,9 +672,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~386),
+- **Verify before committing:** `cargo test --workspace` (~394),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~994 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1933,16 +1943,16 @@ without reading anything else.*
      keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
      off an image, a group two deep — and see which audits stop holding.
-     That found a copy drawing its shadow clipped, and turned up the
-     clipping wrinkle above. What the fixture still lacks: a gradient
-     fill, a stroke with a dash or a marker, text with styled runs, a
-     copy of a *frame*, a swatch actually referred to by a layer. Two:
-     **ask an audit for the thing rather than an account of it** — the
-     file audit compared a document written out as text and could not see
-     wrong pixels; the clipboard audit compared a layer field by field and
-     could not see a picture that arrived blank. Both now compare the
-     page. The same question is worth asking of the export audit, which
-     still only checks that each door opens.
+     That found a copy drawing its shadow clipped, turned up the
+     clipping wrinkle above, and — once a layer in it reached for a
+     palette entry — found a palette change repainting nothing and the
+     GPU declining a page it can draw. What the fixture still lacks: a
+     copy of a *frame*. Two: **ask an audit for the thing rather than an
+     account of it** — the file audit compared a document written out as
+     text and could not see wrong pixels; the clipboard audit compared a
+     layer field by field and could not see a picture that arrived blank.
+     Both now compare the page. The same question is worth asking of the
+     export audit, which still only checks that each door opens.
      Then whatever the next user of the editor misses first — a brush that
      paints pixels rather than laying down live strokes, and text shaping
      worth the name (`rustybuzz`/`parley`, weights, a face chosen per run

@@ -418,7 +418,7 @@ fn write_node(
                         spec.font.as_str()
                     },
                     block.em,
-                    color_hex(doc, spec.fill),
+                    color_hex(doc, &spec.fill),
                 );
                 // No indentation inside: the block preserves its space
                 // (an indent typed into a line is meant), so the only
@@ -616,7 +616,7 @@ fn paint_attrs(
                 let _ = write!(
                     s,
                     r#" stroke="{}" stroke-width="{}"{}"#,
-                    color_hex(doc, stroke.color),
+                    color_hex(doc, &stroke.color),
                     stroke.width,
                     stroke_attrs(doc, stroke, ends, id, defs)
                 );
@@ -626,8 +626,8 @@ fn paint_attrs(
     }
     match fill {
         Some(c) => {
-            let _ = write!(s, r#" fill="{}""#, color_hex(doc, *c));
-            let a = color_alpha(*c);
+            let _ = write!(s, r#" fill="{}""#, color_hex(doc, c));
+            let a = c.alpha();
             if a < 1.0 {
                 let _ = write!(s, r#" fill-opacity="{a}""#);
             }
@@ -638,7 +638,7 @@ fn paint_attrs(
         let _ = write!(
             s,
             r#" stroke="{}" stroke-width="{}"{}"#,
-            color_hex(doc, stroke.color),
+            color_hex(doc, &stroke.color),
             stroke.width,
             stroke_attrs(doc, stroke, ends, id, defs)
         );
@@ -708,7 +708,7 @@ fn stroke_attrs(
             rx = if at_start { 0.0 } else { l },
             ry = r,
             shape = shape,
-            fill = color_hex(doc, stroke.color),
+            fill = color_hex(doc, &stroke.color),
         );
         let _ = write!(
             s,
@@ -773,12 +773,12 @@ fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut Strin
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     for stop in stops {
-        let a = color_alpha(stop.color);
+        let a = stop.color.alpha();
         let _ = writeln!(
             defs,
             r#"      <stop offset="{}" stop-color="{}" stop-opacity="{a}"/>"#,
             stop.offset,
-            color_hex(doc, stop.color)
+            color_hex(doc, &stop.color)
         );
     }
     let _ = writeln!(defs, "{close}");
@@ -786,28 +786,27 @@ fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut Strin
 
 /// Resolve an authored color to an sRGB hex, using the document's press
 /// profile for CMYK when one is loaded (matching on-canvas rendering).
-fn color_hex(doc: &Document, color: AuthoredColor) -> String {
+fn color_hex(doc: &Document, color: &AuthoredColor) -> String {
+    // An SVG has no palette of ours to point at, so a colour standing for
+    // a swatch exports as what that swatch means.
+    let color = color.flat();
     let px = match (color, doc.cmyk_cms()) {
-        (AuthoredColor::Cmyk { c, m, y, k, .. }, Some(cms)) => cms.to_working(c, m, y, k, 1.0),
+        (AuthoredColor::Cmyk { c, m, y, k, .. }, Some(cms)) => cms.to_working(*c, *m, *y, *k, 1.0),
         _ => {
             // Drop alpha here; it exports separately as fill-opacity.
-            let opaque = match color {
+            let opaque = match *color {
                 AuthoredColor::Srgb { r, g, b, .. } => AuthoredColor::Srgb { r, g, b, a: 1.0 },
                 AuthoredColor::Cmyk { c, m, y, k, .. } => {
                     AuthoredColor::Cmyk { c, m, y, k, a: 1.0 }
                 }
+                // `flat` returns one of the two above.
+                AuthoredColor::Named { .. } => unreachable!(),
             };
-            chitrakar_color::to_working(opaque)
+            chitrakar_color::to_working(&opaque)
         }
     };
     let [r, g, b, _] = px.to_srgb8();
     format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn color_alpha(color: AuthoredColor) -> f32 {
-    match color {
-        AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => a,
-    }
 }
 
 /// One set line cut where its style runs start and stop: each piece of
@@ -836,7 +835,7 @@ fn run_attrs(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>)
         return String::new();
     };
     let mut out = String::new();
-    if let Some(fill) = run.fill {
+    if let Some(fill) = &run.fill {
         let _ = write!(out, r#" fill="{}""#, color_hex(doc, fill));
     }
     if let Some(bold) = run.bold {
@@ -1586,6 +1585,87 @@ mod tests {
             "cubic segment written from the handles:\n{svg}"
         );
         assert!(!svg.contains(" L"), "not flattened to a polyline:\n{svg}");
+    }
+
+    #[test]
+    fn a_colour_reached_for_by_name_exports_as_what_it_means() {
+        // An SVG has no palette of ours to point at, so a named colour
+        // has to leave as the colour it stands for. Which is also what
+        // makes the reference safe to have: nothing downstream needs to
+        // learn about it.
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let green = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.6,
+            b: 0.2,
+            a: 1.0,
+        };
+        doc.apply(Command::SetSwatches {
+            swatches: vec![chitrakar_doc::Swatch {
+                name: "brand".into(),
+                color: green.clone(),
+            }],
+        })
+        .unwrap();
+        let mut node = Node::vector(
+            "shape",
+            chitrakar_doc::VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            // Carrying a stale meaning on purpose: the palette decides.
+            *fill = Some(
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                }
+                .standing_for("brand"),
+            );
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let named = export_svg(&doc).unwrap();
+
+        // The same page with the colour written out rather than named.
+        let mut plain = Document::new(20, 20, ColorMode::Rgb);
+        let root = plain.root();
+        let mut node = Node::vector(
+            "shape",
+            chitrakar_doc::VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(green.clone());
+        }
+        plain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        assert_eq!(
+            named,
+            export_svg(&plain).unwrap(),
+            "the two pages export to the same SVG"
+        );
+        assert!(
+            named.contains("#00993"),
+            "and to the palette's green: {named}"
+        );
     }
 
     #[test]

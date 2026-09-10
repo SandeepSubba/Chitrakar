@@ -152,6 +152,12 @@ impl Gradient {
             Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
         }
     }
+
+    pub fn stops_mut(&mut self) -> &mut [GradientStop] {
+        match self {
+            Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
+        }
+    }
 }
 
 /// One stroke of paint: the line it was drawn along in the layer's own
@@ -208,6 +214,15 @@ pub struct PaintStroke {
 }
 
 impl PaintStroke {
+    /// Every colour written on the stroke: the one it lays down, and the
+    /// ones inside the region it is confined to.
+    pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
+        f(&mut self.color);
+        if let Some(held) = &mut self.clip {
+            held.each_color_mut(f);
+        }
+    }
+
     /// The brush radius at point `i`, which is the last one given for
     /// every point past the end of the list.
     pub fn radius(&self, i: usize) -> f32 {
@@ -767,8 +782,8 @@ impl TextSpec {
         let Some(run) = run else {
             return spec;
         };
-        if let Some(fill) = run.fill {
-            spec.fill = fill;
+        if let Some(fill) = &run.fill {
+            spec.fill = fill.clone();
         }
         if let Some(bold) = run.bold {
             spec.bold = bold;
@@ -1050,6 +1065,23 @@ pub struct Mask {
 }
 
 impl Mask {
+    /// Every colour written inside the mask.
+    ///
+    /// A mask is read for coverage and never for colour, so none of these
+    /// is drawn. They are still written down, though, and something that
+    /// walks every colour in a document to keep it in step — the palette
+    /// does — would leave a lie behind if it skipped them.
+    pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
+        match &mut self.kind {
+            MaskKind::Vector { .. } | MaskKind::Raster { .. } => {}
+            MaskKind::Painted { strokes } => {
+                for stroke in strokes {
+                    stroke.each_color_mut(f);
+                }
+            }
+        }
+    }
+
     /// The same coverage, read in a space one transform further out.
     ///
     /// A mask is written in the space its owner is *placed* in — the
@@ -1274,6 +1306,72 @@ impl Effect {
 }
 
 impl Node {
+    /// Every colour written on the layer, handed over one at a time to be
+    /// read or rewritten: its fill and stroke, a gradient's stops, the
+    /// paint laid on it, the text it sets and the runs styled inside it,
+    /// the ground of a frame, the colours of its effects, and the ones
+    /// inside its mask.
+    ///
+    /// Exhaustive by construction — a new kind of layer or a new effect
+    /// will not compile until it says whether it holds a colour — which
+    /// is the point. Anything that has to keep a document's colours in
+    /// step with something else, as the palette does, is only as good as
+    /// this walk is complete.
+    pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
+        match &mut self.kind {
+            NodeKind::Group | NodeKind::Raster(_) | NodeKind::Instance { .. } => {}
+            // An adjustment and a filter are read as numbers: neither
+            // holds a colour of its own, however much it changes them.
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) => {}
+            NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+                for stroke in strokes {
+                    stroke.each_color_mut(f);
+                }
+            }
+            NodeKind::Vector {
+                fill,
+                stroke,
+                gradient,
+                shape: _,
+            } => {
+                if let Some(fill) = fill {
+                    f(fill);
+                }
+                if let Some(stroke) = stroke {
+                    f(&mut stroke.color);
+                }
+                if let Some(gradient) = gradient {
+                    for stop in gradient.stops_mut() {
+                        f(&mut stop.color);
+                    }
+                }
+            }
+            NodeKind::Text(spec) => {
+                f(&mut spec.fill);
+                for run in &mut spec.runs {
+                    if let Some(fill) = &mut run.fill {
+                        f(fill);
+                    }
+                }
+            }
+            NodeKind::Artboard { background, .. } => {
+                if let Some(ground) = background {
+                    f(ground);
+                }
+            }
+        }
+        for effect in &mut self.effects {
+            match effect {
+                Effect::DropShadow { color, .. }
+                | Effect::Outline { color, .. }
+                | Effect::InnerShadow { color, .. } => f(color),
+            }
+        }
+        if let Some(mask) = &mut self.mask {
+            mask.each_color_mut(f);
+        }
+    }
+
     fn base(name: &str, kind: NodeKind) -> Self {
         Self {
             name: name.to_string(),

@@ -101,6 +101,37 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // The document has a palette, and the lower shape reaches for it
+    // rather than carrying a colour of its own: the same blue, said by
+    // name. Which changes nothing about how the page looks — that is the
+    // point of putting it here rather than in a test of its own — and
+    // means every question the shared fixture asks is asked of a document
+    // in which a colour is a reference. A command that changes the
+    // palette recolours a layer; a file written from this has a name in
+    // it to read back.
+    doc.apply(Command::SetSwatches {
+        swatches: vec![Swatch {
+            name: "ink".into(),
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.45,
+                b: 0.8,
+                a: 1.0,
+            },
+        }],
+    })
+    .unwrap();
+    {
+        let mut kind = doc.node(under).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, .. } = &mut kind {
+            *fill = fill.as_ref().map(|c| c.standing_for("ink"));
+        }
+        doc.apply(Command::SetKind {
+            id: under,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+    }
     // A band round the one underneath, and a shadow cast inward on the
     // text further down: three of the three effect kinds are then in the
     // document rather than one. They are not variations on each other —

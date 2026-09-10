@@ -1679,6 +1679,13 @@ body {
   padding: 0;
   cursor: pointer;
 }
+/* The entry the picked layer's colour stands for: a colour reached for
+   by name has to look different from the same colour typed in, since only
+   one of them follows the palette. */
+.palette .swatch[aria-pressed="true"] {
+  outline: 2px solid var(--accent, #4a9eff);
+  outline-offset: 1px;
+}
 .palette .swatch.add {
   background: none;
   color: var(--muted);
