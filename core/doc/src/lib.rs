@@ -906,6 +906,35 @@ impl Document {
         }
     }
 
+    /// Move the id counter past every id in the document, if it is behind.
+    ///
+    /// The counter is bookkeeping rather than artwork: nothing looks at it
+    /// and it is only ever handed out. But it is written into a file along
+    /// with everything else, and a file that says a smaller number than
+    /// the ids it holds is a file where the next layer added *replaces* an
+    /// existing one — the id is taken, the node under it is overwritten,
+    /// and the tree is left with two places claiming the same layer. A
+    /// hand-edited file can say that, and so can one written by something
+    /// that got it wrong.
+    ///
+    /// Repaired rather than refused, deliberately. Where a file's account
+    /// of its artwork contradicts the artwork — a resource whose size does
+    /// not match its bytes — there is nothing to do but refuse it. A
+    /// counter is not the artwork, and throwing somebody's work away over
+    /// a number nobody sees would be the wrong trade.
+    ///
+    /// Anything that deserializes a `Document` owes this call; the
+    /// container makes it for every file it opens.
+    pub fn settle_next_id(&mut self) {
+        let past = self
+            .nodes
+            .keys()
+            .map(|id| id.0.saturating_add(1))
+            .max()
+            .unwrap_or(1);
+        self.next_id = self.next_id.max(past);
+    }
+
     /// The id the next added node will get — lets callers build a [`Batch`]
     /// that adds a node and immediately references it (e.g. grouping).
     ///

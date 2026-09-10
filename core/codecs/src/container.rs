@@ -129,6 +129,12 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         });
     }
     let mut doc = manifest.document;
+    // The id counter, if the file says a number behind the ids it holds.
+    // A file can say that, and the next layer added to such a document
+    // would take an id that is already somebody's and overwrite the node
+    // under it. Bookkeeping rather than artwork, so it is put right rather
+    // than being grounds to refuse the file.
+    doc.settle_next_id();
     // A page that opens has to be one the engine could draw: the surface
     // is sixteen bytes a pixel, so a file claiming an enormous one would
     // ask for memory nobody has rather than fail honestly here.
@@ -351,6 +357,107 @@ mod tests {
             load_chitra(&ahead).is_err(),
             "a file written by something newer says so"
         );
+    }
+
+    /// A file whose id counter is behind the ids in it opens, and the next
+    /// layer added does not overwrite one that is already there.
+    ///
+    /// The counter is bookkeeping: nothing looks at it and it is only ever
+    /// handed out. But it is written into the file with everything else,
+    /// and a file saying a smaller number than the ids it holds is a file
+    /// where the next `AddNode` takes an id that is already somebody's —
+    /// the node under it is replaced, and the tree is left with two places
+    /// claiming the same layer. Before this, adding one layer to such a
+    /// document silently ate another: the layer named "layer 0" came back
+    /// as the new one.
+    ///
+    /// Put right rather than refused, and the difference is the point:
+    /// where a file's account of its artwork contradicts the artwork — a
+    /// resource whose size does not match its bytes — there is nothing to
+    /// do but refuse it, which the audit above checks. A counter is not
+    /// the artwork, and throwing somebody's work away over a number nobody
+    /// sees would be the wrong trade.
+    #[test]
+    fn a_file_whose_id_counter_is_behind_does_not_eat_a_layer() {
+        let mut doc = Document::new(20, 16, ColorMode::Rgb);
+        let root = doc.root();
+        for i in 0..3 {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(Node::group(&format!("layer {i}"))),
+            })
+            .unwrap();
+        }
+        let good = save_chitra(&doc).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+        let mut manifest = String::new();
+        zip.by_name(MANIFEST_PATH)
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(
+            value["document"]["next_id"], 4,
+            "the honest file counts past the ids it holds"
+        );
+
+        // Every number a file could say, including honest ones: none of
+        // them may cost a layer.
+        for behind in [0u64, 1, 2, 3, 4, 9] {
+            value["document"]["next_id"] = behind.into();
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(value.to_string().as_bytes()).unwrap();
+                w.finish().unwrap();
+            }
+            let mut back = load_chitra(&out)
+                .unwrap_or_else(|e| panic!("a file counting from {behind} opens: {e}"));
+            let names = |d: &Document| -> Vec<String> {
+                let mut out: Vec<String> = d.nodes().map(|(_, n)| n.name.clone()).collect();
+                out.sort();
+                out
+            };
+            let was = names(&back);
+            let root = back.root();
+            back.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("new")),
+            })
+            .unwrap_or_else(|e| panic!("counting from {behind}: a layer can still be added: {e}"));
+            let now = names(&back);
+            assert_eq!(
+                now.len(),
+                was.len() + 1,
+                "counting from {behind}: adding a layer added one ({was:?} -> {now:?})"
+            );
+            for name in &was {
+                assert!(
+                    now.contains(name),
+                    "counting from {behind}: {name} is still there ({now:?})"
+                );
+            }
+            // And the tree agrees with itself: every child a group names
+            // is a node, and no id is claimed twice.
+            let mut seen = std::collections::BTreeSet::new();
+            for (id, _) in back.nodes() {
+                assert!(seen.insert(*id), "counting from {behind}: {id:?} twice");
+            }
+            for (id, _) in back.nodes() {
+                if let Ok(kids) = back.children_of(*id) {
+                    for kid in kids {
+                        assert!(
+                            back.node(*kid).is_ok(),
+                            "counting from {behind}: {id:?} names {kid:?}, which is not there"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Every field a `.chitra` was ever given, taken back out again.

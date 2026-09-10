@@ -662,7 +662,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~383),
+- **Verify before committing:** `cargo test --workspace` (~384),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~994 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1352,6 +1352,24 @@ without reading anything else.*
   whenever a fixture's pixels changed. A segment is data now when it is an
   index *or* the key of one of the three objects keyed by data, which is
   the rule that was meant all along.
+- **A file whose id counter is behind the ids in it used to eat a layer:**
+  the counter is bookkeeping — nothing looks at it and it is only ever
+  handed out — but it is written into the file with everything else, and a
+  file saying a smaller number than the ids it holds is a file where the
+  next `AddNode` takes an id that is already somebody's. The node under it
+  is replaced and the tree is left with two places claiming the same
+  layer: adding one layer to such a document silently ate another, or
+  (depending on which id it landed on) failed with a cycle error about a
+  copy of itself. A hand-edited file can say that, and so can one written
+  by something that got it wrong.
+  Put right on the way in rather than refused, and the difference from the
+  hostile-file audit is the point: where a file's account of its artwork
+  contradicts the artwork — a resource whose size does not match its bytes
+  — there is nothing to do but refuse it; a counter is not the artwork, and
+  throwing somebody's work away over a number nobody sees would be the
+  wrong trade. `Document::settle_next_id` is the repair, and every number a
+  file could say is tried, honest ones included, with the tree checked for
+  agreeing with itself afterwards.
 - **Every field a `.chitra` was ever given, taken back out again:** the
   one rule the format has is that an old file keeps opening — a new node
   kind or a new field is additive, written with `#[serde(default)]` so a
