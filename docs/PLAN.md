@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~411),
+- **Verify before committing:** `cargo test --workspace` (~412),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1912,6 +1912,33 @@ without reading anything else.*
   container writes a file per entry in that order). A hash map's order
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
+- **A shadow is the same near the page's edge as away from it.** Put a
+  shadow on the shared fixture's *group* — the one thing the fixture had
+  never held, since every effect in it hung on a layer — and two audits
+  stopped holding at once. The one that mattered: a group copied and
+  pasted twelve pixels across drew a different shadow from the one it was
+  copied from. Every effect is built over a window (the layer's box grown
+  by how far the effect reaches) and the field is nothing at that
+  window's edge — but the window is also cut by the *surface*, and there
+  the field's edge is not nothing. Both the box passes and the stamp were
+  repeating that edge, which invents silhouette that was never there: a
+  layer near the page's edge cast a heavier shadow than the same layer in
+  the middle. Both read nothing past the window now
+  (`blur::Beyond`, and the stamp's own four taps), on both renderers.
+  Held against the same layer twenty pixels in, which is the ground
+  truth: past the effect's reach from the edge the two agree exactly, and
+  nowhere is the near one heavier
+  (`a_shadow_is_the_same_near_the_pages_edge_as_away_from_it`). What is
+  left is that the near one can still be *short*, where the field it
+  would need lies off the surface entirely and there is nowhere to put
+  it; closing that means a layer window that reaches past the page, which
+  is a change to every device coordinate in the renderer and not worth it
+  for a hundredth of a level in two pixels.
+  The other audit was the method's other half: wrapping a layer in a
+  group compared pages byte for byte, and a blur summed over a window
+  that moved does not land on the same last bit. That one now asks for
+  the same *picture* rather than the same bytes, which is what it always
+  meant.
 - **A clone stroke stays inside its region too.** A region picked out
   confines what is painted, and it rides on the stroke so that it goes on
   confining it after the region is let go of. The brush read that; the
@@ -2127,9 +2154,12 @@ without reading anything else.*
      That found a copy drawing its shadow clipped, turned up the
      clipping wrinkle above, and — once a layer in it reached for a
      palette entry — found a palette change repainting nothing and the
-     GPU declining a page it can draw. Three shapes have gone in since
-     and every audit held: a copy of a *frame*, a copy of a *copy*, and a
-     second frame. Holding is not nothing — but the copy of a copy was
+     GPU declining a page it can draw. Four shapes have gone in since. Three held: a
+     copy of a *frame*, a copy of a *copy*, and a second frame. The
+     fourth did not — a shadow on the *group*, where every effect in the
+     fixture had until then hung on a layer — and it took two audits with
+     it, one of which was a shadow that changed when the layer it belonged
+     to moved near the page's edge. Holding is not nothing — but the copy of a copy was
      worth more than that. Nothing broke, so the question became what
      would have to break for the audit to notice, and the answer was
      nothing: stopping the walk that finds copies of copies after one

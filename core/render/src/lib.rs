@@ -1539,7 +1539,18 @@ fn silhouette(
             out.pixels[i] = scale_alpha(tint, if invert { 1.0 - a } else { a });
         }
     }
-    blur::gaussian_blur(&mut out, shift_clip(clip, origin), sigma);
+    // Past the window this was built over there is nothing — the window
+    // is the layer's box grown by how far the effect reaches, and the
+    // field is nothing at its edge. Which only differs from repeating
+    // that edge where the *surface* cut the window short, and there
+    // repeating it would invent silhouette and cast a heavier shadow for
+    // a layer near the page's edge than for the same layer in the middle.
+    blur::gaussian_blur(
+        &mut out,
+        shift_clip(clip, origin),
+        sigma,
+        blur::Beyond::Nothing,
+    );
     out
 }
 
@@ -1652,10 +1663,20 @@ fn stamp(
             }
             let (fx, fy) = (sx.floor(), sy.floor());
             let (tx, ty) = (sx - fx, sy - fy);
+            // Off the window the field was built over there is nothing,
+            // rather than its edge repeated. Which is the same answer
+            // either way where the window is the layer's box grown by
+            // how far the effect reaches — the field is nothing at that
+            // box's edge — and a different one where the *surface* cut
+            // the window short. There the field's edge is not nothing,
+            // and repeating it gives a layer near the page's edge a
+            // heavier shadow than the same layer in the middle: a
+            // shadow that is not a function of the layer alone.
             let at = |px: f32, py: f32| {
-                let px = px.clamp(lo_x, hi_x) as u32;
-                let py = py.clamp(lo_y, hi_y) as u32;
-                field.pixels[at_in(origin, field.width, px, py)]
+                if px < lo_x || py < lo_y || px > hi_x || py > hi_y {
+                    return LinearRgba::TRANSPARENT;
+                }
+                field.pixels[at_in(origin, field.width, px as u32, py as u32)]
             };
             let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
             let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
@@ -4259,7 +4280,7 @@ fn apply_filter(
         Filter::GaussianBlur { sigma } => {
             let needs_mix = opacity < 1.0 || mask.mask.is_some();
             let original = needs_mix.then(|| blur::snapshot(dst, clip));
-            blur::gaussian_blur(dst, clip, *sigma * scale);
+            blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
             if let Some(orig) = original {
                 mix_snapshot(dst, clip, &orig, |o, f, x, y| {
                     lerp(o, f, opacity * coverage_at(doc, mask, x, y))
@@ -4372,7 +4393,7 @@ fn apply_filter(
         }
         Filter::Sharpen { sigma, amount } => {
             let original = blur::snapshot(dst, clip);
-            blur::gaussian_blur(dst, clip, *sigma * scale);
+            blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
             mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
                 let amt = amount * opacity * coverage_at(doc, mask, x, y);
                 // Unsharp mask; keep alpha, clamp premultiplied channels to it.
@@ -8267,6 +8288,109 @@ mod tests {
             recoloured.get(60, 60).to_srgb8(),
             [0, 0, 255, 255],
             "the clone follows its source rather than keeping a copy"
+        );
+    }
+
+    /// A shadow is the same near the page's edge as away from it.
+    ///
+    /// Every effect is built over a window — the layer's box grown by
+    /// how far the effect reaches — and stamped from it at the effect's
+    /// offset. The field is nothing at that window's edge, so reading
+    /// past it gives nothing whichever way it is done. Except that the
+    /// window is also cut by the *surface*: a layer near the page's edge
+    /// gets a window that stops at zero, and there the field's edge is
+    /// not nothing. Repeating it, which is what a clamped read does,
+    /// gave that layer a heavier shadow than the same layer in the
+    /// middle of the page — a shadow that is not a function of the layer
+    /// alone, and one that changed when the layer was copied a few
+    /// pixels across.
+    #[test]
+    fn a_shadow_is_the_same_near_the_pages_edge_as_away_from_it() {
+        let cast = |x: f32| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("shape", 22.0, 18.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, 20.0),
+            })
+            .unwrap();
+            // Blurred, and thrown *away* from the page's edge, which is
+            // what puts the read on the cut side: the stamp reads the
+            // field at minus the offset, so a shadow thrown right is
+            // read from the left, where the window stops.
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![Effect::DropShadow {
+                    dx: 3.0,
+                    dy: 3.0,
+                    blur: 2.5,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.8,
+                }],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // Four from the edge, where the window is cut, and twenty-four,
+        // where it is not.
+        let near = cast(4.0);
+        let away = cast(24.0);
+        let mut worst = (0.0f32, 0u32, 0u32);
+        let mut heaviest = (0.0f32, 0u32, 0u32);
+        for y in 0..near.height {
+            for x in 0..(near.width - 20) {
+                let (p, q) = (near.get(x, y), away.get(x + 20, y));
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs());
+                // Past the effect's own reach from the edge, the window
+                // was not cut and the two are the same arithmetic.
+                if x >= 13 && d > worst.0 {
+                    worst = (d, x, y);
+                }
+                // And nowhere is the near one *heavier*: it may be short
+                // of what it cannot see, never over.
+                if p.a - q.a > heaviest.0 {
+                    heaviest = (p.a - q.a, x, y);
+                }
+            }
+        }
+        assert!(
+            worst.0 < 1e-5,
+            "away from the edge the same shape casts the same shadow \
+             ({} at {},{})",
+            worst.0,
+            worst.1,
+            worst.2
+        );
+        assert!(
+            heaviest.0 < 1e-5,
+            "and at the edge it is never heavier than it should be \
+             ({} at {},{})",
+            heaviest.0,
+            heaviest.1,
+            heaviest.2
+        );
+        // And it casts one at all, so the readings above are two shadows
+        // agreeing rather than two blank pages.
+        assert!(
+            near.get(20, 40).a > 0.3,
+            "there is a shadow to compare ({:?})",
+            near.get(20, 40)
         );
     }
 

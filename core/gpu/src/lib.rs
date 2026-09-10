@@ -2788,8 +2788,13 @@ fn one(
                     steps
                 };
                 let steps = match s.spread {
+                    // The 1 says the box passes find nothing past the
+                    // end of a line rather than its edge repeated: a
+                    // field is nothing past the window it was built
+                    // over, and repeating its edge where the surface cut
+                    // that window short would invent silhouette.
                     Spread::Blurred(radius) => {
-                        axes([radius, 0.0, 0.0, 0.0], [radius, 1.0, 0.0, 0.0], [0.0; 4])
+                        axes([radius, 0.0, 1.0, 0.0], [radius, 1.0, 1.0, 0.0], [0.0; 4])
                     }
                     // The tint rides the second pass, which is the one
                     // that has a distance to cut to a width and so the

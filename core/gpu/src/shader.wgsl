@@ -814,18 +814,35 @@ fn speck(cell: vec2i, seed: u32) -> f32 {
 @fragment
 fn fs_box(in: ImageOut) -> @location(0) vec4f {
     let radius = i32(in.params.x);
-    var step = vec2f(1.0 / page.size.x, 0.0);
-    if in.params.y != 0.0 {
-        step = vec2f(0.0, 1.0 / page.size.y);
-    }
-    // Held inside the page: the sampler would clamp at the texture's
-    // edge, which is the surface's, and past the page there is nothing
-    // the CPU renderer would have read.
-    let lo = (page.lo + vec2f(0.5, 0.5)) / page.size;
-    let hi = (page.hi - vec2f(0.5, 0.5)) / page.size;
+    let vertical = in.params.y != 0.0;
+    // What the window finds when it runs off the end of the line.
+    // Repeating the edge is right for a blur *filter*, which reads what
+    // is under it and past which the picture goes on; nothing is right
+    // for a live effect's field, which is built over the layer's own box
+    // grown by the effect's reach and is nothing past it. The two only
+    // part company where the surface cut that box short — a layer near
+    // the page's edge — and there repeating the edge invents silhouette
+    // and casts a heavier shadow for it. `params.z` says which.
+    let nothing = in.params.z != 0.0;
+    let size = vec2i(page.size);
+    let lo = vec2i(page.lo);
+    let hi = vec2i(page.hi) - vec2i(1, 1);
+    let here = vec2i(floor(in.uv * page.size));
     var sum = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = -radius; i <= radius; i = i + 1) {
-        sum = sum + textureSampleLevel(image, image_sampler, clamp(in.uv + step * f32(i), lo, hi), 0.0);
+        var p = here;
+        if vertical {
+            p.y = p.y + i;
+        } else {
+            p.x = p.x + i;
+        }
+        if nothing {
+            if p.x >= 0 && p.y >= 0 && p.x < size.x && p.y < size.y {
+                sum = sum + textureLoad(image, p, 0);
+            }
+        } else {
+            sum = sum + textureLoad(image, clamp(p, lo, hi), 0);
+        }
     }
     return sum / f32(2 * radius + 1);
 }
@@ -1076,17 +1093,31 @@ fn fs_band(in: ImageOut) -> @location(0) vec4f {
 // company the same way: what falls off the window is nothing, rather
 // than its edge repeated. A shape hanging off the top of the page casts
 // no shadow back onto the first row, and a clamped read would have given
-// it one. Off by no more than a pixel is still read, from the edge,
-// which is what the CPU renderer's own bilinear taps do when one of
-// them runs off the end.
-fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
-    let hi = page.size - vec2f(1.0, 1.0);
-    let s = uv * page.size - vec2f(0.5, 0.5) - offset;
-    if s.x < -1.0 || s.y < -1.0 || s.x > hi.x + 1.0 || s.y > hi.y + 1.0 {
+// it one — and a layer near the page's edge would take a heavier shadow
+// than the same layer in the middle, which is a shadow that is not a
+// function of the layer alone. The four taps of the bilinear read are
+// taken one at a time so that a tap off the window is nothing rather
+// than the edge repeated, which is what the CPU renderer's own four do.
+fn field_tap(p: vec2i, size: vec2i) -> vec4f {
+    if p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y {
         return vec4f(0.0);
     }
-    let at = (clamp(s, vec2f(0.0, 0.0), hi) + vec2f(0.5, 0.5)) / page.size;
-    return textureSampleLevel(image, image_sampler, at, 0.0);
+    return textureLoad(image, p, 0);
+}
+
+fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
+    let size = vec2i(page.size);
+    let s = uv * page.size - vec2f(0.5, 0.5) - offset;
+    let f = floor(s);
+    let t = s - f;
+    let i = vec2i(f);
+    let top = mix(field_tap(i, size), field_tap(i + vec2i(1, 0), size), t.x);
+    let low = mix(
+        field_tap(i + vec2i(0, 1), size),
+        field_tap(i + vec2i(1, 1), size),
+        t.x,
+    );
+    return mix(top, low, t.y);
 }
 
 // The blurred field coming down onto what is under the layer, read at

@@ -8,7 +8,26 @@ use chitrakar_color::LinearRgba;
 
 /// Blur a region of the surface in place with Gaussian standard deviation
 /// `sigma` (document pixels). Samples are clamped at the region edges.
-pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32) {
+/// What a box pass finds when its window runs off the end of a line.
+///
+/// A blur *filter* reads what is under it over the region being
+/// repainted, and past that region the picture goes on — so the edge is
+/// repeated, which is also what keeps a page redrawn a region at a time
+/// from showing a seam at every boundary. A live effect's field is the
+/// other case: it is built over the layer's own box grown by how far the
+/// effect reaches, and past that box there is genuinely nothing. Reading
+/// nothing there matters where the *surface* cut that box short — a
+/// layer near the page's edge — because repeating the edge then invents
+/// silhouette that was never there and casts a heavier shadow for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Beyond {
+    /// The last value on the line, over and over.
+    Edge,
+    /// Nothing at all.
+    Nothing,
+}
+
+pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32, beyond: Beyond) {
     if sigma <= 0.01 || clip.is_empty() {
         return;
     }
@@ -16,8 +35,8 @@ pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32) {
     let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
     let radius = (d.max(1) / 2).max(1);
     for _ in 0..3 {
-        box_blur_axis(surface, clip, radius, true);
-        box_blur_axis(surface, clip, radius, false);
+        box_blur_axis(surface, clip, radius, true, beyond);
+        box_blur_axis(surface, clip, radius, false, beyond);
     }
 }
 
@@ -114,7 +133,13 @@ fn scale(a: LinearRgba, s: f32) -> LinearRgba {
 }
 
 /// One box-blur pass along an axis with a sliding-window running sum.
-fn box_blur_axis(surface: &mut Surface, clip: ClipRect, radius: i32, horizontal: bool) {
+fn box_blur_axis(
+    surface: &mut Surface,
+    clip: ClipRect,
+    radius: i32,
+    horizontal: bool,
+    beyond: Beyond,
+) {
     let (lanes, len) = if horizontal {
         (clip.y1 - clip.y0, (clip.x1 - clip.x0) as i32)
     } else {
@@ -143,7 +168,12 @@ fn box_blur_axis(surface: &mut Surface, clip: ClipRect, radius: i32, horizontal:
         for (i, slot) in line.iter_mut().enumerate() {
             *slot = surface.pixels[index(lane, i as i32)];
         }
-        let at = |i: i32| line[i.clamp(0, len - 1) as usize];
+        let at = |i: i32| {
+            if beyond == Beyond::Nothing && (i < 0 || i >= len) {
+                return LinearRgba::TRANSPARENT;
+            }
+            line[i.clamp(0, len - 1) as usize]
+        };
         // Prime the window centered on i = 0.
         let mut sum = LinearRgba::TRANSPARENT;
         for i in -radius..=radius {
@@ -213,7 +243,7 @@ mod tests {
             a: 1.0,
         };
         let clip = full(&s);
-        gaussian_blur(&mut s, clip, 2.0);
+        gaussian_blur(&mut s, clip, 2.0, Beyond::Edge);
 
         assert!(s.get(15, 15).r < 1.0, "peak flattened");
         assert!(s.get(17, 15).r > 0.0, "energy spread to neighbors");
@@ -235,7 +265,7 @@ mod tests {
         };
         let before = s.pixels.clone();
         let clip = full(&s);
-        gaussian_blur(&mut s, clip, 0.0);
+        gaussian_blur(&mut s, clip, 0.0, Beyond::Edge);
         assert_eq!(s.pixels, before);
     }
 
@@ -250,7 +280,7 @@ mod tests {
         };
         s.pixels.fill(px);
         let clip = full(&s);
-        gaussian_blur(&mut s, clip, 3.0);
+        gaussian_blur(&mut s, clip, 3.0, Beyond::Edge);
         for p in &s.pixels {
             assert!((p.r - px.r).abs() < 1e-5 && (p.a - px.a).abs() < 1e-5);
         }

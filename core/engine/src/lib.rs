@@ -7293,8 +7293,25 @@ mod tests {
                 .group_nodes(&[id], "wrap")
                 .unwrap_or_else(|e| panic!("grouping {what}: {e}"));
             let wrapped = s.render().unwrap();
+            // The same *picture*, rather than the same bytes. Wrapping a
+            // layer moves the window a blurred effect is worked out
+            // over — a group's box is its children's, and a new group
+            // has a different one — and three box passes summed along a
+            // different run do not land on the same last bit of a
+            // float. What is claimed here is that the page looks the
+            // same, and a difference in the seventh decimal is not the
+            // way that goes wrong: what would go wrong is a layer
+            // landing somewhere else, which is a whole level or more.
+            let same = |a: &Surface, b: &Surface| {
+                a.pixels.iter().zip(&b.pixels).all(|(p, q)| {
+                    (p.r - q.r).abs() < 1e-4
+                        && (p.g - q.g).abs() < 1e-4
+                        && (p.b - q.b).abs() < 1e-4
+                        && (p.a - q.a).abs() < 1e-4
+                })
+            };
             assert_eq!(
-                wrapped.pixels == before.pixels,
+                same(&wrapped, &before),
                 !confined,
                 "{what}: wrapping it changed the page, or failed to"
             );

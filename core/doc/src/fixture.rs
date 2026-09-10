@@ -109,6 +109,29 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // And a shadow on the *group*, not on a layer in it. A group's
+    // opacity belongs to its composite rather than to each child, so the
+    // silhouette an effect grows from is the pair of them as one shape —
+    // a different question from the one an effect on a layer asks, and
+    // the only place in this document where it gets asked. It is also
+    // what a copy of this group has to draw, and what a dissolve has to
+    // take somewhere.
+    doc.apply(Command::SetEffects {
+        id: group,
+        effects: vec![Effect::DropShadow {
+            dx: 3.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.0,
+                b: 0.2,
+                a: 1.0,
+            },
+            opacity: 0.6,
+        }],
+    })
+    .unwrap();
     // The document has a palette, and the lower shape reaches for it
     // rather than carrying a colour of its own: the same blue, said by
     // name. Which changes nothing about how the page looks — that is the
