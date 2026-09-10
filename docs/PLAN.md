@@ -1820,13 +1820,24 @@ without reading anything else.*
      docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth: another review pass over the last stretch of commits (each
-     pass so far has found real defects, and the last two came out of
-     asking what the newest two features do when they meet), then
-     whatever the next user of the editor misses first — a brush that
-     paints pixels rather than laying down live strokes, and text
-     shaping worth the name (`rustybuzz`/`parley`, weights, a face
-     chosen per run rather than per block).
+  3. Depth. Two methods have been paying, and both are cheap enough to
+     keep reaching for. One: **put something in the shared fixture that
+     nothing there has ever held** — an effect, a blend mode, a mask read
+     off an image, a group two deep — and see which audits stop holding.
+     That found a copy drawing its shadow clipped, and turned up the
+     clipping wrinkle above. What the fixture still lacks: a gradient
+     fill, a stroke with a dash or a marker, text with styled runs, a
+     copy of a *frame*, a swatch actually referred to by a layer. Two:
+     **ask an audit for the thing rather than an account of it** — the
+     file audit compared a document written out as text and could not see
+     wrong pixels; the clipboard audit compared a layer field by field and
+     could not see a picture that arrived blank. Both now compare the
+     page. The same question is worth asking of the export audit, which
+     still only checks that each door opens.
+     Then whatever the next user of the editor misses first — a brush that
+     paints pixels rather than laying down live strokes, and text shaping
+     worth the name (`rustybuzz`/`parley`, weights, a face chosen per run
+     rather than per block).
 - **What the view shows of the document** is one setting
   (`chitrakar_render::Showing`) rather than a growing pile of flags: the
   page, one layer on its own, or the picture before the work. Both of
