@@ -9867,6 +9867,170 @@ mod tests {
         );
     }
 
+    /// The blend modes that have a colour they do nothing to, do nothing
+    /// to it.
+    ///
+    /// Nine of the sixteen have an exact neutral: a white layer
+    /// multiplied over a picture leaves it, a black one screened over it
+    /// leaves it, and a middle grey in hard or soft light leaves it. They
+    /// are the sharpest test these formulas have, because the neutral is
+    /// where a mode's two branches meet — hard light is a multiply below
+    /// half and a screen above it, so half is the seam — and because the
+    /// grey has to be a middle grey in the *encoding the blend is stated
+    /// in*. These are read on display-encoded values, the way every
+    /// specification writes them and every other program computes them,
+    /// so the neutral is sRGB 0.5 and not the linear 0.5 that shows as
+    /// 188. Get that wrong and a soft-light layer nobody has touched
+    /// lifts the whole picture.
+    ///
+    /// The other seven have no fixed neutral and say so here rather than
+    /// being quietly left out: an overlay's identity depends on what is
+    /// under it, and the four that trade hue, saturation, colour and
+    /// luminosity are identities only where the layer already matches the
+    /// backdrop in that one respect. All sixteen are asked the question
+    /// that does hold for every mode — that a layer with no alpha leaves
+    /// the backdrop exactly, which is what makes compositing a blend
+    /// safe to do at all.
+    #[test]
+    fn a_blend_mode_leaves_the_colour_it_is_neutral_over() {
+        use chitrakar_doc::BlendMode as B;
+        const W: u32 = 20;
+        const H: u32 = 14;
+        // A backdrop with colour and every tone in it, so a neutral that
+        // only holds in the middle of the range is caught.
+        let mut rgba8 = Vec::with_capacity((W * H * 4) as usize);
+        for y in 0..H {
+            for x in 0..W {
+                let v = y as f32 / (H - 1) as f32;
+                let k = x % 5;
+                let (r, g, b) = match k {
+                    0 => (v, v, v),
+                    1 => (v, v * 0.3, v * 0.1),
+                    2 => (v * 0.2, v, v * 0.4),
+                    3 => (v * 0.1, v * 0.3, v),
+                    _ => (v * 0.8, v * 0.8, v * 0.2),
+                };
+                for c in [r, g, b] {
+                    rgba8.push((c * 255.0).round().clamp(0.0, 255.0) as u8);
+                }
+                rgba8.push(255);
+            }
+        }
+        let mut base = Document::new(W, H, ColorMode::Rgb);
+        let id = base.add_resource(W, H, rgba8);
+        let root = base.root();
+        base.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "backdrop",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: W,
+                    height: H,
+                },
+            )),
+        })
+        .unwrap();
+        let plain = render(&base).unwrap();
+
+        let grey = |v: f32| AuthoredColor::Srgb {
+            r: v,
+            g: v,
+            b: v,
+            a: 1.0,
+        };
+        // A layer of one colour over the whole page, in one mode.
+        let over = |color: AuthoredColor, blend: B| {
+            let mut doc = base.clone();
+            let mut node = filled_rect("sheet", W as f32, H as f32, color);
+            node.blend = blend;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let worst = |a: &Surface, b: &Surface| {
+            let mut out = (0.0f32, 0u32, 0u32);
+            for y in 0..H {
+                for x in 0..W {
+                    let (p, q) = (a.get(x, y), b.get(x, y));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > out.0 {
+                        out = (d, x, y);
+                    }
+                }
+            }
+            out
+        };
+
+        for (what, neutral, blend) in [
+            ("white multiplied", 1.0, B::Multiply),
+            ("white darkened with", 1.0, B::Darken),
+            ("white burnt in", 1.0, B::ColorBurn),
+            ("black screened", 0.0, B::Screen),
+            ("black lightened with", 0.0, B::Lighten),
+            ("black dodged with", 0.0, B::ColorDodge),
+            ("black differenced", 0.0, B::Difference),
+            ("black excluded", 0.0, B::Exclusion),
+            ("a middle grey in hard light", 0.5, B::HardLight),
+            ("a middle grey in soft light", 0.5, B::SoftLight),
+        ] {
+            let (d, x, y) = worst(&plain, &over(grey(neutral), blend));
+            // Every one of them cancels to within a millionth over this
+            // backdrop; the slack is a few times that and no more, so a
+            // neutral grey read in the wrong encoding — which shifts the
+            // picture by a good deal more than a percent — cannot pass.
+            assert!(d < 5e-6, "{what} changed the picture by {d} at {x},{y}");
+            // And the same layer at a colour that is *not* the neutral
+            // does change it, so a mode that has quietly stopped doing
+            // anything at all cannot pass by doing nothing.
+            let off = if neutral > 0.5 { 0.35 } else { 0.8 };
+            let (d, _, _) = worst(&plain, &over(grey(off), blend));
+            assert!(d > 0.02, "{what} is a mode that still does something");
+        }
+
+        // The one every mode owes: a layer with no alpha leaves the
+        // backdrop, whatever it would otherwise have done to it.
+        for blend in [
+            B::Normal,
+            B::Multiply,
+            B::Screen,
+            B::Overlay,
+            B::Darken,
+            B::Lighten,
+            B::ColorDodge,
+            B::ColorBurn,
+            B::HardLight,
+            B::SoftLight,
+            B::Difference,
+            B::Exclusion,
+            B::Hue,
+            B::Saturation,
+            B::Color,
+            B::Luminosity,
+        ] {
+            let clear = AuthoredColor::Srgb {
+                r: 0.4,
+                g: 0.9,
+                b: 0.2,
+                a: 0.0,
+            };
+            let (d, x, y) = worst(&plain, &over(clear, blend));
+            assert!(
+                d < 1e-6,
+                "{blend:?} over nothing changed the picture by {d} at {x},{y}"
+            );
+        }
+    }
+
     /// Every adjustment and every filter, set to do nothing, does
     /// nothing.
     ///

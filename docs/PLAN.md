@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~373),
+- **Verify before committing:** `cargo test --workspace` (~374),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1031,6 +1031,25 @@ without reading anything else.*
   kind that draws nothing anyway cannot pass every question without
   answering one; that guard is the only reason this counts as an audit
   rather than a formality.
+- **The blend modes that have a colour they do nothing to, do nothing to
+  it:** nine of the sixteen have an exact neutral — white multiplied,
+  darkened or burnt in; black screened, lightened, dodged, differenced or
+  excluded; a middle grey in hard or soft light — and they are the
+  sharpest test these formulas have. The neutral is where a mode's two
+  branches meet (hard light is a multiply below half and a screen above
+  it, so half is the seam), and the grey has to be a middle grey *in the
+  encoding the blend is stated in*: these are read on display-encoded
+  values, the way every specification writes them, so it is sRGB 0.5 and
+  not the linear 0.5 that shows as 188. Reading it wrong shifts the
+  picture by four fifths, which is what the check reports when asked with
+  the linear figure instead.
+  `a_blend_mode_leaves_the_colour_it_is_neutral_over` holds all ten to a
+  millionth over a backdrop with colour and every tone in it, and asks
+  each mode the same question at a colour that is *not* its neutral, so a
+  mode that has quietly stopped doing anything cannot pass by doing
+  nothing. The other seven have no fixed neutral and say so by name rather
+  than being left out quietly; all sixteen are asked the one every mode
+  owes, that a layer with no alpha leaves the backdrop exactly.
 - **Every adjustment and every filter, set to do nothing, does nothing:**
   each of these is arithmetic on a colour and most of them go somewhere
   and come back on the way — into the display encoding because that is
