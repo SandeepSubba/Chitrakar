@@ -10944,6 +10944,206 @@ mod tests {
         );
     }
 
+    /// A region render, padded by the reach, is the page.
+    ///
+    /// Everything about showing a document quickly rests on one claim:
+    /// that a rectangle of the page can be recomputed on its own and come
+    /// out the same as if the whole page had been drawn. It is not free —
+    /// a blur reads its neighbours, a pixelate block is the average of
+    /// what it covers, a clone reads from somewhere else entirely — so
+    /// the caller has to widen the rectangle it recomputes by
+    /// [`filter_reach`] and keep only the interior. That is exactly what
+    /// the doc comment there promises and what the engine does before
+    /// every repaint, and what was tested was the *figure* rather than
+    /// the promise: that the reach grows when the space a filter sits in
+    /// does, not that a padded region actually comes out right.
+    ///
+    /// So: the page drawn whole, then the same page recomputed over a
+    /// dozen awkward rectangles — a single pixel, a strip along each
+    /// edge, a corner, one straddling a shape's outline — each padded by
+    /// the reach and compared inside the rectangle it was asked for.
+    /// Over the shared fixture, which has a blur and a clone layer in it,
+    /// and then once per filter kind, since each reads its neighbourhood
+    /// in a way of its own.
+    #[test]
+    fn a_region_render_padded_by_the_reach_is_the_page() {
+        use chitrakar_doc::Filter;
+        let rects = |w: u32, h: u32| -> Vec<ClipRect> {
+            vec![
+                // One pixel in the middle of the work.
+                ClipRect {
+                    x0: w / 2,
+                    y0: h / 2,
+                    x1: w / 2 + 1,
+                    y1: h / 2 + 1,
+                },
+                // A strip along each edge, where a padded clip runs off
+                // the page and has to be content with less.
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: 3,
+                },
+                ClipRect {
+                    x0: 0,
+                    y0: h - 3,
+                    x1: w,
+                    y1: h,
+                },
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 3,
+                    y1: h,
+                },
+                ClipRect {
+                    x0: w - 3,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                },
+                // A corner, and a block in the middle of the page.
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 5,
+                    y1: 5,
+                },
+                ClipRect {
+                    x0: w / 4,
+                    y0: h / 4,
+                    x1: w / 4 + 7,
+                    y1: h / 4 + 11,
+                },
+                ClipRect {
+                    x0: w / 3,
+                    y0: 2,
+                    x1: w / 3 + 1,
+                    y1: h - 2,
+                },
+                // And the whole page, which has to be the plain case.
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                },
+            ]
+        };
+        let mut asked = 0usize;
+        let mut check = |what: &str, doc: &Document| {
+            let (w, h) = (doc.meta.width, doc.meta.height);
+            let whole = render(doc).unwrap();
+            let pad = filter_reach(doc);
+            for rect in rects(w, h) {
+                let grown = ClipRect {
+                    x0: rect.x0.saturating_sub(pad),
+                    y0: rect.y0.saturating_sub(pad),
+                    x1: rect.x1.saturating_add(pad).min(w),
+                    y1: rect.y1.saturating_add(pad).min(h),
+                };
+                let mut surface = Surface::new(w, h);
+                render_region(doc, &mut surface, grown).unwrap();
+                for y in rect.y0..rect.y1 {
+                    for x in rect.x0..rect.x1 {
+                        let (p, q) = (whole.get(x, y), surface.get(x, y));
+                        let d = (p.r - q.r)
+                            .abs()
+                            .max((p.g - q.g).abs())
+                            .max((p.b - q.b).abs())
+                            .max((p.a - q.a).abs());
+                        assert!(
+                            d < 2e-3,
+                            "{what}: the region {rect:?} came out different at {x},{y} \
+                             (by {d}, padded by {pad})"
+                        );
+                    }
+                }
+                asked += 1;
+            }
+        };
+
+        check(
+            "the document of everything",
+            &chitrakar_doc::fixture::everything().doc,
+        );
+
+        // One filter at a time over a picture with something in it to
+        // read, since each reads its neighbourhood differently — and a
+        // filter with nothing under it would agree with anything.
+        for (what, filter) in [
+            ("a blur", Filter::GaussianBlur { sigma: 3.0 }),
+            (
+                "a sharpen",
+                Filter::Sharpen {
+                    sigma: 2.0,
+                    amount: 0.8,
+                },
+            ),
+            ("a pixelate", Filter::Pixelate { size: 7.0 }),
+            (
+                "grain",
+                Filter::Noise {
+                    amount: 0.4,
+                    grain: 2.0,
+                    mono: false,
+                    seed: 11,
+                },
+            ),
+            (
+                "a vignette",
+                Filter::Vignette {
+                    amount: 0.7,
+                    radius: 0.2,
+                    softness: 0.6,
+                },
+            ),
+        ] {
+            let mut doc = Document::new(40, 32, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, (x, y, c)) in [
+                (2.0f32, 3.0f32, [0.9, 0.3, 0.1]),
+                (18.0, 6.0, [0.1, 0.7, 0.9]),
+                (10.0, 18.0, [0.8, 0.8, 0.2]),
+            ]
+            .iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: filled_rect(
+                        "block",
+                        16.0,
+                        11.0,
+                        AuthoredColor::Srgb {
+                            r: c[0],
+                            g: c[1],
+                            b: c[2],
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(*x, *y),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::filter("work", filter)),
+            })
+            .unwrap();
+            check(what, &doc);
+        }
+        assert!(asked >= 50, "the rectangles were actually asked: {asked}");
+    }
+
     #[test]
     fn a_filter_reaches_as_far_as_the_space_it_sits_in_stretches_it() {
         // The sigma is written in the filter's own space, so a group

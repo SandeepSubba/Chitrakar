@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~379),
+- **Verify before committing:** `cargo test --workspace` (~380),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~987 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1086,6 +1086,23 @@ without reading anything else.*
   change, and everything the layer says about how it is drawn is in that
   one comparison. The lock and the pin cannot show on a page, so those are
   said field by field beside it. Block 9az drives it through the panel.
+- **A region render, padded by the reach, is the page:** everything about
+  showing a document quickly rests on one claim — that a rectangle of the
+  page can be recomputed on its own and come out the same as if the whole
+  page had been drawn. It is not free: a blur reads its neighbours, a
+  pixelate block is the average of what it covers, a clone reads from
+  somewhere else entirely. So the caller widens the rectangle by
+  `filter_reach` and keeps the interior, which is what the engine does
+  before every repaint. What was tested was the *figure* — that the reach
+  grows when the space a filter sits in does — and not the promise.
+  `a_region_render_padded_by_the_reach_is_the_page` draws the page whole
+  and then recomputes it over nine awkward rectangles apiece: a single
+  pixel, a strip along each edge, a corner, a column, a block in the
+  middle, and the whole page. Over the shared fixture, which has a blur
+  and a clone layer in it, and then once per filter kind over a page with
+  three overlapping blocks to read. Understating the blur's reach or
+  dropping the pixelate block's fails it at the single pixel in the middle,
+  which is the pixel a stale halo is hardest to notice around.
 - **A layer that cannot be seen draws the same page as no layer at all:**
   there are three ways for a layer to be invisible and they are three
   different pieces of arithmetic — hidden is a flag the walk skips on, an
