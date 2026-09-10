@@ -6114,10 +6114,85 @@ fn hit_in_group(
     parent: Transform,
 ) -> Result<Option<NodeId>, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
+        if let Some(hit) = hit_child(doc, child, x, y, parent)? {
+            return Ok(Some(hit));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a layer is *there* at a point: what its mask lets through,
+/// and — for a layer held to the one under it — whether that layer is
+/// there to hold it.
+///
+/// Both are ways for a layer to be somewhere it is not. Picking used to
+/// read a layer's own geometry and nothing else, so a shape masked down
+/// to a disc was pickable across the whole rectangle it was cut out of,
+/// and a layer held to a small one under it was pickable over the whole
+/// of itself — including where the page is bare, and clicking bare
+/// canvas picked a layer the pointer was nowhere near anything of.
+///
+/// The coverage is the compositor's own reading, over the one pixel the
+/// point is in: a feathered edge and a brushed mask are worked out over
+/// a window the way they are for drawing, so a mask that lets a tenth
+/// through is a tenth of a mask here as well as there.
+fn shows_at(
+    doc: &Document,
+    id: NodeId,
+    parent: Transform,
+    x: f32,
+    y: f32,
+) -> Result<bool, DocError> {
+    let node = doc.node(id)?;
+    let (px, py) = (x.floor(), y.floor());
+    let surface = (doc.meta.width, doc.meta.height);
+    // Off the page there is no pixel to read a coverage at, and nothing
+    // is drawn there either; a pick that far out is the caller's to
+    // make sense of rather than this one's to refuse.
+    if px < 0.0 || py < 0.0 || px >= surface.0 as f32 || py >= surface.1 as f32 {
+        return Ok(true);
+    }
+    if let Some(mask) = node.mask.as_ref() {
+        let one = ClipRect {
+            x0: px as u32,
+            y0: py as u32,
+            x1: px as u32 + 1,
+            y1: py as u32 + 1,
+        };
+        if mask_plane_over(doc, mask, parent, one, surface)
+            .first()
+            .is_none_or(|c| *c <= 0.0)
+        {
+            return Ok(false);
+        }
+    }
+    if node.clipped {
+        // The bottom layer of a parent has nothing to be held to and
+        // draws whole, which is what the compositor reads too.
+        if let Some(base) = clip_base(doc, id)? {
+            return hit_child(doc, base, x, y, parent).map(|h| h.is_some());
+        }
+    }
+    Ok(true)
+}
+
+/// One layer of a group, asked whether the point picks it — or, for a
+/// group or a frame, whatever it holds.
+fn hit_child(
+    doc: &Document,
+    child: NodeId,
+    x: f32,
+    y: f32,
+    parent: Transform,
+) -> Result<Option<NodeId>, DocError> {
+    {
         let node = doc.node(child)?;
         // Locked layers are not there to be picked, their contents included.
         if !node.visible || node.locked {
-            continue;
+            return Ok(None);
+        }
+        if !shows_at(doc, child, parent, x, y)? {
+            return Ok(None);
         }
         match &node.kind {
             NodeKind::Group => {
@@ -6130,7 +6205,7 @@ fn hit_in_group(
                 // the copy's own place — the same box the copy's handles
                 // are drawn round, so what is picked is what is outlined.
                 let Ok(Some(box_)) = local_bounds_of(doc, *of) else {
-                    continue;
+                    return Ok(None);
                 };
                 if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
                     if lx >= box_[0] && ly >= box_[1] && lx < box_[2] && ly < box_[3] {
@@ -6146,13 +6221,13 @@ fn hit_in_group(
             } => {
                 let t = parent.compose(node.transform);
                 let Some((lx, ly)) = to_local(t, x, y) else {
-                    continue;
+                    return Ok(None);
                 };
                 // A frame cuts its contents to its box, so nothing outside
                 // it can be picked through it — not even a layer that
                 // reaches past the edge.
                 if lx < 0.0 || ly < 0.0 || lx >= *width || ly >= *height {
-                    continue;
+                    return Ok(None);
                 }
                 if let Some(hit) = hit_in_group(doc, child, x, y, t)? {
                     return Ok(Some(hit));
@@ -8220,6 +8295,101 @@ mod tests {
             [0, 0, 255, 255],
             "the clone follows its source rather than keeping a copy"
         );
+    }
+
+    /// A layer is picked where it *is*, which a mask and being held to
+    /// the layer under it both have something to say about.
+    ///
+    /// Picking read a layer's own geometry and nothing else, so a shape
+    /// masked down to a disc was pickable across the whole rectangle it
+    /// was cut out of, and a layer held to a small one under it was
+    /// pickable over the whole of itself. Both of those reach places
+    /// where the page is bare: clicking empty canvas picked a layer the
+    /// pointer was nowhere near anything of, which is the symptom worth
+    /// naming.
+    #[test]
+    fn a_layer_is_picked_where_it_shows_and_not_where_it_does_not() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+        let put = |doc: &mut Document, name: &str, w: f32, h: f32, at: (f32, f32)| -> NodeId {
+            let root = doc.root();
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: filled_rect(name, w, h, grey.clone()),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            id
+        };
+        let bare =
+            |doc: &Document, x: f32, y: f32| render(doc).unwrap().get(x as u32, y as u32).a <= 0.0;
+
+        // A big layer held to a small one under it. It shows only over
+        // the small one; everywhere else the page is bare.
+        let mut held_doc = Document::new(60, 40, ColorMode::Rgb);
+        put(&mut held_doc, "base", 10.0, 10.0, (10.0, 10.0));
+        let held = put(&mut held_doc, "held to it", 40.0, 30.0, (5.0, 5.0));
+        held_doc
+            .apply(Command::SetClipped {
+                id: held,
+                clipped: true,
+            })
+            .unwrap();
+        assert_eq!(
+            hit_test(&held_doc, 15.0, 15.0).unwrap(),
+            Some(held),
+            "over the layer it is held to, it is picked"
+        );
+        for (x, y) in [(35.0f32, 25.0f32), (8.0, 8.0)] {
+            assert!(bare(&held_doc, x, y), "the page is bare at {x},{y}");
+            assert_eq!(
+                hit_test(&held_doc, x, y).unwrap(),
+                None,
+                "and clicking bare canvas at {x},{y} picks nothing"
+            );
+        }
+
+        // And a layer masked down to a disc: pickable inside it, and not
+        // in the corner of the rectangle it was cut out of.
+        let mut masked_doc = Document::new(60, 40, ColorMode::Rgb);
+        let masked = put(&mut masked_doc, "masked", 40.0, 30.0, (5.0, 5.0));
+        masked_doc
+            .apply(Command::SetMask {
+                id: masked,
+                mask: Some(Box::new(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 6.0, ry: 6.0 },
+                        transform: Transform::translation(12.0, 12.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        assert_eq!(
+            hit_test(&masked_doc, 18.0, 18.0).unwrap(),
+            Some(masked),
+            "inside what the mask lets through, it is picked"
+        );
+        for (x, y) in [(40.0f32, 30.0f32), (12.5, 12.5)] {
+            assert!(bare(&masked_doc, x, y), "the page is bare at {x},{y}");
+            assert_eq!(
+                hit_test(&masked_doc, x, y).unwrap(),
+                None,
+                "and clicking bare canvas at {x},{y} picks nothing"
+            );
+        }
     }
 
     /// A copy of a *frame* is not the same question as a copy of a group.

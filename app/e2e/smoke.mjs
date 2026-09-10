@@ -3212,6 +3212,22 @@ assert(
     (await page.locator(".clip-mark").count()) === 1,
     "the row says so with a hook",
   );
+  // And it is not there to be clicked where it is not there to be seen.
+  // Picking used to read a layer's own shape and nothing else, so
+  // clicking bare canvas well past the layer this one is held to picked
+  // it — a layer the pointer is nowhere near anything of.
+  await page.mouse.click(...at(450, 200));
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 0,
+    "clicking where the clipped layer shows nothing picks nothing",
+  );
+  await page.mouse.click(...at(200, 200));
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 1,
+    "and clicking where it does picks it again",
+  );
 
   // It goes when the layer under it goes.
   await page.locator(".panel ul li").nth(1).locator("button.visibility").click();

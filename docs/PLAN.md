@@ -672,9 +672,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~401),
+- **Verify before committing:** `cargo test --workspace` (~402),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1909,6 +1909,19 @@ without reading anything else.*
   container writes a file per entry in that order). A hash map's order
   is stable within one run, so the test cannot catch the symptom by
   saving twice — it asks the thing that makes the symptom impossible.
+- **Picking reads what a layer shows, not only its shape.** A mask and
+  being held to the layer under it are both ways of a layer being
+  somewhere it is not, and hit-testing used to look at neither: a shape
+  masked down to a disc was pickable across the whole rectangle it was
+  cut out of, and a layer held to a small one under it was pickable over
+  the whole of itself. Both reach bare canvas, so clicking nothing picked
+  a layer the pointer was nowhere near anything of. `shows_at` gates
+  every kind now — the compositor's own coverage over the one pixel the
+  point is in, so a feathered edge and a brushed mask are read the way
+  they are drawn. What is *not* gated is deliberate and worth keeping
+  straight: a copy is picked over the box its original occupies, since
+  that is the box its handles are drawn round, and a block of text over
+  its box rather than its glyphs.
 - **Regions, in one breath:** a selection here is a `Mask` over the page
   — a region to *hand to a layer*, not a stencil pixels are cut through.
   Drawn with a box, an ellipse or a lasso; wanded, either by the run a
