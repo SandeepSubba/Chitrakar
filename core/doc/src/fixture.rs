@@ -10,8 +10,8 @@
 
 use crate::{
     BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
-    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, Swatch, TextSpec,
-    Transform, VectorShape,
+    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StyleRun, Swatch,
+    TextSpec, Transform, VectorShape,
 };
 use chitrakar_color::ColorMode;
 
@@ -256,10 +256,9 @@ pub fn everything() -> Fixture {
     doc.apply(Command::AddNode {
         parent: root,
         index: 3,
-        node: Box::new(Node::text(
-            "words",
-            TextSpec::new(
-                "Ag",
+        node: Box::new(Node::text("words", {
+            let mut spec = TextSpec::new(
+                "Agile",
                 18.0,
                 chitrakar_color::AuthoredColor::Srgb {
                     r: 0.05,
@@ -267,8 +266,31 @@ pub fn everything() -> Fixture {
                     b: 0.1,
                     a: 1.0,
                 },
-            ),
-        )),
+            );
+            // Part of it styled differently from the rest. A run is a
+            // range of *bytes*, and the block's own settings are what
+            // a run does not override — so a block with one is the
+            // only thing that asks whether the two are read together,
+            // and the only text here that is drawn in more than one
+            // pass. Its own colour and weight, so the difference
+            // shows on the page rather than only in the file.
+            spec.runs = vec![StyleRun {
+                start: 1,
+                end: 4,
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.2,
+                    b: 0.15,
+                    a: 1.0,
+                }),
+                bold: Some(true),
+                italic: None,
+                underline: Some(true),
+                strike: None,
+                font: None,
+            }];
+            spec
+        })),
     })
     .unwrap();
     let words = doc.children_of(root).unwrap()[3];

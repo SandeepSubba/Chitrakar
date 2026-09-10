@@ -1250,6 +1250,14 @@ without reading anything else.*
   axis and carries no tilt, so it returns where it crosses the middle of
   the page. Nothing batches a straighten; the engine and the UI both send
   it alone.
+- **And text with a styled run in it:** a run is a range of *bytes*, and
+  what a run does not override is the block's own setting — so a block
+  with one is the only thing that asks whether the two are read together,
+  and the only text here drawn in more than one pass. Given its own colour
+  and weight and an underline, so the difference is on the page rather
+  than only in the file. The byte arithmetic behind editing runs has a
+  property test of its own on the UI side (`app/e2e/runs.test.mjs`); this
+  is the other half, which is a run being *drawn*.
 - **And four more after that:** a *gradient* fill — a ramp baked from its
   stops and read across the shape's own box, which is a different path
   from a flat colour and is read at every pixel it covers; a *dashed*
