@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~367),
+- **Verify before committing:** `cargo test --workspace` (~368),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~972 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -971,6 +971,27 @@ without reading anything else.*
   parts of the fix was checked by breaking it and watching that test
   fail. `a_shadow_turns_with_the_group_it_is_in` pins the renderer's
   half on its own.
+- **A region confines a brush on a mask too:** rubbing a piece out of
+  anything but a paint layer goes into that layer's *mask* rather than
+  over its pixels — which is what makes it something to change one's mind
+  about — and a mask is brushed with the same tool and the same
+  `PaintStroke` a layer is, so it is confined the same way. The engine had
+  always written the region onto the stroke. The drawing code read it in
+  one of the two places: `stroke.clip` was applied where a paint layer's
+  strokes are drawn and not in `paint_plane`, where a mask's are, so an
+  eraser used inside a region took the piece out of the whole layer. The
+  test that pinned the layer half had a hole in it of exactly the same
+  shape, which is why nothing said so; `a_brush_on_a_mask_stays_inside_
+  the_region_too` is that test's other half, and block 9ay drives it
+  through the tool.
+  Carrying such a stroke between spaces wants three things rather than
+  one, and `Mask::carried_through` now does all three: the points go
+  through the transform, the radii are lengths in that space and go by its
+  scale, and the region the stroke was confined to is another coverage
+  over the same space and goes the same way. Each was checked by breaking
+  it — and the first two attempts at the check did not bite at all, since
+  a stroke laid down where its layer does not draw proves nothing about a
+  mask.
 - **And the same rule where a person meets it daily:** `reparent` — a
   layer dragged onto another row in the layers panel — already undid the
   change of space on the layer's own transform, so the layer does not

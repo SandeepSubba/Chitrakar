@@ -7510,6 +7510,80 @@ mod tests {
                 "{what}: and one undo puts the mask back where it was"
             );
         }
+
+        // A mask brushed by hand is the same question with more in it: a
+        // stroke's points are written in that space, its radii are
+        // lengths in it, and the region it was confined to when it was
+        // laid down is another coverage over it. All three have to come
+        // out together — points alone would leave a brush the wrong size
+        // spilling past a region that has stayed behind.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            // A band down the middle of where the picture is — (50,6) to
+            // (70,26) on this page — so the region cuts the stroke rather
+            // than missing it, and the stroke crosses the picture rather
+            // than passing beside it. A mask only shows where its layer
+            // draws, and a stroke laid down off the layer proves nothing.
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(52.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+            s.ensure_painted_mask(f.picture).unwrap();
+            s.paint_begin(
+                f.picture,
+                52.0,
+                10.0,
+                5.0,
+                AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                0.0,
+                true,
+                true,
+            )
+            .unwrap();
+            s.paint_extend(68.0, 22.0, 5.0).unwrap();
+            s.commit_preview();
+            s.pick_none().unwrap();
+            let brushed = match &s
+                .document()
+                .node(f.picture)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .kind
+            {
+                chitrakar_doc::MaskKind::Painted { strokes } => strokes.clone(),
+                other => panic!("a brushed mask, not {other:?}"),
+            };
+            assert!(
+                brushed[0].clip.is_some(),
+                "the stroke was laid down inside a region and carries it"
+            );
+            let g = s.group_nodes(&[f.picture], "wrap").unwrap();
+            s.apply(Command::SetTransform {
+                id: g,
+                transform: moved,
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g).unwrap();
+            let (worst, x, y) = apart(&before, &s.render().unwrap());
+            assert!(
+                worst < 1e-4,
+                "a brushed mask changed on being let out ({worst} at {x},{y})"
+            );
+        }
     }
 
     /// And a layer dragged into a group somewhere else brings its mask.
@@ -8617,6 +8691,135 @@ mod tests {
         assert!(
             session.render().unwrap().get(100, 50).a > 0.5,
             "an unconfined stroke goes where it is drawn"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// And the same of a brush on a layer's *mask*, which is where it was
+    /// not true.
+    ///
+    /// A mask is brushed in exactly the same way a layer is — the same
+    /// tool, the same strokes, the same `PaintStroke` — so it is confined
+    /// in exactly the same way, and the engine had always written the
+    /// region onto the stroke. The drawing code read it in one of the two
+    /// places: a stroke on a layer stopped at the edge of the region and
+    /// a stroke on a mask went straight past it, so taking a piece out of
+    /// a layer *inside* a region took it out of the whole layer. The test
+    /// above had a mask-shaped hole in it of exactly the same shape,
+    /// which is why nothing said so.
+    #[test]
+    fn a_brush_on_a_mask_stays_inside_the_region_too() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("sheet", 120.0, 60.0),
+            })
+            .unwrap();
+        let layer = session.document().children_of(root).unwrap()[0];
+        let showing = |s: &Session, x: u32| s.render().unwrap().get(x, 30).a > 0.5;
+        assert!(
+            showing(&session, 20) && showing(&session, 100),
+            "the layer covers the page to begin with"
+        );
+
+        // A region over the left half, and an eraser drawn clear across
+        // the whole page on the layer's mask.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::default(),
+                "replace",
+            )
+            .unwrap();
+        session.ensure_painted_mask(layer).unwrap();
+        session
+            .paint_begin(
+                layer,
+                10.0,
+                30.0,
+                8.0,
+                AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                0.0,
+                true,
+                true,
+            )
+            .unwrap();
+        for x in [30.0, 60.0, 90.0, 110.0] {
+            session.paint_extend(x, 30.0, 8.0).unwrap();
+        }
+        assert!(session.commit_preview());
+        assert!(
+            !showing(&session, 20),
+            "inside the region the eraser took the layer out"
+        );
+        assert!(
+            showing(&session, 100),
+            "and outside it the layer is untouched"
+        );
+
+        // Letting go of the region changes nothing, and picking somewhere
+        // else does not let the stroke out either.
+        assert!(session.pick_none().unwrap());
+        assert!(
+            !showing(&session, 20) && showing(&session, 100),
+            "with nothing picked, the stroke is still where it was confined"
+        );
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(60.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(
+            showing(&session, 100),
+            "a region picked afterwards does not let it out"
+        );
+
+        // And nothing was cut away: the whole eraser is there under the
+        // clip, which is what makes the confinement a thing to change
+        // one's mind about.
+        let mut without = Session::from_document(session.document().clone());
+        let chitrakar_doc::MaskKind::Painted { strokes } = &without
+            .document()
+            .node(layer)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .kind
+        else {
+            unreachable!("a brushed mask")
+        };
+        let mut bare = strokes[0].clone();
+        bare.clip = None;
+        without
+            .apply(Command::SetStroke {
+                id: layer,
+                index: 0,
+                stroke: Box::new(bare),
+                on_mask: true,
+            })
+            .unwrap();
+        assert!(
+            without.render().unwrap().get(100, 30).a <= 0.5,
+            "the eraser itself runs the whole way across"
         );
         assert_cache_matches_fresh(&mut session);
     }

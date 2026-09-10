@@ -3826,7 +3826,7 @@ impl<'a> MaskRef<'a> {
     ) -> Option<MaskPlane> {
         let m = mask?;
         if let MaskKind::Painted { strokes } = &m.kind {
-            let plane = paint_plane(strokes, parent, clip, surface);
+            let plane = paint_plane(doc, strokes, parent, clip, surface);
             return Some(match feather_of(m, parent) {
                 Some(sigma) => softened(plane, sigma),
                 None => plane,
@@ -4351,6 +4351,10 @@ impl MaskPlane {
 /// each stroke hides what it covers or shows it again, in the order the
 /// strokes were laid.
 fn paint_plane(
+    // Only to read a stroke's own region, which can be a raster mask and
+    // so can have pixels to look up. Without a document those answer from
+    // their geometry alone, which is what a bare coverage is for.
+    doc: Option<&Document>,
     strokes: &[chitrakar_doc::PaintStroke],
     t: Transform,
     clip: ClipRect,
@@ -4374,9 +4378,32 @@ fn paint_plane(
             }
             let bw = bbox.x1 - bbox.x0;
             let laid = stroke_cover(stroke, t, inv, band, bbox, surface);
+            // The region this stroke was confined to when it was laid
+            // down. A mask is brushed in exactly the same way a layer is,
+            // so it is confined in exactly the same way: the region rides
+            // on the stroke rather than being read off the document,
+            // which is what keeps it confined after the region is let go
+            // of. This is the one place that used to leave it unread — a
+            // stroke on a mask spilled straight past a region that a
+            // stroke on a layer respected.
+            let held = stroke.clip.as_deref().map(|m| {
+                let plane = MaskRef::plane_over(doc, Some(m), t, bbox, surface);
+                let r = MaskRef::new(Some(m), t).with_plane(plane.as_ref());
+                let mut out = Vec::with_capacity((bw * (bbox.y1 - bbox.y0)) as usize);
+                for y in bbox.y0..bbox.y1 {
+                    for x in bbox.x0..bbox.x1 {
+                        out.push(match doc {
+                            Some(doc) => coverage_at(doc, r, x, y),
+                            None => bare_coverage(r, x, y),
+                        });
+                    }
+                }
+                out
+            });
             for py in bbox.y0..bbox.y1 {
                 for px in bbox.x0..bbox.x1 {
-                    let c = laid[((py - bbox.y0) * bw + (px - bbox.x0)) as usize];
+                    let at = ((py - bbox.y0) * bw + (px - bbox.x0)) as usize;
+                    let c = laid[at] * held.as_ref().map_or(1.0, |p| p[at]);
                     if c <= 0.0 {
                         continue;
                     }

@@ -9275,6 +9275,85 @@ assert(
   );
 }
 
+// 9ay. Rubbing a piece out of a layer inside a region stays inside the
+// region. Rubbing out on any layer but a paint one goes into that layer's
+// mask rather than over its pixels, which is what makes it something to
+// change one's mind about — and a mask is brushed with the same tool and
+// the same strokes a layer is, so it is confined the same way. The engine
+// had always written the region onto the stroke; the drawing code read it
+// for a stroke on a layer and not for one on a mask, so an eraser used
+// inside a region took the piece out of the whole layer.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(20, 80));
+  await page.mouse.down();
+  await page.mouse.move(...at(380, 220), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const covered = async (x, y) => (await canvasPixel(x, y))[3] > 200;
+  assert(
+    (await covered(80, 150)) && (await covered(320, 150)),
+    "the shape covers both halves of the page to begin with",
+  );
+
+  // A region over the left half.
+  await pickTool("Select");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  // The shape has to be the layer in hand for the eraser to know whose
+  // mask to write into; a marquee lets go of it.
+  await pickTool("Move");
+  await page.mouse.click(...at(80, 150));
+  await page.waitForTimeout(250);
+
+  // Rub clear across the whole shape.
+  await pickTool("Paint");
+  await page.click('button[aria-label="Erase"]');
+  await page.waitForTimeout(150);
+  await page.mouse.move(...at(40, 150));
+  await page.mouse.down();
+  for (const x of [120, 200, 280, 370]) {
+    await page.mouse.move(...at(x, 150), { steps: 4 });
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(
+    !(await covered(80, 150)),
+    "inside the region the eraser took the shape out",
+  );
+  assert(
+    await covered(320, 150),
+    "and outside it the shape is untouched",
+  );
+
+  // Letting go of the region changes nothing: the stroke carries it.
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(300);
+  assert(
+    !(await covered(80, 150)) && (await covered(320, 150)),
+    "with nothing picked, the piece taken out is still only where it was",
+  );
+  // And undoing hands the whole shape back — two steps, since letting go
+  // of the region was an edit of its own.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(
+    (await covered(80, 150)) && (await covered(320, 150)),
+    "undone, the whole shape is back",
+  );
+  await page.click('button[aria-label="Erase"]');
+  await page.waitForTimeout(150);
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

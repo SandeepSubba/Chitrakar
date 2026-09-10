@@ -1053,9 +1053,25 @@ impl Mask {
                 *transform = m.compose(*transform);
             }
             MaskKind::Painted { strokes } => {
+                let k = m.max_scale();
                 for stroke in strokes {
                     for p in &mut stroke.points {
                         *p = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+                    }
+                    // A radius is a length in that space, like the
+                    // softness above: the points spread with the scale
+                    // and the brush has to spread with them.
+                    for r in &mut stroke.radii {
+                        *r *= k;
+                    }
+                    // And the region the stroke was confined to is
+                    // another coverage over the same space, so it goes
+                    // the same way. Recursion, but only as deep as a
+                    // region brushed inside a region inside a region —
+                    // and serde will not read a file nested past its own
+                    // limit, so what arrives is as shallow as it looks.
+                    if let Some(held) = &mut stroke.clip {
+                        **held = held.carried_through(m);
                     }
                 }
             }
