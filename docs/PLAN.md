@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~397),
+- **Verify before committing:** `cargo test --workspace` (~398),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1940,11 +1940,24 @@ without reading anything else.*
      geometry out where the CPU renderer works its own out and from the
      same numbers, which is what makes the two land on the same picture
      rather than on two plausible ones.
-     What is
-     left to *wire*: it draws the page at its own size, and the app
-     shows a viewport — a scale and an origin — so presenting from it
-     means `gather` and the shader learning a view transform, which is
-     the harder half of the wiring and not a detail of it. The fixture
+     What is left to *wire*: it now takes a view
+     (`GpuRenderer::render_view`), which was the half that mattered — the
+     surface has stopped being the page, so a viewport can be drawn from
+     it, and the witness holds it against the CPU's own
+     `render_region_at` at four views including one where the page is a
+     patch in the middle of the surface
+     (`a_view_draws_what_the_cpu_draws_into_the_same_surface`). Two
+     things that were formalities while the two were the same rectangle
+     are not any more, and both are now said rather than assumed: the
+     page's own edge clips the artwork, and what reads a neighbourhood
+     stops at the page's edge rather than at the surface's. What a view
+     still hands back is a page with a mask or a clipped layer on it: the
+     coverage plane both renderers read is rasterized over a plane the
+     size of the page, and under a view that is not the size of the
+     surface — so the plane has to learn which it is before those can
+     come along. Then the app has to reach for it at all, which is a
+     question about where WebGPU is to be had rather than about this
+     crate. The fixture
      audit (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_
      does`) is what to run while doing either. See
      docs/spikes/gpu-rendering.md.

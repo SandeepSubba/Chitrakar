@@ -15,7 +15,16 @@ struct VsOut {
 };
 
 struct Page {
+    /// The surface being drawn, in device pixels.
     size: vec2f,
+    /// Where the page lands on it: the first pixel inside, and the first
+    /// past the end. The two are the whole surface while the backend
+    /// draws the page at its own size, and part company under a view.
+    /// What reads a neighbourhood stops at this rather than at the
+    /// surface's edge — which is where the CPU renderer's own reading
+    /// stops, since it is handed the page's rectangle to work in.
+    lo: vec2f,
+    hi: vec2f,
     pad: vec2f,
 };
 
@@ -809,9 +818,14 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
     if in.params.y != 0.0 {
         step = vec2f(0.0, 1.0 / page.size.y);
     }
+    // Held inside the page: the sampler would clamp at the texture's
+    // edge, which is the surface's, and past the page there is nothing
+    // the CPU renderer would have read.
+    let lo = (page.lo + vec2f(0.5, 0.5)) / page.size;
+    let hi = (page.hi - vec2f(0.5, 0.5)) / page.size;
     var sum = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = -radius; i <= radius; i = i + 1) {
-        sum = sum + textureSampleLevel(image, image_sampler, in.uv + step * f32(i), 0.0);
+        sum = sum + textureSampleLevel(image, image_sampler, clamp(in.uv + step * f32(i), lo, hi), 0.0);
     }
     return sum / f32(2 * radius + 1);
 }
@@ -838,7 +852,7 @@ fn fs_smear(in: ImageOut) -> @location(0) vec4f {
     var sum = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var k = 0; k < n; k = k + 1) {
         let at = floor(here + step * (f32(k) - half) + vec2f(0.5, 0.5));
-        let p = clamp(at, vec2f(0.0, 0.0), page.size - vec2f(1.0, 1.0));
+        let p = clamp(at, page.lo, page.hi - vec2f(1.0, 1.0));
         sum = sum + textureLoad(image, vec2i(p), 0);
     }
     return sum / f32(n);
@@ -887,7 +901,8 @@ fn fs_block(in: ImageOut) -> @location(0) vec4f {
     let side = in.params.z;
     let vertical = in.params.w != 0.0;
     let here = floor(in.uv * page.size);
-    let limit = select(page.size.x, page.size.y, vertical);
+    let first = select(page.lo.x, page.lo.y, vertical);
+    let limit = select(page.hi.x, page.hi.y, vertical);
     let p = select(here.x, here.y, vertical);
     let c = block_of(p, inv, origin, side);
     var sum = vec4f(0.0, 0.0, 0.0, 0.0);
@@ -896,7 +911,7 @@ fn fs_block(in: ImageOut) -> @location(0) vec4f {
     // ceiling is a belt: the page is handed back before it is reached.
     var q = p;
     loop {
-        if q < 0.0 || q >= limit || block_of(q, inv, origin, side) != c || p - q > 256.0 {
+        if q < first || q >= limit || block_of(q, inv, origin, side) != c || p - q > 256.0 {
             break;
         }
         sum = sum + block_tap(here, q, vertical);
@@ -905,7 +920,7 @@ fn fs_block(in: ImageOut) -> @location(0) vec4f {
     }
     q = p + 1.0;
     loop {
-        if q < 0.0 || q >= limit || block_of(q, inv, origin, side) != c || q - p > 256.0 {
+        if q < first || q >= limit || block_of(q, inv, origin, side) != c || q - p > 256.0 {
             break;
         }
         sum = sum + block_tap(here, q, vertical);

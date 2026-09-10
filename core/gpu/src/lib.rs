@@ -835,18 +835,45 @@ impl GpuRenderer {
     /// Draw the whole page, or nothing when the document holds something
     /// this backend does not know how to draw.
     pub fn render(&self, doc: &Document) -> Option<Surface> {
-        let (width, height) = (doc.meta.width, doc.meta.height);
+        let size = (doc.meta.width, doc.meta.height);
+        self.render_view(doc, Transform::default(), size)
+    }
+
+    /// The page drawn onto a surface of `size` device pixels, with the
+    /// document mapped through `view` on the way — which is what lets the
+    /// surface stop being the page: a scale of two on a surface twice the
+    /// size draws the document at twice the resolution, outlines re-solved
+    /// at that scale rather than a magnified bitmap, and a view that also
+    /// translates draws whatever part of the document the surface is
+    /// looking at.
+    ///
+    /// The same mapping the CPU renderer takes in `render_region_at`, so
+    /// the two can be held against each other at any view rather than
+    /// only at the page's own size.
+    pub fn render_view(
+        &self,
+        doc: &Document,
+        view: Transform,
+        size: (u32, u32),
+    ) -> Option<Surface> {
         let mut scene = Scene::default();
-        gather(doc, &mut scene)?;
-        Some(self.draw(width, height, &scene))
+        gather(doc, view, size, &mut scene)?;
+        Some(self.draw(size.0, size.1, &scene))
     }
 
     /// Whether [`render`](Self::render) would draw this document.
     pub fn can_render(doc: &Document) -> bool {
-        gather(doc, &mut Scene::default()).is_some()
+        let size = (doc.meta.width, doc.meta.height);
+        Self::can_render_view(doc, Transform::default(), size)
+    }
+
+    /// Whether [`render_view`](Self::render_view) would draw it.
+    pub fn can_render_view(doc: &Document, view: Transform, size: (u32, u32)) -> bool {
+        gather(doc, view, size, &mut Scene::default()).is_some()
     }
 
     fn draw(&self, width: u32, height: u32, scene: &Scene) -> Surface {
+        let page = scene.page;
         let size = wgpu::Extent3d {
             width,
             height,
@@ -890,7 +917,16 @@ impl GpuRenderer {
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("page"),
-                contents: bytemuck::cast_slice(&[width as f32, height as f32, 0.0, 0.0]),
+                contents: bytemuck::cast_slice(&[
+                    width as f32,
+                    height as f32,
+                    page.x0 as f32,
+                    page.y0 as f32,
+                    page.x1 as f32,
+                    page.y1 as f32,
+                    0.0,
+                    0.0,
+                ]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1530,7 +1566,6 @@ impl Item {
 }
 
 /// The vertices and the order to draw them in.
-#[derive(Default)]
 struct Scene {
     vertices: Vec<Vertex>,
     draws: Vec<Item>,
@@ -1542,6 +1577,18 @@ struct Scene {
     /// several layers is uploaded once. Ramps are not shared: they are
     /// small, and two layers rarely carry the same one.
     ids: Vec<(String, usize)>,
+    /// The surface being drawn, in device pixels, and where the page
+    /// lands on it once mapped through the view.
+    ///
+    /// The two were the same thing while this backend drew the page at
+    /// its own size. They part company the moment a view is asked for: a
+    /// viewport is a window onto the document, so the surface is the
+    /// window's size and the page is a rectangle somewhere on it —
+    /// sometimes covering the whole of it and sometimes a patch in the
+    /// middle. Everything that used to reach for the page's size wants
+    /// one or the other of these.
+    surface: (u32, u32),
+    page: chitrakar_render::ClipRect,
 }
 
 /// A texture ready to upload: its size, how many channels each texel
@@ -1554,6 +1601,24 @@ struct Image {
     texels: Vec<u16>,
 }
 
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            draws: Vec::new(),
+            textures: Vec::new(),
+            ids: Vec::new(),
+            surface: (0, 0),
+            page: chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0,
+            },
+        }
+    }
+}
+
 impl Scene {
     /// Take a run of vertices as the range it occupies.
     fn push(&mut self, verts: Vec<Vertex>) -> std::ops::Range<u32> {
@@ -1563,12 +1628,45 @@ impl Scene {
     }
 }
 
-/// Everything the page needs drawn, or `None` when some of it cannot be.
-fn gather(doc: &Document, out: &mut Scene) -> Option<()> {
-    if doc.meta.width > MAX_TEXTURE || doc.meta.height > MAX_TEXTURE {
+/// Everything the page needs drawn onto a surface of `size`, with the
+/// document mapped through `view` on the way — or `None` when some of it
+/// cannot be.
+fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) -> Option<()> {
+    if size.0 > MAX_TEXTURE || size.1 > MAX_TEXTURE {
         return None;
     }
-    collect(doc, doc.root(), Transform::default(), 1.0, None, out)
+    // Where the page lands on the surface, rounded outward but no
+    // further: a pixel the page's edge partly covers is the page's to
+    // paint and one it does not touch is not, which is the rectangle the
+    // CPU renderer works out for the same reason.
+    let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) = chitrakar_render::transformed_box(
+        view,
+        [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
+    ) else {
+        return None;
+    };
+    let page = chitrakar_render::ClipRect {
+        x0: x0.floor().max(0.0) as u32,
+        y0: y0.floor().max(0.0) as u32,
+        x1: (x1.ceil().max(0.0) as u32).min(size.0),
+        y1: (y1.ceil().max(0.0) as u32).min(size.1),
+    };
+    out.surface = size;
+    out.page = page;
+    // A coverage plane — a layer's mask, or the layer a clipped one is
+    // held to — is rasterized by the CPU renderer over a plane the size
+    // of the page rather than of the surface, and both renderers read
+    // the same one so that a mask cannot come to mean two things. Under
+    // a view those are two different sizes, so a page with either on it
+    // goes back until the plane learns which it is.
+    let plain = view == Transform::default();
+    if !plain && doc.nodes().any(|(_, n)| n.mask.is_some() || n.clipped) {
+        return None;
+    }
+    // The page's own edge is what clips the artwork, and with the surface
+    // no longer being the page that has to be said rather than assumed.
+    let bound = (!plain).then_some(page);
+    collect(doc, doc.root(), view, 1.0, bound, out)
 }
 
 /// Walk the tree in painter's order, turning what can be drawn into
@@ -1781,7 +1879,13 @@ fn one(
                 out.textures.push(img);
                 at
             });
-            let quad = out.push(page_quad(doc, alpha, plan.params, plan.grad, plan.extra));
+            let quad = out.push(page_quad(
+                (out.page, out.surface),
+                alpha,
+                plan.params,
+                plan.grad,
+                plan.extra,
+            ));
             out.draws.push(Item::of(Draw::Adjust { quad, table }));
         }
         NodeKind::Filter(filter) => {
@@ -1796,16 +1900,23 @@ fn one(
             // reading the CPU renderer takes.
             match filter_of(filter, parent)? {
                 Filtering::Pointwise(params, grad) => {
-                    let quad = out.push(page_quad(doc, alpha, params, grad, [0.0; 3]));
+                    let quad = out.push(page_quad(
+                        (out.page, out.surface),
+                        alpha,
+                        params,
+                        grad,
+                        [0.0; 3],
+                    ));
                     out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
                 }
                 Filtering::Blur { radius, sharpen } => {
+                    let on = (out.page, out.surface);
                     let axis =
-                        |a: f32| page_quad(doc, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
+                        |a: f32| page_quad(on, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
                     let mut steps = out.push(axis(0.0));
                     steps.end = out.push(axis(1.0)).end;
                     let quad = out.push(page_quad(
-                        doc,
+                        (out.page, out.surface),
                         alpha,
                         [sharpen, 0.0, 0.0, 0.0],
                         [0.0; 4],
@@ -1814,16 +1925,36 @@ fn one(
                     out.draws.push(Item::of(Draw::Blur { steps, quad }));
                 }
                 Filtering::Blocks { across, down } => {
-                    let mut steps = out.push(page_quad(doc, 1.0, across, [0.0; 4], [0.0; 3]));
-                    steps.end = out.push(page_quad(doc, 1.0, down, [0.0; 4], [0.0; 3])).end;
+                    let mut steps = out.push(page_quad(
+                        (out.page, out.surface),
+                        1.0,
+                        across,
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
+                    steps.end = out
+                        .push(page_quad(
+                            (out.page, out.surface),
+                            1.0,
+                            down,
+                            [0.0; 4],
+                            [0.0; 3],
+                        ))
+                        .end;
                     // Laid down the way a blur is: nothing is added back,
                     // so the amount that makes a sharpen is zero.
-                    let quad = out.push(page_quad(doc, alpha, [0.0; 4], [0.0; 4], [0.0; 3]));
+                    let quad = out.push(page_quad(
+                        (out.page, out.surface),
+                        alpha,
+                        [0.0; 4],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
                     out.draws.push(Item::of(Draw::Blocks { steps, quad }));
                 }
                 Filtering::Smear { taps, step } => {
                     let along = out.push(page_quad(
-                        doc,
+                        (out.page, out.surface),
                         1.0,
                         [taps, step[0], step[1], 0.0],
                         [0.0; 4],
@@ -1833,7 +1964,13 @@ fn one(
                     // mixed with the smeared copy by the layer's opacity
                     // and its mask. Nothing is added back, so the amount
                     // that makes a sharpen out of a blur is zero here.
-                    let quad = out.push(page_quad(doc, alpha, [0.0; 4], [0.0; 4], [0.0; 3]));
+                    let quad = out.push(page_quad(
+                        (out.page, out.surface),
+                        alpha,
+                        [0.0; 4],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
                     out.draws.push(Item::of(Draw::Smear { along, quad }));
                 }
                 // Nothing asked for is nothing drawn, and nothing
@@ -1875,7 +2012,7 @@ fn one(
             {
                 return None;
             }
-            let (pw, ph) = (doc.meta.width, doc.meta.height);
+            let (pw, ph) = out.surface;
             let board = chitrakar_render::ClipRect {
                 x0: (fx0.round().max(0.0) as u32).min(pw),
                 y0: (fy0.round().max(0.0) as u32).min(ph),
@@ -1964,7 +2101,7 @@ fn one(
         // surface down, not on what was drawn into it.
         mark = (out.vertices.len(), out.draws.len());
         let quad = out.push(page_quad(
-            doc,
+            (out.page, out.surface),
             node.opacity * opacity,
             [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
             [0.0; 4],
@@ -2009,7 +2146,9 @@ fn mask_texture(
     parent: Transform,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
-    let page = (doc.meta.width, doc.meta.height);
+    // The surface, not the page: what a coverage plane is indexed by is
+    // the thing being drawn on.
+    let page = out.surface;
     // Through the space the layer is being drawn in rather than through
     // the one the document places it in: a copy of a group draws that
     // group's layers somewhere else entirely, and a coverage rasterized
@@ -3019,16 +3158,27 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
 /// `alpha` is the group's own opacity, which the image fragment reads
 /// off the colour the way a placed picture's does.
 fn page_quad(
-    doc: &Document,
+    on: (chitrakar_render::ClipRect, (u32, u32)),
     alpha: f32,
     params: [f32; 4],
     grad: [f32; 4],
     extra: [f32; 3],
 ) -> Vec<Vertex> {
-    let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+    let (page, surface) = on;
+    // Over the page rather than over the whole surface: what is beside
+    // the page is not the page's to write, and an adjustment that
+    // rewrote it would be painting where the CPU renderer never goes.
+    // The texture coordinate is still the surface's, since that is what
+    // these fragments sample.
+    let (x0, y0) = (page.x0 as f32, page.y0 as f32);
+    let (x1, y1) = (page.x1 as f32, page.y1 as f32);
+    let (sw, sh) = (surface.0 as f32, surface.1 as f32);
     let corner = |u: f32, v: f32| Vertex {
-        doc: [u * w, v * h],
-        local: [u, v],
+        doc: [x0 + u * (x1 - x0), y0 + v * (y1 - y0)],
+        local: [
+            (x0 + u * (x1 - x0)) / sw.max(1e-6),
+            (y0 + v * (y1 - y0)) / sh.max(1e-6),
+        ],
         params,
         color: [extra[0], extra[1], extra[2], alpha],
         grad,
@@ -5574,6 +5724,199 @@ mod tests {
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
         );
+    }
+
+    /// A view: the surface stops being the page.
+    ///
+    /// This backend drew the page at its own size, and the app shows a
+    /// viewport — a scale and an origin — so presenting from it at all
+    /// means the walk and the shaders learning a mapping. Held against
+    /// the CPU renderer's own `render_region_at`, which is the same
+    /// mapping on the other side, at four views that pull the two apart
+    /// in different ways: bigger than the surface, smaller than it,
+    /// panned so the page's corner is inside it, and at a scale that
+    /// lands nothing on whole pixels.
+    #[test]
+    fn a_view_draws_what_the_cpu_draws_into_the_same_surface() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "back",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.12,
+                    g: 0.14,
+                    b: 0.22,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        // A round-cornered box and an ellipse, so there are curves whose
+        // edges are re-solved at the view's scale rather than magnified.
+        add(
+            &mut doc,
+            filled(
+                "box",
+                VectorShape::Rect {
+                    width: 24.0,
+                    height: 16.0,
+                    radius: 5.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.85,
+                    b: 0.35,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(8.0, 6.0),
+        );
+        add(
+            &mut doc,
+            filled(
+                "blob",
+                VectorShape::Ellipse { rx: 9.0, ry: 6.0 },
+                AuthoredColor::Srgb {
+                    r: 0.3,
+                    g: 0.75,
+                    b: 0.9,
+                    a: 0.7,
+                },
+            ),
+            Transform::translation(40.0, 26.0),
+        );
+        // Text, whose outlines are re-solved at the view's scale on both
+        // sides rather than magnified.
+        add(
+            &mut doc,
+            Box::new(Node::text(
+                "words",
+                chitrakar_doc::TextSpec::new(
+                    "Ag",
+                    11.0,
+                    AuthoredColor::Srgb {
+                        r: 0.95,
+                        g: 0.95,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                ),
+            )),
+            Transform::translation(6.0, 30.0),
+        );
+        // And one hanging off the page's corner, so that the page's own
+        // edge is something the render has to say rather than something
+        // the surface happens to enforce.
+        add(
+            &mut doc,
+            filled(
+                "over the edge",
+                VectorShape::Rect {
+                    width: 26.0,
+                    height: 18.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.3,
+                    b: 0.45,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(-11.0, -7.0),
+        );
+
+        let at = |scale: f32, x: f32, y: f32| Transform {
+            a: scale,
+            b: 0.0,
+            c: 0.0,
+            d: scale,
+            e: x,
+            f: y,
+        };
+        for (name, view, size) in [
+            (
+                "the page at its own size",
+                at(1.0, 0.0, 0.0),
+                (60u32, 40u32),
+            ),
+            ("twice as big", at(2.0, 0.0, 0.0), (120, 80)),
+            // Small enough that the page is a patch in the middle, which
+            // is what makes the page's own edge something to say rather
+            // than something to assume.
+            (
+                "half size, with room around it",
+                at(0.5, 20.0, 15.0),
+                (80, 60),
+            ),
+            // A scale nothing lands on whole pixels at, panned so the
+            // page's corner is inside the surface.
+            (
+                "panned, at an awkward scale",
+                at(1.7, -13.5, -7.25),
+                (70, 50),
+            ),
+        ] {
+            assert!(
+                GpuRenderer::can_render_view(&doc, view, size),
+                "{name} is drawn rather than handed back"
+            );
+            let drawn = gpu.render_view(&doc, view, size).unwrap();
+            assert_eq!(
+                (drawn.width, drawn.height),
+                size,
+                "{name} is the size asked for"
+            );
+            let mut surface = Surface::new(size.0, size.1);
+            let clip = surface.full_clip();
+            chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+            let (mean, worst) = difference(&drawn, &surface);
+            assert!(
+                mean < 0.004,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+
+            // And again with something that reads a neighbourhood over
+            // it. A blur is where the page's edge stops being a
+            // formality: the box passes would otherwise clamp at the
+            // surface's edge, and where the page does not fill the
+            // surface that is a different lane to run off the end of.
+            let mut blurred = doc.clone();
+            let root = blurred.root();
+            let index = blurred.children_of(root).unwrap().len();
+            blurred
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(Node::filter(
+                        "soften",
+                        chitrakar_doc::Filter::GaussianBlur { sigma: 2.5 },
+                    )),
+                })
+                .unwrap();
+            assert!(
+                GpuRenderer::can_render_view(&blurred, view, size),
+                "{name}, blurred, is drawn rather than handed back"
+            );
+            let drawn = gpu.render_view(&blurred, view, size).unwrap();
+            let mut surface = Surface::new(size.0, size.1);
+            let clip = surface.full_clip();
+            chitrakar_render::render_region_at(&blurred, &mut surface, clip, view).unwrap();
+            let (mean, worst) = difference(&drawn, &surface);
+            assert!(
+                mean < 0.004,
+                "{name}, blurred: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
     }
 
     /// A pixelate: two passes, one along each axis, which together are

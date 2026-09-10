@@ -77,7 +77,9 @@ impl Surface {
         }
     }
 
-    fn full_clip(&self) -> ClipRect {
+    /// The whole of it: what a caller rendering into a fresh surface
+    /// hands to [`render_region_at`] when it wants all of it painted.
+    pub fn full_clip(&self) -> ClipRect {
         ClipRect {
             x0: 0,
             y0: 0,
