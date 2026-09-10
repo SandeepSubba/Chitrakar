@@ -739,6 +739,68 @@ mod tests {
             .is_empty());
     }
 
+    /// A page turned round and back saves to the bytes it started with.
+    ///
+    /// The whole point of writing a document in an order is that the same
+    /// work is the same file: nothing can compare two saves otherwise,
+    /// and a version control system reports a change where there is none.
+    /// Turning the page had been quietly making one. Multiplying a
+    /// transform by a quarter turn gives negative zeros where there were
+    /// zeros, so a page turned right and then left came back to
+    /// transforms *equal* to the ones it started with and written
+    /// differently — every layer of it, in a file nothing had really
+    /// changed. `Transform::compose` adds zero to each component now,
+    /// which is a no-op on every value a transform can hold except that
+    /// one.
+    ///
+    /// A mirror does the same thing for the same reason, so it is asked
+    /// here too, and so is a straighten of nothing.
+    #[test]
+    fn a_page_turned_round_and_back_saves_to_the_same_bytes() {
+        let f = chitrakar_doc::fixture::everything();
+        let first = save_chitra(&f.doc).unwrap();
+        for (what, there_and_back) in [
+            (
+                "turned a quarter right and a quarter left",
+                vec![
+                    Command::TurnCanvas { quarters: 1 },
+                    Command::TurnCanvas { quarters: 3 },
+                ],
+            ),
+            (
+                "turned all the way round",
+                vec![
+                    Command::TurnCanvas { quarters: 2 },
+                    Command::TurnCanvas { quarters: 2 },
+                ],
+            ),
+            (
+                "mirrored twice",
+                vec![
+                    Command::MirrorCanvas { across_x: true },
+                    Command::MirrorCanvas { across_x: true },
+                ],
+            ),
+            (
+                "mirrored twice the other way",
+                vec![
+                    Command::MirrorCanvas { across_x: false },
+                    Command::MirrorCanvas { across_x: false },
+                ],
+            ),
+        ] {
+            let mut doc = f.doc.clone();
+            for cmd in there_and_back {
+                doc.apply(cmd).unwrap();
+            }
+            assert_eq!(
+                save_chitra(&doc).unwrap(),
+                first,
+                "a page {what} is the same work, so it is the same file"
+            );
+        }
+    }
+
     /// The same document saves to the same bytes.
     ///
     /// A `.chitra` is a manifest and one file per resource, and both used

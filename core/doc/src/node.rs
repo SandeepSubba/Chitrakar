@@ -74,13 +74,21 @@ impl Transform {
     /// transform reaches its children — and how ungrouping folds the
     /// group's transform into them.
     pub fn compose(self, inner: Transform) -> Transform {
+        // `+ 0.0` on each: it changes no value a transform can hold
+        // except a negative zero, which it makes positive. Multiplying by
+        // a quarter turn or a mirror produces them — a page turned right
+        // and then left came back to a transform equal to the one it
+        // started with and written differently, so a document nothing had
+        // been done to saved to different bytes. Everything else about
+        // this file is careful to save the same work as the same bytes;
+        // this is the same care, one operation earlier.
         Transform {
-            a: self.a * inner.a + self.c * inner.b,
-            b: self.b * inner.a + self.d * inner.b,
-            c: self.a * inner.c + self.c * inner.d,
-            d: self.b * inner.c + self.d * inner.d,
-            e: self.a * inner.e + self.c * inner.f + self.e,
-            f: self.b * inner.e + self.d * inner.f + self.f,
+            a: self.a * inner.a + self.c * inner.b + 0.0,
+            b: self.b * inner.a + self.d * inner.b + 0.0,
+            c: self.a * inner.c + self.c * inner.d + 0.0,
+            d: self.b * inner.c + self.d * inner.d + 0.0,
+            e: self.a * inner.e + self.c * inner.f + self.e + 0.0,
+            f: self.b * inner.e + self.d * inner.f + self.f + 0.0,
         }
     }
 

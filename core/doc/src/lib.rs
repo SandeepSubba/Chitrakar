@@ -877,6 +877,15 @@ impl Document {
             }
             Command::Batch(cmds) => {
                 let mut inverses = Vec::with_capacity(cmds.len());
+                // Where the ids stood before any of this. A batch that
+                // fails did not happen, so the ids it took are free
+                // again — and giving them back is what makes "nothing
+                // changed" true of the whole document rather than of
+                // everything except a counter. This is not the same
+                // question as undo, where the ids must stay taken: an
+                // undone add can be redone, and whatever else referred
+                // to that layer while it existed still says its id.
+                let ids = self.next_id;
                 for cmd in cmds {
                     match self.apply(cmd) {
                         Ok(inverse) => inverses.push(inverse),
@@ -886,6 +895,7 @@ impl Document {
                             for inverse in inverses.into_iter().rev() {
                                 let _ = self.apply(inverse);
                             }
+                            self.next_id = ids;
                             return Err(e);
                         }
                     }
@@ -1697,6 +1707,149 @@ mod tests {
         assert_eq!(doc.node(id).unwrap().name, "new");
         history.undo(&mut doc).unwrap();
         assert_eq!(doc.node(id).unwrap().name, "old");
+    }
+
+    fn near_or_why(
+        a: &serde_json::Value,
+        b: &serde_json::Value,
+        at: String,
+        why: &mut String,
+    ) -> bool {
+        use serde_json::Value;
+        let ok = match (a, b) {
+            (Value::Object(x), Value::Object(y)) if x.len() == y.len() => {
+                return x.iter().all(|(k, v)| match y.get(k) {
+                    Some(w) => near_or_why(v, w, format!("{at}/{k}"), why),
+                    None => {
+                        *why = format!("{at}/{k} is gone");
+                        false
+                    }
+                })
+            }
+            (Value::Array(x), Value::Array(y)) if x.len() == y.len() => {
+                return x
+                    .iter()
+                    .zip(y)
+                    .enumerate()
+                    .all(|(i, (v, w))| near_or_why(v, w, format!("{at}/{i}"), why))
+            }
+            _ => nearly(a, b),
+        };
+        if !ok {
+            *why = format!("{at}: {a} became {b}");
+        }
+        ok
+    }
+
+    /// Two documents-as-values alike but for the last digits of numbers —
+    /// and, within a unit, for the one thing a page turned and turned back
+    /// genuinely cannot restore. A guide is a line on an axis and carries
+    /// no tilt, so it comes back where it crosses the middle of the page
+    /// rather than where it was; on the fixture's page that is half a
+    /// pixel. A unit of slack keeps that and still catches a guide that
+    /// came back somewhere else entirely.
+    fn nearly(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+        use serde_json::Value;
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => {
+                let (x, y) = (x.as_f64().unwrap_or(0.0), y.as_f64().unwrap_or(0.0));
+                (x - y).abs() <= 1.0 + 1e-3 * x.abs().max(y.abs())
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).map(|w| nearly(v, w)).unwrap_or(false))
+            }
+            (Value::Array(x), Value::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(v, w)| nearly(v, w))
+            }
+            _ => a == b,
+        }
+    }
+
+    /// A batch that fails leaves the document exactly as it was.
+    ///
+    /// That is what makes a batch worth having: a gesture, a group, a
+    /// layer added and masked in one breath are each several commands
+    /// that have to land together or not at all, and the not-at-all is
+    /// the half nobody exercises. It was tested once, with one failing
+    /// command and a node count for a witness — which would not notice a
+    /// page left a little turned, a selection left behind, or an id
+    /// counter that had moved on.
+    ///
+    /// So: every command the fixture knows, each put in front of one that
+    /// cannot work, and the whole serialized document held against what
+    /// it was. Then again with the failure inside a batch of its own,
+    /// since a batch is a command like any other and rolling one back is
+    /// the same work one level down.
+    ///
+    /// `StraightenCanvas` is the one exception, and the same one the
+    /// inverse audit makes: a page turned by anything but a quarter
+    /// cannot be turned back exactly, so a rollback across one lands
+    /// near rather than on. Nothing batches a straighten — the engine
+    /// and the UI both send it alone — so the case this test constructs
+    /// is one only this test can reach; it is asserted as *near* rather
+    /// than waved past, so a straighten that started coming back wildly
+    /// wrong would still be caught.
+    #[test]
+    fn a_batch_that_fails_leaves_the_document_alone() {
+        let f = fixture::everything();
+        let mut checked = 0usize;
+        for command in fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what
+                .split_once(" {")
+                .map(|(a, _)| a)
+                .unwrap_or(&what)
+                .to_string();
+            // A command nothing can do: the id is not in the document and
+            // never was, so whatever came before it in the batch has to
+            // be taken back.
+            let doomed = Command::RemoveNode { id: NodeId(99_999) };
+            for (how, batch) in [
+                (
+                    "beside it",
+                    Command::Batch(vec![command.clone(), doomed.clone()]),
+                ),
+                (
+                    "inside a batch of its own",
+                    Command::Batch(vec![command.clone(), Command::Batch(vec![doomed.clone()])]),
+                ),
+            ] {
+                let mut doc = f.doc.clone();
+                let before = serde_json::to_string(&doc).unwrap();
+                assert!(
+                    doc.apply(batch).is_err(),
+                    "{what} with a failure {how}: the batch fails"
+                );
+                let after = serde_json::to_string(&doc).unwrap();
+                if fixture::exact(&command) {
+                    assert_eq!(
+                        after, before,
+                        "{what} with a failure {how}: the document did not come back"
+                    );
+                } else {
+                    // Near rather than on: the same document in every
+                    // respect but the last digits of a few numbers, which
+                    // is what turning a page and turning it back costs.
+                    // Compared as values rather than as text, since a
+                    // number a hair off is also a number written at a
+                    // different length.
+                    let a: serde_json::Value = serde_json::from_str(&before).unwrap();
+                    let b: serde_json::Value = serde_json::from_str(&after).unwrap();
+                    let mut why = String::new();
+                    assert!(
+                        near_or_why(&a, &b, String::new(), &mut why),
+                        "{what} came back further off than rounding explains: {why}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 2 * fixture::EVERY_VARIANT.len(),
+            "the whole list was reached both ways: {checked}"
+        );
     }
 
     #[test]

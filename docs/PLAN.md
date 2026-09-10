@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~369),
+- **Verify before committing:** `cargo test --workspace` (~371),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1013,6 +1013,36 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **A batch that fails leaves the document exactly as it was:** that is
+  what makes a batch worth having — a gesture, a group, a layer added and
+  masked in one breath are each several commands that have to land
+  together or not at all — and the not-at-all half was tested once, with
+  one failing command and a node count for a witness, which would not
+  notice a page left a little turned or a counter that had moved on.
+  `a_batch_that_fails_leaves_the_document_alone` puts every command the
+  fixture knows in front of one that cannot work, both beside it and
+  inside a batch of its own, and holds the whole serialized document
+  against what it was. It found two things.
+  A failed batch kept the ids it had taken: `next_id` had moved on, so
+  "nothing changed" was true of everything except a counter. The ids are
+  given back now — which is *not* the same question as undo, where they
+  must stay taken, since an undone add can be redone and whatever referred
+  to that layer still says its id.
+  And multiplying a transform by a quarter turn or a mirror gives negative
+  zeros where there were zeros, so a page turned right and then left came
+  back to transforms *equal* to the ones it started with and written
+  differently — a file where nothing had changed, in every layer of it,
+  against a format that is careful everywhere else to save the same work
+  as the same bytes. `Transform::compose` adds zero to each component now,
+  a no-op on every value a transform can hold but that one, and
+  `a_page_turned_round_and_back_saves_to_the_same_bytes` says so of a
+  quarter each way, a half each way, and a mirror both ways.
+  `StraightenCanvas` is the one command allowed to come back near rather
+  than exactly, the same exception the inverse audit makes, and the slack
+  is a unit — which is what a guide costs, since a guide is a line on an
+  axis and carries no tilt, so it returns where it crosses the middle of
+  the page. Nothing batches a straighten; the engine and the UI both send
+  it alone.
 - **Every field a `.chitra` was ever given, taken back out again:** the
   one rule the format has is that an old file keeps opening — a new node
   kind or a new field is additive, written with `#[serde(default)]` so a
