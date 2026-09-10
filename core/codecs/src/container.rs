@@ -353,6 +353,221 @@ mod tests {
         );
     }
 
+    /// Every field a `.chitra` was ever given, taken back out again.
+    ///
+    /// The one rule this format has is that an old file keeps opening:
+    /// a new node kind or a new field is additive, written with
+    /// `#[serde(default)]` so that a manifest from before it existed
+    /// reads as whatever that default is. Nothing checked it. A field
+    /// added without the attribute makes every file anybody has ever
+    /// saved unopenable, and the way that is found out is somebody's
+    /// work refusing to open.
+    ///
+    /// So: save the document of everything, then take each key of the
+    /// manifest out on its own and see whether the file still opens. The
+    /// ones it cannot do without are named here — they are the fields
+    /// the format has had since the beginning, and by the rule above
+    /// that list is finished. A field added without a default joins it,
+    /// and this test says which one.
+    ///
+    /// An enum's tag is not one of these questions: it is a single-key
+    /// object whose one key says which variant, so removing it is not
+    /// "a file from before this field" but a file that says nothing at
+    /// all. Those are skipped, and the hostile-file test above is where
+    /// nonsense belongs.
+    #[test]
+    fn a_file_written_before_a_field_existed_still_opens() {
+        /// The three objects whose keys are data rather than field names:
+        /// a node id, a node id, a content address. Taking a key out of
+        /// one of them is not "a file from before this field existed", it
+        /// is a file with a layer missing.
+        const KEYED_BY_DATA: &[&str] = &["nodes", "children", "resources"];
+
+        /// Every (object path, key) pair worth removing. `named` is
+        /// whether the object we are in is one whose keys are field
+        /// names, which is the only kind a removal means anything in.
+        fn keys(v: &serde_json::Value, at: String, named: bool, out: &mut Vec<(String, String)>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, child) in map {
+                        // A single-key object is an enum's tag: its one
+                        // key says which variant, so removing it is not a
+                        // question about additive fields either.
+                        if named && map.len() > 1 {
+                            out.push((at.clone(), k.clone()));
+                        }
+                        keys(
+                            child,
+                            format!("{at}/{k}"),
+                            !KEYED_BY_DATA.contains(&k.as_str()),
+                            out,
+                        );
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (i, child) in items.iter().enumerate() {
+                        keys(child, format!("{at}/{i}"), named, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn at_path<'a>(
+            v: &'a mut serde_json::Value,
+            path: &str,
+        ) -> Option<&'a mut serde_json::Value> {
+            let mut cur = v;
+            for step in path.split('/').filter(|s| !s.is_empty()) {
+                cur = match cur {
+                    serde_json::Value::Object(m) => m.get_mut(step)?,
+                    serde_json::Value::Array(a) => a.get_mut(step.parse::<usize>().ok()?)?,
+                    _ => return None,
+                };
+            }
+            Some(cur)
+        }
+
+        // The fields the format has always had. Everything else in a
+        // manifest is additive and a file without it has to open.
+        const ALWAYS: &[&str] = &[
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+            "f", // a transform, all six of it
+            "blend",
+            "children",
+            "color",
+            "color_mode",
+            "document",
+            "dpi",
+            "fill",
+            "format_version",
+            "g",
+            "height",
+            "invert",
+            "kind",
+            "meta",
+            "name",
+            "next_id",
+            "nodes",
+            "of",
+            "opacity",
+            "points",
+            "r",
+            "radii",
+            "resource_id",
+            "root",
+            "shape",
+            "size",
+            "text",
+            "transform",
+            "visible",
+            "width",
+            "x",
+            "y",
+        ];
+
+        let f = chitrakar_doc::fixture::everything();
+        let good = save_chitra(&f.doc).unwrap();
+        assert!(load_chitra(&good).is_ok(), "the file itself opens");
+        let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+        let mut manifest = String::new();
+        zip.by_name(MANIFEST_PATH)
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let base: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        // Everything but the manifest carried over untouched, resources
+        // included: a file missing a field is still a file with its
+        // pictures in it.
+        let rest: Vec<(String, Vec<u8>)> = zip
+            .file_names()
+            .filter(|n| *n != MANIFEST_PATH)
+            .map(String::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|n| {
+                let mut b = Vec::new();
+                zip.by_name(&n).unwrap().read_to_end(&mut b).unwrap();
+                (n, b)
+            })
+            .collect();
+        let repack = |value: &serde_json::Value| -> Vec<u8> {
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(value.to_string().as_bytes()).unwrap();
+                for (name, body) in &rest {
+                    w.start_file(name, SimpleFileOptions::default()).unwrap();
+                    w.write_all(body).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            out
+        };
+
+        let mut all = Vec::new();
+        keys(&base, String::new(), true, &mut all);
+        assert!(
+            all.len() > 200,
+            "the manifest of everything has fields to take out: {}",
+            all.len()
+        );
+        let mut cannot: std::collections::BTreeSet<String> = Default::default();
+        for (path, key) in &all {
+            let mut value = base.clone();
+            let Some(serde_json::Value::Object(m)) = at_path(&mut value, path) else {
+                continue;
+            };
+            m.remove(key);
+            if load_chitra(&repack(&value)).is_err() {
+                cannot.insert(key.clone());
+            }
+        }
+        let added: Vec<&String> = cannot
+            .iter()
+            .filter(|k| !ALWAYS.contains(&k.as_str()))
+            .collect();
+        assert!(
+            added.is_empty(),
+            "a file written before these existed will not open — they want #[serde(default)]: {added:?}"
+        );
+        // And the other way round, so the list cannot quietly keep names
+        // that stopped being needed.
+        let gone: Vec<&&str> = ALWAYS.iter().filter(|k| !cannot.contains(**k)).collect();
+        assert!(
+            gone.is_empty(),
+            "these are no longer needed and can leave the list: {gone:?}"
+        );
+
+        // The whole claim in one file: every additive field taken out at
+        // once, which is as near as this can come to a manifest written
+        // before any of them existed. It opens, and it draws.
+        let mut old = base.clone();
+        for (path, key) in &all {
+            if ALWAYS.contains(&key.as_str()) {
+                continue;
+            }
+            if let Some(serde_json::Value::Object(m)) = at_path(&mut old, path) {
+                m.remove(key);
+            }
+        }
+        let doc = load_chitra(&repack(&old)).expect("a manifest of only the oldest fields opens");
+        assert!(
+            doc.nodes().count() > 5,
+            "with its layers still in it: {}",
+            doc.nodes().count()
+        );
+        assert!(
+            chitrakar_render::render(&doc).is_ok(),
+            "and the page it describes draws"
+        );
+    }
+
     /// Every command there is, and then the file.
     ///
     /// A `.chitra` is the only thing between a session and the next one,

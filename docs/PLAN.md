@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~368),
+- **Verify before committing:** `cargo test --workspace` (~369),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~977 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1013,6 +1013,31 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **Every field a `.chitra` was ever given, taken back out again:** the
+  one rule the format has is that an old file keeps opening — a new node
+  kind or a new field is additive, written with `#[serde(default)]` so a
+  manifest from before it existed reads as that default — and nothing
+  checked it. A field added without the attribute makes every file
+  anybody has saved unopenable, and the way that gets found out is
+  somebody's work refusing to open.
+  `a_file_written_before_a_field_existed_still_opens` saves the document
+  of everything, then takes each of the manifest's three hundred-odd keys
+  out on its own and asks whether the file still opens. The three dozen it
+  cannot do without are named in the test: they are the fields the format
+  has had since the beginning, and by the rule above that list is
+  finished, so it is asserted in both directions — a field added without a
+  default joins it and the test says which one by name. Then all the
+  additive keys come out at once, which is as near as this can get to a
+  manifest written before any of them existed: it opens, its layers are
+  there, and the page draws.
+  Two kinds of key are not one of these questions and are skipped. An
+  enum's tag is a single-key object whose one key says which variant, so
+  removing it makes a file that says nothing rather than an old one; and
+  `nodes`, `children` and `resources` are keyed by data — a node id, a
+  node id, a content address — so taking a key out of those is a file with
+  a layer missing. Getting that second one wrong is what the first run
+  found: every additive key removed at once had emptied the document, and
+  the test said so.
 - **Every command, over the boundary the UI talks across:** nothing in
   the app calls `apply`. The UI is TypeScript on the far side of a wasm
   boundary, so every mutation it makes is a serde-JSON `Command` handed
