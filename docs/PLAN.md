@@ -662,7 +662,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~385),
+- **Verify before committing:** `cargo test --workspace` (~386),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~994 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1352,6 +1352,23 @@ without reading anything else.*
   whenever a fixture's pixels changed. A segment is data now when it is an
   index *or* the key of one of the three objects keyed by data, which is
   the rule that was meant all along.
+- **And layers cannot be nested past what a stack can walk:** a deep tree
+  is a *legal* tree — no cycle, no layer named twice — and the check for
+  those walks it with a stack of its own and is fine. Every walk that
+  recurses is as deep as the tree, though: the renderer's compositing, the
+  check for a copy of itself, the exporters. Ten thousand groups inside one
+  another overflowed the stack, and the *editor* reached that before any
+  file did, since the copy check runs after every structural edit and so
+  building the nesting was enough.
+  So there is a stated limit (`MAX_DEPTH`, two hundred and fifty six — far
+  past anything a person nests, and Photoshop stops at ten), the way there
+  is one on how large a page may be, and it is checked in both places: a
+  command that would nest past it is refused, and so is a file that says it
+  already has. Measured iteratively, because measuring has to be safe on a
+  tree too deep to walk, and checked *before* the copy check, which
+  recurses. The test also nests to exactly the limit and draws and saves
+  the result, so the number is a limit rather than a wall a little before
+  one.
 - **A file that says its layers are not a tree used to crash on being
   opened:** a file names the layers there are and names what each group
   holds as two separate lists, and nothing about the format stops one of

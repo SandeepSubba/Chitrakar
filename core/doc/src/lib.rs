@@ -73,6 +73,8 @@ pub enum DocError {
     InstanceCycle,
     #[error("the layers are not a tree: {0:?} is reached more than once")]
     NotATree(NodeId),
+    #[error("layers cannot be nested more than {limit} deep")]
+    TooDeep { limit: usize },
 }
 
 /// How large a page may be. The renderer's surface is sixteen bytes a
@@ -82,6 +84,20 @@ pub enum DocError {
 /// The per-side limit only keeps a page from being a thread.
 pub const MAX_CANVAS_PIXELS: u64 = 100_000_000;
 pub const MAX_CANVAS_SIDE: u32 = 30_000;
+
+/// How deep the layers may nest.
+///
+/// Every walk over the tree that recurses is as deep as the tree is, and a
+/// stack is not: the renderer's compositing, the check for a copy of
+/// itself, the exporters. Ten thousand groups inside one another overflowed
+/// it and took the process with it — which nobody builds by hand, and which
+/// a file can say in a few kilobytes, and which the editor itself would
+/// reach if something automated the nesting.
+///
+/// Two hundred and fifty six is far past anything a person nests — Photoshop
+/// stops at ten — and it makes every one of those walks provably bounded,
+/// which is worth more than a depth nobody will use.
+pub const MAX_DEPTH: usize = 256;
 
 /// Whether a page of this size is one the engine could draw.
 pub fn canvas_fits(width: u32, height: u32) -> bool {
@@ -490,6 +506,13 @@ impl Document {
                 | Command::Batch(_)
         );
         let inverse = self.apply_inner(cmd)?;
+        // Depth first, and iteratively: the check below recurses, so a
+        // command that nested the layers past what a stack can walk would
+        // take the process with it rather than being refused.
+        if structural && self.depth() > MAX_DEPTH {
+            let _ = self.apply_inner(inverse);
+            return Err(DocError::TooDeep { limit: MAX_DEPTH });
+        }
         if structural && self.instance_cycle() {
             // Put it back rather than leave the document in a state
             // nothing could draw.
@@ -908,6 +931,22 @@ impl Document {
         }
     }
 
+    /// How deep the layers nest, counted iteratively so that measuring it
+    /// is safe on a tree too deep to walk.
+    fn depth(&self) -> usize {
+        let mut deepest = 0usize;
+        let mut stack = vec![(self.root, 0usize)];
+        while let Some((id, at)) = stack.pop() {
+            deepest = deepest.max(at);
+            if let Some(kids) = self.children.get(&id) {
+                for &kid in kids {
+                    stack.push((kid, at + 1));
+                }
+            }
+        }
+        deepest
+    }
+
     /// Whether the layers form a tree, and refusing to say yes when they
     /// do not.
     ///
@@ -950,6 +989,11 @@ impl Document {
                 }
                 stack.push(kid);
             }
+        }
+        // Before the copies are asked about, because that check recurses
+        // and a tree too deep to walk is what this refuses.
+        if self.depth() > MAX_DEPTH {
+            return Err(DocError::TooDeep { limit: MAX_DEPTH });
         }
         if self.instance_cycle() {
             return Err(DocError::InstanceCycle);

@@ -373,6 +373,111 @@ mod tests {
         );
     }
 
+    /// Layers cannot be nested past what a stack can walk, and a file
+    /// saying they are is refused.
+    ///
+    /// A deep tree is a *legal* tree — no cycle, no layer named twice, and
+    /// the check for those walks it with a stack of its own and is fine. But
+    /// every walk that recurses is as deep as the tree: the renderer's
+    /// compositing, the check for a copy of itself, the exporters. Ten
+    /// thousand groups inside one another overflowed the stack and took the
+    /// process with it, and the editor reached that before any file did —
+    /// the copy check runs after every structural edit, so building the
+    /// nesting was enough.
+    ///
+    /// So there is a stated limit, the way there is one on how large a page
+    /// may be, and it is checked in both places: a command that would nest
+    /// past it is refused, and so is a file that says it already has. The
+    /// depth is measured iteratively, because measuring it must be safe on
+    /// a tree that is too deep to walk.
+    #[test]
+    fn layers_cannot_be_nested_past_what_a_stack_can_walk() {
+        let limit = chitrakar_doc::MAX_DEPTH;
+        // Up to the limit is allowed, and the page it makes still draws —
+        // which is the other half of the claim: the number is a limit, not
+        // a wall a little before one.
+        let mut doc = Document::new(16, 12, ColorMode::Rgb);
+        let mut parent = doc.root();
+        for i in 0..limit {
+            doc.apply(Command::AddNode {
+                parent,
+                index: 0,
+                node: Box::new(Node::group(&format!("g{i}"))),
+            })
+            .unwrap_or_else(|e| panic!("nesting {i} deep is allowed: {e}"));
+            parent = doc.children_of(parent).unwrap()[0];
+        }
+        // The innermost one gets something to draw, so the walk really
+        // goes all the way down.
+        doc.apply(Command::AddNode {
+            parent,
+            index: 0,
+            node: Box::new(Node::vector(
+                "shape",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 8.0,
+                    height: 6.0,
+                    radius: 0.0,
+                },
+            )),
+        })
+        .expect_err("one past the limit is refused");
+        assert!(
+            chitrakar_render::render(&doc).is_ok(),
+            "a page nested to the limit still draws"
+        );
+        let bytes = save_chitra(&doc).unwrap();
+        assert!(
+            load_chitra(&bytes).is_ok(),
+            "and the file it saves to opens again"
+        );
+
+        // A file saying it is deeper than that is refused rather than
+        // opened and drawn. Written by hand, since nothing here will make
+        // one: a chain of groups, each holding the next.
+        let deep = {
+            let mut zip = ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+            let mut manifest = String::new();
+            zip.by_name(MANIFEST_PATH)
+                .unwrap()
+                .read_to_string(&mut manifest)
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+            let n = limit as u64 + 40;
+            let mut nodes = serde_json::Map::new();
+            let mut children = serde_json::Map::new();
+            let plain = serde_json::to_value(Node::group("g")).unwrap();
+            for id in 0..=n {
+                nodes.insert(id.to_string(), plain.clone());
+                children.insert(
+                    id.to_string(),
+                    if id < n {
+                        serde_json::json!([id + 1])
+                    } else {
+                        serde_json::json!([])
+                    },
+                );
+            }
+            value["document"]["nodes"] = serde_json::Value::Object(nodes);
+            value["document"]["children"] = serde_json::Value::Object(children);
+            value["document"]["root"] = serde_json::json!(0);
+            value["document"]["next_id"] = serde_json::json!(n + 1);
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(value.to_string().as_bytes()).unwrap();
+                w.finish().unwrap();
+            }
+            out
+        };
+        let said = load_chitra(&deep)
+            .expect_err("a file nested past the limit is refused")
+            .to_string();
+        assert!(said.contains("nested more than"), "and says why: {said}");
+    }
+
     /// A file whose id counter is behind the ids in it opens, and the next
     /// layer added does not overwrite one that is already there.
     ///
