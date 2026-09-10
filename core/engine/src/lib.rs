@@ -975,26 +975,50 @@ impl Session {
         let name = format!("{} + {}", self.doc.node(id)?.name, node.name);
         let group_id = self.doc.peek_next_id();
         let label = format!("Adjust {}", self.doc.node(id)?.name);
-        self.apply_labeled(
-            Command::Batch(vec![
-                Command::AddNode {
-                    parent,
-                    index: index + 1,
-                    node: Box::new(Node::group(&name)),
-                },
-                Command::MoveNode {
-                    id,
-                    parent: group_id,
-                    index: 0,
-                },
-                Command::AddNode {
-                    parent: group_id,
-                    index: 1,
-                    node: Box::new(node),
-                },
-            ]),
-            Some(label),
-        )?;
+        // How the layer met the page is the group's business now, not the
+        // layer's. A group holding something that reads the backdrop is
+        // drawn on a surface of its own, so a layer wrapped in one meets
+        // that surface rather than the page: a multiplying layer began
+        // multiplying against nothing and arrived over the page plainly,
+        // and a layer confined to the one below it was let out of it
+        // altogether. Both belong to the wrapper, which sits exactly where
+        // the layer sat; inside it the layer paints plainly, which is also
+        // what the adjustment above it wants to read.
+        //
+        // Opacity stays where it is. Source-over with a weight is
+        // associative, so it comes out the same either way — and leaving
+        // it means the adjustment reads the layer as the page shows it.
+        let held = self.doc.node(id)?;
+        let mut wrapper = Node::group(&name);
+        wrapper.blend = held.blend;
+        wrapper.clipped = held.clipped;
+        let mut cmds = vec![
+            Command::AddNode {
+                parent,
+                index: index + 1,
+                node: Box::new(wrapper),
+            },
+            Command::MoveNode {
+                id,
+                parent: group_id,
+                index: 0,
+            },
+        ];
+        if held.blend != chitrakar_doc::BlendMode::Normal {
+            cmds.push(Command::SetBlendMode {
+                id,
+                blend: chitrakar_doc::BlendMode::Normal,
+            });
+        }
+        if held.clipped {
+            cmds.push(Command::SetClipped { id, clipped: false });
+        }
+        cmds.push(Command::AddNode {
+            parent: group_id,
+            index: 1,
+            node: Box::new(node),
+        });
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(group_id)
     }
 
@@ -5515,7 +5539,7 @@ mod tests {
     }
 
     /// The same, in a colour of its own.
-    fn rect_of(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
+    pub(super) fn rect_of(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
         let mut node = filled_rect(name, w, h);
         if let NodeKind::Vector { fill, .. } = &mut node.kind {
             *fill = Some(color);
@@ -8017,6 +8041,132 @@ mod tests {
             session.document().node(big).is_ok() && session.document().node(small).is_ok(),
             "one undo puts both shapes back"
         );
+    }
+
+    /// Giving a layer its own adjustment leaves the page where it was.
+    ///
+    /// The machinery is a group: the layer and the new adjustment go in
+    /// one together, and a group holding something that reads the
+    /// backdrop is drawn on a surface of its own, which is exactly what
+    /// confines the adjustment to that layer. The other half of that is
+    /// what nobody looked at — a wrapped layer meets the group's surface
+    /// rather than the page. A multiplying layer began multiplying against
+    /// nothing and arrived over the page plainly; a layer confined to the
+    /// one below it was let out of it altogether and covered what it had
+    /// been showing through. Both belong to the wrapper now, which sits
+    /// exactly where the layer sat.
+    ///
+    /// Asked with an adjustment that does nothing, so the whole claim is
+    /// the plain one: the page before and the page after are the same
+    /// page. Opacity is asked too and needs no moving — source-over with
+    /// a weight is associative, so it comes out the same either way —
+    /// which is why it is left where it is and why that is worth pinning
+    /// rather than assuming.
+    #[test]
+    fn a_layer_given_its_own_adjustment_is_drawn_as_it_was() {
+        let neutral = || {
+            let mut n = Node::group("no exposure");
+            n.kind = NodeKind::Adjustment(chitrakar_doc::Adjustment::Exposure { stops: 0.0 });
+            n
+        };
+        for (what, how) in [
+            (
+                "multiplying",
+                Some(
+                    (|id| Command::SetBlendMode {
+                        id,
+                        blend: chitrakar_doc::BlendMode::Multiply,
+                    }) as fn(NodeId) -> Command,
+                ),
+            ),
+            (
+                "in soft light",
+                Some(|id| Command::SetBlendMode {
+                    id,
+                    blend: chitrakar_doc::BlendMode::SoftLight,
+                }),
+            ),
+            (
+                "half-transparent",
+                Some(|id| Command::SetOpacity { id, opacity: 0.5 }),
+            ),
+            (
+                "confined to the layer below",
+                Some(|id| Command::SetClipped { id, clipped: true }),
+            ),
+            ("plain", None),
+        ] {
+            let mut s = Session::new(60, 40, ColorMode::Rgb);
+            let root = s.document().root();
+            // Something under it to blend against and be confined to,
+            // narrower than the layer above so a lost clip shows.
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of(
+                    "ground",
+                    30.0,
+                    30.0,
+                    AuthoredColor::Srgb {
+                        r: 0.25,
+                        g: 0.55,
+                        b: 0.85,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect_of(
+                    "over",
+                    40.0,
+                    26.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.55,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            let over = s.document().children_of(root).unwrap()[1];
+            s.apply(Command::SetTransform {
+                id: over,
+                transform: Transform::translation(6.0, 4.0),
+            })
+            .unwrap();
+            if let Some(make) = how {
+                s.apply(make(over)).unwrap();
+            }
+            let before = s.render().unwrap();
+            let wrapper = s
+                .adjust_node(over, neutral())
+                .unwrap_or_else(|e| panic!("a {what} layer: {e}"));
+            let (worst, x, y) = apart(&before, &s.render().unwrap());
+            assert!(
+                worst < 1e-5,
+                "a {what} layer moved when it was given an adjustment ({worst} at {x},{y})"
+            );
+            // The layer is inside the wrapper, and the wrapper is where
+            // the layer was.
+            assert_eq!(
+                s.document().children_of(wrapper).unwrap().len(),
+                2,
+                "a {what} layer and its adjustment are in there together"
+            );
+            assert_eq!(
+                s.document().children_of(root).unwrap(),
+                &[s.document().children_of(root).unwrap()[0], wrapper],
+                "a {what} layer's wrapper took its place"
+            );
+            // And one undo takes the whole thing back.
+            s.undo().unwrap();
+            let (worst, _, _) = apart(&before, &s.render().unwrap());
+            assert!(worst < 1e-5, "one undo puts a {what} layer back as it was");
+        }
     }
 
     /// Every command, over the boundary the UI actually talks across.

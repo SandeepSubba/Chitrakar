@@ -659,7 +659,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~375),
+- **Verify before committing:** `cargo test --workspace` (~376),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~982 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1013,6 +1013,23 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **Giving a layer its own adjustment leaves the page where it was:** the
+  machinery is a group — the layer and the new adjustment go in one
+  together, and a group holding something that reads the backdrop is drawn
+  on a surface of its own, which is exactly what confines the adjustment
+  to that layer. The other half of that is what nobody had looked at: a
+  wrapped layer meets the group's surface rather than the page. A
+  multiplying layer began multiplying against nothing and arrived over the
+  page plainly, and a layer confined to the one below it was let out of it
+  altogether and covered what it had been showing through — one press,
+  from a menu that promises only to scope an adjustment.
+  Both belong to the wrapper now, which sits exactly where the layer sat;
+  inside it the layer paints plainly, which is also what the adjustment
+  above it wants to read. Opacity is the one that stays: source-over with
+  a weight is associative, so it comes out the same either way, and that
+  is pinned rather than assumed. Asked with an adjustment that does
+  nothing, so the claim is the plain one — the page before and the page
+  after are the same page.
 - **Combining shapes keeps the shape that was being combined:** the
   result takes the bottom-most operand's fill and stroke, because that is
   the shape the eye reads as the one being worked on — and by the same
