@@ -1270,6 +1270,22 @@ without reading anything else.*
   The GPU audit takes the effects off by walking the tree now instead of
   naming a layer, so the fixture can grow another without that going
   quiet, and it asserts that it found some to take off.
+- **And the picture the clipboard gives back:** the same gap on the other
+  side. The clipboard audit compared each arriving layer written out as
+  text — its kind, its mask, its effects, how it composites — and then
+  only that the document it arrived in *draws*. A layer can hold the same
+  values and draw something else, and the case that matters is the plain
+  one: a resource id names bytes that did not travel, so the picture
+  arrives correct in every field and blank on the page. Each covering kind
+  is now drawn on its own on both sides, with the nudge a paste gives it
+  allowed for and nothing else. Stopping `paste` from restoring the pixels
+  it carries fails it by a full step; taking a mask off, or moving one a
+  pixel, is caught by the written-out comparison first, which is how the
+  two divide the work.
+  The four that draw by reading what is under them keep the written-out
+  claim alone, since drawn on their own there is nothing there to adjust,
+  to blur or to read from — that is said in the list rather than left as a
+  gap.
 - **And the page the file gives back, not only the account of it:** the
   file audit compares the document as a spelled-out account, and a
   resource appears there as *how many* bytes it has rather than as which.

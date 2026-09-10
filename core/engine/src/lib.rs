@@ -7037,16 +7037,21 @@ mod tests {
             );
         }
 
-        for (what, id) in [
-            ("a group", f.group),
-            ("a shape", f.under),
-            ("a paint layer", f.painted),
-            ("a picture", f.picture),
-            ("a block of text", f.words),
-            ("a frame", f.frame),
-            ("an adjustment", f.lifted),
-            ("a filter", f.softened),
-            ("a clone layer", f.borrowed),
+        for (what, id, covers) in [
+            ("a group", f.group, true),
+            ("a shape", f.under, true),
+            ("a paint layer", f.painted, true),
+            ("a picture", f.picture, true),
+            ("a block of text", f.words, true),
+            ("a frame", f.frame, true),
+            // The four that draw by reading what is under them have no
+            // picture of their own to hold against anything: drawn on
+            // their own there is nothing there to adjust, to blur, or to
+            // read from. For those the written-out comparison above is
+            // the whole of the claim.
+            ("an adjustment", f.lifted, false),
+            ("a filter", f.softened, false),
+            ("a clone layer", f.borrowed, false),
         ] {
             from.copy_node(id)
                 .unwrap_or_else(|e| panic!("copying {what}: {e}"));
@@ -7088,9 +7093,69 @@ mod tests {
             ] {
                 assert_eq!(a, b, "{what} lost {field}");
             }
+            // And the picture it makes, which the account above cannot
+            // see: everything compared so far is the layer written out as
+            // text, and a layer can hold the same values and draw
+            // something else — a resource id that names bytes which did
+            // not travel, a mask read in the wrong space, an effect whose
+            // reach was cut. Each layer is drawn on its own, where the
+            // page puts it, on both sides.
+            let alone = |s: &Session, id: NodeId| {
+                let (w, h) = (f.doc.meta.width, f.doc.meta.height);
+                let mut surface = Surface::new(w, h);
+                chitrakar_render::render_showing_at(
+                    s.document(),
+                    &mut surface,
+                    ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: w,
+                        y1: h,
+                    },
+                    Transform::default(),
+                    chitrakar_render::Showing::Alone(id),
+                )
+                .unwrap();
+                surface
+            };
+            if !covers {
+                assert!(
+                    to.render().is_ok(),
+                    "the document {what} arrived in still draws"
+                );
+                continue;
+            }
+            let sent = alone(&from, id);
+            let arrived = alone(&to, pasted[0]);
             assert!(
-                to.render().is_ok(),
-                "the document {what} arrived in still draws"
+                sent.pixels.iter().any(|p| p.a > 0.01),
+                "{what} draws something to begin with"
+            );
+            // Pasting nudges what it pastes, so that a copy is visible
+            // rather than hiding exactly behind the original — so the two
+            // pictures are held against each other with that nudge
+            // allowed for, and nothing else.
+            let by = DUPLICATE_OFFSET as u32;
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..(f.doc.meta.height - by) {
+                for x in 0..(f.doc.meta.width - by) {
+                    let (p, q) = (sent.get(x, y), arrived.get(x + by, y + by));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 1e-5,
+                "{what} arrived drawing something else ({} at {},{})",
+                worst.0,
+                worst.1,
+                worst.2
             );
         }
     }
