@@ -858,6 +858,64 @@ fn fs_smear(in: ImageOut) -> @location(0) vec4f {
     return sum / f32(n);
 }
 
+// Where along a segment a point falls, from nought at one end to one at
+// the other and clamped to the segment, and how far it is from it. The
+// CPU renderer's own two, written the same way round: a brush is an
+// analytic coverage rather than a rasterized shape, so a difference in
+// the arithmetic here is a difference in every edge the brush lays.
+fn seg_parameter(p: vec2f, a: vec2f, b: vec2f) -> f32 {
+    let d = b - a;
+    let len2 = d.x * d.x + d.y * d.y;
+    if len2 <= 1e-12 {
+        return 0.0;
+    }
+    return clamp(((p.x - a.x) * d.x + (p.y - a.y) * d.y) / len2, 0.0, 1.0);
+}
+
+fn seg_distance(p: vec2f, a: vec2f, b: vec2f) -> f32 {
+    let d = b - a;
+    let t = seg_parameter(p, a, b);
+    let c = a + d * t;
+    return sqrt((p.x - c.x) * (p.x - c.x) + (p.y - c.y) * (p.y - c.y));
+}
+
+// One segment of a brush stroke: a round-capped band from one point to
+// the next, as wide as the radius at each end says and fading across the
+// softness the brush was set to.
+//
+// `params` is the segment's two ends in the layer's own space, which is
+// what `local` interpolates to; `grad` is the radius at each end, the
+// softness, and the width of the narrowest fade there can be — one
+// device pixel, so a hard brush has an antialiased edge for the same
+// reason every other edge here does.
+//
+// Written into a texture of its own with max blending, because the
+// segments of one stroke *union*: a stroke that doubles back is not
+// darker where it crossed itself, which is what taking the most any
+// segment lays says and what adding them up would not.
+@fragment
+fn fs_brush(in: VsOut) -> @location(0) vec4f {
+    let a = vec2f(in.params.x, in.params.y);
+    let b = vec2f(in.params.z, in.params.w);
+    let along = seg_parameter(in.local, a, b);
+    let r = in.grad.x + (in.grad.y - in.grad.x) * along;
+    if r <= 0.0 {
+        return vec4f(0.0, 0.0, 0.0, 0.0);
+    }
+    let fade = max(r * in.grad.z, in.grad.w);
+    let c = clamp((r - seg_distance(in.local, a, b)) / fade, 0.0, 1.0);
+    return vec4f(c, c, c, c);
+}
+
+// A brush stroke coming down on the layer: the coverage its segments
+// left, in the colour it lays. An eraser hands down the same coverage in
+// nothing at all and is brought down by a blend that takes it off.
+@fragment
+fn fs_paint(in: ImageOut) -> @location(0) vec4f {
+    let c = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
+    return in.grad * c;
+}
+
 // A layer's silhouette in one flat colour, or the hole around it: what
 // every live effect is built from, and the reason a shadow of a
 // photograph is a shape rather than a picture of one.

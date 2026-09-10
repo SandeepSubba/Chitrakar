@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~400),
+- **Verify before committing:** `cargo test --workspace` (~401),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1004 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -1924,9 +1924,16 @@ without reading anything else.*
   and how soft the edge is, which an outline cannot.
 - **Next up (rough priority):**
   1. The GPU backend, in two halves. What is left to *teach* it:
-     the one node kind it has never drawn — a paint layer, whose strokes
-     carry a softness, an erase and a heal the stroke geometry does not.
-     Shadows it now draws, inner and outer, as the blur passes again read
+     nothing of the node kinds: a brush layer was the last it had never
+     drawn, and it draws one now
+     (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
+     into a coverage of its own with max blending, since the segments of
+     one stroke union rather than pile up, then laid down in its colour
+     or, for an eraser, taken off by a blend that subtracts it. What
+     still goes back is a stroke confined to a region, which would be the
+     mask machinery a second time over per stroke, and a clone layer,
+     which paints with what the page already holds. Shadows it now draws,
+     inner and outer, as the blur passes again read
      off the layer's own silhouette rather than off what is under it
      (`a_shadow_is_the_silhouette_the_cpu_casts`), on a leaf that is
      faded, masked or held to the one under it as well as on a plain one

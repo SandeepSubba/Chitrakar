@@ -220,6 +220,15 @@ enum Draw {
         steps: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
     },
+    /// One stroke of a brush: its segments, gathered into a coverage of
+    /// their own on a scratch texture, and the quad that lays that
+    /// coverage down in the stroke's colour — or takes it off, for an
+    /// eraser.
+    Brush {
+        segments: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        erase: bool,
+    },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
     /// before it meets what is under it.
@@ -260,6 +269,9 @@ pub struct GpuRenderer {
     blocks: wgpu::RenderPipeline,
     field: wgpu::RenderPipeline,
     effect: wgpu::RenderPipeline,
+    brush: wgpu::RenderPipeline,
+    paint: wgpu::RenderPipeline,
+    eraser: wgpu::RenderPipeline,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -687,6 +699,88 @@ impl GpuRenderer {
             })
         };
         let field = one_of("effect field", "fs_field", wgpu::BlendState::REPLACE);
+        // A brush stroke's segments, gathered with max blending: they
+        // union rather than pile up, so a stroke that doubles back is
+        // not darker where it crossed itself.
+        let most = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Max,
+        };
+        let brush = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("brush"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_brush"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState {
+                        color: most,
+                        alpha: most,
+                    }),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        // The stroke coming down in its colour, over what the strokes
+        // before it left; and an eraser, which is the same coverage
+        // taking off instead of laying on.
+        let off = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        // On a page, so multisampled and carrying the stencil every
+        // other pass that draws on one does.
+        let laying = |label: &'static str, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_image"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_paint"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        blend: Some(blend),
+                        ..target.clone()
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(stencil_state(
+                    wgpu::StencilOperation::Keep,
+                    wgpu::CompareFunction::Always,
+                )),
+                multisample,
+                multiview: None,
+                cache: None,
+            })
+        };
+        let paint = laying("paint", wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let eraser = laying(
+            "eraser",
+            wgpu::BlendState {
+                color: off,
+                alpha: off,
+            },
+        );
         // The stamp goes onto the surface under the layer, so it
         // composites over what is already there the way a placed picture
         // does — the same target and the same stencil as every other
@@ -886,6 +980,9 @@ impl GpuRenderer {
             blocks,
             field,
             effect,
+            brush,
+            paint,
+            eraser,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -1218,6 +1315,7 @@ impl GpuRenderer {
                     | Some(Opening::Smear { .. })
                     | Some(Opening::Blocks { .. })
                     | Some(Opening::Effect { .. })
+                    | Some(Opening::Brush { .. })
             )
         });
         let scratch: Vec<_> = if !blurring {
@@ -1325,6 +1423,33 @@ impl GpuRenderer {
                     pass.set_vertex_buffer(0, quads.slice(..));
                     pass.draw(along(round % 2), 0..1);
                 }
+            }
+            // A brush stroke, before the pass that lays it down: its
+            // segments are gathered into a coverage of their own with
+            // max blending, since the segments of one stroke union
+            // rather than pile up.
+            if let (Some(Opening::Brush { segments, .. }), Some(quads)) = (&step.lay, &quads) {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("brush"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &scratch[0].0,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.brush);
+                pass.set_bind_group(0, &whole, &[]);
+                pass.set_bind_group(1, &self.open, &[]);
+                pass.set_bind_group(2, &self.open, &[]);
+                pass.set_bind_group(3, &self.open, &[]);
+                pass.set_vertex_buffer(0, quads.slice(..));
+                pass.draw(segments.clone(), 0..1);
             }
             // A live effect, before the pass that stamps it down: the
             // layer's own surface goes in, one pass turns its silhouette
@@ -1534,6 +1659,11 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[1].1, &[]);
                             (quad, mask)
                         }
+                        Opening::Brush { quad, erase, .. } => {
+                            pass.set_pipeline(if *erase { &self.eraser } else { &self.paint });
+                            pass.set_bind_group(1, &scratch[0].1, &[]);
+                            (quad, &None)
+                        }
                         Opening::Effect { from, at, mask } => {
                             pass.set_pipeline(&self.effect);
                             // Six rounds end on the first of the pair; a
@@ -1620,7 +1750,8 @@ impl GpuRenderer {
                         | Draw::Adjust { .. }
                         | Draw::Blur { .. }
                         | Draw::Smear { .. }
-                        | Draw::Blocks { .. } => {}
+                        | Draw::Blocks { .. }
+                        | Draw::Brush { .. } => {}
                     }
                 }
             }
@@ -1974,6 +2105,15 @@ fn one(
         return None;
     }
     let alone = !shadings.is_empty()
+        // A brush layer always: its strokes go on one after another and
+        // an eraser takes off what the ones before it left, which is a
+        // conversation among the strokes and not with the page. On a
+        // surface of its own, its opacity, its mask and its blend are
+        // taken once over the finished layer — which is what the CPU
+        // renderer does to it whenever any of the three is in play, and
+        // what source-over being associative makes identical when none
+        // of them is.
+        || matches!(node.kind, NodeKind::Paint { .. })
         || node.blend != BlendMode::Normal
         || (matches!(node.kind, NodeKind::Group)
             && (node.opacity < 1.0
@@ -2028,6 +2168,90 @@ fn one(
             alpha,
             out,
         )?,
+        // A brush layer: the strokes that were laid on it, in the order
+        // they were laid. Each is gathered into a coverage of its own
+        // first — its segments union rather than pile up — and then
+        // comes down in its colour, or takes off what is under it.
+        NodeKind::Paint { strokes } => {
+            let Some(inv) = chitrakar_render::invert(t) else {
+                return Some(());
+            };
+            let _ = inv;
+            // The softest fade is still one device pixel wide, which is
+            // the floor the CPU renderer puts under it.
+            let band = 1.0 / t.max_scale().max(1e-6);
+            for stroke in strokes {
+                // A stroke confined to a region carries that region, and
+                // reading it here would be the mask machinery a second
+                // time over, per stroke. The CPU's for now.
+                if stroke.clip.is_some() {
+                    return None;
+                }
+                let n = stroke.points.len();
+                if n == 0 {
+                    continue;
+                }
+                let colour = if stroke.erase {
+                    // The colour of an eraser is nothing at all; what it
+                    // hands down is the coverage, and the blend that
+                    // brings it down takes that much off.
+                    [0.0, 0.0, 0.0, 1.0]
+                } else {
+                    // Ink authored for a press is the CPU's, here as
+                    // everywhere else.
+                    premultiplied_color(stroke.color.clone(), 1.0)?
+                };
+                let start = out.vertices.len() as u32;
+                for i in 0..n.saturating_sub(1).max(1) {
+                    let j = (i + 1).min(n - 1);
+                    let (a, b) = (stroke.points[i], stroke.points[j]);
+                    let (ra, rb) = (stroke.radius(i), stroke.radius(j));
+                    let reach = ra.max(rb);
+                    if reach <= 0.0 {
+                        continue;
+                    }
+                    let box_ = [
+                        a[0].min(b[0]) - reach,
+                        a[1].min(b[1]) - reach,
+                        a[0].max(b[0]) + reach,
+                        a[1].max(b[1]) + reach,
+                    ];
+                    let at = t.compose(Transform::translation(box_[0], box_[1]));
+                    let mut verts = quad(
+                        at,
+                        [box_[2] - box_[0], box_[3] - box_[1]],
+                        [a[0], a[1], b[0], b[1]],
+                        [0.0; 4],
+                        [ra, rb, stroke.softness.clamp(0.0, 1.0), band],
+                        0.0,
+                    );
+                    // The quad is placed at the segment's corner, so its
+                    // local coordinate starts there; the segment is
+                    // written in the layer's own space, and both have to
+                    // be read in the same one.
+                    for v in &mut verts {
+                        v.local = [v.local[0] + box_[0], v.local[1] + box_[1]];
+                    }
+                    out.vertices.extend(verts);
+                }
+                let segments = start..out.vertices.len() as u32;
+                if segments.is_empty() {
+                    continue;
+                }
+                let quad = out.push(page_quad(
+                    (out.page, out.surface),
+                    alpha,
+                    [0.0; 4],
+                    colour,
+                    [0.0; 3],
+                ));
+                out.draws.push(Item::of(Draw::Brush {
+                    segments,
+                    quad,
+                    erase: stroke.erase,
+                }));
+            }
+        }
         NodeKind::Raster(raster) => {
             let Some(res) = doc.resource(&raster.resource_id) else {
                 // A resource whose pixels never came back is drawn by
@@ -3436,6 +3660,15 @@ enum Opening {
         at: Painted,
         mask: Option<usize>,
     },
+    /// One brush stroke. Its segments have been gathered into a coverage
+    /// on the scratch texture by the time this opens the pass; what is
+    /// left is the quad that lays that coverage down in the stroke's
+    /// colour.
+    Brush {
+        segments: std::ops::Range<u32>,
+        quad: std::ops::Range<u32>,
+        erase: bool,
+    },
 }
 
 impl Opening {
@@ -3447,8 +3680,8 @@ impl Opening {
             | Opening::Blur { .. }
             | Opening::Smear { .. }
             | Opening::Blocks { .. } => true,
-            // It reads the layer's own surface, not what is under it.
-            Opening::Effect { .. } => false,
+            // Each reads a texture of its own, not what is under it.
+            Opening::Effect { .. } | Opening::Brush { .. } => false,
         }
     }
 }
@@ -3474,7 +3707,8 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             | Draw::Adjust { .. }
             | Draw::Blur { .. }
             | Draw::Smear { .. }
-            | Draw::Blocks { .. } => {}
+            | Draw::Blocks { .. }
+            | Draw::Brush { .. } => {}
             _ => continue,
         }
         passes.push(Pass {
@@ -3569,6 +3803,18 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     steps: steps.clone(),
                     quad: quad.clone(),
                     mask: item.mask,
+                });
+            }
+            Draw::Brush {
+                segments,
+                quad,
+                erase,
+            } => {
+                clear = false;
+                lay = Some(Opening::Brush {
+                    segments: segments.clone(),
+                    quad: quad.clone(),
+                    erase: *erase,
                 });
             }
             _ => unreachable!("only the six above cut a pass"),
@@ -6154,6 +6400,166 @@ mod tests {
         assert!(
             (ratio - 0.666).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
+        );
+    }
+
+    /// A brush layer: the strokes that were laid on it, in the order
+    /// they were laid.
+    ///
+    /// The one node kind this backend had never drawn. A stroke is not a
+    /// shape with an outline — it is a round-capped band from each point
+    /// to the next, as wide as the radius at each end says and fading
+    /// across whatever softness the brush was set to — and the segments
+    /// of one stroke *union* rather than pile up, so a stroke that
+    /// doubles back is not darker where it crossed itself.
+    #[test]
+    fn a_brush_lays_the_strokes_the_cpu_lays() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let stroke = |points: &[[f32; 2]], radii: &[f32], softness: f32, erase: bool| {
+            chitrakar_doc::PaintStroke {
+                points: points.to_vec(),
+                radii: radii.to_vec(),
+                color: ink(0.1, 0.2, 0.7, 1.0),
+                softness,
+                erase,
+                source: [0.0, 0.0],
+                heal: false,
+                clip: None,
+            }
+        };
+        let page = |strokes: Vec<chitrakar_doc::PaintStroke>| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.9, 0.88, 0.8, 1.0),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::paint("brushed")),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            for (i, s) in strokes.into_iter().enumerate() {
+                doc.apply(Command::AddStroke {
+                    id,
+                    index: i,
+                    stroke: Box::new(s),
+                    on_mask: false,
+                })
+                .unwrap();
+            }
+            (doc, id)
+        };
+
+        for (name, strokes) in [
+            ("one dab", vec![stroke(&[[20.0, 20.0]], &[6.0], 0.0, false)]),
+            (
+                "a line",
+                vec![stroke(&[[10.0, 10.0], [50.0, 30.0]], &[5.0], 0.0, false)],
+            ),
+            // Swelling from one end to the other, which is what pressure
+            // and a slow hand both come out as.
+            (
+                "a line that swells",
+                vec![stroke(
+                    &[[8.0, 30.0], [30.0, 12.0], [52.0, 26.0]],
+                    &[2.0, 7.0, 3.0],
+                    0.0,
+                    false,
+                )],
+            ),
+            (
+                "a soft brush",
+                vec![stroke(&[[15.0, 20.0], [45.0, 20.0]], &[8.0], 0.8, false)],
+            ),
+            // Doubling back over itself: taking the most any segment lays
+            // rather than adding them is what keeps the crossing from
+            // being darker.
+            (
+                "a stroke that crosses itself",
+                vec![stroke(
+                    &[[15.0, 12.0], [45.0, 28.0], [15.0, 28.0], [45.0, 12.0]],
+                    &[4.0],
+                    0.35,
+                    false,
+                )],
+            ),
+            (
+                "one over another",
+                vec![
+                    stroke(&[[10.0, 15.0], [50.0, 15.0]], &[6.0], 0.0, false),
+                    stroke(&[[10.0, 25.0], [50.0, 25.0]], &[6.0], 0.5, false),
+                ],
+            ),
+            (
+                "and an eraser over both",
+                vec![
+                    stroke(&[[10.0, 15.0], [50.0, 15.0]], &[6.0], 0.0, false),
+                    stroke(&[[10.0, 25.0], [50.0, 25.0]], &[6.0], 0.5, false),
+                    stroke(&[[30.0, 8.0], [30.0, 32.0]], &[5.0], 0.2, true),
+                ],
+            ),
+        ] {
+            let (doc, _) = page(strokes);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name} is drawn rather than handed back"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.004,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // What a mean would hide. A stroke that doubles back is one
+        // colour where it crossed itself, not two coats of it.
+        let (crossed, _) = page(vec![stroke(
+            &[[10.0, 20.0], [50.0, 20.0], [10.0, 20.0]],
+            &[5.0],
+            0.6,
+            false,
+        )]);
+        let twice = gpu.render(&crossed).unwrap();
+        let (once, _) = page(vec![stroke(
+            &[[10.0, 20.0], [50.0, 20.0]],
+            &[5.0],
+            0.6,
+            false,
+        )]);
+        let single = gpu.render(&once).unwrap();
+        assert_eq!(
+            twice.get(30, 20).to_srgb8(),
+            single.get(30, 20).to_srgb8(),
+            "a stroke laid over itself is not darker for it"
+        );
+        // And the eraser really takes off rather than painting the page's
+        // colour over: what is left is the layer under it.
+        let (rubbed, _) = page(vec![
+            stroke(&[[10.0, 20.0], [50.0, 20.0]], &[8.0], 0.0, false),
+            stroke(&[[30.0, 8.0], [30.0, 32.0]], &[5.0], 0.0, true),
+        ]);
+        let out = gpu.render(&rubbed).unwrap();
+        assert_eq!(
+            out.get(30, 20).to_srgb8(),
+            out.get(2, 2).to_srgb8(),
+            "the eraser leaves the page showing through"
         );
     }
 
