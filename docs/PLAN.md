@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~366),
+- **Verify before committing:** `cargo test --workspace` (~367),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~966 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~972 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -971,6 +971,27 @@ without reading anything else.*
   parts of the fix was checked by breaking it and watching that test
   fail. `a_shadow_turns_with_the_group_it_is_in` pins the renderer's
   half on its own.
+- **And the same rule where a person meets it daily:** `reparent` — a
+  layer dragged onto another row in the layers panel — already undid the
+  change of space on the layer's own transform, so the layer does not
+  jump when it is dropped into a group that sits away from the origin,
+  and left the mask and the shadow behind in the space it came from. The
+  layer stood still while the hole in it moved. The carry is the same one
+  transform (`back ∘ was`) the code already had in hand, handed to
+  `carried_through` as well as to the layer.
+  Its own audit is narrower than the group one on purpose: reparenting
+  changes the stack as well as the space — dropped somewhere else a layer
+  is drawn in a different order, and a copy of the group it left holds
+  something different now — so the claim is about the layer rather than
+  about the page, and `Showing::Alone` is what asks it. Both ways round,
+  through a host that turns and scales as well as shifts, and block 9ax
+  drives the drag through the panel with a masked layer and probes across
+  the mask's edge.
+  Where the carry is *not* wanted is now a line worth stating: it is
+  needed exactly when a layer's parent changes, since that is when the
+  space its mask is written in changes. Aligning, flipping and a frame
+  resizing its pinned children all keep the parent, so leaving the mask
+  is the documented thing a layer does — moving behind its own mask.
 - **Every command, over the boundary the UI talks across:** nothing in
   the app calls `apply`. The UI is TypeScript on the far side of a wasm
   boundary, so every mutation it makes is a serde-JSON `Command` handed

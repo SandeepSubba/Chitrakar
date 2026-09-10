@@ -9161,6 +9161,120 @@ assert(
   );
 }
 
+// 9ax. A masked layer dragged into a group somewhere else stays where it
+// is. Dropping a row onto a group's row already undid the change of space
+// on the layer's own transform, so the layer does not jump when the group
+// it lands in sits away from the origin — and a mask is written in the
+// space its owner is *placed* in, not in the layer's own, so it was left
+// behind: the layer stood still while the hole in it moved. The everyday
+// way to meet that is exactly this drag.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const draw = async (tool, x0, y0, x1, y1) => {
+    await pickTool(tool);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  // Something to drop into, wrapped and then carried well away from where
+  // it was made, so the space inside it is nothing like the page's.
+  await draw("Ellipse", 250, 190, 350, 270);
+  await page.locator(".panel ul li").first().click();
+  await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.mouse.move(...at(300, 230));
+  await page.mouse.down();
+  await page.mouse.move(...at(330, 255), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  // The layer to drag, held to a region so it carries a mask.
+  await draw("Rect", 40, 40, 200, 160);
+  await pickTool("Select");
+  await page.mouse.move(...at(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...at(120, 100), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.mouse.click(...at(80, 70));
+  await page.waitForTimeout(250);
+  await menuClick("Edit", "Mask this layer with what is picked");
+  await page.waitForTimeout(400);
+  await menuClick("Edit", "Pick out nothing");
+  await page.waitForTimeout(250);
+
+  // Where the mask's edge is: inside it the layer shows, outside it does
+  // not, and both have to be true afterwards for the mask to have come
+  // along. A row of probes across the edge rather than one point, so a
+  // mask that shifted by a little is caught as well as one that left.
+  const probes = [
+    [60, 60],
+    [100, 80],
+    [116, 96],
+    [140, 120],
+    [180, 150],
+  ];
+  const shot = async () => {
+    const out = [];
+    for (const [x, y] of probes) out.push((await canvasPixel(x, y))[3] > 128);
+    return out.join(",");
+  };
+  const held = await shot();
+  assert(
+    held.startsWith("true") && held.endsWith("false"),
+    `the mask cuts the layer somewhere in the middle of the probes (${held})`,
+  );
+
+  // Drag its row onto the middle of the group's row, which is what drops
+  // it inside.
+  const rows = page.locator(".panel ul li");
+  const names = async () =>
+    (await page.locator(".panel ul li .layer-name").allTextContents()).map((n) => n.trim());
+  // By position and kind rather than by name: the names carry a counter
+  // that the blocks before this one have already moved on.
+  const rectRow = rows.first();
+  const groupRow = page.locator('.panel ul li[data-kind="group"]').first();
+  const [from, onto] = [await rectRow.boundingBox(), await groupRow.boundingBox()];
+  await page.mouse.move(from.x + 40, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(from.x + 40, onto.y + onto.height * 0.5, { steps: 8 });
+  assert(
+    (await groupRow.getAttribute("class")).includes("drop-into"),
+    "the group's row says the layer would land inside it",
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  assert(
+    (await names()).length === 3,
+    `the layer is inside the group now (${await names()})`,
+  );
+  const indent = await page
+    .locator('.panel ul li[data-kind="vector"]')
+    .first()
+    .evaluate((el) => parseFloat(el.style.paddingLeft));
+  assert(indent > 4, `and is drawn indented under it (${indent}px)`);
+  const after = await shot();
+  assert(
+    after === held,
+    `the layer and its mask both stayed where they were (${held} -> ${after})`,
+  );
+
+  // And one undo takes the whole drop back, mask and all.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  assert(
+    (await shot()) === held,
+    "and one undo leaves it exactly as it was",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

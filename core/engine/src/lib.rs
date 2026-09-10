@@ -1399,17 +1399,42 @@ impl Session {
         let Some(back) = chitrakar_render::invert(now) else {
             return self.apply_labeled(move_it, Some(label));
         };
-        let keep = back.compose(was).compose(self.doc.node(id)?.transform);
-        self.apply_labeled(
-            Command::Batch(vec![
-                move_it,
-                Command::SetTransform {
-                    id,
-                    transform: keep,
-                },
-            ]),
-            Some(label),
-        )
+        // The one transform that carries the layer from the space it was
+        // written in to the space it is going to.
+        let carry = back.compose(was);
+        let node = self.doc.node(id)?;
+        let mut cmds = vec![
+            move_it,
+            Command::SetTransform {
+                id,
+                transform: carry.compose(node.transform),
+            },
+        ];
+        // A mask is written in the space its owner is *placed* in, and an
+        // effect's offset is a vector in that space, so neither travels
+        // with the layer's own transform: both have to be carried by hand
+        // (the same rule `Document::map_page` keeps for a page, and
+        // `ungroup_node` for a group being dissolved). Left behind, a
+        // mask goes on covering the part of the page it used to, which
+        // for a layer dropped into a group somewhere else is a layer that
+        // stays put while the hole in it jumps.
+        if let Some(mask) = &node.mask {
+            cmds.push(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.carried_through(carry))),
+            });
+        }
+        if !node.effects.is_empty() {
+            cmds.push(Command::SetEffects {
+                id,
+                effects: node
+                    .effects
+                    .iter()
+                    .map(|e| e.carried_through(carry))
+                    .collect(),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(label))
     }
 
     /// Put a live copy of a layer beside it: a layer that draws whatever
@@ -7483,6 +7508,152 @@ mod tests {
                 format!("{:?}", s.document().node(id).unwrap().mask),
                 format!("{:?}", Some(mask.clone())),
                 "{what}: and one undo puts the mask back where it was"
+            );
+        }
+    }
+
+    /// And a layer dragged into a group somewhere else brings its mask.
+    ///
+    /// The same rule as a group being dissolved, in the other direction
+    /// and in the place a person meets it every day: dragging a layer
+    /// onto another row in the layers panel. `reparent` already undoes
+    /// the space change on the layer's own transform, so the layer does
+    /// not jump when it is dropped into a group that sits away from the
+    /// origin — and left the mask and the shadow behind in the space it
+    /// came from, so the layer stayed put while the hole in it moved.
+    ///
+    /// Both ways round, since a layer comes out of a group as often as it
+    /// goes in, and through a host that turns and scales as well as
+    /// shifts, so a carry that only got the shift right would still be
+    /// caught.
+    #[test]
+    fn a_layer_dragged_into_another_group_brings_its_mask() {
+        let f = chitrakar_doc::fixture::everything();
+        let (c, sn) = (0.3f32.cos(), 0.3f32.sin());
+        let placed = Transform::translation(11.0, 7.0).compose(Transform {
+            a: 1.2 * c,
+            b: 1.2 * sn,
+            c: -1.2 * sn,
+            d: 1.2 * c,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 30.0,
+                    height: 16.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(4.0, 6.0),
+            },
+            invert: false,
+            feather: 4.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 5.0,
+            dy: 0.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.9,
+        };
+        for (what, id) in [
+            ("a shape", f.under),
+            ("a paint layer", f.painted),
+            ("a picture", f.picture),
+            ("a block of text", f.words),
+            ("a group", f.group),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            // Somewhere to drop it: a group holding one layer, put where
+            // its space is nothing like the page's.
+            let host = s.group_nodes(&[f.frame], "host").unwrap();
+            s.apply(Command::SetTransform {
+                id: host,
+                transform: placed,
+            })
+            .unwrap();
+            s.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.clone())),
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone()],
+            })
+            .unwrap();
+            // The layer on its own, where the page puts it. Reparenting
+            // is a change to the stack as well as to the space — dropped
+            // somewhere else a layer is drawn in a different order, and
+            // what a copy of the group it left holds changes too — so the
+            // claim is about the layer, not about the page: it lands
+            // exactly where it was, mask, softness and shadow and all.
+            let alone = |s: &Session| {
+                let (w, h) = (f.doc.meta.width, f.doc.meta.height);
+                let mut surface = Surface::new(w, h);
+                let clip = ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                };
+                chitrakar_render::render_showing_at(
+                    s.document(),
+                    &mut surface,
+                    clip,
+                    Transform::default(),
+                    chitrakar_render::Showing::Alone(id),
+                )
+                .unwrap();
+                surface
+            };
+            let before = alone(&s);
+            let home = (
+                s.document().parent_of(id).unwrap(),
+                s.document()
+                    .children_of(s.document().parent_of(id).unwrap())
+                    .unwrap()
+                    .iter()
+                    .position(|c| *c == id)
+                    .unwrap(),
+            );
+
+            s.reparent(id, host, 0)
+                .unwrap_or_else(|e| panic!("dropping {what} into the group: {e}"));
+            let (worst, x, y) = apart(&before, &alone(&s));
+            assert!(
+                worst < 1e-4,
+                "{what} moved when it was dropped in ({worst} at {x},{y})"
+            );
+
+            // And out again, to exactly where it was.
+            s.reparent(id, home.0, home.1)
+                .unwrap_or_else(|e| panic!("dragging {what} back out: {e}"));
+            let (worst, x, y) = apart(&before, &alone(&s));
+            assert!(
+                worst < 1e-4,
+                "{what} moved on the way back out ({worst} at {x},{y})"
+            );
+
+            // Two drags, two undos, and the mask is the one it started
+            // with rather than one carried there and back.
+            s.undo().unwrap();
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().mask),
+                format!("{:?}", Some(mask.clone())),
+                "{what}: undone, its mask is the one it was given"
+            );
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().effects),
+                format!("{:?}", vec![shadow.clone()]),
+                "{what}: and so is its shadow"
             );
         }
     }
