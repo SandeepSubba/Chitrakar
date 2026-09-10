@@ -1383,6 +1383,17 @@ without reading anything else.*
   eight bits a channel; that is a twentieth of a step of linear light here
   and is what the tolerance is for. It came back right, and each half of
   the check was verified by breaking the writer.
+- **And the two doors that can be read back are:** "it came out
+  non-empty" is a long way from "it came out right" — a channel written in
+  the wrong order, an alpha not composited, a picture at the wrong size are
+  each a file of the proper length. So the PNG is decoded and held against
+  the page to within one eight-bit step, in the encoding a PNG carries
+  rather than in light; and the JPEG, which is lossy and has no alpha, is
+  held to being the *same picture* over the page's opaque part, within a
+  couple of steps a channel on average. Swapping red and blue on the way
+  to a JPEG shows up as seventy steps; writing a PNG opaque shows up as a
+  full one. SVG has a round trip of its own; a PDF and a CMYK TIFF are
+  still only asked to open.
 - **Every command, and then every door out:**
   `every_command_leaves_a_document_every_door_can_take` applies the
   shared fixture's every command and then asks for a PNG, a JPEG, an

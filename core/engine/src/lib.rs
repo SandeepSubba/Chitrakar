@@ -9021,6 +9021,66 @@ mod tests {
             out("a PNG", session.render_png_at(1.0, None).map(|b| b.len()));
             out("a JPEG", session.export_jpeg(80).map(|b| b.len()));
             out("an SVG", session.export_svg().map(|s| s.len()));
+
+            // The two doors that can be read back again are read back and
+            // held against the page, because "it came out non-empty" is a
+            // long way from "it came out right": a channel written in the
+            // wrong order, an alpha composited against the wrong colour or
+            // not composited at all, a picture written at the wrong size —
+            // every one of those is a file of the proper length.
+            let page = session.render().unwrap();
+            let png = chitrakar_codecs::decode(&session.render_png_at(1.0, None).unwrap())
+                .unwrap_or_else(|e| panic!("the PNG written after {what} reads back: {e}"));
+            assert_eq!(
+                (png.width, png.height),
+                (page.width, page.height),
+                "the PNG written after {what} is the size of the page"
+            );
+            // A PNG carries eight bits a channel of what a device shows,
+            // so the page is asked in the same terms rather than in light.
+            let shown = page.to_srgb8();
+            let mut worst = (0u8, 0usize);
+            for (i, (&a, &b)) in shown.iter().zip(&png.rgba8).enumerate() {
+                let d = a.abs_diff(b);
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            assert!(
+                worst.0 <= 1,
+                "the PNG written after {what} is not the page ({} at byte {})",
+                worst.0,
+                worst.1
+            );
+
+            // A JPEG is lossy and has no alpha, so it is held to being
+            // the *same picture* rather than the same bytes: over the
+            // page's opaque part, on average, within a couple of steps.
+            let jpeg = chitrakar_codecs::decode(&session.export_jpeg(92).unwrap())
+                .unwrap_or_else(|e| panic!("the JPEG written after {what} reads back: {e}"));
+            assert_eq!(
+                (jpeg.width, jpeg.height),
+                (page.width, page.height),
+                "the JPEG written after {what} is the size of the page"
+            );
+            let mut sum = 0u64;
+            let mut seen = 0u64;
+            for (i, px) in page.pixels.iter().enumerate() {
+                if px.a < 0.99 {
+                    continue;
+                }
+                for c in 0..3 {
+                    sum += shown[i * 4 + c].abs_diff(jpeg.rgba8[i * 4 + c]) as u64;
+                    seen += 1;
+                }
+            }
+            if seen > 64 {
+                let mean = sum as f64 / seen as f64;
+                assert!(
+                    mean < 3.0,
+                    "the JPEG written after {what} is a different picture (off by {mean:.2} a channel)"
+                );
+            }
             out("a PDF", session.export_pdf().map(|b| b.len()));
             out(
                 "a PDF of frames",
