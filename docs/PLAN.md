@@ -659,9 +659,9 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~374),
+- **Verify before committing:** `cargo test --workspace` (~375),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~977 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~982 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -1013,6 +1013,22 @@ without reading anything else.*
   space its mask is written in changes. Aligning, flipping and a frame
   resizing its pinned children all keep the parent, so leaving the mask
   is the documented thing a layer does — moving behind its own mask.
+- **Combining shapes keeps the shape that was being combined:** the
+  result takes the bottom-most operand's fill and stroke, because that is
+  the shape the eye reads as the one being worked on — and by the same
+  reading it *is* that layer with a different outline. It was built as a
+  fresh layer with the fill and stroke put back into it, so a
+  half-transparent shape with a drop shadow came out of a combine opaque
+  and flat, its mask gone, unlocked, and let out of whatever it was
+  clipped to. It is built from a copy of that layer now, which is also
+  what makes the next field a `Node` is given come along without anybody
+  remembering this code — the same lesson as `emit_copy` beside
+  `emit_clip`.
+  The test's sharp end needs no list of fields at all: the union of a
+  shape and a shape *inside* it is the first shape, so the page must not
+  change, and everything the layer says about how it is drawn is in that
+  one comparison. The lock and the pin cannot show on a page, so those are
+  said field by field beside it. Block 9az drives it through the panel.
 - **A layer that cannot be seen draws the same page as no layer at all:**
   there are three ways for a layer to be invisible and they are three
   different pieces of arithmetic — hidden is a flag the walk skips on, an

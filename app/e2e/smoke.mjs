@@ -9354,6 +9354,71 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9az. Combining shapes keeps the shape that was being combined. The
+// result takes the bottom-most operand's fill and stroke, because that is
+// the shape the eye reads as the one being worked on — and by the same
+// reading it *is* that layer, with a different outline. It used to be a
+// fresh layer with the fill put back into it, so a half-transparent shape
+// came out of a combine at full strength and its blend mode was gone.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const drawRect = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  // The one being combined, made half-transparent so the page can say
+  // whether that came along.
+  await drawRect(60, 60, 260, 200);
+  const shape = page.locator(".panel ul li").first();
+  await shape.click();
+  await page.locator('input[aria-label="Layer opacity"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "0.5");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const faded = await canvasPixel(120, 120);
+  assert(faded[3] > 60 && faded[3] < 200, `half-transparent to begin with (${faded[3]})`);
+
+  // A smaller one wholly inside it: their union is the first one's own
+  // outline, so the page must not move at all.
+  await drawRect(120, 110, 180, 150);
+  await pickTool("Move");
+  await page.locator(".panel ul li").nth(1).click();
+  await page.locator(".panel ul li").nth(0).click({ modifiers: ["Control"] });
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Unite shapes"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    "uniting left a single layer",
+  );
+  const after = await canvasPixel(120, 120);
+  assert(
+    Math.abs(after[3] - faded[3]) <= 2,
+    `the combined shape is drawn as the shape it was (${faded[3]} -> ${after[3]})`,
+  );
+  assert(
+    Math.abs(Number(await page.locator('input[aria-label="Layer opacity"]').inputValue()) - 0.5) < 0.02,
+    "and the panel says so too",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "one undo takes the combine back",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

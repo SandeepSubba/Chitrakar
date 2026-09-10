@@ -898,39 +898,40 @@ impl Session {
         let points = shift(acc.next().unwrap());
         let subpaths: Vec<Vec<[f32; 2]>> = acc.map(shift).collect();
 
-        let bottom = self.doc.node(ordered[0])?;
-        let (fill, stroke, gradient) = match &bottom.kind {
-            NodeKind::Vector {
-                fill,
-                stroke,
-                gradient,
-                ..
-            } => (*fill, stroke.clone(), gradient.clone()),
-            _ => unreachable!("checked above"),
+        // The result *is* the bottom-most shape, with a different
+        // outline: that is the whole reading behind taking its fill and
+        // stroke, and everything else the layer says about itself follows
+        // from the same reading. It is built from a copy of that layer
+        // rather than from a fresh one with a few fields put back, so a
+        // half-transparent shape with a drop shadow does not come out of
+        // a combine opaque and flat — and so whatever a `Node` is given
+        // next comes along without anybody remembering to add it here.
+        // Its mask is in the parent's space and the result goes in the
+        // same parent at the same place, so the mask needs no carrying.
+        let mut node = self.doc.node(ordered[0])?.clone();
+        node.name = format!("{} {}", node.name, label_for(op));
+        let NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = node.kind
+        else {
+            unreachable!("checked above")
         };
-        let name = format!("{} {}", bottom.name.clone(), label_for(op));
-        let mut node = Node::vector(
-            &name,
-            chitrakar_doc::VectorShape::Path {
+        node.kind = NodeKind::Vector {
+            shape: chitrakar_doc::VectorShape::Path {
                 points,
                 closed: true,
                 smooth: false,
                 handles: Vec::new(),
                 subpaths,
             },
-        );
+            fill,
+            stroke,
+            gradient,
+        };
         node.transform = Transform::translation(x0, y0);
-        if let NodeKind::Vector {
-            fill: f,
-            stroke: s,
-            gradient: g,
-            ..
-        } = &mut node.kind
-        {
-            *f = fill;
-            *s = stroke;
-            *g = gradient;
-        }
         let index = siblings
             .iter()
             .position(|s| *s == ordered[0])
@@ -5513,6 +5514,15 @@ mod tests {
         Box::new(node)
     }
 
+    /// The same, in a colour of its own.
+    fn rect_of(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
+        let mut node = filled_rect(name, w, h);
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(color);
+        }
+        node
+    }
+
     fn add_rect(session: &mut Session, name: &str, w: f32, h: f32) -> NodeId {
         let root = session.document().root();
         let index = session.document().children_of(root).unwrap().len();
@@ -7819,6 +7829,194 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Combining shapes keeps the shape that was being combined.
+    ///
+    /// The result takes the bottom-most operand's fill and stroke,
+    /// because that is the shape the eye reads as the one being operated
+    /// on — and by the same reading it is that layer, with a different
+    /// outline. It used to be a fresh layer with the fill and the stroke
+    /// put back into it, so a half-transparent shape with a drop shadow
+    /// came out of a combine opaque and flat, its mask gone, unlocked,
+    /// and let out of whatever it was clipped to. It is built from a copy
+    /// of that layer now, which is also why the next field a `Node` is
+    /// given will come along without anybody remembering this code.
+    ///
+    /// The sharp end of it: the union of a shape and a shape *inside* it
+    /// is the first shape, so the page must not change at all. Everything
+    /// the layer says about how it is drawn is in that one comparison,
+    /// and nothing has to be listed for it to be checked.
+    #[test]
+    fn combining_shapes_keeps_the_shape_that_was_combined() {
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 34.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(6.0, 4.0),
+            },
+            invert: false,
+            feather: 2.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 3.0,
+            dy: 3.0,
+            blur: 2.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.1,
+                a: 1.0,
+            },
+            opacity: 0.8,
+        };
+        // A backdrop to blend against, then the shape being combined.
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of(
+                    "ground",
+                    80.0,
+                    60.0,
+                    AuthoredColor::Srgb {
+                        r: 0.3,
+                        g: 0.6,
+                        b: 0.8,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect_of(
+                    "big",
+                    40.0,
+                    30.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.4,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        let big = session.document().children_of(root).unwrap()[1];
+        for cmd in [
+            Command::SetTransform {
+                id: big,
+                transform: Transform::translation(12.0, 10.0),
+            },
+            Command::SetOpacity {
+                id: big,
+                opacity: 0.6,
+            },
+            Command::SetBlendMode {
+                id: big,
+                blend: chitrakar_doc::BlendMode::Multiply,
+            },
+            Command::SetMask {
+                id: big,
+                mask: Some(Box::new(mask.clone())),
+            },
+            Command::SetEffects {
+                id: big,
+                effects: vec![shadow.clone()],
+            },
+            Command::SetLocked {
+                id: big,
+                locked: true,
+            },
+            Command::SetPinning {
+                id: big,
+                pinned: chitrakar_doc::Pinning {
+                    x: chitrakar_doc::Pin::End,
+                    y: chitrakar_doc::Pin::Stretch,
+                },
+            },
+        ] {
+            session.apply(cmd).unwrap();
+        }
+        let alone = session.render().unwrap();
+
+        // A smaller shape wholly inside it, so their union is its own
+        // outline and nothing about the page should move.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: rect_of(
+                    "small",
+                    10.0,
+                    8.0,
+                    AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.9,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        let small = session.document().children_of(root).unwrap()[2];
+        session
+            .apply(Command::SetTransform {
+                id: small,
+                transform: Transform::translation(20.0, 18.0),
+            })
+            .unwrap();
+        let joined = session.boolean_nodes(&[big, small], "union").unwrap();
+        let (worst, x, y) = apart(&alone, &session.render().unwrap());
+        assert!(
+            worst < 2e-2,
+            "the combined shape is drawn as the shape it was ({worst} at {x},{y})"
+        );
+
+        // And said field by field as well, since the page cannot show a
+        // lock or a pin.
+        let now = session.document().node(joined).unwrap();
+        assert_eq!(now.opacity, 0.6, "its opacity came along");
+        assert_eq!(
+            now.blend,
+            chitrakar_doc::BlendMode::Multiply,
+            "and how it blends"
+        );
+        assert_eq!(
+            format!("{:?}", now.mask),
+            format!("{:?}", Some(mask)),
+            "and its mask"
+        );
+        assert_eq!(
+            format!("{:?}", now.effects),
+            format!("{:?}", vec![shadow]),
+            "and its shadow"
+        );
+        assert!(now.locked, "a locked shape does not come out unlocked");
+        assert_eq!(
+            now.pinned.x,
+            chitrakar_doc::Pin::End,
+            "and it answers a frame the same way it did"
+        );
+        assert!(
+            now.name.starts_with("big"),
+            "named for the shape it was: {}",
+            now.name
+        );
+        // One undo takes the whole combine back.
+        session.undo().unwrap();
+        assert!(
+            session.document().node(big).is_ok() && session.document().node(small).is_ok(),
+            "one undo puts both shapes back"
+        );
     }
 
     /// Every command, over the boundary the UI actually talks across.
