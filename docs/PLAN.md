@@ -1995,7 +1995,9 @@ without reading anything else.*
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: press ink, a healing
-     stroke, an outline wider than a pass will walk, effects on a group.
+     stroke, an outline wider than a pass will walk, effects on a frame
+     or on a copy or on a clone layer, and a stroke carrying a region on
+     a layer whose own mask is already riding that slot.
      A brush layer it draws
      (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
      into a coverage of its own with max blending, since the segments of
@@ -2063,7 +2065,7 @@ without reading anything else.*
      the silhouette, both of which want the layer's own coverage where a
      blend wants what is under it. So where there is a blend those two
      happen a pass earlier, on the scratch pair, and the stamp is left an
-     ordinary picture to bring down. What still goes back is a group.
+     ordinary picture to bring down.
      The fixture audit now compares all three of its layers with their
      effects on. Finding the third of them is what turned up a separate
      defect, in the stamp rather than the blend: the field was read
@@ -2154,12 +2156,20 @@ without reading anything else.*
      That found a copy drawing its shadow clipped, turned up the
      clipping wrinkle above, and — once a layer in it reached for a
      palette entry — found a palette change repainting nothing and the
-     GPU declining a page it can draw. Four shapes have gone in since. Three held: a
+     GPU declining a page it can draw. Five shapes have gone in since. Three held: a
      copy of a *frame*, a copy of a *copy*, and a second frame. The
      fourth did not — a shadow on the *group*, where every effect in the
      fixture had until then hung on a layer — and it took two audits with
-     it, one of which was a shadow that changed when the layer it belonged
-     to moved near the page's edge. Holding is not nothing — but the copy of a copy was
+     it, one of which was a shadow that changed when the layer it
+     belonged to moved near the page's edge. The fifth held: a layer
+     *held to* the one under it, which is the one way of one layer
+     deciding what another shows that the standing document had never
+     had — and since holding proves little on its own, the code it was
+     meant to exercise was broken to see who would notice. Somebody
+     does: ignore the flag in the GPU backend and the cross-renderer
+     audit fails on the bare fixture; drop it on the way to a file and
+     the container audit says the clip did not survive. Which is the
+     lesson applied rather than relearned. Holding is not nothing — but the copy of a copy was
      worth more than that. Nothing broke, so the question became what
      would have to break for the audit to notice, and the answer was
      nothing: stopping the walk that finds copies of copies after one
@@ -2174,7 +2184,14 @@ without reading anything else.*
      and could not see a picture that arrived blank; the SVG witness read
      a dash pattern out of the markup rather than off the page, where a
      line on where it should be off would have passed. All three now
-     compare the picture. What is left of the export audit is the doors
+     compare the picture. The newest of those: a *clipped* layer travels
+     to SVG as a mask made out of the layer below it, and what said so
+     was a test reading the markup back for a `<mask>` element over the
+     right box. The resvg page carries one now — take the mask off and
+     the comparison fails, shift its box six pixels and it still fails —
+     with three spot checks saying the overlap, the base alone and the
+     overhang each show what they should.
+     What is left of the export audit is the doors
      that cannot be read back: a PDF has no reader here, so it is still
      only asked to open.
      Then whatever the next user of the editor misses first — a brush that

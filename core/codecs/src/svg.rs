@@ -2114,6 +2114,54 @@ mod tests {
         }
         place(&mut doc, broken, [78.0, 38.0]);
 
+        // A layer *held to* the one under it. SVG has no clipping to
+        // another layer's alpha, so this travels as a mask made out of
+        // the layer below — and whether that mask lands where the engine
+        // puts the clip is a question about the picture, which reading
+        // the markup back cannot answer. Hung off the base's corner so
+        // the clip has something to cut.
+        place(
+            &mut doc,
+            painted(
+                "a base",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 18.0,
+                    radius: 0.0,
+                },
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.6,
+                    b: 0.3,
+                    a: 1.0,
+                },
+            ),
+            [96.0, 56.0],
+        );
+        let held = place(
+            &mut doc,
+            painted(
+                "held to it",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 18.0,
+                    radius: 0.0,
+                },
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.55,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            [104.0, 50.0],
+        );
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+
         let mut lettering = chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE);
         // The second letter is set apart: another colour, so the page
         // exercises a block that is not all one ink.
@@ -2206,6 +2254,27 @@ mod tests {
             at(75, 20)
         );
         assert_eq!(at(23, 60), &[255, 255, 255], "the hole shows paper");
+        // The layer held to the one under it: orange where the two
+        // overlap, the base's green where only the base is, and paper
+        // where the held layer reaches past what holds it. The last of
+        // those is the one that matters — a mask written over the wrong
+        // box would leave the overhang showing, and a mean over a page
+        // this busy would not say so.
+        assert!(
+            at(110, 62)[0] > 200 && at(110, 62)[2] < 60,
+            "the held layer shows where the base does {:?}",
+            at(110, 62)
+        );
+        assert!(
+            at(100, 62)[1] > 120 && at(100, 62)[0] < 100,
+            "and the base alone where it does not {:?}",
+            at(100, 62)
+        );
+        assert_eq!(
+            at(110, 52),
+            &[255, 255, 255],
+            "and nothing of it past the base's edge"
+        );
         assert!(
             at(60, 55)[0] > 200 && at(60, 55)[1] > 100,
             "the group is half opaque over paper {:?}",

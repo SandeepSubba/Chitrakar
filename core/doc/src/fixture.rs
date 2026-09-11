@@ -39,6 +39,11 @@ pub struct Fixture {
     pub echo: NodeId,
     /// A second frame, so that a page's frames are more than one.
     pub other_frame: NodeId,
+    /// A layer drawn as itself and, a second time, as the coverage that
+    /// holds the layer above it — and that layer, which shows only where
+    /// the base's own alpha does.
+    pub base: NodeId,
+    pub held: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -702,6 +707,45 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A layer *held to* the one under it, which is the one way of one
+    // layer deciding what another shows that this document has never
+    // stood with. It is not a mask and not a frame: the base is drawn as
+    // it always was, and what is above it shows only where the base's own
+    // alpha does — which means the base has to be drawn twice over (once
+    // as itself, once as a coverage for what it holds) and that the
+    // layers it holds read pixels of it further out than they cover,
+    // since a shadow's blur does. Hung off the base's corner on purpose,
+    // so the clip has something to cut rather than being a formality.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 12,
+        node: rect("a base", [0.35, 0.7, 0.45, 1.0]),
+    })
+    .unwrap();
+    let base = doc.children_of(root).unwrap()[12];
+    doc.apply(Command::SetTransform {
+        id: base,
+        transform: Transform::translation(52.0, 34.0),
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 13,
+        node: rect("held to it", [0.95, 0.45, 0.2, 0.8]),
+    })
+    .unwrap();
+    let held = doc.children_of(root).unwrap()[13];
+    doc.apply(Command::SetTransform {
+        id: held,
+        transform: Transform::translation(62.0, 28.0),
+    })
+    .unwrap();
+    doc.apply(Command::SetClipped {
+        id: held,
+        clipped: true,
+    })
+    .unwrap();
+
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })
@@ -724,6 +768,8 @@ pub fn everything() -> Fixture {
         frame_copy,
         echo,
         other_frame,
+        base,
+        held,
         stroke,
     }
 }
