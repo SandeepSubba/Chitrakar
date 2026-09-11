@@ -2219,10 +2219,13 @@ mod tests {
             }
         }
         let mean = total as f64 / (ours.pixels.len() * 3) as f64;
-        // Every diagonal edge on the page costs a little of this, since
-        // the two rasterizers antialias one their own way — so the
-        // number goes up as the page gains elements, and it is the spot
-        // checks below, not this, that catch a shape in the wrong place.
+        // The coarse net. Every diagonal edge on the page costs a little
+        // of this, since the two rasterizers antialias one their own
+        // way — so the number goes up as the page gains elements, and a
+        // day when it has to be loosened to let an innocent addition
+        // through is not a regression. It is not what catches a shape in
+        // the wrong place: the interiors below are, and they sharpen as
+        // the page grows rather than blunting.
         assert!(
             mean < 3.5,
             "mean channel difference {mean:.2}; worst pixel {},{} off by {}",
@@ -2242,6 +2245,133 @@ mod tests {
         // inside the rect, the ellipse's band and its middle, the hole in
         // the compound path, the half-opaque group, the image's two pixels.
         let at = |x: usize, y: usize| &drawn.data()[(y * 120 + x) * 4..(y * 120 + x) * 4 + 3];
+        // Every layer's own interior, rather than a page-wide mean and a
+        // handful of spots picked by hand.
+        //
+        // A mean is a poor instrument for this and gets worse: the
+        // antialiasing on every diagonal edge costs it a little, so it
+        // rises as the page gains elements and the threshold has to be
+        // loosened to let innocent additions through — an audit that
+        // catches less the more it is given to look at. What is *not*
+        // allowed to differ is the inside of a shape, where neither
+        // rasterizer has an edge to disagree about and neither has a
+        // half-opaque layer to composite in a space of its own. So each
+        // layer is drawn alone, its opaque interior found, and only the
+        // points where the page shows that layer's own colour unmixed
+        // are compared — which leaves out exactly the two things that
+        // are allowed to differ, and grows rather than thins as the page
+        // does.
+        let ids: Vec<chitrakar_doc::NodeId> = doc
+            .nodes()
+            .map(|(id, _)| *id)
+            .filter(|id| *id != doc.root())
+            .collect();
+        // One exception, and it is about the reader rather than the
+        // export: a raster enlarged is resampled, and the two do not use
+        // the same kernel — the engine takes one bilinear sample and
+        // clamps at the last texel, where a reader may reach further and
+        // pick up a neighbour. That reaches *past* the picture, since a
+        // transparent texel enlarged lets a little of an opaque one
+        // bleed into what is under it, so what has to be left out is
+        // every point a raster covers rather than every point it paints.
+        let mut rastered = vec![false; 120 * 80];
+        for &id in &ids {
+            if !matches!(
+                doc.node(id).unwrap().kind,
+                chitrakar_doc::NodeKind::Raster(_)
+            ) {
+                continue;
+            }
+            if let Ok(chitrakar_render::Bounds::Rect(x0, y0, x1, y1)) =
+                chitrakar_render::bounds_in_parent_space(&doc, id)
+            {
+                for y in (y0.floor().max(0.0) as usize)..=(y1.ceil().min(79.0) as usize) {
+                    for x in (x0.floor().max(0.0) as usize)..=(x1.ceil().min(119.0) as usize) {
+                        rastered[y * 120 + x] = true;
+                    }
+                }
+            }
+        }
+        let (mut layers, mut points, mut off) = (0usize, 0usize, Vec::new());
+        for id in ids {
+            let mut alone = chitrakar_render::Surface::new(120, 80);
+            chitrakar_render::render_showing_at(
+                &doc,
+                &mut alone,
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 120,
+                    y1: 80,
+                },
+                chitrakar_doc::Transform::default(),
+                chitrakar_render::Showing::Alone(id),
+            )
+            .unwrap();
+            let mut here = 0usize;
+            for y in 1..79u32 {
+                for x in 1..119u32 {
+                    let p = alone.get(x, y);
+                    // Opaque, and the same as all eight of its
+                    // neighbours: an inside rather than an edge.
+                    let inside = p.a > 0.999
+                        && (-1..=1i32).all(|dy| {
+                            (-1..=1i32).all(|dx| {
+                                let q = alone.get((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                                q.a > 0.999
+                                    && (q.r - p.r).abs() < 1e-4
+                                    && (q.g - p.g).abs() < 1e-4
+                                    && (q.b - p.b).abs() < 1e-4
+                            })
+                        });
+                    if !inside || rastered[(y * 120 + x) as usize] {
+                        continue;
+                    }
+                    // And the page shows that layer's own colour there,
+                    // so nothing above it and nothing half-opaque under
+                    // it has been mixed in.
+                    let s = ours.get(x, y);
+                    if s.a < 0.999
+                        || (s.r - p.r).abs() > 1e-4
+                        || (s.g - p.g).abs() > 1e-4
+                        || (s.b - p.b).abs() > 1e-4
+                    {
+                        continue;
+                    }
+                    here += 1;
+                    let want = [s.r, s.g, s.b]
+                        .map(|v| (chitrakar_color::linear_to_srgb(v) * 255.0).round() as i32);
+                    let got = at(x as usize, y as usize);
+                    let worst = (0..3)
+                        .map(|c| (got[c] as i32 - want[c]).unsigned_abs())
+                        .max()
+                        .unwrap();
+                    // Four levels of slack for the rounding either side
+                    // of eight bits, and for the mask a clipped layer
+                    // travels as, which the reader resamples.
+                    if worst > 4 {
+                        off.push((x, y, worst));
+                    }
+                }
+            }
+            if here > 0 {
+                layers += 1;
+                points += here;
+            }
+        }
+        assert!(
+            off.is_empty(),
+            "inside a shape the two draw the same colour: {} points off, first {:?}",
+            off.len(),
+            &off[..off.len().min(4)]
+        );
+        // And it looked at something: a filter that quietly stopped
+        // finding interiors would pass this without reading a pixel.
+        assert!(
+            layers >= 6 && points >= 400,
+            "the interiors of {layers} layers, {points} points, were compared"
+        );
+
         assert_eq!(at(30, 25), &[255, 0, 0], "rect");
         assert!(
             at(75, 8)[0] > 200 && at(75, 8)[2] < 60,

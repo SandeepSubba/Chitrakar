@@ -2191,6 +2191,27 @@ without reading anything else.*
      the comparison fails, shift its box six pixels and it still fails —
      with three spot checks saying the overlap, the base alone and the
      overhang each show what they should.
+     And the instrument itself changed, which was overdue. That witness
+     compared a page-wide mean against a threshold, and a mean is a poor
+     thing to measure export fidelity with: every diagonal edge costs it
+     a little, so it rises as the page gains elements and the threshold
+     has to be loosened to let innocent additions through — an audit that
+     catches less the more it is given to look at. It was at 3.29 against
+     a ceiling of 3.5. What is *not* allowed to differ is the inside of a
+     shape, where neither rasterizer has an edge to disagree about and
+     neither has a half-opaque layer to composite in a space of its own.
+     So every layer is drawn alone now, its opaque interior found, and
+     only the points where the page shows that layer's own colour unmixed
+     are compared — 2631 of them across seven layers, to four levels out
+     of 255. That leaves out exactly the two things allowed to differ,
+     and grows rather than thins as the page does. One exception, about
+     the reader rather than the export: a raster enlarged is resampled,
+     and the two do not use the same kernel, so every point a raster
+     *covers* is left out — which is more than it paints, since a
+     transparent texel enlarged lets a little of an opaque neighbour
+     bleed into what is under it. Put five levels of error on one shape's
+     fill and the mean sails through at 3.31 while the interiors name 121
+     points; that is the whole reason for the change.
      What is left of the export audit is the doors
      that cannot be read back: a PDF has no reader here, so it is still
      only asked to open.
