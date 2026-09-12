@@ -510,6 +510,24 @@ pub fn everything() -> Fixture {
         },
     })
     .unwrap();
+    // An adjustment *inside* a plain group. Every adjustment and filter
+    // in this document has stood at the top of the page, where what it
+    // changes is everything under it. Inside a group it changes its
+    // neighbours in that group and nothing beneath, which means the
+    // group has to be drawn on a surface of its own — and this is the
+    // only group here that would be isolated for *what it holds* rather
+    // than for an opacity, a mask or an effect it wears. Without one,
+    // every renderer could ignore the question and still draw this page.
+    doc.apply(Command::AddNode {
+        parent: inside,
+        index: 1,
+        node: Box::new(Node::adjustment(
+            "a stop down inside",
+            crate::Adjustment::Exposure { stops: -1.0 },
+        )),
+    })
+    .unwrap();
+
     // Painted with a gradient rather than a flat colour: a gradient is a
     // ramp baked from its stops and
     // read across the shape's own box, which is a different path from a

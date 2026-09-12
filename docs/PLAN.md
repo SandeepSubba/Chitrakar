@@ -2219,6 +2219,25 @@ without reading anything else.*
      (`a_copy_is_outlined_and_picked_over_what_it_draws`). Four defects
      from one shape in the fixture, none of them reachable without a
      copy that is not its original.
+     The eighth was an adjustment layer *inside a plain group*. Every
+     adjustment and filter here had stood at the top of the page, where
+     what it changes is everything under it; inside a group it changes
+     its neighbours and nothing beneath, which is what makes a group be
+     drawn on a surface of its own. It was put in the pair first, where
+     everything held — and where it proved nothing, because that group
+     already wears a shadow and so was already isolated for that. So it
+     went into the one plain group the document has, where isolation is
+     asked for by *what the group holds* and by nothing else. That is
+     the shape that bites: stop the GPU backend isolating a group for
+     what it reads and the cross-renderer audit fails on the bare
+     fixture, where before the addition it passed. A decision both
+     renderers make, and neither was being asked about it.
+     What it does not catch, and this is worth writing down beside the
+     method: the same sabotage made to `reads_backdrop` itself is
+     invisible to that audit, because the GPU backend asks the CPU's own
+     function. Three engine tests catch it; no fixture audit can, and
+     none of them is blind by accident — a shared answer is a shared
+     answer, the same as with the walk that resolves a copy's stand-ins.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field
@@ -2286,10 +2305,16 @@ without reading anything else.*
      bias constant — and it is also what makes every placement mistake
      identical at both, so the check could not fail. The two things
      wanted of it were the same thing pointing opposite ways.
-     Then whatever the next user of the editor misses first — a brush that
-     paints pixels rather than laying down live strokes, and text shaping
-     worth the name (`rustybuzz`/`parley`, weights, a face chosen per run
-     rather than per block).
+     Then whatever the next user of the editor misses first — a brush
+     that paints pixels rather than laying down live strokes. This line
+     used to ask for text shaping worth the name as well, and that has
+     been true for a while: rustybuzz shapes it, a face family answers
+     for bold and italic with its own cuts and what it has no cut for is
+     synthesized, and a style run names a face of its own — the run's
+     styling is what is shaped as well as what is drawn, so a ligature
+     never crosses a boundary between two faces and the pen carries the
+     run's own thickening. Worth striking rather than leaving to read as
+     missing.
 - **What the view shows of the document** is one setting
   (`chitrakar_render::Showing`) rather than a growing pile of flags: the
   page, one layer on its own, or the picture before the work. Both of
