@@ -304,7 +304,14 @@ pub fn ancestor_space(doc: &Document, id: NodeId) -> Transform {
 /// a nested group that isolates itself does not, because it hands back a
 /// composite either way.
 pub fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
-    for &child in doc.children_of(group)? {
+    any_reads_backdrop(doc, doc.children_of(group)?)
+}
+
+/// The same question asked of a list of layers rather than of a group:
+/// what a copy draws is a list, put together from the original's layers
+/// and the copy's own, and it has to be isolated on the same terms.
+pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, DocError> {
+    for &child in layers {
         let node = doc.node(child)?;
         if node.blend != BlendMode::Normal {
             return Ok(true);
@@ -318,9 +325,21 @@ pub fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
             NodeKind::Group | NodeKind::Artboard { .. } if reads_backdrop(doc, child)? => {
                 return Ok(true)
             }
-            // A copy sees what the original sees. The graph has no
-            // cycles, so following it terminates.
+            // A copy sees what the original sees — or, where it stands in
+            // for some of the original's layers, what it actually draws.
+            // The graph has no cycles, so following it terminates.
             NodeKind::Instance { of, .. } => {
+                let stand_ins = if takes_stand_ins(doc, *of) {
+                    copy_children(doc, child)?
+                } else {
+                    Vec::new()
+                };
+                if !stand_ins.is_empty() {
+                    if any_reads_backdrop(doc, &stand_ins)? {
+                        return Ok(true);
+                    }
+                    continue;
+                }
                 let master = doc.node(*of)?;
                 let reads = match &master.kind {
                     NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => true,
@@ -1134,7 +1153,23 @@ fn render_child(
                 };
                 // Composited like the original would be: nothing of its
                 // own to apply, so draw it straight in.
-                if node.opacity >= 1.0 && blend == BlendMode::Normal && mask.mask.is_none() {
+                //
+                // Except where what it draws reads what is under it. The
+                // original is a group, and a group holding an adjustment
+                // — or a filter, a clone layer, a layer with a blend —
+                // is isolated so that what is inside it changes only what
+                // is inside it. Drawing the copy's layers straight onto
+                // the page throws that away: the original's own adjustment
+                // reached the whole page the moment a copy of it stood in
+                // for anything. Where the copy draws the original entire
+                // this does not arise — `render_layer` draws the group,
+                // and the group isolates itself.
+                let isolate = !stand_ins.is_empty() && any_reads_backdrop(doc, &stand_ins)?;
+                if node.opacity >= 1.0
+                    && blend == BlendMode::Normal
+                    && mask.mask.is_none()
+                    && !isolate
+                {
                     if stand_ins.is_empty() {
                         return render_layer(doc, *of, dst, sub_clip, space, bare);
                     }

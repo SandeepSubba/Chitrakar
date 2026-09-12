@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~419),
+- **Verify before committing:** `cargo test --workspace` (~421),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2782,6 +2782,24 @@ chitrakar/
   opens as the page it was
   (`a_file_that_said_where_a_stand_in_sat_opens_as_the_page_it_was`) —
   which is what `FORMAT_VERSION` 2 is.
+  What is inside a group changes only what is inside it, and a copy with
+  a stand-in keeps that ✅. A group holding an adjustment — or a filter, a
+  clone layer, a layer with a blend — is drawn on a surface of its own,
+  so what is in it reaches its neighbours and nothing beneath. A copy
+  drew the group and inherited that; a copy *standing in* for one of the
+  group's layers draws a list of layers instead, and the list went
+  straight onto the page. So standing in for a layer of one copy sent the
+  original's own adjustment over the whole page — the ground, the
+  original and everything else on it, two stops down
+  (`an_adjustment_in_a_copied_group_stays_inside_the_copy`). The list is
+  asked the same question the group is now
+  (`chitrakar_render::any_reads_backdrop`) and isolated on the same terms.
+  The GPU backend had it too and hands such a page back rather than
+  drawing a different picture
+  (`a_copy_standing_in_where_the_group_reads_the_backdrop_goes_back`);
+  PDF was already right by the route it takes, since a copy holding
+  anything not live goes over as pixels, and SVG omits adjustments
+  wherever they are and says so in the markup.
 - Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

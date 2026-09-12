@@ -2720,6 +2720,16 @@ fn one(
             if stand_ins.is_empty() {
                 one(doc, *of, t.compose(back), opacity, bound, out)?;
             } else {
+                // What a copy with stand-ins draws is a list of layers
+                // rather than the group itself, and a group holding an
+                // adjustment, a filter, a clone layer or a blend is
+                // isolated so that what is inside it changes only what
+                // is inside it. The CPU renderer puts such a copy on a
+                // surface of its own; this pass draws straight in, which
+                // is a different picture, so the page goes back.
+                if chitrakar_render::any_reads_backdrop(doc, &stand_ins).ok()? {
+                    return None;
+                }
                 for part in stand_ins {
                     one(doc, part, t, opacity, bound, out)?;
                 }
@@ -9501,6 +9511,112 @@ mod tests {
             &chitrakar_render::render(&bare).unwrap(),
         );
         assert!(mean < 0.001, "a ramp with no stops changes nothing: {mean}");
+    }
+
+    /// A copy standing in for a layer of a group that reads what is
+    /// under it goes back, and the same page without the reading is
+    /// drawn the way the CPU renderer draws it.
+    ///
+    /// What a copy with stand-ins draws is a list of layers rather than
+    /// the group, and a group holding an adjustment is isolated so that
+    /// the adjustment reaches its neighbours and nothing beneath. This
+    /// pass lays that list straight down, which is a different picture,
+    /// so the one it cannot draw it says so about.
+    #[test]
+    fn a_copy_standing_in_where_the_group_reads_the_backdrop_goes_back() {
+        let square = VectorShape::Rect {
+            width: 20.0,
+            height: 20.0,
+            radius: 0.0,
+        };
+        let green = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        // A ground, a group of one mark, and a copy of it standing in for
+        // that mark with one of its own.
+        let page = |reading: bool| {
+            let mut doc = Document::new(120, 50, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 120.0,
+                        height: 50.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.6,
+                        g: 0.6,
+                        b: 0.6,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let master = add(
+                &mut doc,
+                Box::new(Node::group("badge")),
+                Transform::translation(10.0, 10.0),
+            );
+            doc.apply(Command::AddNode {
+                parent: master,
+                index: 0,
+                node: filled("mark", square.clone(), RED),
+            })
+            .unwrap();
+            if reading {
+                doc.apply(Command::AddNode {
+                    parent: master,
+                    index: 1,
+                    node: Box::new(Node::adjustment(
+                        "two stops down",
+                        chitrakar_doc::Adjustment::Exposure { stops: -2.0 },
+                    )),
+                })
+                .unwrap();
+            }
+            let copy = add(
+                &mut doc,
+                Box::new(Node::instance("a copy that differs", master)),
+                Transform::translation(70.0, 10.0),
+            );
+            doc.apply(Command::AddNode {
+                parent: copy,
+                index: 0,
+                node: filled("its own mark", square.clone(), green.clone()),
+            })
+            .unwrap();
+            doc.apply(Command::SetKind {
+                id: copy,
+                kind: Box::new(NodeKind::Instance {
+                    of: master,
+                    replaces: vec![doc.children_of(master).unwrap()[0]],
+                }),
+            })
+            .unwrap();
+            doc
+        };
+        assert!(
+            !GpuRenderer::can_render(&page(true)),
+            "a copy standing in where the group reads what is under it"
+        );
+        let plain = page(false);
+        assert!(
+            GpuRenderer::can_render(&plain),
+            "and without the reading it is an ordinary copy"
+        );
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (mean, worst) = difference(
+            &gpu.render(&plain).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(mean < 0.001, "a copy that differs: {mean}, worst {worst:?}");
     }
 
     #[test]

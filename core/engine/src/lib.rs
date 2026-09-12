@@ -13341,6 +13341,138 @@ mod tests {
         );
     }
 
+    /// What is inside a group changes only what is inside it, and that
+    /// holds for a copy of the group with a layer of its own in it.
+    ///
+    /// A group holding an adjustment is drawn on a surface of its own, so
+    /// the adjustment reaches its neighbours in the group and nothing
+    /// under it. A copy of that group drew the group, so it inherited
+    /// that — until it stood in for one of the group's layers, and then
+    /// what it drew was a *list* of layers laid straight onto the page.
+    /// The adjustment then reached the whole page: standing in for a
+    /// layer of one copy darkened the original, the page and everything
+    /// on it.
+    #[test]
+    fn an_adjustment_in_a_copied_group_stays_inside_the_copy() {
+        let mut session = Session::new(200, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        let grey = AuthoredColor::Srgb {
+            r: 0.6,
+            g: 0.6,
+            b: 0.6,
+            a: 1.0,
+        };
+        // A page-wide ground, so anything reaching past a group shows.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of("ground", 200.0, 60.0, grey),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[1];
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 0,
+                node: rect_of(
+                    "mark",
+                    20.0,
+                    20.0,
+                    AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "two stops down",
+                    chitrakar_doc::Adjustment::Exposure { stops: -2.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: master,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(110.0, 10.0),
+            })
+            .unwrap();
+        // Two stops down is a quarter of the light; the ground is 0.6
+        // authored, which is a little under a third in linear light.
+        let ground = session.render().unwrap().get(60, 30).r;
+        assert!(
+            (0.28..0.36).contains(&ground),
+            "the ground is untouched to begin with ({ground})"
+        );
+        assert!(
+            (session.render().unwrap().get(15, 15).r - 0.25).abs() < 0.01,
+            "and the mark inside the group is two stops down"
+        );
+
+        // Now one of the copy's layers is its own, in green.
+        let mine = session.override_child(copy, 0).unwrap();
+        session
+            .apply(Command::SetKind {
+                id: mine,
+                kind: Box::new(NodeKind::Vector {
+                    shape: chitrakar_doc::VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 1.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert!(
+            (s.get(60, 30).r - ground).abs() < 1e-4 && (s.get(160, 30).r - ground).abs() < 1e-4,
+            "the ground is untouched still, under the original and under the copy ({} {})",
+            s.get(60, 30).r,
+            s.get(160, 30).r
+        );
+        assert!(
+            (s.get(15, 15).r - 0.25).abs() < 0.01,
+            "the original is as it was ({})",
+            s.get(15, 15).r
+        );
+        assert!(
+            (s.get(115, 15).g - 0.25).abs() < 0.01
+                && s.get(115, 15).r < 0.01
+                && s.get(115, 15).b < 0.01,
+            "and the copy's own layer is two stops down, as the group says ({:?})",
+            s.get(115, 15)
+        );
+    }
+
     /// Only a plain group's layers can be stood in for: one drawn as a
     /// whole would have to be drawn twice.
     #[test]
