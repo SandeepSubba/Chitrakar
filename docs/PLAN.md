@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~414),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1044 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2730,7 +2730,11 @@ chitrakar/
   whatever it replaced, so reaching the label meant detaching the whole
   button: the second call did not fail gracefully, it failed with "that
   layer is not a copy", because what came back was not one
-  (`a_copy_can_differ_at_a_layer_deeper_than_the_originals_own`). Leaves
+  (`a_copy_can_differ_at_a_layer_deeper_than_the_originals_own`). The
+  browser suite builds that card through the UI — two groupings, a copy,
+  a stand-in for the button, then one for the label inside it — and
+  reads the answer off the canvas, so the panel's own way in is covered
+  and not only the engine's. Leaves
   are still copied by value, since what is wanted there is a shape to
   edit rather than a picture of one; and only a plain group can be stood
   in for, which is the same rule as everywhere else in this feature.

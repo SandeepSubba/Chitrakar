@@ -3737,6 +3737,167 @@ assert(
   );
 }
 
+// 8x6f. Standing in reaches deeper than the original's own children: a
+// copy of a card can be given its own label — inside a button, inside
+// the card — and still follow the original for everything around it.
+{
+  await newDocument(600, 400, "rgb");
+  const b3 = await page.locator("#engine-page").boundingBox();
+  const at3 = (x, y) => [
+    b3.x + (x / 600) * b3.width,
+    b3.y + (y / 400) * b3.height,
+  ];
+  const row = (name) =>
+    page.locator(`.panel ul li:has(.layer-name:text-is("${name}"))`);
+  // Draw a rectangle and give it a colour of its own, so that a pixel
+  // says which layer drew it.
+  const paint = async (x0, y0, x1, y1, hex) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at3(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at3(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+    await pickTool("Move");
+    await page.locator(".panel ul li").first().click();
+    await page.waitForTimeout(150);
+    await setColor("Fill color", hex);
+    await page.waitForTimeout(250);
+  };
+  const group = async () => {
+    await pickTool("Move");
+    await menuClick("Edit", "Select all");
+    await page.waitForTimeout(150);
+    await page.click(
+      'button[aria-label="Group selected layers (ctrl-click to select several)"]',
+    );
+    await page.waitForTimeout(250);
+  };
+  // A card: a button holding a label and its chrome, and an edge beside
+  // the button.
+  await paint(40, 40, 90, 90, "#ff0000"); // Rect 1 — the label
+  await paint(110, 40, 160, 90, "#00ff00"); // Rect 2 — the button's chrome
+  await group(); // the button
+  await paint(180, 40, 230, 90, "#0000ff"); // Rect 3 — the card's edge
+  await group(); // the card
+
+  const label0 = await canvasPixel(65, 65);
+  const chrome0 = await canvasPixel(135, 65);
+  const edge0 = await canvasPixel(205, 65);
+  assert(
+    label0[0] > 200 && chrome0[1] > 200 && edge0[2] > 200,
+    `the card is drawn in three colours (${label0} ${chrome0} ${edge0})`,
+  );
+
+  await page.locator(".panel ul li").first().click(); // the card
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Make a live copy"]');
+  await page.waitForTimeout(300);
+  // The copy starts on top of the original; drag it clear by 300.
+  await page.mouse.move(...at3(65, 65));
+  await page.mouse.down();
+  await page.mouse.move(...at3(365, 65), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(365, 65)).join() === label0.join() &&
+      (await canvasPixel(435, 65)).join() === chrome0.join() &&
+      (await canvasPixel(505, 65)).join() === edge0.join(),
+    "the copy draws the whole card",
+  );
+
+  // Stand in for the button — a group, two levels above the label that
+  // is actually to be changed.
+  const theButton = page.locator(
+    'button[aria-label^="Give this copy its own Group"]',
+  );
+  assert(
+    (await theButton.count()) === 1,
+    `the copy offers the button it holds (${await theButton.count()})`,
+  );
+  await theButton.click();
+  await page.waitForTimeout(300);
+  const instances = page.locator('.panel ul li[data-kind="instance"]');
+  assert(
+    (await instances.count()) === 2,
+    `standing in for a group leaves a copy of it, not a deep copy (${await instances.count()})`,
+  );
+  await instances.nth(1).click();
+  await page.waitForTimeout(250);
+  const inner = await page
+    .locator('[aria-label="Follows the original in"] .row')
+    .count();
+  assert(
+    inner === 2,
+    `and that copy follows the original button in both its layers (${inner})`,
+  );
+
+  // Now the label, one level further down, and a colour only this copy
+  // has.
+  await page.click('button[aria-label="Give this copy its own Rect 1"]');
+  await page.waitForTimeout(300);
+  await row("Rect 1").first().click();
+  await page.waitForTimeout(200);
+  await setColor("Fill color", "#ffff00");
+  await page.waitForTimeout(300);
+  const mine = await canvasPixel(365, 65);
+  assert(
+    mine[0] > 200 && mine[1] > 200 && mine[2] < 80,
+    `the copy's own label took the new colour (${mine})`,
+  );
+  assert(
+    (await canvasPixel(65, 65)).join() === label0.join(),
+    "and the original's label kept its own",
+  );
+  // And it stands where the layer it replaced stands: a stand-in
+  // starts as an exact copy of what it replaces, in the same place.
+  assert(
+    (await canvasPixel(337, 65))[3] === 0 &&
+      (await canvasPixel(343, 65)).join() === mine.join(),
+    `the copy's own label begins where the original's does (${await canvasPixel(337, 65)} ${await canvasPixel(343, 65)})`,
+  );
+
+  // What the copy did not stand in for still follows the original —
+  // including the chrome, which sits inside the very button the copy
+  // took for its own.
+  await row("Rect 2").first().click();
+  await page.waitForTimeout(200);
+  await setColor("Fill color", "#ff00ff");
+  await page.waitForTimeout(300);
+  const chrome1 = await canvasPixel(135, 65);
+  assert(
+    chrome1[0] > 200 && chrome1[2] > 200 && chrome1[1] < 80,
+    `the original's chrome went magenta (${chrome1})`,
+  );
+  assert(
+    (await canvasPixel(435, 65)).join() === chrome1.join(),
+    `and the copy's chrome went with it, inside the button it stood in for (${await canvasPixel(435, 65)})`,
+  );
+  await row("Rect 3").first().click();
+  await page.waitForTimeout(200);
+  await setColor("Fill color", "#00ffff");
+  await page.waitForTimeout(300);
+  const edge1 = await canvasPixel(205, 65);
+  assert(
+    edge1[1] > 200 && edge1[2] > 200 && edge1[0] < 80,
+    `the original's edge went cyan (${edge1})`,
+  );
+  assert(
+    (await canvasPixel(505, 65)).join() === edge1.join(),
+    `and the copy's edge followed it too (${await canvasPixel(505, 65)})`,
+  );
+
+  // Letting the deep stand-in go puts the copy back on the original.
+  await instances.nth(1).click();
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label^="Follow the original"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(365, 65)).join() === label0.join(),
+    `and following again gives the copy the original's label back (${await canvasPixel(365, 65)})`,
+  );
+}
+
 
 // 8x7. Export at a scale, and export just the selection. The PNG's IHDR
 // says how big the picture came out.
