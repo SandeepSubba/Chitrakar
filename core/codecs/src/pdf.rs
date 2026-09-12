@@ -2154,6 +2154,222 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Hand a PDF to Ghostscript and get back what it drew, or nothing
+    /// when the machine has no Ghostscript to hand it to.
+    fn rasterized(pdf: &[u8], size: (u32, u32)) -> Option<crate::SourceImage> {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "chitrakar-ink-{}-{:p}",
+            std::process::id(),
+            pdf.as_ptr()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, out) = (dir.join("page.pdf"), dir.join("page.png"));
+        std::fs::write(&src, pdf).unwrap();
+        // A pixel to the point, which is what the MediaBox is written in.
+        let ran = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=png16m",
+                "-r72",
+                "-dGraphicsAlphaBits=4",
+                "-dTextAlphaBits=4",
+            ])
+            .arg(format!("-sOutputFile={}", out.display()))
+            .arg(&src)
+            .status()
+            .unwrap();
+        assert!(ran.success(), "ghostscript accepted the file");
+        let drawn = crate::decode(&std::fs::read(&out).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((drawn.width, drawn.height), size);
+        Some(drawn)
+    }
+
+    /// The text in a PDF lands where the engine sets it.
+    ///
+    /// A PDF's text is live — an embedded face, a glyph at a time, each
+    /// with a matrix of its own — and everything asserted about it so far
+    /// is either the string reading back out or the right operators being
+    /// present. Neither says where a glyph *landed*. The interiors
+    /// reading cannot help: a glyph's stem is a pixel or two across, so
+    /// it is all edge and nothing inside, and a page-wide mean would not
+    /// notice a line of type moved two pixels along.
+    ///
+    /// So this asks the one question that survives two rasterizers
+    /// hinting and antialiasing their own way: where the ink *is*. The
+    /// page is drawn twice on each side, once with the text and once with
+    /// it hidden; what the text put down is the difference; and the two
+    /// are held to the same centre of mass — over the line, and over each
+    /// half of it, so that a glyph moved inside the line is caught too —
+    /// and to the same extent.
+    #[test]
+    fn the_pdf_sets_text_where_the_engine_sets_it() {
+        let (w, h) = (200u32, 48u32);
+        let page = |showing: bool| {
+            let mut doc = Document::new(w, h, chitrakar_color::ColorMode::Rgb);
+            // A band for the line to sit on, so what is measured is ink
+            // landing on something rather than ink against bare paper.
+            add(
+                &mut doc,
+                shape(
+                    "band",
+                    VectorShape::Rect {
+                        width: 200.0,
+                        height: 22.0,
+                        radius: 0.0,
+                    },
+                    Some(AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.88,
+                        b: 0.8,
+                        a: 1.0,
+                    }),
+                ),
+                [0.0, 14.0],
+            );
+            // Long enough to have kerning pairs, ascenders and
+            // descenders in it, which is what puts a glyph somewhere a
+            // sloppy matrix would not.
+            let words = add(
+                &mut doc,
+                chitrakar_doc::Node::text(
+                    "line",
+                    chitrakar_doc::TextSpec::new("Hamburgefonstiv", 18.0, BLUE),
+                ),
+                [11.0, 15.0],
+            );
+            if !showing {
+                doc.apply(Command::SetVisible {
+                    id: words,
+                    visible: false,
+                })
+                .unwrap();
+            }
+            doc
+        };
+        // What the line put down: how far each pixel moved when the text
+        // was added, on each side.
+        let ink = |a: &[u8], b: &[u8]| -> Vec<f64> {
+            (0..(w * h) as usize)
+                .map(|i| {
+                    (0..3)
+                        .map(|c| (a[i * 4 + c] as i32 - b[i * 4 + c] as i32).unsigned_abs())
+                        .max()
+                        .unwrap() as f64
+                })
+                .collect()
+        };
+        // Ink, its centre of mass and its extent over a stretch of
+        // columns. Under eight levels is the tail of an antialiased edge,
+        // and is left to it.
+        let read = |v: &[f64], from: u32, to: u32| {
+            let (mut mass, mut mx, mut my) = (0.0f64, 0.0f64, 0.0f64);
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            for y in 0..h {
+                for x in from..to {
+                    let d = v[(y * w + x) as usize];
+                    if d < 8.0 {
+                        continue;
+                    }
+                    mass += d;
+                    mx += d * x as f64;
+                    my += d * y as f64;
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+            }
+            (mass, mx / mass, my / mass, x0, y0, x1, y1)
+        };
+        // Quarters of the line, found from where the ink actually is
+        // rather than from the page: a glyph moved inside the line is
+        // averaged away by the whole of it, and the more stretches this
+        // is read over the less room there is for one to hide in.
+        let bands = |x0: u32, x1: u32| -> Vec<(u32, u32, String)> {
+            let span = x1 - x0;
+            (0..4)
+                .map(|i| {
+                    (
+                        x0 + i * span / 4,
+                        x0 + (i + 1) * span / 4,
+                        format!("quarter {}", i + 1),
+                    )
+                })
+                .chain([(x0, x1, "the line".to_string())])
+                .collect()
+        };
+
+        let Some(with) = rasterized(&export_pdf_document(&page(true)).unwrap(), (w, h)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let without = rasterized(&export_pdf_document(&page(false)).unwrap(), (w, h)).unwrap();
+        let theirs = ink(&with.rgba8, &without.rgba8);
+        let mine = ink(
+            &chitrakar_render::render(&page(true)).unwrap().to_srgb8(),
+            &chitrakar_render::render(&page(false)).unwrap().to_srgb8(),
+        );
+        let all = read(&mine, 0, w);
+        {
+            for (from, to, what) in bands(all.3, all.5 + 1) {
+                let (a, b) = (read(&theirs, from, to), read(&mine, from, to));
+                let where_ = what;
+                assert!(
+                    a.0 > 4000.0 && b.0 > 4000.0,
+                    "{where_}: there is ink to weigh ({} against {})",
+                    a.0,
+                    b.0
+                );
+                // The coarse half. A pixel of slack in the middle and one
+                // in the extent: a rasterizer that darkens stems moves
+                // the weight about inside a glyph without moving the
+                // glyph, and reaches a row further out at the faint end
+                // of an edge.
+                assert!(
+                    (a.1 - b.1).abs() < 1.0 && (a.2 - b.2).abs() < 1.0,
+                    "{where_}: the ink has about the same centre ({:.2},{:.2}) \
+                     against ({:.2},{:.2})",
+                    a.1,
+                    a.2,
+                    b.1,
+                    b.2
+                );
+                assert!(
+                    a.3.abs_diff(b.3) <= 1
+                        && a.4.abs_diff(b.4) <= 1
+                        && a.5.abs_diff(b.5) <= 1
+                        && a.6.abs_diff(b.6) <= 1,
+                    "{where_}: and about the same extent {:?} against {:?}",
+                    (a.3, a.4, a.5, a.6),
+                    (b.3, b.4, b.5, b.6)
+                );
+                // A face set at the wrong size lays down a different
+                // quantity of ink even where it starts in the right
+                // place.
+                assert!(
+                    (a.0 - b.0).abs() < 0.3 * b.0,
+                    "{where_}: and about as much of it ({} against {})",
+                    a.0,
+                    b.0
+                );
+            }
+        }
+    }
+
     /// Ghostscript, when it is installed, rasterizes the file; the page it
     /// draws is the page the engine draws. Self-skips without `gs`.
     #[test]

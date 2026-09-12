@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~412),
+- **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2221,10 +2221,30 @@ without reading anything else.*
      with sharper point: its mean was at 2.77 against a ceiling of 3.0.
      Loosen that ceiling to 4.0, where a busier page would push it, put
      six levels of error on one ink, and the mean lets it through while
-     the interiors name 1263 points and the layer they are on. What is
-     left of the export audit is a PDF's *text*, which is asked to read
-     back as the string that went in but not to land where the engine
-     sets it.
+     the interiors name 1263 points and the layer they are on. A PDF's text is asked where it
+     *landed* now too (`the_pdf_sets_text_where_the_engine_sets_it`),
+     which neither of the other two readings can answer: a glyph's stem
+     is a pixel or two across, so it is all edge and nothing inside, and
+     a page-wide mean would not notice a line of type moved two pixels
+     along. What survives two rasterizers hinting and darkening stems
+     their own way is where the ink *is*. So the page is drawn twice on
+     each side, once with the line and once with it hidden; what the text
+     put down is the difference; and the two are held to the same centre
+     of mass, the same extent and about the same quantity of ink — over
+     the line and over each quarter of it, found from where the ink is
+     rather than from the page, so that a glyph moved inside the line is
+     not averaged away by the rest. A pixel of slack, which is what a
+     rasterizer that darkens stems costs; four sabotages land outside it
+     — every glyph a point and a half right, a point and a bit down, an
+     advance drifting a quarter point a glyph, and the face set three per
+     cent wide.
+     A fifth reading was written and thrown away, which is worth
+     recording: the same line at two placements a whole number of pixels
+     apart, holding the *difference* between the renderers to be the same
+     at both. A whole number of pixels is what keeps the rasterizer's own
+     bias constant — and it is also what makes every placement mistake
+     identical at both, so the check could not fail. The two things
+     wanted of it were the same thing pointing opposite ways.
      Then whatever the next user of the editor misses first — a brush that
      paints pixels rather than laying down live strokes, and text shaping
      worth the name (`rustybuzz`/`parley`, weights, a face chosen per run
