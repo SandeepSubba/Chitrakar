@@ -89,35 +89,54 @@ fn write_node(
                 let _ = writeln!(out, "{pad}</g>");
             }
             NodeKind::Instance { of, .. } => {
-                // A copy is the original's markup again, inside the
-                // copy's own transform, with the original's own
-                // placement undone: SVG has <use>, but it would carry
-                // that placement with it.
-                let Some(back) = doc
-                    .node(*of)
-                    .ok()
-                    .and_then(|m| chitrakar_render::invert(m.transform))
-                else {
-                    return Ok(());
+                // Where the copy has layers of its own standing in for
+                // some of the original's, what travels is what the copy
+                // actually draws rather than the original again. Those
+                // layers are written in the original group's own child
+                // space — the space the original's transform is undone
+                // back to below — so they go straight inside the copy's
+                // own transform with nothing between.
+                let stand_ins = if chitrakar_render::takes_stand_ins(doc, *of) {
+                    chitrakar_render::copy_children(doc, child)?
+                } else {
+                    Vec::new()
                 };
-                // Adding zero turns the negative zeros an inverse
-                // produces back into plain ones: the same number, but
-                // "-0" in the markup reads as a mistake.
-                let z = |v: f32| v + 0.0;
-                let undo = format!(
-                    r#" transform="matrix({} {} {} {} {} {})""#,
-                    z(back.a),
-                    z(back.b),
-                    z(back.c),
-                    z(back.d),
-                    z(back.e),
-                    z(back.f)
-                );
-                let _ = writeln!(out, "{pad}<g{common}>");
-                let _ = writeln!(out, "{pad}  <g{undo}>");
-                write_node(doc, *of, out, depth + 2, defs)?;
-                let _ = writeln!(out, "{pad}  </g>");
-                let _ = writeln!(out, "{pad}</g>");
+                if !stand_ins.is_empty() {
+                    let _ = writeln!(out, "{pad}<g{common}>");
+                    for part in stand_ins {
+                        write_node(doc, part, out, depth + 1, defs)?;
+                    }
+                    let _ = writeln!(out, "{pad}</g>");
+                } else {
+                    // Otherwise a copy is the original's markup again,
+                    // inside the copy's own transform, with the
+                    // original's own placement undone: SVG has <use>,
+                    // but it would carry that placement with it.
+                    let back = doc
+                        .node(*of)
+                        .ok()
+                        .and_then(|m| chitrakar_render::invert(m.transform));
+                    if let Some(back) = back {
+                        // Adding zero turns the negative zeros an inverse
+                        // produces back into plain ones: the same number,
+                        // but "-0" in the markup reads as a mistake.
+                        let z = |v: f32| v + 0.0;
+                        let undo = format!(
+                            r#" transform="matrix({} {} {} {} {} {})""#,
+                            z(back.a),
+                            z(back.b),
+                            z(back.c),
+                            z(back.d),
+                            z(back.e),
+                            z(back.f)
+                        );
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        let _ = writeln!(out, "{pad}  <g{undo}>");
+                        write_node(doc, *of, out, depth + 2, defs)?;
+                        let _ = writeln!(out, "{pad}  </g>");
+                        let _ = writeln!(out, "{pad}</g>");
+                    }
+                }
             }
             NodeKind::Artboard {
                 width,
@@ -1900,6 +1919,176 @@ mod tests {
             *f = Some(fill);
         }
         n
+    }
+
+    /// A small page with a copy that is not its original: a badge of two
+    /// marks, used twice, with the second mark swapped on the copy.
+    fn a_badge_and_a_copy_that_differs() -> Document {
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let leaf = AuthoredColor::Srgb {
+            r: 0.25,
+            g: 0.55,
+            b: 0.35,
+            a: 1.0,
+        };
+        let pink = AuthoredColor::Srgb {
+            r: 0.85,
+            g: 0.3,
+            b: 0.55,
+            a: 1.0,
+        };
+        let chip = |name: &str, w: f32, radius: f32, fill| {
+            painted(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: 8.0,
+                    radius,
+                },
+                fill,
+            )
+        };
+        let badge = place(&mut doc, Node::group("a badge"), [6.0, 4.0]);
+        for (i, (name, at)) in [("a dot", 0.0), ("a ring", 12.0)].iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: badge,
+                index: i,
+                node: Box::new(chip(name, 10.0, 0.0, leaf.clone())),
+            })
+            .unwrap();
+            let id = doc.children_of(badge).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform {
+                    e: *at,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        }
+        let copy = place(
+            &mut doc,
+            Node::instance("a copy that differs", badge),
+            [6.0, 20.0],
+        );
+        doc.apply(Command::AddNode {
+            parent: copy,
+            index: 0,
+            node: Box::new(chip("a ring of its own", 7.0, 2.0, pink)),
+        })
+        .unwrap();
+        let own = doc.children_of(copy).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: own,
+            transform: Transform {
+                e: 12.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        doc.apply(Command::SetKind {
+            id: copy,
+            kind: Box::new(NodeKind::Instance {
+                of: badge,
+                replaces: vec![1],
+            }),
+        })
+        .unwrap();
+        doc
+    }
+
+    /// A copy with a layer of its own in place of one of the original's
+    /// exports what it *draws*, not the original again.
+    ///
+    /// Every copy this file had ever exported drew its original entire,
+    /// so the branch that writes one could take the original's markup
+    /// and be right every time. A copy that differs is the other half of
+    /// what a copy is for — a badge used twice with a different mark on
+    /// the second — and it came out as two identical badges, which is a
+    /// wrong picture that reads as perfectly good SVG.
+    #[test]
+    fn a_copy_that_differs_exports_what_it_draws() {
+        let doc = a_badge_and_a_copy_that_differs();
+        let svg = export_svg(&doc).unwrap();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(60, 40).unwrap();
+        drawn.fill(resvg::tiny_skia::Color::WHITE);
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let at = |x: usize, y: usize| &drawn.data()[(y * 60 + x) * 4..(y * 60 + x) * 4 + 3];
+
+        // Inside every shape the two draw the same colour. Edges are
+        // left out, since the two rasterizers antialias their own way.
+        let (mut points, mut off) = (0usize, Vec::new());
+        for y in 1..39u32 {
+            for x in 1..59u32 {
+                let p = ours.get(x, y);
+                let inside = p.a > 0.999
+                    && (-1..=1i32).all(|dy| {
+                        (-1..=1i32).all(|dx| {
+                            let q = ours.get((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                            q.a > 0.999
+                                && (q.r - p.r).abs() < 1e-4
+                                && (q.g - p.g).abs() < 1e-4
+                                && (q.b - p.b).abs() < 1e-4
+                        })
+                    });
+                if !inside {
+                    continue;
+                }
+                points += 1;
+                let want = [p.r, p.g, p.b]
+                    .map(|v| (chitrakar_color::linear_to_srgb(v) * 255.0).round() as i32);
+                let got = at(x as usize, y as usize);
+                let worst = (0..3)
+                    .map(|c| (got[c] as i32 - want[c]).unsigned_abs())
+                    .max()
+                    .unwrap();
+                if worst > 4 {
+                    off.push((x, y, worst));
+                }
+            }
+        }
+        assert!(
+            off.is_empty(),
+            "{} points differ, first {:?}",
+            off.len(),
+            &off[..off.len().min(4)]
+        );
+        assert!(points > 120, "{points} interior points were compared");
+
+        // And said in the plain way as well, since what went wrong here
+        // was a whole layer and not a level of colour: the copy follows
+        // the original for the mark it did not stand in for, draws its
+        // own for the one it did, and its own is narrower than what it
+        // replaced, so what the original's mark covers out there is
+        // paper.
+        let green = |p: &[u8]| p[1] > p[0] + 30 && p[1] > p[2] + 20;
+        assert!(
+            green(at(11, 8)),
+            "the original's first mark {:?}",
+            at(11, 8)
+        );
+        assert!(green(at(23, 8)), "and its second {:?}", at(23, 8));
+        assert!(
+            green(at(11, 24)),
+            "the copy follows for the first {:?}",
+            at(11, 24)
+        );
+        assert!(
+            at(21, 24)[0] > 200 && at(21, 24)[1] < 120,
+            "and draws its own for the second {:?}",
+            at(21, 24)
+        );
+        assert_eq!(
+            at(26, 24),
+            &[255, 255, 255],
+            "which is narrower than the mark it replaced"
+        );
     }
 
     /// A page holding one of everything SVG is meant to carry live: a

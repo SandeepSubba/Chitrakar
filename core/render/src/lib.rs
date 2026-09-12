@@ -448,7 +448,12 @@ fn bounds_in_parent_space_inner(
         NodeKind::Instance { of, .. } if effects && copy_reaches_out(doc, id, *of) => {
             Bounds::Everything
         }
-        NodeKind::Instance { of, .. } => match local_bounds_of(doc, *of) {
+        // The copy's own box rather than the original's: where it stands
+        // in for one of the original's layers with a wider one, what it
+        // occupies is what it draws. `local_bounds_of` asks that question
+        // of the copy itself and falls back to the original's box where
+        // there is nothing standing in.
+        NodeKind::Instance { .. } => match local_bounds_of(doc, id) {
             Ok(Some([x0, y0, x1, y1])) => {
                 transformed_local_bounds(node.transform, (x0, y0, x1, y1))
             }
@@ -6194,11 +6199,14 @@ fn hit_child(
                     return Ok(Some(hit));
                 }
             }
-            NodeKind::Instance { of, .. } => {
-                // Picked over the box the original occupies, carried into
+            NodeKind::Instance { .. } => {
+                // Picked over the box the copy occupies, carried into
                 // the copy's own place — the same box the copy's handles
                 // are drawn round, so what is picked is what is outlined.
-                let Ok(Some(box_)) = local_bounds_of(doc, *of) else {
+                // Which is the copy's own box and not the original's,
+                // since a copy standing in for one of the original's
+                // layers draws its own and covers what its own covers.
+                let Ok(Some(box_)) = local_bounds_of(doc, child) else {
                     return Ok(None);
                 };
                 if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {

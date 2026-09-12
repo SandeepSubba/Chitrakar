@@ -44,6 +44,12 @@ pub struct Fixture {
     /// the base's own alpha does.
     pub base: NodeId,
     pub held: NodeId,
+    /// A plain group, and a copy of it with a layer of its own in place
+    /// of one of the group's — the half of copies where a copy is not
+    /// its original.
+    pub badge: NodeId,
+    pub differs: NodeId,
+    pub own_ring: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -59,6 +65,28 @@ fn rect(name: &str, fill: [f32; 4]) -> Box<Node> {
             width: 22.0,
             height: 18.0,
             radius: 0.0,
+        },
+    );
+    if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
+        *f = Some(chitrakar_color::AuthoredColor::Srgb {
+            r: fill[0],
+            g: fill[1],
+            b: fill[2],
+            a: fill[3],
+        });
+    }
+    Box::new(node)
+}
+
+/// A smaller filled rectangle, for the corner of the page where a badge
+/// and the copy that differs from it stand.
+fn chip(name: &str, w: f32, h: f32, radius: f32, fill: [f32; 4]) -> Box<Node> {
+    let mut node = Node::vector(
+        name,
+        VectorShape::Rect {
+            width: w,
+            height: h,
+            radius,
         },
     );
     if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
@@ -746,6 +774,80 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A copy that *differs* from what it follows. Three copies have
+    // stood here since copies were written and every one of them draws
+    // its original entire; a copy with a layer of its own in place of
+    // one of the original's is the other half of the feature, and the
+    // half nothing here has ever asked about. It is what a symbol is
+    // for — a badge drawn once and used twice, with a different mark on
+    // the second — so the thing to stand a copy against is a plain
+    // group: `pair` carries a shadow, which makes it a layer drawn as a
+    // whole rather than one whose parts can be swapped.
+    //
+    // The stand-in is a different colour, a different width and a
+    // rounded corner, so it is not the original's layer in disguise:
+    // what the copy draws, where the copy's box ends, and what goes
+    // into a file or an export all have to follow the copy's own layer
+    // rather than the one it replaced.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 14,
+        node: Box::new(Node::group("a badge")),
+    })
+    .unwrap();
+    let badge = doc.children_of(root).unwrap()[14];
+    doc.apply(Command::SetTransform {
+        id: badge,
+        transform: Transform::translation(28.0, 2.0),
+    })
+    .unwrap();
+    for (i, (name, at)) in [("a dot", 0.0), ("a ring", 11.0)].iter().enumerate() {
+        doc.apply(Command::AddNode {
+            parent: badge,
+            index: i,
+            node: chip(name, 10.0, 8.0, 0.0, [0.25, 0.55, 0.35, 1.0]),
+        })
+        .unwrap();
+        let id = doc.children_of(badge).unwrap()[i];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(*at, 0.0),
+        })
+        .unwrap();
+    }
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 15,
+        node: Box::new(Node::instance("a copy that differs", badge)),
+    })
+    .unwrap();
+    let differs = doc.children_of(root).unwrap()[15];
+    doc.apply(Command::SetTransform {
+        id: differs,
+        transform: Transform::translation(26.0, 16.0),
+    })
+    .unwrap();
+    doc.apply(Command::AddNode {
+        parent: differs,
+        index: 0,
+        node: chip("a ring of its own", 7.0, 8.0, 2.0, [0.85, 0.3, 0.55, 1.0]),
+    })
+    .unwrap();
+    let own_ring = doc.children_of(differs).unwrap()[0];
+    doc.apply(Command::SetTransform {
+        id: own_ring,
+        transform: Transform::translation(11.0, 0.0),
+    })
+    .unwrap();
+    doc.apply(Command::SetKind {
+        id: differs,
+        kind: Box::new(NodeKind::Instance {
+            of: badge,
+            replaces: vec![1],
+        }),
+    })
+    .unwrap();
+
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })
@@ -809,6 +911,9 @@ pub fn everything() -> Fixture {
         other_frame,
         base,
         held,
+        badge,
+        differs,
+        own_ring,
         stroke,
     }
 }

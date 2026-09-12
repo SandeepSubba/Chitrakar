@@ -13036,6 +13036,88 @@ mod tests {
         assert!(!session.overridable(copy)[1].1);
     }
 
+    /// A copy that stands in for one of the original's layers occupies
+    /// what *it* draws: its handles are drawn round its own box and it is
+    /// picked over its own box, not the original's.
+    ///
+    /// Both were asked of the original, which is right for every copy
+    /// that draws its original entire and wrong for the one that does
+    /// not — a copy whose own layer reaches further than the layer it
+    /// replaced was outlined short and could not be picked over the part
+    /// that stuck out, which is the half of it a person would reach for
+    /// first.
+    #[test]
+    fn a_copy_is_outlined_and_picked_over_what_it_draws() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        for (i, x) in [0.0f32, 20.0].into_iter().enumerate() {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: filled_rect(&format!("mark{i}"), 10.0, 10.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        // The copy's own second mark, further out than the original's.
+        let mine = session.override_child(copy, 1).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: mine,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.render().unwrap().get(145, 5).a,
+            1.0,
+            "the copy draws its own mark out there"
+        );
+        let box_ = chitrakar_render::bounds_in_parent_space(session.document(), copy).unwrap();
+        assert_eq!(
+            box_,
+            chitrakar_render::Bounds::Rect(100.0, 0.0, 150.0, 10.0),
+            "and is outlined round what it draws"
+        );
+        assert_eq!(
+            session.hit_test(145.0, 5.0),
+            Some(copy),
+            "and is picked there"
+        );
+        // And the original is unmoved by any of it.
+        assert_eq!(
+            chitrakar_render::bounds_in_parent_space(session.document(), master).unwrap(),
+            chitrakar_render::Bounds::Rect(0.0, 0.0, 30.0, 10.0),
+        );
+        assert_eq!(
+            session.hit_test(25.0, 5.0),
+            Some(session.document().children_of(master).unwrap()[1]),
+            "whose own second mark is still where it was"
+        );
+    }
+
     /// Only a plain group's layers can be stood in for: one drawn as a
     /// whole would have to be drawn twice.
     #[test]

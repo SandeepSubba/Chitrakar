@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~414),
+- **Verify before committing:** `cargo test --workspace` (~417),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2193,6 +2193,32 @@ without reading anything else.*
      lesson is the method's own — when the fixture gains something and
      everything holds, break the code the new thing was meant to exercise
      and see whether anything notices.
+     The seventh was a copy that *differs* from what it follows. Three
+     copies had stood in that document since copies were written and
+     every one of them drew its original entire; a copy with a layer of
+     its own in place of one of the original's is the other half of what
+     a copy is for — a badge drawn once and used twice with a different
+     mark on the second — and nothing there had ever asked about it. It
+     had to go beside a plain group rather than the pair, since the pair
+     carries a shadow and a layer drawn as a whole cannot have its parts
+     swapped, which is the rule the feature is built on.
+     Every audit held, so the code it was meant to exercise was broken:
+     make a copy ignore its own stand-ins and exactly two tests fail,
+     both of them the ones written for the feature. Nothing else had ever
+     looked. That sent the question to the exporters, and there it was —
+     SVG and PDF both drew the original again whenever they met a copy,
+     so a badge used twice with a different mark came out as two
+     identical badges: a wrong picture in a file that reads perfectly
+     well. Both now export what the copy *draws*, and a reader that is
+     not us says so (`a_copy_that_differs_exports_what_it_draws`,
+     `a_copy_that_differs_goes_over_as_what_it_draws`). Two more of the
+     same family came with it: the box a copy is outlined by and the box
+     it is picked over were both asked of the *original*, so a copy
+     whose own layer reaches further than the layer it replaced was
+     outlined short and could not be picked over the part that stuck out
+     (`a_copy_is_outlined_and_picked_over_what_it_draws`). Four defects
+     from one shape in the fixture, none of them reachable without a
+     copy that is not its original.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field

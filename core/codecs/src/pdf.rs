@@ -439,8 +439,29 @@ impl Page {
             } => gradient.is_none() && stroke.as_ref().is_none_or(|s| s.widths.is_empty()),
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
             // A copy is drawn by drawing the original again, so it is as
-            // live as the original is.
-            NodeKind::Instance { of, .. } => self.is_live(*of)?,
+            // live as the original is — or, where it stands in for some
+            // of the original's layers, as live as what it actually
+            // draws, which is not the same list.
+            NodeKind::Instance { of, .. } => {
+                let stand_ins = if chitrakar_render::takes_stand_ins(&self.doc, *of) {
+                    chitrakar_render::copy_children(&self.doc, id)?
+                } else {
+                    Vec::new()
+                };
+                if stand_ins.is_empty() {
+                    self.is_live(*of)?
+                } else {
+                    let mut live = true;
+                    for part in stand_ins {
+                        let c = self.doc.node(part)?;
+                        if c.visible && c.opacity > 0.0 && !self.is_live(part)? {
+                            live = false;
+                            break;
+                        }
+                    }
+                    live
+                }
+            }
             // A brush layer has no live form in PDF, so it goes over as
             // the pixels it paints.
             NodeKind::Paint { .. }
@@ -715,6 +736,26 @@ impl Page {
                 }
             }
             NodeKind::Instance { of, .. } => {
+                // Where the copy stands in for some of the original's
+                // layers with layers of its own, what goes over is what
+                // the copy draws. Those layers are written in the
+                // original group's own child space — which is the space
+                // undoing the original's placement arrives at — so they
+                // are drawn here with nothing between.
+                let stand_ins = if chitrakar_render::takes_stand_ins(&self.doc, *of) {
+                    chitrakar_render::copy_children(&self.doc, id)?
+                } else {
+                    Vec::new()
+                };
+                if !stand_ins.is_empty() {
+                    for part in stand_ins {
+                        let c = self.doc.node(part)?;
+                        if c.visible && c.opacity > 0.0 {
+                            self.draw_node(part)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 // The original's own placement is undone first: a copy
                 // puts the picture where the copy is.
                 let master = self.doc.node(*of)?;
@@ -1620,6 +1661,155 @@ mod tests {
         })
         .unwrap();
         id
+    }
+
+    /// A copy with a layer of its own in place of one of the original's
+    /// goes over as what it *draws*, not as the original again.
+    ///
+    /// Every copy this exporter had ever written drew its original
+    /// entire, so the branch that writes one could put the original down
+    /// again and be right every time. A badge used twice with a
+    /// different mark on the second came out as two identical badges —
+    /// a wrong picture in a file that reads perfectly well.
+    #[test]
+    fn a_copy_that_differs_goes_over_as_what_it_draws() {
+        let leaf = AuthoredColor::Srgb {
+            r: 0.25,
+            g: 0.55,
+            b: 0.35,
+            a: 1.0,
+        };
+        let pink = AuthoredColor::Srgb {
+            r: 0.85,
+            g: 0.3,
+            b: 0.55,
+            a: 1.0,
+        };
+        let chip = |name: &str, w: f32, radius: f32, fill| {
+            shape(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: 8.0,
+                    radius,
+                },
+                Some(fill),
+            )
+        };
+        let mut doc = Document::new(60, 40, chitrakar_color::ColorMode::Rgb);
+        let badge = add(&mut doc, chitrakar_doc::Node::group("a badge"), [6.0, 4.0]);
+        for (i, (name, at)) in [("a dot", 0.0), ("a ring", 12.0)].iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: badge,
+                index: i,
+                node: Box::new(chip(name, 10.0, 0.0, leaf.clone())),
+            })
+            .unwrap();
+            let id = doc.children_of(badge).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(*at, 0.0),
+            })
+            .unwrap();
+        }
+        let copy = add(
+            &mut doc,
+            chitrakar_doc::Node::instance("a copy that differs", badge),
+            [6.0, 20.0],
+        );
+        doc.apply(Command::AddNode {
+            parent: copy,
+            index: 0,
+            node: Box::new(chip("a ring of its own", 7.0, 2.0, pink)),
+        })
+        .unwrap();
+        let own = doc.children_of(copy).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: own,
+            transform: Transform::translation(12.0, 0.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetKind {
+            id: copy,
+            kind: Box::new(NodeKind::Instance {
+                of: badge,
+                replaces: vec![1],
+            }),
+        })
+        .unwrap();
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let Some(drawn) = rasterized(&pdf, (60, 40)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let at = |x: usize, y: usize| &drawn.rgba8[(y * 60 + x) * 4..(y * 60 + x) * 4 + 3];
+
+        // Inside every shape the two draw the same colour; edges are
+        // left out, where two rasterizers antialias their own way.
+        let (mut points, mut off) = (0usize, Vec::new());
+        for y in 1..39u32 {
+            for x in 1..59u32 {
+                let p = ours.get(x, y);
+                let inside = p.a > 0.999
+                    && (-1..=1i32).all(|dy| {
+                        (-1..=1i32).all(|dx| {
+                            let q = ours.get((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                            q.a > 0.999
+                                && (q.r - p.r).abs() < 1e-4
+                                && (q.g - p.g).abs() < 1e-4
+                                && (q.b - p.b).abs() < 1e-4
+                        })
+                    });
+                if !inside {
+                    continue;
+                }
+                points += 1;
+                let want = [p.r, p.g, p.b]
+                    .map(|v| (chitrakar_color::linear_to_srgb(v) * 255.0).round() as i32);
+                let got = at(x as usize, y as usize);
+                let worst = (0..3)
+                    .map(|c| (got[c] as i32 - want[c]).unsigned_abs())
+                    .max()
+                    .unwrap();
+                if worst > 4 {
+                    off.push((x, y, worst));
+                }
+            }
+        }
+        assert!(
+            off.is_empty(),
+            "{} points differ, first {:?}",
+            off.len(),
+            &off[..off.len().min(4)]
+        );
+        assert!(points > 120, "{points} interior points were compared");
+
+        // Said plainly as well, since what went wrong was a whole layer
+        // rather than a level of colour.
+        let green = |p: &[u8]| p[1] > p[0] + 30 && p[1] > p[2] + 20;
+        assert!(
+            green(at(11, 8)),
+            "the original's first mark {:?}",
+            at(11, 8)
+        );
+        assert!(green(at(23, 8)), "and its second {:?}", at(23, 8));
+        assert!(
+            green(at(11, 24)),
+            "the copy follows for the first {:?}",
+            at(11, 24)
+        );
+        assert!(
+            at(21, 24)[0] > 200 && at(21, 24)[1] < 120,
+            "and draws its own for the second {:?}",
+            at(21, 24)
+        );
+        assert!(
+            at(26, 24).iter().all(|&c| c > 245),
+            "which is narrower than the mark it replaced {:?}",
+            at(26, 24)
+        );
     }
 
     /// A page of everything: a red rect, an ellipse with an inner stroke,
