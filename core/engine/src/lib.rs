@@ -1535,7 +1535,7 @@ impl Session {
                 "no such layer in the original".into(),
             ));
         };
-        if replaces.contains(&index) {
+        if replaces.contains(&original) {
             return Err(EngineError::BadCommand("already stood in for".into()));
         }
         let at = self.doc.children_of(instance)?.len();
@@ -1581,7 +1581,10 @@ impl Session {
                 &mut cmds,
             )?
         };
-        replaces.push(index);
+        // By the layer rather than by where it sits: the original's
+        // layers can be added to and reordered afterwards, and a copy
+        // has to go on standing in for the layer it was pointed at.
+        replaces.push(original);
         cmds.push(Command::SetKind {
             id: instance,
             kind: Box::new(NodeKind::Instance { of, replaces }),
@@ -1602,7 +1605,10 @@ impl Session {
             return Err(EngineError::BadCommand("that layer is not a copy".into()));
         };
         let (of, mut replaces) = (*of, replaces.clone());
-        let Some(k) = replaces.iter().position(|&r| r == index) else {
+        let Some(&original) = self.doc.children_of(of)?.get(index) else {
+            return Ok(());
+        };
+        let Some(k) = replaces.iter().position(|&r| r == original) else {
             return Ok(());
         };
         let Some(&mine) = self.doc.children_of(instance)?.get(k) else {
@@ -1641,14 +1647,13 @@ impl Session {
             .children_of(*of)
             .map(|kids| {
                 kids.iter()
-                    .enumerate()
-                    .map(|(i, &id)| {
+                    .map(|&id| {
                         let name = self
                             .doc
                             .node(id)
                             .map(|n| n.name.clone())
                             .unwrap_or_default();
-                        (name, replaces.contains(&i))
+                        (name, replaces.contains(&id))
                     })
                     .collect()
             })
@@ -2276,9 +2281,18 @@ impl Session {
         // Duplicating a group holding an original and a copy of it
         // otherwise gives a group whose copy still watches the original
         // group — two things linked in a way nobody asked for.
-        if let NodeKind::Instance { of, .. } = &mut node.kind {
+        if let NodeKind::Instance { of, replaces } = &mut node.kind {
             if let Some(made) = becomes.get(of) {
                 *of = *made;
+            }
+            // And what each of its own layers stands in for, by the same
+            // rule: a stand-in points at the layer that arrived where
+            // the original travelled, and at the one left behind where
+            // it did not.
+            for r in replaces.iter_mut() {
+                if let Some(made) = becomes.get(r) {
+                    *r = *made;
+                }
             }
         }
         if style == CopyStyle::Duplicate {
@@ -2495,9 +2509,14 @@ impl Session {
         // pair that works there. A copy whose original stayed where it
         // was keeps pointing at it, which is what duplicating a copy on
         // its own means.
-        if let NodeKind::Instance { of, .. } = &mut node.kind {
+        if let NodeKind::Instance { of, replaces } = &mut node.kind {
             if let Some(moved) = becomes.get(of) {
                 *of = *moved;
+            }
+            for r in replaces.iter_mut() {
+                if let Some(moved) = becomes.get(r) {
+                    *r = *moved;
+                }
             }
         }
         let new_id = NodeId(*next);
@@ -13115,6 +13134,210 @@ mod tests {
             session.hit_test(25.0, 5.0),
             Some(session.document().children_of(master).unwrap()[1]),
             "whose own second mark is still where it was"
+        );
+    }
+
+    /// A stand-in holds to the *layer* it stands in for, not to where
+    /// that layer sat: the original's layers can be added to, shuffled
+    /// and thinned out, and the copy goes on differing in the one place
+    /// it was asked to.
+    ///
+    /// This used to be a position among the original's children, which
+    /// is true only until those children change. Add a layer to the front
+    /// of a component and every copy's stand-in slid onto its neighbour —
+    /// the copy silently stopped drawing one of the original's layers and
+    /// started overriding another. Nothing said so; the file was written
+    /// that way too.
+    #[test]
+    fn a_stand_in_holds_to_its_layer_when_the_originals_are_shuffled() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        let hue = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        // Two marks that overlap, so the order they are drawn in shows.
+        for (i, (name, w, x, color)) in [
+            ("mark0", 20.0f32, 0.0f32, hue(1.0, 0.0, 0.0)),
+            ("mark1", 10.0, 15.0, hue(0.0, 0.0, 1.0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: rect_of(name, w, 10.0, color),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        // The copy's own second mark, in green.
+        let mine = session.override_child(copy, 1).unwrap();
+        session
+            .apply(Command::SetKind {
+                id: mine,
+                kind: Box::new(NodeKind::Vector {
+                    shape: chitrakar_doc::VectorShape::Rect {
+                        width: 10.0,
+                        height: 10.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(hue(0.0, 1.0, 0.0)),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let hue_at = |session: &mut Session, x: u32| {
+            let p = session.render().unwrap().get(x, 5);
+            if p.a < 0.5 {
+                "paper"
+            } else if p.r > 0.5 && p.g > 0.5 {
+                "yellow"
+            } else if p.r > 0.5 {
+                "red"
+            } else if p.g > 0.5 {
+                "green"
+            } else if p.b > 0.5 {
+                "blue"
+            } else {
+                "something else"
+            }
+        };
+        assert_eq!(hue_at(&mut session, 105), "red", "the copy follows mark0");
+        assert_eq!(hue_at(&mut session, 122), "green", "and has its own mark1");
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "green",
+            "which is drawn where mark1 is, over mark0"
+        );
+
+        // A layer added to the *front* of the original. Every position
+        // after it has moved along; the layer the copy stands in for has
+        // not.
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 0,
+                node: rect_of("mark2", 10.0, 10.0, hue(1.0, 1.0, 0.0)),
+            })
+            .unwrap();
+        let mark2 = session.document().children_of(master).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: mark2,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        assert_eq!(
+            hue_at(&mut session, 145),
+            "yellow",
+            "the copy draws the new layer too"
+        );
+        assert_eq!(
+            hue_at(&mut session, 105),
+            "red",
+            "and still follows mark0 rather than standing in for it"
+        );
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "its own is still its own"
+        );
+
+        // The original's layers shuffled: the copy draws them in the
+        // order the original now holds them, its own among them where
+        // the layer it stands in for now sits.
+        session
+            .apply(Command::MoveNode {
+                id: session.document().children_of(master).unwrap()[1],
+                parent: master,
+                index: 2,
+            })
+            .unwrap();
+        assert_eq!(
+            session
+                .document()
+                .children_of(master)
+                .unwrap()
+                .iter()
+                .map(|&c| session
+                    .document()
+                    .node(c)
+                    .unwrap()
+                    .name
+                    .as_str()
+                    .to_string())
+                .collect::<Vec<_>>(),
+            vec!["mark2", "mark1", "mark0"],
+        );
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "red",
+            "mark0 is on top now, in the copy as in the original"
+        );
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "and its own still its own"
+        );
+
+        // The layer it stands in for taken away: its own layer is not
+        // lost with it — it is drawn after the original's contents, which
+        // is what a layer standing in for nothing has always done.
+        session
+            .apply(Command::RemoveNode {
+                id: session.document().children_of(master).unwrap()[1],
+            })
+            .unwrap();
+        assert_eq!(hue_at(&mut session, 22), "paper", "the original lost mark1");
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "the copy kept the layer it had made its own"
+        );
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "green",
+            "drawn last, as a layer standing in for nothing is"
+        );
+
+        // And undone, it stands in for that layer again.
+        assert!(session.undo().unwrap());
+        assert_eq!(hue_at(&mut session, 22), "blue", "mark1 is back");
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "red",
+            "and the copy has it back in its own place"
+        );
+        assert_eq!(
+            session.overridable(copy),
+            vec![
+                ("mark2".into(), false),
+                ("mark1".into(), true),
+                ("mark0".into(), false)
+            ],
+            "the panel says which layer the copy has one of its own for"
         );
     }
 

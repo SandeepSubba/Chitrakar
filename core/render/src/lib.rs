@@ -4952,14 +4952,17 @@ pub fn copy_children(doc: &Document, instance: NodeId) -> Result<Vec<NodeId>, Do
     }
     let theirs = doc.children_of(*of).unwrap_or(&[]);
     let mut out = Vec::with_capacity(theirs.len() + mine.len());
-    for (i, &original) in theirs.iter().enumerate() {
-        match replaces.iter().position(|&r| r == i) {
+    for &original in theirs {
+        match replaces.iter().position(|&r| r == original) {
             Some(k) if k < mine.len() => out.push(mine[k]),
             _ => out.push(original),
         }
     }
+    // A layer of the copy's own that stands in for nothing — one dropped
+    // into the copy, or one whose layer in the original has since gone —
+    // is drawn after the original's contents rather than lost.
     for (k, &own) in mine.iter().enumerate() {
-        if replaces.get(k).is_none_or(|&r| r >= theirs.len()) {
+        if replaces.get(k).is_none_or(|r| !theirs.contains(r)) {
             out.push(own);
         }
     }

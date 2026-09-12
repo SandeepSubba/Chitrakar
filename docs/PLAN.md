@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~417),
+- **Verify before committing:** `cargo test --workspace` (~419),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2764,6 +2764,24 @@ chitrakar/
   are still copied by value, since what is wanted there is a shape to
   edit rather than a picture of one; and only a plain group can be stood
   in for, which is the same rule as everywhere else in this feature.
+  A stand-in names the *layer* it stands in for rather than where that
+  layer sat ✅. A position is true only until the original's layers are
+  added to, reordered or thinned out, and then it quietly means a
+  different layer: put a layer at the front of a component and every
+  copy's stand-in slid onto its neighbour — the copy stopped drawing one
+  of the original's layers and started overriding another, with nothing
+  to say so and the file written that way too. It is a `NodeId` now, so
+  adding, shuffling and deleting simply work: the copy draws its own
+  layer where the original now holds the one it replaced, and a layer
+  whose original has gone is kept and drawn after the rest rather than
+  lost, with undo putting it back in its place
+  (`a_stand_in_holds_to_its_layer_when_the_originals_are_shuffled`).
+  Both ways of saying it are lists of numbers in a file, so nothing in
+  the bytes says which one a file meant: the container's format version
+  does, and a file written the old way is carried over on the way in and
+  opens as the page it was
+  (`a_file_that_said_where_a_stand_in_sat_opens_as_the_page_it_was`) —
+  which is what `FORMAT_VERSION` 2 is.
 - Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

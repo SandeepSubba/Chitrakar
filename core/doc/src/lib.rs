@@ -1127,6 +1127,54 @@ impl Document {
         self.next_id = self.next_id.max(past);
     }
 
+    /// Read every copy's stand-ins as *positions* among the original's
+    /// layers and point them at the layers themselves, for a file written
+    /// when that is what they were.
+    ///
+    /// `NodeKind::Instance::replaces` used to say where, among the
+    /// original's children, each of the copy's own layers stood; it says
+    /// which layer it stands in for now, because a position is only true
+    /// until those children are added to or reordered and then it quietly
+    /// means a different layer. Both are lists of numbers in a file, so
+    /// nothing about the bytes says which a file meant — the format
+    /// version does, and this is called for the ones that meant
+    /// positions. Answers how many copies it re-pointed.
+    ///
+    /// A position past the end of the original's layers is left as it is:
+    /// it stood for nothing then and stands for nothing now, and what is
+    /// wanted of such a layer — that it goes on being drawn after the
+    /// original's contents — is what an id nothing matches already does.
+    pub fn settle_stand_ins_from_positions(&mut self) -> usize {
+        let was: Vec<(NodeId, Vec<usize>)> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match &node.kind {
+                NodeKind::Instance { replaces, .. } if !replaces.is_empty() => {
+                    Some((*id, replaces.iter().map(|r| r.0 as usize).collect()))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut moved = 0;
+        for (id, positions) in was {
+            let Some(NodeKind::Instance { of, .. }) = self.nodes.get(&id).map(|n| &n.kind) else {
+                continue;
+            };
+            let theirs = self.children.get(of).cloned().unwrap_or_default();
+            let now: Vec<NodeId> = positions
+                .iter()
+                .map(|&i| theirs.get(i).copied().unwrap_or(NodeId(u64::MAX)))
+                .collect();
+            if let Some(NodeKind::Instance { replaces, .. }) =
+                self.nodes.get_mut(&id).map(|n| &mut n.kind)
+            {
+                *replaces = now;
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     /// Point every colour that stands for a swatch at what the palette
     /// now says it means, and answer how many were re-pointed.
     ///

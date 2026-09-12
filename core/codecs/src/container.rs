@@ -9,7 +9,13 @@ use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 /// Bumped on breaking manifest-schema changes; readers refuse newer majors.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The last version whose copies said stand-ins as *positions* among the
+/// original's layers rather than as the layers themselves. Both are lists
+/// of numbers in the JSON, so the version is the only thing that says
+/// which a file meant.
+const STAND_INS_BY_POSITION_THROUGH: u32 = 1;
 
 const MANIFEST_PATH: &str = "manifest.json";
 
@@ -140,6 +146,13 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // under it. Bookkeeping rather than artwork, so it is put right rather
     // than being grounds to refuse the file.
     doc.settle_next_id();
+    // And what each copy's own layers stand in for, if the file says it
+    // in the older way. A stand-in used to be a position among the
+    // original's layers and is the layer itself now, because a position
+    // slides the moment those layers are added to or reordered.
+    if manifest.format_version <= STAND_INS_BY_POSITION_THROUGH {
+        doc.settle_stand_ins_from_positions();
+    }
     // And the colours that stand for palette entries, if the file says one
     // means something the palette disagrees with. Bookkeeping too: the
     // palette is where the name is defined, so the page is drawn in what
@@ -2150,6 +2163,115 @@ mod tests {
         );
     }
 
+    /// A file written when a stand-in was a *position* among the
+    /// original's layers opens as the page it was, with each stand-in
+    /// pointing at the layer it stood for.
+    ///
+    /// Both are lists of numbers in the JSON, so nothing in the bytes
+    /// says which a file meant — the format version does, and a file that
+    /// meant positions is carried over on the way in. Without that, every
+    /// stand-in in every older file would point at whichever layer
+    /// happened to have that id, which is a different picture and not an
+    /// error anything could catch.
+    #[test]
+    fn a_file_that_said_where_a_stand_in_sat_opens_as_the_page_it_was() {
+        let f = chitrakar_doc::fixture::everything();
+        let bytes = save_chitra(&f.doc).unwrap();
+        let mut zip = ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        let mut manifest = String::new();
+        zip.by_name(MANIFEST_PATH)
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        // Written back the old way: the version it was, and each
+        // stand-in as where its layer sits among the original's.
+        v["format_version"] = STAND_INS_BY_POSITION_THROUGH.into();
+        let children = v["document"]["children"].clone();
+        let mut written = 0;
+        for (_, node) in v["document"]["nodes"].as_object_mut().unwrap() {
+            let Some(inst) = node["kind"].get_mut("Instance") else {
+                continue;
+            };
+            let of = inst["of"].as_u64().unwrap();
+            let theirs: Vec<u64> = children[of.to_string()]
+                .as_array()
+                .map(|a| a.iter().map(|v| v.as_u64().unwrap()).collect())
+                .unwrap_or_default();
+            let was: Vec<u64> = inst["replaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap())
+                .collect();
+            if was.is_empty() {
+                continue;
+            }
+            let positions: Vec<serde_json::Value> = was
+                .iter()
+                .map(|id| {
+                    serde_json::json!(theirs
+                        .iter()
+                        .position(|t| t == id)
+                        .expect("a layer of the original"))
+                })
+                .collect();
+            assert_ne!(
+                positions,
+                was.iter()
+                    .map(|id| serde_json::json!(id))
+                    .collect::<Vec<_>>(),
+                "the two ways of saying it have to differ for this to test anything"
+            );
+            inst["replaces"] = positions.into();
+            written += 1;
+        }
+        assert_eq!(written, 1, "the fixture holds one copy that differs");
+
+        let others: Vec<String> = zip
+            .file_names()
+            .filter(|n| *n != MANIFEST_PATH)
+            .map(String::from)
+            .collect();
+        let mut old = Vec::new();
+        {
+            let mut w = ZipWriter::new(Cursor::new(&mut old));
+            w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(v.to_string().as_bytes()).unwrap();
+            for name in others {
+                let mut body = Vec::new();
+                zip.by_name(&name).unwrap().read_to_end(&mut body).unwrap();
+                w.start_file(&name, SimpleFileOptions::default()).unwrap();
+                w.write_all(&body).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let back = load_chitra(&old).unwrap();
+        assert_eq!(
+            back.node(f.differs).unwrap().kind,
+            f.doc.node(f.differs).unwrap().kind,
+            "the stand-in points at the layer again"
+        );
+        // And the picture, which is the thing: an account of the
+        // document agreeing proves less than the page coming out the
+        // same.
+        let (was, now) = (
+            chitrakar_render::render(&f.doc).unwrap(),
+            chitrakar_render::render(&back).unwrap(),
+        );
+        assert!(
+            was.pixels
+                .iter()
+                .zip(&now.pixels)
+                .all(|(a, b)| (a.r - b.r).abs() < 1e-6
+                    && (a.g - b.g).abs() < 1e-6
+                    && (a.b - b.b).abs() < 1e-6
+                    && (a.a - b.a).abs() < 1e-6),
+            "the page it was"
+        );
+    }
+
     #[test]
     fn newer_major_version_is_refused() {
         let doc = Document::new(8, 8, ColorMode::Rgb);
@@ -2164,7 +2286,10 @@ mod tests {
             s
         })
         .unwrap()
-        .replace("\"format_version\": 1", "\"format_version\": 99");
+        .replace(
+            &format!("\"format_version\": {FORMAT_VERSION}"),
+            "\"format_version\": 99",
+        );
 
         let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())

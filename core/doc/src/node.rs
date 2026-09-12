@@ -846,8 +846,9 @@ pub enum NodeKind {
     Instance {
         of: NodeId,
         /// Which of the original's layers this copy stands in for with
-        /// one of its own: `replaces[k]` is the position, among the
-        /// original's children, that this copy's `k`th child takes.
+        /// one of its own: `replaces[k]` is the layer, among the
+        /// original's children, whose place this copy's `k`th child
+        /// takes.
         ///
         /// That is what makes a copy differ where it has to — a label
         /// with a different string, a panel in a different colour — while
@@ -855,8 +856,16 @@ pub enum NodeKind {
         /// stands in for nothing is drawn after the original's contents,
         /// so dropping a layer into a copy adds to it rather than
         /// breaking it.
+        ///
+        /// The *layer* and not its position. A position is only true
+        /// until the original's layers are added to, reordered or thinned
+        /// out, and then it silently means a different layer: add a layer
+        /// to a component and every copy's stand-in slides onto its
+        /// neighbour. Files written before this said positions and are
+        /// carried over on the way in
+        /// ([`Document::settle_stand_ins_from_positions`]).
         #[serde(default)]
-        replaces: Vec<usize>,
+        replaces: Vec<NodeId>,
     },
     /// A frame on the page: a group with a size of its own that cuts its
     /// contents to that box, paints a ground behind them, and exports at

@@ -1990,7 +1990,7 @@ mod tests {
             id: copy,
             kind: Box::new(NodeKind::Instance {
                 of: badge,
-                replaces: vec![1],
+                replaces: vec![doc.children_of(badge).unwrap()[1]],
             }),
         })
         .unwrap();
