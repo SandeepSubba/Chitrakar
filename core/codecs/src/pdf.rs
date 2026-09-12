@@ -2206,9 +2206,132 @@ mod tests {
             mean < 3.0,
             "mean channel difference {mean:.2} against the engine"
         );
-        // Spot checks: inside the rect, the ellipse's band and its middle,
-        // the hole in the compound path, the image's two pixels.
         let at = |x: usize, y: usize| &drawn.rgba8[(y * 120 + x) * 4..(y * 120 + x) * 4 + 3];
+
+        // Every layer's own interior, which is the sharp reading. The
+        // mean above is coarse and gets coarser: every edge the two
+        // rasterize their own way costs it a little, so it rises as the
+        // page gains elements and the threshold has to be loosened to let
+        // innocent additions through. What is *not* allowed to differ is
+        // the inside of a shape, where neither has an edge to disagree
+        // about and neither has a half-opaque layer to composite in a
+        // space of its own — so each layer is drawn alone, its opaque
+        // interior found, and only the points where the page shows that
+        // layer's own colour unmixed are compared. The two readings are
+        // complementary: the mean covers what is occluded and what is
+        // half-opaque, which this leaves out, and this holds the rest to
+        // four levels out of 255 however busy the page gets.
+        let ids: Vec<chitrakar_doc::NodeId> = doc
+            .nodes()
+            .map(|(id, _)| *id)
+            .filter(|id| *id != doc.root())
+            .collect();
+        // One exception, and it is about the reader rather than the
+        // export: a raster enlarged is resampled, and no two readers use
+        // the same kernel. It reaches past the picture, since a
+        // transparent texel enlarged lets a little of an opaque
+        // neighbour bleed into what is under it, so what is left out is
+        // every point a raster *covers* rather than every point it
+        // paints.
+        let mut rastered = vec![false; 120 * 80];
+        for &id in &ids {
+            if !matches!(
+                doc.node(id).unwrap().kind,
+                chitrakar_doc::NodeKind::Raster(_)
+            ) {
+                continue;
+            }
+            if let Ok(chitrakar_render::Bounds::Rect(x0, y0, x1, y1)) =
+                chitrakar_render::bounds_in_parent_space(&doc, id)
+            {
+                for y in (y0.floor().max(0.0) as usize)..=(y1.ceil().min(79.0) as usize) {
+                    for x in (x0.floor().max(0.0) as usize)..=(x1.ceil().min(119.0) as usize) {
+                        rastered[y * 120 + x] = true;
+                    }
+                }
+            }
+        }
+        let (mut layers, mut points, mut off) = (0usize, 0usize, Vec::new());
+        for id in ids {
+            let mut alone = chitrakar_render::Surface::new(120, 80);
+            chitrakar_render::render_showing_at(
+                &doc,
+                &mut alone,
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 120,
+                    y1: 80,
+                },
+                chitrakar_doc::Transform::default(),
+                chitrakar_render::Showing::Alone(id),
+            )
+            .unwrap();
+            let mut here = 0usize;
+            for y in 1..79u32 {
+                for x in 1..119u32 {
+                    let p = alone.get(x, y);
+                    // Opaque, and the same as all eight of its
+                    // neighbours: an inside rather than an edge.
+                    let inside = p.a > 0.999
+                        && (-1..=1i32).all(|dy| {
+                            (-1..=1i32).all(|dx| {
+                                let q = alone.get((x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                                q.a > 0.999
+                                    && (q.r - p.r).abs() < 1e-4
+                                    && (q.g - p.g).abs() < 1e-4
+                                    && (q.b - p.b).abs() < 1e-4
+                            })
+                        });
+                    if !inside || rastered[(y * 120 + x) as usize] {
+                        continue;
+                    }
+                    // And the page shows that layer's own colour there,
+                    // so nothing above it and nothing half-opaque under
+                    // it has been mixed in.
+                    let s = ours.get(x, y);
+                    if s.a < 0.999
+                        || (s.r - p.r).abs() > 1e-4
+                        || (s.g - p.g).abs() > 1e-4
+                        || (s.b - p.b).abs() > 1e-4
+                    {
+                        continue;
+                    }
+                    here += 1;
+                    let want = [s.r, s.g, s.b]
+                        .map(|v| (chitrakar_color::linear_to_srgb(v) * 255.0).round() as i32);
+                    let got = at(x as usize, y as usize);
+                    let bad = (0..3)
+                        .map(|c| (got[c] as i32 - want[c]).unsigned_abs())
+                        .max()
+                        .unwrap();
+                    if bad > 4 {
+                        off.push((doc.node(id).unwrap().name.clone(), x, y, bad));
+                    }
+                }
+            }
+            if here > 0 {
+                layers += 1;
+                points += here;
+            }
+        }
+        assert!(
+            off.is_empty(),
+            "inside a shape the reader draws the engine's colour: {} points off, first {:?}",
+            off.len(),
+            &off[..off.len().min(4)]
+        );
+        // And it looked at something: a filter that quietly stopped
+        // finding interiors would pass this without reading a pixel.
+        assert!(
+            layers >= 5 && points >= 300,
+            "the interiors of {layers} layers, {points} points, were compared"
+        );
+
+        // Spot checks, which reach where the interiors do not — a shape's
+        // outermost pixel, and the paper beside it: inside the rect, the
+        // ellipse's band and its middle, the hole in the compound path,
+        // the image's two pixels.
         assert_eq!(at(30, 25), &[255, 0, 0], "rect");
         assert!(
             at(75, 8)[0] > 200 && at(75, 8)[2] < 60,

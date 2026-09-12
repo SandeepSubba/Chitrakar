@@ -2212,9 +2212,19 @@ without reading anything else.*
      bleed into what is under it. Put five levels of error on one shape's
      fill and the mean sails through at 3.31 while the interiors name 121
      points; that is the whole reason for the change.
-     What is left of the export audit is the doors
-     that cannot be read back: a PDF has no reader here, so it is still
-     only asked to open.
+     A PDF is read back too, and that line here said
+     otherwise for longer than it was true: Ghostscript rasterizes both
+     the page and the frames when the machine has it, self-skipping when
+     it does not, and what it draws is held against what the engine
+     draws (`ghostscript_draws_the_same_page_the_engine_does`). That one
+     takes the interior reading now as well, on the same argument and
+     with sharper point: its mean was at 2.77 against a ceiling of 3.0.
+     Loosen that ceiling to 4.0, where a busier page would push it, put
+     six levels of error on one ink, and the mean lets it through while
+     the interiors name 1263 points and the layer they are on. What is
+     left of the export audit is a PDF's *text*, which is asked to read
+     back as the string that went in but not to land where the engine
+     sets it.
      Then whatever the next user of the editor misses first — a brush that
      paints pixels rather than laying down live strokes, and text shaping
      worth the name (`rustybuzz`/`parley`, weights, a face chosen per run
