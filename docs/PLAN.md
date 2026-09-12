@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1006 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1015 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2595,7 +2595,16 @@ chitrakar/
 - Tauri iOS/Android builds; responsive UI ✅ first pass: below 900px the
   layer panel comes over the canvas rather than beside it, asked for from
   the bar, and the bar sheds what is only informational so the window
-  holds all of it. Bottom toolbars still to come.
+  holds all of it. Below 640px — a phone's own width — the tool rail goes
+  along the bottom ✅, where the hand already is: a column down the left
+  edge takes width from a canvas that has none to spare and puts every
+  tool at the far end of the reach, while along the bottom it takes
+  height, which a page held upright has more of. The same buttons in the
+  same order, the rail scrolling sideways rather than the page, the
+  shape flyout opening upward since below the rail is off the screen, and
+  no grip to carry it off by since down there it has one place to be.
+  Reversed rather than reordered, so it is still the first thing a
+  keyboard or a reader arrives at.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

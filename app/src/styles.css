@@ -1407,6 +1407,59 @@ body {
   }
 }
 
+/* A phone. The rail goes along the bottom, where the hand already is.
+   A column down the left edge takes width from a canvas that has none to
+   spare and puts every tool at the far end of the reach; along the bottom
+   it takes height instead, which a page held upright has more of. The
+   same buttons in the same order, scrolled sideways when there are more
+   of them than there is room — a tool nobody can reach is worse than a
+   tool they have to slide to. */
+@media (max-width: 640px) {
+  .workspace {
+    /* Reversed rather than reordered: the rail stays first in the markup,
+       so it is still the first thing a keyboard or a reader arrives at. */
+    flex-direction: column-reverse;
+  }
+
+  .toolbar,
+  .toolbar.floating {
+    /* Back in the flow, wherever the rail was carried off to on a wider
+       window: a floating rail on a phone is a rail in the way, and the
+       left/top it was left at means nothing down here. */
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    max-height: none;
+    /* Clear of whatever the phone puts along its own bottom edge. */
+    padding: 0.35rem 0.4rem max(0.35rem, env(safe-area-inset-bottom));
+  }
+
+  /* Nothing to pick it up by: down here it has one place to be. */
+  .toolbar .tool.grip {
+    display: none;
+  }
+
+  /* The rail scrolls; the tools keep their size. A tool squeezed to a
+     third of a thumb is not a tool. */
+  .toolbar > *,
+  .toolbar .tool-group {
+    flex: 0 0 auto;
+  }
+
+  /* The shape tools' flyout opens upward: below the rail is off the
+     screen. */
+  .tool-flyout {
+    left: 0;
+    top: auto;
+    bottom: calc(100% + 0.35rem);
+  }
+}
+
 .panel-toggle {
   margin-left: auto;
 }

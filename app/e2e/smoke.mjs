@@ -5960,9 +5960,11 @@ assert(
 
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
-// panel comes over it instead and is asked for from the bar. (The
-// document from the block before carries on, so something is left in it
-// for the block after.)
+// panel comes over it instead and is asked for from the bar. Narrower
+// still, at a phone's own width, the tool rail goes along the bottom
+// where the hand already is, and the canvas gets the whole width back.
+// (The document from the block before carries on, so something is left
+// in it for the block after.)
 {
   const panel = page.locator(".panel");
   const toggle = page.locator('button[aria-label="Layers panel"]');
@@ -6012,11 +6014,64 @@ assert(
   await page.waitForTimeout(300);
   assert(!(await panel.isVisible()), "and the button puts them away again");
 
+  // A phone: the tool rail goes along the bottom, where a thumb is.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(500);
+  const rail = page.locator('nav[aria-label="Tools"]');
+  const railBox = await rail.boundingBox();
+  const hostBox = await page.locator(".canvas-host").boundingBox();
+  assert(
+    railBox.y >= hostBox.y + hostBox.height - 1,
+    `the rail sits under the canvas rather than beside it (${railBox.y} against ${hostBox.y + hostBox.height})`,
+  );
+  assert(
+    railBox.width > 300 && railBox.height < 90,
+    `lying along the bottom rather than standing up (${railBox.width} by ${railBox.height})`,
+  );
+  // The canvas gets the whole width back, which is the point of moving it.
+  assert(
+    Math.abs(hostBox.width - 390) < 1,
+    `and the canvas has the window's width (${hostBox.width})`,
+  );
+  // Nothing slides sideways: the rail scrolls inside itself instead.
+  const phoneSpill = await page.evaluate(() => [
+    document.documentElement.scrollWidth,
+    window.innerWidth,
+  ]);
+  assert(
+    phoneSpill[0] <= phoneSpill[1],
+    `and the window holds the whole page (${phoneSpill[0]} of ${phoneSpill[1]})`,
+  );
+  assert(
+    await rail.evaluate((n) => n.scrollWidth > n.clientWidth),
+    "with the rail itself the thing that scrolls",
+  );
+  // Every tool is still there, and still the size of a thumb.
+  // Not the grip, which is gone: the first thing that can be pressed.
+  const tools = page.locator('nav[aria-label="Tools"] .tool:not(.grip)');
+  assert((await tools.count()) > 6, "every tool came with it");
+  const firstTool = await tools.first().boundingBox();
+  assert(
+    firstTool.width > 24 && firstTool.height > 24,
+    `each one still worth pressing (${firstTool.width} by ${firstTool.height})`,
+  );
+  // And nothing to pick the rail up by, since down here it has one place
+  // to be.
+  assert(
+    !(await page.locator('nav[aria-label="Tools"] .grip').isVisible()),
+    "and no grip to carry it off by",
+  );
+
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.waitForTimeout(500);
   assert(
     (await panel.isVisible()) && (await toggle.count()) === 0,
     "given the room back, they sit beside the canvas again",
+  );
+  const wideRail = await rail.boundingBox();
+  assert(
+    wideRail.height > 200 && wideRail.width < 90,
+    `and the rail stands up beside the canvas again (${wideRail.width} by ${wideRail.height})`,
   );
 }
 
