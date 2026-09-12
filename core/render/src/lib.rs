@@ -3531,6 +3531,21 @@ fn rect_coverage(width: f32, height: f32, t: Transform, inv: Inverse, px: u32, p
     span(t.e, t.e + width * t.a, px) * span(t.f, t.f + height * t.d, py)
 }
 
+/// Exact coverage of an axis-aligned local-space box over one device
+/// pixel. The same arithmetic [`rect_coverage`] takes, said about a box
+/// that need not start at the origin — which is what a stroke band's two
+/// rectangles are. A box with nothing in it covers nothing.
+fn box_coverage(x0: f32, y0: f32, x1: f32, y1: f32, t: Transform, px: u32, py: u32) -> f32 {
+    if x1 <= x0 || y1 <= y0 {
+        return 0.0;
+    }
+    let span = |lo: f32, hi: f32, at: u32| {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+    };
+    span(t.e + x0 * t.a, t.e + x1 * t.a, px) * span(t.f + y0 * t.d, t.f + y1 * t.d, py)
+}
+
 /// Anti-aliased coverage of a shape over one device pixel, in 0..=1.
 ///
 /// The corners plus the centre are tested first: when all five agree the
@@ -3567,6 +3582,44 @@ fn pixel_coverage(
     {
         if *radius <= 0.0 {
             return rect_coverage(*width, *height, t, inv, px, py);
+        }
+    }
+    // And its *band* has one too. A square-cornered rect's stroke is one
+    // rectangle less another — the outline grown by the band's far side,
+    // less the outline grown by its near one — and each of those is the
+    // same product of two 1-D overlaps the fill takes. Sampled, the band's
+    // edges came out in quarters: a hairline half a pixel over a boundary
+    // was drawn as half of it whatever the fraction really was, which is
+    // visible on a thin stroke and was the one place the renderer that is
+    // the reference was coarser than the backend being held against it.
+    if let (
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        },
+        Some(s),
+    ) = (shape, stroke)
+    {
+        // Only where the band is a range of distances rather than a run
+        // of laid pieces (a dash, a path, a stroke that changes width),
+        // and only while the map keeps the rectangle square on the page.
+        if *radius <= 0.0
+            && s.pieces.is_empty()
+            && t.b.abs() <= 1e-6
+            && t.c.abs() <= 1e-6
+            && !matches!(shape, VectorShape::Path { .. })
+        {
+            // The same two numbers `stroke_covers` reads the band as,
+            // where the distance is negative inside.
+            let (lo, hi) = match s.align {
+                StrokeAlign::Inside => (-s.width, 0.0),
+                StrokeAlign::Centre => (-s.width / 2.0, s.width / 2.0),
+                StrokeAlign::Outside => (0.0, s.width),
+            };
+            let outer = box_coverage(-hi, -hi, width + hi, height + hi, t, px, py);
+            let inner = box_coverage(-lo, -lo, width + lo, height + lo, t, px, py);
+            return (outer - inner).clamp(0.0, 1.0);
         }
     }
     let covers = |sx: f32, sy: f32| {

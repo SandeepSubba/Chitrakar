@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~421),
+- **Verify before committing:** `cargo test --workspace` (~423),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2238,6 +2238,49 @@ without reading anything else.*
      function. Three engine tests catch it; no fixture audit can, and
      none of them is blind by accident — a shared answer is a shared
      answer, the same as with the walk that resolves a copy's stand-ins.
+     Three, and new: **pages nobody wrote**
+     (`chitrakar_doc::fixture::page(seed)`). The fixture answers "does
+     this hold for a document with one of everything in it", which is the
+     question worth asking first and the one a person can keep in their
+     head. It cannot answer "does this hold for the combinations nobody
+     thought of", because every combination in it had to be thought of to
+     be put there. A page drawn from a seed costs nothing to ask and
+     there are as many as an audit wants. Two audits take them now: a
+     hundred and twenty of them into a `.chitra` and back, held to the
+     picture and not to the document (`a_page_nobody_wrote_goes_into_a_
+     file_and_comes_back`), and the same hundred and twenty drawn both
+     ways wherever the GPU backend takes them
+     (`pages_nobody_wrote_are_drawn_the_way_the_cpu_draws_them`).
+     The first run found four things, three of them in the backend and
+     one in the reference renderer.
+     A copy *held to the layer under it* was drawn whole: a copy's draws
+     come from walking what it copies, and that walk ended the one that
+     would have held it back — its own mask was already a reason to hand
+     the page over and being clipped was not. A copy *of* a layer that is
+     held to the one under it was held back by that layer, where the CPU
+     renderer draws it whole: what a copy draws is the layer, not the
+     layer's place in a run of clipped ones. Both hand the page over now.
+     A sharp corner was rounded off: the backend measures a shape by its
+     distance, and a distance is the same in every direction, so the
+     pixel diagonally outside a square's corner came out a tenth covered
+     where the area it really covers is none. A rectangle with square
+     corners is measured edge by edge now — two half-planes multiplied,
+     which is the exact area for one standing square on the page and much
+     the nearer answer for a turned one.
+     And the reference renderer was the coarser of the two in one place:
+     a rect's stroke *band* was sampled sixteen to a pixel, so its edges
+     came out in quarters — a hairline eight tenths of a pixel over a
+     boundary was drawn as three quarters of it. The band is one
+     rectangle less another, and each of those is the same product of two
+     1-D overlaps the fill already had exact, so it is exact now too.
+     What is left is worth stating rather than burying: eighteen of the
+     thirty-three pages the backend takes still carry a pixel more than a
+     twentieth off, and it is not sampling — raising the reference's box
+     from four samples an axis to sixteen moves none of it. The audit
+     names those pages and holds the count where it is, which is a
+     ratchet to bring down rather than a tolerance that is meant. Eighty-
+     seven of the hundred and twenty it declines outright, which is its
+     own thing to look at.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field

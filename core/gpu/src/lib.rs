@@ -2707,7 +2707,24 @@ fn one(
         // on a surface of its own there, and that is a different
         // picture from this, so it goes back.
         NodeKind::Instance { of, .. } => {
-            if alone || node.opacity < 1.0 || node.mask.is_some() {
+            // A copy's draws are emitted by walking what it copies, and
+            // that walk ends this one: the coverage this layer would
+            // otherwise be held back by is set up below and never
+            // reached. Its own mask was already a reason to hand the
+            // page over; being held to the layer under it is the same
+            // reason, and was not — so a copy clipped to the layer
+            // below was drawn whole, covering what it was meant to show
+            // through.
+            if alone || node.opacity < 1.0 || node.mask.is_some() || held_to.is_some() {
+                return None;
+            }
+            // And a copy of a layer that is itself held to the one under
+            // *it*: what a copy draws is the layer, not the layer's place
+            // in a run of clipped ones, so the CPU renderer draws it
+            // whole. This walk reaches the original through the same
+            // path that reads `clipped`, and would hold the copy back by
+            // a layer somewhere else entirely.
+            if doc.node(*of).ok()?.clipped {
                 return None;
             }
             let master = doc.node(*of).ok()?;
@@ -9511,6 +9528,64 @@ mod tests {
             &chitrakar_render::render(&bare).unwrap(),
         );
         assert!(mean < 0.001, "a ramp with no stops changes nothing: {mean}");
+    }
+
+    /// Pages nobody wrote, drawn both ways.
+    ///
+    /// The fixture audit asks this of a document with one of everything
+    /// in it, and every combination in it had to be thought of to be put
+    /// there. These are drawn from a seed instead — a blend under a mask
+    /// inside a faded group, a copy of a layer held to the one under it,
+    /// whatever the seed says — so the comparison reaches arrangements
+    /// nobody chose. A failure names the seed that found it.
+    #[test]
+    fn pages_nobody_wrote_are_drawn_the_way_the_cpu_draws_them() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (mut drawn, mut declined) = (0usize, 0usize);
+        let mut worst_seen = 0.0f64;
+        let mut rough: Vec<u64> = Vec::new();
+        for seed in 0..120u64 {
+            let doc = chitrakar_doc::fixture::page(seed);
+            if !GpuRenderer::can_render(&doc) {
+                declined += 1;
+                continue;
+            }
+            let mine = gpu.render(&doc).expect("can_render said it would");
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            worst_seen = worst_seen.max(worst);
+            if worst > 0.05 {
+                rough.push(seed);
+            }
+            assert!(
+                mean < 0.004,
+                "seed {seed}: mean {mean:.5}, worst pixel off by {worst:.3}"
+            );
+            drawn += 1;
+        }
+        // A backend that declined everything would pass without drawing
+        // a thing, and one that drew only the empty pages would too.
+        assert!(
+            drawn > 25,
+            "the backend drew {drawn} of them and declined {declined}"
+        );
+        // A ratchet rather than a tolerance. Eighteen of these pages
+        // carry a pixel this instrument found and nobody has run down
+        // yet: a mean over a page this size does not notice one, which
+        // is the whole argument against means. It is not the reference
+        // renderer's sampling — raising its box from four samples an
+        // axis to sixteen moves none of it — so it is a disagreement
+        // about geometry somewhere and it is the next thing to pull on.
+        // Naming the rough pages keeps the count from growing quietly in
+        // the meantime, and this assertion is meant to come down rather
+        // than to be lived with.
+        assert!(
+            rough.len() <= 18 && worst_seen < 0.25,
+            "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
+        );
+        eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");
     }
 
     /// A copy standing in for a layer of a group that reads what is

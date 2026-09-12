@@ -2163,6 +2163,59 @@ mod tests {
         );
     }
 
+    /// A page nobody wrote goes into a file and comes back the same
+    /// picture.
+    ///
+    /// The shared fixture asks this of a document with one of everything
+    /// in it, which is the question worth asking first. It cannot ask it
+    /// of the *combinations* nobody thought of — a blend under a mask
+    /// inside a faded group, a copy of a layer that is held to the one
+    /// under it — because every one of those had to be thought of to be
+    /// put there. These pages are drawn from a seed instead, so a
+    /// hundred of them cost nothing to ask and a failure names the seed
+    /// that found it.
+    ///
+    /// Held to the picture and not to the document: two documents that
+    /// serialize the same draw the same, so comparing the JSON would be
+    /// comparing the round trip with itself.
+    #[test]
+    fn a_page_nobody_wrote_goes_into_a_file_and_comes_back() {
+        let mut drawn = 0usize;
+        for seed in 0..120u64 {
+            let doc = chitrakar_doc::fixture::page(seed);
+            let bytes =
+                save_chitra(&doc).unwrap_or_else(|e| panic!("seed {seed} would not save: {e}"));
+            let back = load_chitra(&bytes)
+                .unwrap_or_else(|e| panic!("seed {seed} would not open again: {e}"));
+            let (was, now) = (
+                chitrakar_render::render(&doc).unwrap(),
+                chitrakar_render::render(&back).unwrap(),
+            );
+            let mut off = None;
+            for (i, (a, b)) in was.pixels.iter().zip(&now.pixels).enumerate() {
+                if (a.r - b.r).abs() > 1e-6
+                    || (a.g - b.g).abs() > 1e-6
+                    || (a.b - b.b).abs() > 1e-6
+                    || (a.a - b.a).abs() > 1e-6
+                {
+                    off = Some((i % 48, i / 48, *a, *b));
+                    break;
+                }
+            }
+            assert!(
+                off.is_none(),
+                "seed {seed} came back a different picture at {:?}",
+                off.unwrap()
+            );
+            // And it drew something: a page of nothing would pass this
+            // without the file having carried anything.
+            if was.pixels.iter().any(|p| p.a > 0.001) {
+                drawn += 1;
+            }
+        }
+        assert!(drawn > 100, "only {drawn} of the pages drew anything");
+    }
+
     /// A file written when a stand-in was a *position* among the
     /// original's layers opens as the page it was, with each stand-in
     /// pointing at the layer it stood for.

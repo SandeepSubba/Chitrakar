@@ -8,12 +8,13 @@
 //! once. Adding a `Command` variant without adding it here is meant to
 //! be the thing that makes those tests fail.
 
+use crate::{Adjustment, Filter};
 use crate::{
     BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
     Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StyleRun, Swatch,
     TextSpec, Transform, VectorShape,
 };
-use chitrakar_color::ColorMode;
+use chitrakar_color::{AuthoredColor, ColorMode};
 
 /// The document and the handful of nodes in it the commands refer to.
 pub struct Fixture {
@@ -934,6 +935,391 @@ pub fn everything() -> Fixture {
         own_ring,
         stroke,
     }
+}
+
+/// A page nobody wrote: layers, placements and settings drawn from a
+/// seed rather than chosen.
+///
+/// The shared fixture answers "does this hold for a document with one of
+/// everything in it", which is the question worth asking first and the
+/// one a person can keep in their head. It cannot answer "does this hold
+/// for the *combinations* nobody thought of" — a blend under a mask
+/// inside a faded group, a copy of a layer that is held to the one under
+/// it — because every one of those had to be thought of to be put in.
+/// These pages are for that: cheap, unreadable, and there are as many of
+/// them as an audit cares to ask for.
+///
+/// Deliberately small: a page a few layers deep, mostly opaque, so that
+/// what a comparison finds is a disagreement rather than a haze of
+/// antialiasing. And deliberately *drawable*: nothing here is refused by
+/// the document, so a page that does not come back is the audit's answer
+/// rather than the generator's mistake.
+pub fn page(seed: u64) -> Document {
+    let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+    let mut doc = Document::new(48, 36, ColorMode::Rgb);
+    let root = doc.root();
+    // Something to see through the layers above, so a blend and an
+    // adjustment have work to do.
+    let ground = rng.color(1.0);
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 0,
+        node: shape_node(
+            "ground",
+            VectorShape::Rect {
+                width: 48.0,
+                height: 36.0,
+                radius: 0.0,
+            },
+            ground,
+        ),
+    })
+    .unwrap();
+    let mut made: Vec<NodeId> = vec![doc.children_of(root).unwrap()[0]];
+    let how_many = 2 + rng.upto(5) as usize;
+    for i in 0..how_many {
+        let at = doc.children_of(root).unwrap().len();
+        let node = rng.node(&mut doc, &made, i);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: at,
+            node,
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[at];
+        made.push(id);
+        rng.dress(&mut doc, id, &made);
+    }
+    doc
+}
+
+/// A small xorshift, so a seed names a page and the same seed names it
+/// again on any machine. `rand` is not a dependency here and this is not
+/// cryptography: what is wanted is a spread, repeatably.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn upto(&mut self, n: u64) -> u64 {
+        self.next() % n.max(1)
+    }
+    fn chance(&mut self, one_in: u64) -> bool {
+        self.upto(one_in) == 0
+    }
+    fn unit(&mut self) -> f32 {
+        (self.next() % 10_000) as f32 / 10_000.0
+    }
+    fn between(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + self.unit() * (hi - lo)
+    }
+    fn color(&mut self, alpha: f32) -> AuthoredColor {
+        AuthoredColor::Srgb {
+            r: self.unit(),
+            g: self.unit(),
+            b: self.unit(),
+            a: alpha,
+        }
+    }
+    fn shape(&mut self) -> VectorShape {
+        match self.upto(3) {
+            0 => VectorShape::Rect {
+                width: self.between(6.0, 24.0),
+                height: self.between(6.0, 20.0),
+                radius: if self.chance(2) {
+                    self.between(0.0, 4.0)
+                } else {
+                    0.0
+                },
+            },
+            1 => VectorShape::Ellipse {
+                rx: self.between(3.0, 12.0),
+                ry: self.between(3.0, 10.0),
+            },
+            _ => {
+                let n = 3 + self.upto(3) as usize;
+                let points = (0..n)
+                    .map(|_| [self.between(0.0, 20.0), self.between(0.0, 18.0)])
+                    .collect();
+                VectorShape::Path {
+                    points,
+                    closed: true,
+                    smooth: self.chance(3),
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// One layer, of a kind picked from everything a page can hold.
+    /// `made` is what is already on the page, so a copy has something to
+    /// be a copy of and cannot reach itself.
+    fn node(&mut self, doc: &mut Document, made: &[NodeId], i: usize) -> Box<Node> {
+        let name = format!("l{i}");
+        match self.upto(9) {
+            0 => Box::new(Node::group(&name)),
+            1 => {
+                let mut node = Node::vector(&name, self.shape());
+                let fill = self.color(1.0);
+                if let NodeKind::Vector {
+                    fill: f,
+                    stroke,
+                    gradient,
+                    ..
+                } = &mut node.kind
+                {
+                    *f = Some(fill);
+                    if self.chance(3) {
+                        *stroke = Some(Stroke {
+                            color: self.color(1.0),
+                            width: self.between(0.5, 3.0),
+                            widths: Vec::new(),
+                            dash: Vec::new(),
+                            cap: Default::default(),
+                            join: Default::default(),
+                            align: None,
+                            start_marker: Default::default(),
+                            end_marker: Default::default(),
+                        });
+                    }
+                    if self.chance(4) {
+                        *gradient = Some(Gradient::Linear {
+                            from: [0.0, 0.0],
+                            to: [1.0, 1.0],
+                            stops: vec![
+                                GradientStop {
+                                    offset: 0.0,
+                                    color: self.color(1.0),
+                                },
+                                GradientStop {
+                                    offset: 1.0,
+                                    color: self.color(1.0),
+                                },
+                            ],
+                        });
+                    }
+                }
+                Box::new(node)
+            }
+            2 => {
+                let mut spec = TextSpec::new("Ab", self.between(8.0, 20.0), self.color(1.0));
+                spec.bold = self.chance(3);
+                spec.italic = self.chance(3);
+                Box::new(Node::text(&name, spec))
+            }
+            3 => {
+                // A tiny picture, two by two, in its own colours.
+                let mut bytes = Vec::with_capacity(16);
+                for _ in 0..4 {
+                    bytes.extend_from_slice(&[
+                        (self.unit() * 255.0) as u8,
+                        (self.unit() * 255.0) as u8,
+                        (self.unit() * 255.0) as u8,
+                        255,
+                    ]);
+                }
+                let id = doc.add_resource(2, 2, bytes);
+                Box::new(Node::raster(
+                    &name,
+                    RasterRef {
+                        resource_id: id,
+                        width: 6 + self.upto(14) as u32,
+                        height: 6 + self.upto(12) as u32,
+                    },
+                ))
+            }
+            4 => Box::new(Node::adjustment(
+                &name,
+                match self.upto(3) {
+                    0 => Adjustment::Exposure {
+                        stops: self.between(-1.5, 1.5),
+                    },
+                    1 => Adjustment::BrightnessContrast {
+                        brightness: self.between(-0.3, 0.3),
+                        contrast: self.between(-0.3, 0.3),
+                    },
+                    _ => Adjustment::HueSaturation {
+                        hue_degrees: self.between(-60.0, 60.0),
+                        saturation: self.between(-0.5, 0.5),
+                        lightness: self.between(-0.2, 0.2),
+                    },
+                },
+            )),
+            5 => Box::new(Node::filter(
+                &name,
+                match self.upto(2) {
+                    0 => Filter::GaussianBlur {
+                        sigma: self.between(0.5, 2.5),
+                    },
+                    _ => Filter::Pixelate {
+                        size: self.between(2.0, 6.0),
+                    },
+                },
+            )),
+            6 => {
+                let mut node = Node::paint(&name);
+                let stroke = PaintStroke {
+                    points: (0..3)
+                        .map(|_| [self.between(0.0, 40.0), self.between(0.0, 30.0)])
+                        .collect(),
+                    radii: vec![self.between(1.0, 4.0)],
+                    color: self.color(1.0),
+                    softness: if self.chance(2) {
+                        self.between(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                    erase: false,
+                    source: [0.0, 0.0],
+                    heal: false,
+                    clip: None,
+                };
+                if let NodeKind::Paint { strokes } = &mut node.kind {
+                    strokes.push(stroke);
+                }
+                Box::new(node)
+            }
+            7 if !made.is_empty() => {
+                let of = made[self.upto(made.len() as u64) as usize];
+                Box::new(Node::instance(&name, of))
+            }
+            _ => {
+                let mut node = Node::vector(&name, self.shape());
+                let alpha = self.between(0.4, 1.0);
+                let fill = self.color(alpha);
+                if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
+                    *f = Some(fill);
+                }
+                Box::new(node)
+            }
+        }
+    }
+
+    /// What is done to a layer after it is put down: where it sits, how
+    /// it composites, and now and then a mask, a clip, a child or an
+    /// effect.
+    fn dress(&mut self, doc: &mut Document, id: NodeId, made: &[NodeId]) {
+        let t = Transform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: self.between(-4.0, 34.0),
+            f: self.between(-4.0, 26.0),
+        };
+        doc.apply(Command::SetTransform { id, transform: t })
+            .unwrap();
+        if self.chance(4) {
+            let opacity = self.between(0.3, 0.95);
+            doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+        }
+        if self.chance(3) {
+            let blend = BLENDS[self.upto(BLENDS.len() as u64) as usize];
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+        }
+        if self.chance(5) {
+            let mask = Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Ellipse {
+                        rx: self.between(4.0, 14.0),
+                        ry: self.between(4.0, 12.0),
+                    },
+                    transform: Transform::translation(
+                        self.between(0.0, 20.0),
+                        self.between(0.0, 16.0),
+                    ),
+                },
+                invert: self.chance(3),
+                feather: if self.chance(2) {
+                    self.between(0.0, 2.0)
+                } else {
+                    0.0
+                },
+            };
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask)),
+            })
+            .unwrap();
+        }
+        if self.chance(5) {
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![match self.upto(3) {
+                    0 => Effect::DropShadow {
+                        dx: self.between(-3.0, 3.0),
+                        dy: self.between(-3.0, 3.0),
+                        blur: self.between(0.0, 2.5),
+                        color: self.color(1.0),
+                        opacity: self.between(0.4, 1.0),
+                    },
+                    1 => Effect::Outline {
+                        width: self.between(0.5, 3.0),
+                        color: self.color(1.0),
+                        opacity: self.between(0.4, 1.0),
+                    },
+                    _ => Effect::InnerShadow {
+                        dx: self.between(-2.0, 2.0),
+                        dy: self.between(-2.0, 2.0),
+                        blur: self.between(0.0, 2.0),
+                        color: self.color(1.0),
+                        opacity: self.between(0.4, 1.0),
+                    },
+                }],
+            })
+            .unwrap();
+        }
+        // Held to the layer below, when there is one and this is not it.
+        if self.chance(5) && made.len() > 1 {
+            doc.apply(Command::SetClipped { id, clipped: true })
+                .unwrap();
+        }
+        // A group with nothing in it draws nothing, so one gets a child.
+        if doc
+            .node(id)
+            .map(|n| matches!(n.kind, NodeKind::Group))
+            .unwrap_or(false)
+        {
+            for k in 0..1 + self.upto(2) {
+                let child = self.node(doc, &[], 90 + k as usize);
+                doc.apply(Command::AddNode {
+                    parent: id,
+                    index: k as usize,
+                    node: child,
+                })
+                .unwrap();
+                let cid = doc.children_of(id).unwrap()[k as usize];
+                let ct = Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
+                doc.apply(Command::SetTransform {
+                    id: cid,
+                    transform: ct,
+                })
+                .unwrap();
+            }
+        }
+    }
+}
+
+const BLENDS: [BlendMode; 6] = [
+    BlendMode::Multiply,
+    BlendMode::Screen,
+    BlendMode::Overlay,
+    BlendMode::Darken,
+    BlendMode::Lighten,
+    BlendMode::Difference,
+];
+
+fn shape_node(name: &str, shape: VectorShape, fill: AuthoredColor) -> Box<Node> {
+    let mut node = Node::vector(name, shape);
+    if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
+        *f = Some(fill);
+    }
+    Box::new(node)
 }
 
 /// One instance of every command, against the nodes of a [`Fixture`].

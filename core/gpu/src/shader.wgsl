@@ -131,7 +131,20 @@ fn coverage(in: VsOut) -> f32 {
         select(ellipse_distance(in.local, r, max(shrunk, vec2f(1e-6, 1e-6))), 1e9, shrunk.x <= 0.0 || shrunk.y <= 0.0),
         ellipse,
     );
-    let cov = edge(select(plain, outer, band));
+    // A sharp-cornered rectangle is measured edge by edge rather than
+    // by its distance. A distance is the same in every direction, so its
+    // one-pixel band rounds a corner off: the pixel diagonally outside a
+    // square's corner is three-quarters of a pixel from it and comes out
+    // a tenth covered, where the area it actually covers is none. Two
+    // half-planes multiplied is the exact area for a rectangle standing
+    // square on the page and much the nearer answer for a turned one, and
+    // it costs two clamps. Only where there is a corner to get wrong: a
+    // rounded rect's corner really is an arc, and an ellipse has none.
+    let q = abs(in.local - r) - r;
+    let square = clamp(0.5 - q.x / max(fwidth(q.x), 1e-6), 0.0, 1.0)
+        * clamp(0.5 - q.y / max(fwidth(q.y), 1e-6), 0.0, 1.0);
+    let sharp = !band && !ellipse && in.params.z <= 0.0;
+    let cov = select(edge(select(plain, outer, band)), square, sharp);
     return select(cov, clamp(cov - edge(inner), 0.0, 1.0), band);
 }
 
