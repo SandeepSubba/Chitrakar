@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~413),
+- **Verify before committing:** `cargo test --workspace` (~414),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1044 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2720,8 +2720,20 @@ chitrakar/
   layer's content in its own place, with a cycle guard in the document
   (any structural command that would let a copy reach itself is refused
   and rolled back), and a copy can stand in for the original's direct
-  children with layers of its own. Live in SVG and PDF. Standing in for
-  a layer deeper than the original's own children is still to come.
+  children with layers of its own. Live in SVG and PDF. Standing in for a layer deeper than the
+  original's own children ✅: a stand-in for a *group* is a copy of that
+  group rather than a copy of its contents, so standing in composes — one
+  call a level — and everything not stood in for goes on following the
+  original. A card holds a button holds a label; change one card's label
+  and that card still follows the original for the button's chrome and
+  the card's own edge, live. Before, a stand-in was a deep copy of
+  whatever it replaced, so reaching the label meant detaching the whole
+  button: the second call did not fail gracefully, it failed with "that
+  layer is not a copy", because what came back was not one
+  (`a_copy_can_differ_at_a_layer_deeper_than_the_originals_own`). Leaves
+  are still copied by value, since what is wanted there is a shape to
+  edit rather than a picture of one; and only a plain group can be stood
+  in for, which is the same rule as everywhere else in this feature.
 - Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

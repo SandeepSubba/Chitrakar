@@ -1539,20 +1539,48 @@ impl Session {
             return Err(EngineError::BadCommand("already stood in for".into()));
         }
         let at = self.doc.children_of(instance)?.len();
-        let mut next = self.doc.peek_next_id().0;
-        let mut becomes = std::collections::HashMap::new();
-        let mut peek = next;
-        self.assign_copy_ids(original, &mut peek, &mut becomes)?;
         let mut cmds = Vec::new();
-        let made = self.emit_copy(
-            original,
-            instance,
-            at,
-            CopyStyle::Exact,
-            &mut next,
-            &becomes,
-            &mut cmds,
-        )?;
+        // A stand-in for a *group* is a copy of it rather than a copy of
+        // its contents, so that standing in reaches further than one
+        // level without detaching everything on the way down. Change a
+        // card's label and the card still follows the original for the
+        // button it sits in and the panel that holds them; stand in for
+        // the button group the old way and none of that followed
+        // anything any more, because what you got was a deep copy of the
+        // lot. Which is the same thing said the other way: a stand-in
+        // starts as an exact copy of what it replaces, and for a group
+        // the exact copy that keeps its links is a copy *of* it.
+        //
+        // Only a plain group, since that is the only thing a copy can
+        // stand in for parts of; anything else is drawn as a whole and a
+        // copy of it could not be changed inside. And leaves are still
+        // copied by value: a copy of a shape draws the original's shape,
+        // and what is wanted here is a shape to edit.
+        let made = if chitrakar_render::takes_stand_ins(&self.doc, original) {
+            let id = self.doc.peek_next_id();
+            let mut node = chitrakar_doc::Node::instance(&self.doc.node(original)?.name, original);
+            node.transform = self.doc.node(original)?.transform;
+            cmds.push(Command::AddNode {
+                parent: instance,
+                index: at,
+                node: Box::new(node),
+            });
+            id
+        } else {
+            let mut next = self.doc.peek_next_id().0;
+            let mut becomes = std::collections::HashMap::new();
+            let mut peek = next;
+            self.assign_copy_ids(original, &mut peek, &mut becomes)?;
+            self.emit_copy(
+                original,
+                instance,
+                at,
+                CopyStyle::Exact,
+                &mut next,
+                &becomes,
+                &mut cmds,
+            )?
+        };
         replaces.push(index);
         cmds.push(Command::SetKind {
             id: instance,
@@ -12758,6 +12786,164 @@ mod tests {
     /// A copy can stand in for one of the original's layers and follow
     /// it everywhere else: change the original's other layer and the
     /// copy takes it; change the stood-in one and the copy keeps its own.
+    /// A copy can differ from the original at a layer *deeper* than the
+    /// original's own children, and go on following it everywhere else.
+    ///
+    /// This is what a component is for: a card holds a button, the button
+    /// holds a label, and what one card wants to change is the label. A
+    /// stand-in used to be a deep copy of what it replaced, so standing
+    /// in for the button to reach the label detached the whole button —
+    /// its chrome stopped following the original, and changing the
+    /// original's button colour no longer reached that card. The layer
+    /// you wanted was two deep and everything above it came away with it.
+    ///
+    /// A stand-in for a *group* is a copy of that group now rather than a
+    /// copy of its contents, which is the same promise said properly: a
+    /// stand-in starts as an exact copy of what it replaces, and for a
+    /// group the exact copy that keeps its links is a copy *of* it. So
+    /// standing in composes — one call a level — and everything not stood
+    /// in for still follows.
+    #[test]
+    fn a_copy_can_differ_at_a_layer_deeper_than_the_originals_own() {
+        let mut session = Session::new(220, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let colour = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let paint = |session: &mut Session, id: NodeId, c: AuthoredColor| {
+            let NodeKind::Vector {
+                shape,
+                stroke,
+                gradient,
+                ..
+            } = session.document().node(id).unwrap().kind.clone()
+            else {
+                panic!("not a shape");
+            };
+            session
+                .apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Vector {
+                        shape,
+                        fill: Some(c),
+                        stroke,
+                        gradient,
+                    }),
+                })
+                .unwrap();
+        };
+        let at = |session: &mut Session, id: NodeId, x: f32, y: f32| {
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+        };
+        // The original: a card holding a button holding a label, with a
+        // piece of its own beside the button.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("card")),
+            })
+            .unwrap();
+        let card = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: card,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("button")),
+            })
+            .unwrap();
+        let button = session.document().children_of(card).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: card,
+                index: 1,
+                node: filled_rect("edge", 10.0, 10.0),
+            })
+            .unwrap();
+        let edge = session.document().children_of(card).unwrap()[1];
+        at(&mut session, edge, 30.0, 0.0);
+        paint(&mut session, edge, colour(0.0, 0.0, 1.0));
+        session
+            .apply(Command::AddNode {
+                parent: button,
+                index: 0,
+                node: filled_rect("label", 10.0, 10.0),
+            })
+            .unwrap();
+        let label = session.document().children_of(button).unwrap()[0];
+        paint(&mut session, label, colour(1.0, 0.0, 0.0));
+        session
+            .apply(Command::AddNode {
+                parent: button,
+                index: 1,
+                node: filled_rect("chrome", 10.0, 10.0),
+            })
+            .unwrap();
+        let chrome = session.document().children_of(button).unwrap()[1];
+        at(&mut session, chrome, 15.0, 0.0);
+        paint(&mut session, chrome, colour(0.0, 1.0, 0.0));
+
+        let copy = session.make_instance(card).unwrap();
+        at(&mut session, copy, 100.0, 0.0);
+
+        // One call a level: stand in for the button, then for its label.
+        let mine_button = session.override_child(copy, 0).unwrap();
+        let mine_label = session.override_child(mine_button, 0).unwrap();
+        paint(&mut session, mine_label, colour(1.0, 1.0, 0.0));
+
+        let page = session.render().unwrap();
+        let hue = |x: u32, y: u32| page.get(x, y).to_srgb8();
+        // The original is untouched: a red label, green chrome, blue edge.
+        assert_eq!(hue(5, 5), [255, 0, 0, 255], "the original's label");
+        assert_eq!(hue(20, 5), [0, 255, 0, 255], "the original's chrome");
+        assert_eq!(hue(35, 5), [0, 0, 255, 255], "the original's edge");
+        // The copy differs only where it was told to.
+        assert_eq!(hue(105, 5), [255, 255, 0, 255], "the copy's own label");
+        assert_eq!(
+            hue(120, 5),
+            [0, 255, 0, 255],
+            "and the chrome it still follows"
+        );
+        assert_eq!(
+            hue(135, 5),
+            [0, 0, 255, 255],
+            "and the edge it still follows"
+        );
+
+        // And the following is live, which is the whole of the point:
+        // recolour the original's chrome and the copy takes it, while its
+        // own label stays its own.
+        paint(&mut session, chrome, colour(0.0, 1.0, 1.0));
+        paint(&mut session, edge, colour(1.0, 0.0, 1.0));
+        let after = session.render().unwrap();
+        let now = |x: u32, y: u32| after.get(x, y).to_srgb8();
+        assert_eq!(
+            now(120, 5),
+            [0, 255, 255, 255],
+            "the copy follows the chrome"
+        );
+        assert_eq!(now(135, 5), [255, 0, 255, 255], "and the edge");
+        assert_eq!(now(105, 5), [255, 255, 0, 255], "and keeps its own label");
+        assert_eq!(
+            now(5, 5),
+            [255, 0, 0, 255],
+            "the original's label is its own too"
+        );
+
+        // Taking the stand-in away puts the copy back to following the
+        // original there as well.
+        session.clear_override(copy, 0).unwrap();
+        let back = session.render().unwrap();
+        assert_eq!(
+            back.get(105, 5).to_srgb8(),
+            [255, 0, 0, 255],
+            "and letting the stand-in go follows the original again"
+        );
+    }
+
     #[test]
     fn a_copy_can_differ_where_it_has_to() {
         let mut session = Session::new(200, 100, ColorMode::Rgb);
