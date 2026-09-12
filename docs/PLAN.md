@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1019 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1023 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2614,7 +2614,20 @@ chitrakar/
   bar and so the first to wrap, which made the one way to the layers on a
   phone the thing that broke. The bar grows to hold its rows now, and the
   suite presses that button at a phone's width rather than only at a
-  tablet's, where nothing had wrapped and nothing was wrong.
+  tablet's, where nothing had wrapped and nothing was wrong. It was worse
+  than the first reading of it: the document's name and the zoom were
+  under the ruler too, and it began at 640px — a tablet held upright, not
+  only a phone.
+  Which is a *kind* of defect worth a question of its own, since it is
+  invisible to every other sort of test: a control that is there, the
+  right size, in the right place, and covered. Nothing about the markup is
+  wrong, nothing about the layout says so, and it looks right in a
+  screenshot. What says so is asking the page what is under the middle of
+  each control, which is what a finger would find — so the suite walks
+  every button, field and picker at four widths and asks exactly that.
+  With the bar's fix taken out it names three controls at 360 and 500,
+  one at 640, and stays quiet from 720 up, which is the defect's own
+  shape.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

@@ -6102,6 +6102,52 @@ assert(
   );
 }
 
+// 9q. Every control answers to a press at its own middle, at every width
+// the window is likely to be.
+//
+// This is the shape the last defect had, and it is worth a question of
+// its own because it is invisible to every other kind of test: a control
+// that is *there*, the right size, in the right place, and covered. The
+// top bar's fixed height let a wrapped row spill over the canvas and
+// under the ruler, and what was left unpressable was the document's name,
+// the zoom, and the one button that asks for the layers. Nothing about
+// the markup was wrong; nothing about the layout said so; the button was
+// visible in a screenshot. What says so is asking the page what is under
+// the middle of each control, which is what a finger would find.
+{
+  const covered = async () =>
+    await page.evaluate(() => {
+      const out = [];
+      for (const b of document.querySelectorAll("button, [role=button], input, select")) {
+        const r = b.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        if (getComputedStyle(b).visibility === "hidden") continue;
+        const cx = r.x + r.width / 2;
+        const cy = r.y + r.height / 2;
+        // Off the screen is a different question — a rail that scrolls
+        // holds tools past its end on purpose.
+        if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) continue;
+        const at = document.elementFromPoint(cx, cy);
+        if (at && (b === at || b.contains(at) || at.contains(b))) continue;
+        const name =
+          b.getAttribute("aria-label") || b.textContent?.trim().slice(0, 20) || b.className;
+        out.push(`${name} -> ${at ? at.tagName + "." + (at.className || "").toString().slice(0, 24) : "nothing"}`);
+      }
+      return out;
+    });
+  for (const width of [360, 500, 720, 1100]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForTimeout(400);
+    const hidden = await covered();
+    assert(
+      hidden.length === 0,
+      `at ${width} every control answers to a press at its middle (${hidden.join(" | ")})`,
+    );
+  }
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(400);
+}
+
 // 9q. Auto levels: the input points set to where the picture's own tones
 // start and stop, read off the same histogram the panel draws — and the
 // points are shown in the encoding that histogram is drawn in, so what
