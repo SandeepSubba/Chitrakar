@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1036 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1044 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2648,6 +2648,21 @@ chitrakar/
   resizing one, and the reading that matters is behavioural: tap the
   corner and the rest of the shapes come out, while the middle of the
   slot still answers as the tool.
+- Menus stay inside the window ✅, and what is past a menu's end can be
+  got to: a menu opens under its label and is as tall as it has items, so
+  one taller than the room under it went on past the bottom of the window
+  with nothing to scroll — on a phone held sideways, fourteen of Edit's
+  twenty-four items were off the screen, File five of fourteen, View six
+  of fifteen. They scroll now, against a height that leaves room for the
+  bar even when it has wrapped to three rows: generous rather than exact,
+  since what matters is that a menu can never run out of the window and
+  one that scrolls sooner than it had to is no worse than one that fits.
+  And on a narrow window they open from the bar's left edge rather than
+  from under their own label, because a popup is fifteen rem wide and
+  there is no room for that under a label near the right of the bar —
+  View hung three pixels off the edge at a phone's width. Given the room
+  back they go under their own labels again, which the suite checks so
+  the narrow rule cannot leak.
 - Dialogs stay inside the window ✅: one is centred on its scrim, so one
   taller than the screen hangs off *both* ends and takes its buttons with
   it. On a phone held sideways that left New document 394 pixels tall on

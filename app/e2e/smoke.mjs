@@ -6284,6 +6284,82 @@ assert(
   await page.waitForTimeout(400);
 }
 
+// 9u. A menu stays inside the window too, and what is past its end can
+// be got to.
+//
+// Same shape as the dialog, found the same way. A menu opens under its
+// label and is as tall as it has items, so one taller than the room under
+// it went on past the bottom of the window: on a phone held sideways
+// fourteen of Edit's twenty-four items were off the screen, with nothing
+// to scroll. And a popup is fifteen rem wide, which a narrow window has
+// no room for under a label near the right of the bar — View hung three
+// pixels off the edge at a phone's width.
+{
+  await page.setViewportSize({ width: 740, height: 320 });
+  await page.waitForTimeout(400);
+  const labels = await page.locator(".menubar button").allTextContents();
+  assert(labels.length >= 4, `there are menus to open (${labels.join(",")})`);
+  for (const label of labels) {
+    await page.locator(`.menubar button:has-text("${label}")`).first().click();
+    await page.waitForTimeout(200);
+    const shape = await page.evaluate(() => {
+      const m = document.querySelector(".menu-pop");
+      if (!m) return null;
+      const r = m.getBoundingClientRect();
+      return {
+        inside:
+          r.left >= -1 && r.top >= -1 && r.right <= innerWidth + 1 && r.bottom <= innerHeight + 1,
+        box: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+      };
+    });
+    assert(shape && shape.inside, `${label} opens inside the window (${shape && shape.box})`);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+  }
+  // And the reading that says a menu which had to scroll is still usable:
+  // the last item of the longest one, scrolled to and pressable.
+  await page.locator('.menubar button:has-text("Edit")').first().click();
+  await page.waitForTimeout(200);
+  const pop = page.locator(".menu-pop");
+  assert(
+    await pop.evaluate((m) => m.scrollHeight > m.clientHeight + 1),
+    "Edit has more in it than fits, and knows it",
+  );
+  const lastItem = pop.locator("button").last();
+  await lastItem.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(200);
+  assert(
+    await lastItem.evaluate((b) => {
+      const r = b.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > window.innerHeight) return false;
+      const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return b.contains(at);
+    }),
+    "and its last item can be scrolled to and pressed",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // Given the room, they go back to opening under their own labels rather
+  // than all from the bar's left edge.
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(400);
+  const lefts = [];
+  for (const label of ["File", "View"]) {
+    await page.locator(`.menubar button:has-text("${label}")`).first().click();
+    await page.waitForTimeout(200);
+    lefts.push(
+      await page.locator(".menu-pop").evaluate((m) => Math.round(m.getBoundingClientRect().left)),
+    );
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+  }
+  assert(
+    lefts[1] - lefts[0] > 40,
+    `and each under its own label on a wide window (${lefts.join(" then ")})`,
+  );
+}
+
 // 9q. Auto levels: the input points set to where the picture's own tones
 // start and stop, read off the same histogram the panel draws — and the
 // points are shown in the encoding that histogram is drawn in, so what

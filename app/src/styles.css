@@ -142,6 +142,16 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  /* A menu can be taller than the room under it, and one that is went on
+     past the bottom of the window with no way to reach what was down
+     there: on a phone held sideways, fourteen of Edit's twenty-four items
+     were off the screen. It scrolls now. What is taken off is room for
+     the bar itself, which is one row on a wide window and up to three
+     when it wraps — generous rather than exact, since what matters is
+     that a menu can never run out of the window, and one that scrolls a
+     little sooner than it had to is no worse than one that fits. */
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
 }
 
 /* The same popup, put where the pointer asked for it rather than under a
@@ -1396,6 +1406,20 @@ body {
    panel comes over the canvas there instead, and is put away again from
    the button in the bar; the canvas is what the room is for. */
 @media (max-width: 900px) {
+  /* The menus open from the bar's left edge rather than from under their
+     own label. A popup is fifteen rem wide and a narrow window has no
+     room for that under a label near the right of the bar — View hung
+     three pixels off the edge at a phone's width. Making the bar the
+     thing they are placed against, rather than each label, costs nothing
+     and puts every one of them where there is room. */
+  .menubar {
+    position: relative;
+  }
+
+  .menu {
+    position: static;
+  }
+
   /* The bar keeps everything that can be pressed. What goes is what only
      tells you something — the name over the door, and the size of the
      page, which the fields in the panel say too — because a bar wider
