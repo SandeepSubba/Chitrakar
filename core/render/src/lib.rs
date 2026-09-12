@@ -3721,7 +3721,14 @@ fn fill_path_scanlines(
     bbox: ClipRect,
     mask: MaskRef<'_>,
 ) {
-    const N: u32 = 4;
+    // Sixteen sub-rows rather than four. A path's edge is exact across
+    // the row and stepped down it, so a near-horizontal edge was drawn in
+    // quarters — the coarsest antialiasing anywhere in this renderer, and
+    // on exactly the shapes a person draws with the pen. It costs nothing
+    // it did not already cost because of the edge table below: only the
+    // edges that reach a row are asked about it, so sixteen sub-rows over
+    // a handful of live edges is less work than four over all of them.
+    const N: u32 = 16;
     if bbox.is_empty() {
         return;
     }
@@ -3736,24 +3743,68 @@ fn fill_path_scanlines(
     if polys.is_empty() {
         return;
     }
+    // Every segment as the range of rows it spans and where it is at the
+    // top of that range, ordered by where it starts. A scanline needs the
+    // segments that reach it and no others; walking all of them for every
+    // sub-row of every row is what made a finer sample count expensive,
+    // and on a spline of a few hundred anchors it was most of the work at
+    // any sample count. Horizontal segments are left out: they cross no
+    // scanline (`y0 <= sy < y1` is empty when the two are equal), which
+    // is the same rule the crossing test had.
+    struct Edge {
+        y0: f32,
+        y1: f32,
+        /// Where the segment is at `y0`.
+        x0: f32,
+        /// How far it moves across for each row down.
+        slope: f32,
+    }
+    let mut edges: Vec<Edge> = Vec::new();
+    for poly in &polys {
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            if a.1 == b.1 {
+                continue;
+            }
+            let (top, bottom) = if a.1 < b.1 { (a, b) } else { (b, a) };
+            edges.push(Edge {
+                y0: top.1,
+                y1: bottom.1,
+                x0: top.0,
+                slope: (bottom.0 - top.0) / (bottom.1 - top.1),
+            });
+        }
+    }
+    edges.sort_by(|a, b| a.y0.partial_cmp(&b.y0).unwrap_or(std::cmp::Ordering::Equal));
     let width = (bbox.x1 - bbox.x0) as usize;
     let mut cov = vec![0f32; width];
     let mut xs: Vec<f32> = Vec::new();
+    let mut waiting = 0usize;
+    let mut live: Vec<usize> = Vec::new();
     for py in bbox.y0..bbox.y1 {
         cov.fill(0.0);
+        let (top, bottom) = (py as f32, py as f32 + 1.0);
+        while waiting < edges.len() && edges[waiting].y0 < bottom {
+            live.push(waiting);
+            waiting += 1;
+        }
+        live.retain(|&i| edges[i].y1 > top);
+        if live.is_empty() {
+            continue;
+        }
         for j in 0..N {
             // Sample y at the middle of each sub-row, never on its edge.
             let sy = py as f32 + (j as f32 + 0.5) / N as f32;
             xs.clear();
             // Crossings from every ring go into one sorted list, which is
             // exactly what makes the fill even-odd across all of them.
-            for poly in &polys {
-                for i in 0..poly.len() {
-                    let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-                    if (a.1 > sy) != (b.1 > sy) {
-                        let s = (sy - a.1) / (b.1 - a.1);
-                        xs.push(a.0 + s * (b.0 - a.0));
-                    }
+            // A segment counts where `y0 <= sy < y1`, which is the old
+            // test — exactly one end strictly above the sample — said
+            // about a segment that knows which of its ends is which.
+            for &i in &live {
+                let e = &edges[i];
+                if e.y0 <= sy && sy < e.y1 {
+                    xs.push(e.x0 + (sy - e.y0) * e.slope);
                 }
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -10197,6 +10248,68 @@ mod tests {
         let s = render(&doc).unwrap();
         assert_eq!(s.get(2, 3).a, 1.0, "integer bounds stay hard-edged");
         assert_eq!(s.get(6, 3).a, 0.0);
+    }
+
+    /// A path's edge is antialiased down the page as well as across it.
+    ///
+    /// The scanline fill is exact across a row — a span contributes the
+    /// fraction of the pixel it really covers — and sampled down it, so a
+    /// near-horizontal edge came out in whatever steps the sample count
+    /// allowed. Four sub-rows meant quarters, which is the coarsest
+    /// antialiasing this renderer had and on exactly the shapes a person
+    /// draws with the pen: a row nine tenths covered was drawn whole.
+    ///
+    /// Sixteen sub-rows cost nothing they did not already cost, because
+    /// only the segments that reach a row are asked about it now rather
+    /// than all of them — which on a spline of a couple of hundred
+    /// anchors is most of the work at any sample count. A canvas-filling
+    /// spline renders faster than it did at four.
+    #[test]
+    fn a_paths_edge_is_antialiased_down_the_page_too() {
+        // A rectangle written as a path, so it goes through the scanline
+        // fill, with its top edge part of the way down a row.
+        let edge_at = |top: f32| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "band",
+                VectorShape::Path {
+                    points: vec![[5.0, top], [35.0, top], [35.0, 20.0], [5.0, 20.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            render(&doc).unwrap().get(20, 8).a
+        };
+        // Nine tenths of the row, and three fifths of it. Four sub-rows
+        // answered the first with the whole row and the second with a
+        // half; sixteen come within a fortieth of both.
+        assert!(
+            (edge_at(8.1) - 0.9).abs() < 0.05,
+            "a row nine tenths covered ({})",
+            edge_at(8.1)
+        );
+        assert!(
+            (edge_at(8.4) - 0.6).abs() < 0.05,
+            "and one three fifths covered ({})",
+            edge_at(8.4)
+        );
     }
 
     #[test]

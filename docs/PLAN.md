@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~424),
+- **Verify before committing:** `cargo test --workspace` (~425),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2295,6 +2295,23 @@ without reading anything else.*
      coarse box had been missing the sliver.
      Eighty-seven of the hundred and twenty pages the backend declines
      outright, which is its own thing to look at.
+     And the coarsest antialiasing in the renderer was found by the same
+     reading and is gone: the scanline path fill is exact across a row
+     and was *sampled* down it, four sub-rows deep, so a near-horizontal
+     edge came out in quarters — a row nine tenths covered was drawn
+     whole, on exactly the shapes a person draws with the pen. It is
+     sixteen now and it renders *faster* than it did at four, because
+     the crossings are taken from an edge table: only the segments that
+     reach a row are asked about it, where before every segment was asked
+     for every sub-row of every row, which on a spline of a couple of
+     hundred anchors was nearly all of the work at any sample count. A
+     canvas-filling spline at 1400x1000 went from 38ms to 29ms while the
+     sampling got four times finer
+     (`a_paths_edge_is_antialiased_down_the_page_too`). Worth knowing
+     about the edge table: retiring an edge is a cost and not a
+     correctness question — leave every edge live and every test still
+     passes, slowly — so the benchmark was the witness for that half and
+     nothing standing guards it.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field
