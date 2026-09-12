@@ -2156,7 +2156,7 @@ without reading anything else.*
      That found a copy drawing its shadow clipped, turned up the
      clipping wrinkle above, and — once a layer in it reached for a
      palette entry — found a palette change repainting nothing and the
-     GPU declining a page it can draw. Five shapes have gone in since. Three held: a
+     GPU declining a page it can draw. Six shapes have gone in since. Three held: a
      copy of a *frame*, a copy of a *copy*, and a second frame. The
      fourth did not — a shadow on the *group*, where every effect in the
      fixture had until then hung on a layer — and it took two audits with
@@ -2169,7 +2169,22 @@ without reading anything else.*
      does: ignore the flag in the GPU backend and the cross-renderer
      audit fails on the bare fixture; drop it on the way to a file and
      the container audit says the clip did not survive. Which is the
-     lesson applied rather than relearned. Holding is not nothing — but the copy of a copy was
+     lesson applied rather than relearned.
+     The sixth was a region *picked out* and a region *kept by name*,
+     standing in the document rather than only appearing in the list of
+     commands. Both had been in that list since they were written, which
+     asks what each one does; neither had ever been in the document the
+     rest of the audits are asked about, which is the other question —
+     what a page with a region on it survives. One audit stopped holding,
+     and it was the right one: the file format's inventory of fields a
+     `.chitra` cannot be missing grew by twenty-six, all of them inside
+     the selection and the kept regions, since a `Mask` is as required
+     there as it is on a layer. Everything else held, so the code the
+     addition was meant to exercise was broken to see who would notice:
+     take the carry off the selection and three tests fail, off the kept
+     regions and two do. Both were already pinned. Worth knowing rather
+     than worth fixing — and the shared document is the stronger for
+     standing with a region on it. Holding is not nothing — but the copy of a copy was
      worth more than that. Nothing broke, so the question became what
      would have to break for the audit to notice, and the answer was
      nothing: stopping the walk that finds copies of copies after one

@@ -751,6 +751,45 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A region picked out, and one put away by name. Both have been in
+    // the list of commands since they were written, which asks what each
+    // *does*; neither has ever been in the document the rest of the
+    // audits are asked about, which is a different question — what a
+    // page with a region on it survives. They are written in the page's
+    // own space, so they are the third thing `map_page` has to carry
+    // when the canvas turns, and they go into a file and onto a
+    // clipboard like anything else. Deliberately not the ones the
+    // command list sets, so that setting those still changes something.
+    doc.apply(Command::SetSelection {
+        selection: Some(Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx: 11.0, ry: 8.0 },
+                transform: Transform::translation(34.0, 30.0),
+            },
+            invert: false,
+            feather: 1.5,
+        })),
+    })
+    .unwrap();
+    doc.apply(Command::SetRegions {
+        regions: vec![crate::KeptRegion {
+            name: "the wall".into(),
+            mask: Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 18.0,
+                        height: 14.0,
+                        radius: 3.0,
+                    },
+                    transform: Transform::translation(56.0, 8.0),
+                },
+                invert: true,
+                feather: 0.0,
+            },
+        }],
+    })
+    .unwrap();
+
     Fixture {
         doc,
         root,
