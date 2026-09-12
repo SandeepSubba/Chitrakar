@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1030 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1036 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2648,6 +2648,15 @@ chitrakar/
   resizing one, and the reading that matters is behavioural: tap the
   corner and the rest of the shapes come out, while the middle of the
   slot still answers as the tool.
+- Dialogs stay inside the window ✅: one is centred on its scrim, so one
+  taller than the screen hangs off *both* ends and takes its buttons with
+  it. On a phone held sideways that left New document 394 pixels tall on
+  a 320-pixel screen with no Create and no Cancel anywhere on it, and
+  nothing to scroll — the only way out was the Escape key, which a phone
+  does not have. A dialog has a size it cannot exceed now and, past that,
+  its own scrollbar, with the row that answers it kept against its
+  bottom so what closes it is where it always is rather than down the end
+  of a list of fields.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

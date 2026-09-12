@@ -253,7 +253,15 @@ body {
 }
 
 .modal {
-  width: 20rem;
+  /* Never wider or taller than the window it is in. A dialog is centred
+     on the scrim, so one taller than the screen hangs off *both* ends and
+     takes its buttons with it — on a phone held sideways that left New
+     document with no Create and no Cancel on the screen at all, and
+     nothing to scroll. What it has now is a size it cannot exceed and,
+     past that, its own scrollbar. */
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   padding: 1rem;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -360,6 +368,13 @@ body {
   justify-content: flex-end;
   gap: 0.4rem;
   margin-top: 0.3rem;
+  /* Kept against the bottom of a dialog that has had to scroll, so that
+     what answers it is where it always is rather than somewhere down the
+     end of a list of fields. */
+  position: sticky;
+  bottom: -1rem;
+  padding: 0.4rem 0 0;
+  background: var(--panel);
 }
 
 .mask-button.primary {

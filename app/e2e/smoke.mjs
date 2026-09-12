@@ -6237,6 +6237,53 @@ assert(
   await thumb.close();
 }
 
+// 9s. A dialog stays inside the window, and what answers it stays in
+// reach.
+//
+// A dialog is centred on its scrim, so one taller than the screen hangs
+// off *both* ends and takes its buttons with it. On a phone held sideways
+// that left New document 394 pixels tall on a 320-pixel screen with no
+// Create and no Cancel anywhere on it, and nothing to scroll: the only
+// way out was the Escape key, which a phone does not have.
+{
+  await page.setViewportSize({ width: 740, height: 320 });
+  await page.waitForTimeout(400);
+  await page.locator('.menubar button:has-text("File")').first().click();
+  await page.waitForTimeout(200);
+  await page.locator('.menu-pop button:has-text("New document")').first().click();
+  await page.waitForTimeout(350);
+  const modal = page.locator(".modal");
+  const modalBox = await modal.boundingBox();
+  assert(
+    modalBox.y >= -1 && modalBox.y + modalBox.height <= 320 + 1,
+    `the dialog is inside the window it is in (${modalBox.y} to ${modalBox.y + modalBox.height} of 320)`,
+  );
+  // The two that answer it, which is what a dialog is for.
+  for (const name of ["Cancel", "Create"]) {
+    const b = page.locator(`.modal-actions button:has-text("${name}")`).first();
+    const box = await b.boundingBox();
+    assert(
+      box && box.y >= 0 && box.y + box.height <= 320,
+      `${name} is on the screen (${box && box.y})`,
+    );
+    assert(
+      await b.evaluate((n) => {
+        const r = n.getBoundingClientRect();
+        const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        return n.contains(at);
+      }),
+      `and ${name} answers to a press at its middle`,
+    );
+  }
+  // Out the way it came, leaving the document alone.
+  await page.locator('.modal-actions button:has-text("Cancel")').first().click();
+  await page.waitForTimeout(300);
+  assert((await page.locator(".modal").count()) === 0, "and Cancel puts it away");
+
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(400);
+}
+
 // 9q. Auto levels: the input points set to where the picture's own tones
 // start and stop, read off the same histogram the panel draws — and the
 // points are shown in the encoding that histogram is drawn in, so what
