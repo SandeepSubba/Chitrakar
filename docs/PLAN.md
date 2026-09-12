@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~423),
+- **Verify before committing:** `cargo test --workspace` (~424),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2273,14 +2273,28 @@ without reading anything else.*
      boundary was drawn as three quarters of it. The band is one
      rectangle less another, and each of those is the same product of two
      1-D overlaps the fill already had exact, so it is exact now too.
-     What is left is worth stating rather than burying: eighteen of the
-     thirty-three pages the backend takes still carry a pixel more than a
-     twentieth off, and it is not sampling — raising the reference's box
-     from four samples an axis to sixteen moves none of it. The audit
-     names those pages and holds the count where it is, which is a
-     ratchet to bring down rather than a tolerance that is meant. Eighty-
-     seven of the hundred and twenty it declines outright, which is its
-     own thing to look at.
+     The pages that stayed rough were then run down, and all of it is a
+     curve drawn two ways. Eleven of the nineteen hold a *path*, which
+     the backend fills through a stencil and so does not antialias at
+     all — the difference that was already recorded, and the biggest of
+     them. Several hold a raster, where an enlarged picture is resampled
+     either side of its last texel by two samplers that clamp their own
+     way. The rest are a rectangle's *corners*, and chasing those found
+     two more things in the reference renderer: a rounded rectangle is
+     the same exact product away from its corners as a square one, which
+     it was not taking; and the exact stroke band above had been written
+     without that reservation, so it squared off a corner that is really
+     a quarter circle of the band's own reach — a defect introduced and
+     found within the day, by this instrument
+     (`a_rects_stroke_is_exact_along_its_runs_and_round_at_its_corners`).
+     What is left at a corner is two approximations of an arc, so the
+     few pixels a corner costs are sampled sixteen to a side now rather
+     than four — which turned up a standing test asserting that the pixel
+     just outside a corner circle is drawn as *nothing*, where it is a
+     hair inside the radius and really about a hundredth covered. The
+     coarse box had been missing the sliver.
+     Eighty-seven of the hundred and twenty pages the backend declines
+     outright, which is its own thing to look at.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field

@@ -3531,6 +3531,20 @@ fn rect_coverage(width: f32, height: f32, t: Transform, inv: Inverse, px: u32, p
     span(t.e, t.e + width * t.a, px) * span(t.f, t.f + height * t.d, py)
 }
 
+/// Whether a device pixel, carried back into the shape's own space,
+/// keeps clear of all four of a rectangle's corner regions — the squares
+/// of side `reach` at each end. Inside one, a rounded rectangle and a
+/// stroke band both turn a curve and the exact answer for a box does not
+/// hold; outside them the shape is two straight edges, which is most of
+/// any rectangle and all of a long thin one.
+fn clear_of_corners(width: f32, height: f32, reach: f32, inv: Inverse, px: u32, py: u32) -> bool {
+    let (ax, ay) = inv.at(px as f32, py as f32);
+    let (bx, by) = inv.at(px as f32 + 1.0, py as f32 + 1.0);
+    let (lx0, lx1) = (ax.min(bx), ax.max(bx));
+    let (ly0, ly1) = (ay.min(by), ay.max(by));
+    (lx0 >= reach && lx1 <= width - reach) || (ly0 >= reach && ly1 <= height - reach)
+}
+
 /// Exact coverage of an axis-aligned local-space box over one device
 /// pixel. The same arithmetic [`rect_coverage`] takes, said about a box
 /// that need not start at the origin — which is what a stroke band's two
@@ -3566,6 +3580,14 @@ fn pixel_coverage(
     py: u32,
 ) -> f32 {
     const N: u32 = 4;
+    // Where a rectangle turns its corner the exact answers below do not
+    // hold and the sampler takes over — for a handful of pixels a shape,
+    // since a corner is small and the runs either side of it are not. So
+    // those few can afford a finer box: a curve is the one thing here
+    // worth more than four samples an axis, and it is the only place
+    // this renderer, which every other is held against, is the coarser
+    // of them.
+    let mut n = N;
     // An axis-aligned rect fill has an exact answer, so take it. Rect fills
     // cover the largest areas, and this is both cheaper than sampling and
     // not an approximation of it.
@@ -3582,6 +3604,25 @@ fn pixel_coverage(
     {
         if *radius <= 0.0 {
             return rect_coverage(*width, *height, t, inv, px, py);
+        }
+        // A rounded one is the same product away from its corners. A
+        // pixel that touches none of the four corner squares sees two
+        // straight edges and nothing else, so the exact answer is the
+        // square-cornered rect's — which leaves sampling to the corners,
+        // where the shape really is an arc. Most of a rounded
+        // rectangle's edge is not its corners.
+        if t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
+            if clear_of_corners(
+                *width,
+                *height,
+                corner_radius(*width, *height, *radius),
+                inv,
+                px,
+                py,
+            ) {
+                return rect_coverage(*width, *height, t, inv, px, py);
+            }
+            n = 16;
         }
     }
     // And its *band* has one too. A square-cornered rect's stroke is one
@@ -3604,12 +3645,7 @@ fn pixel_coverage(
         // Only where the band is a range of distances rather than a run
         // of laid pieces (a dash, a path, a stroke that changes width),
         // and only while the map keeps the rectangle square on the page.
-        if *radius <= 0.0
-            && s.pieces.is_empty()
-            && t.b.abs() <= 1e-6
-            && t.c.abs() <= 1e-6
-            && !matches!(shape, VectorShape::Path { .. })
-        {
+        if s.pieces.is_empty() && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
             // The same two numbers `stroke_covers` reads the band as,
             // where the distance is negative inside.
             let (lo, hi) = match s.align {
@@ -3617,9 +3653,21 @@ fn pixel_coverage(
                 StrokeAlign::Centre => (-s.width / 2.0, s.width / 2.0),
                 StrokeAlign::Outside => (0.0, s.width),
             };
-            let outer = box_coverage(-hi, -hi, width + hi, height + hi, t, px, py);
-            let inner = box_coverage(-lo, -lo, width + lo, height + lo, t, px, py);
-            return (outer - inner).clamp(0.0, 1.0);
+            // Away from the corners only. A band is a range of
+            // *distances*, so round the corner it turns — even on a
+            // square-cornered rectangle, where the outside of the band
+            // is a quarter circle of the band's own reach. Two
+            // rectangles differenced have square corners and would say
+            // otherwise, so the corners stay with the sampler and the
+            // long straight runs, which are most of a stroke, come out
+            // exact.
+            let reach = corner_radius(*width, *height, *radius) + hi.abs().max(lo.abs());
+            if clear_of_corners(*width, *height, reach, inv, px, py) {
+                let outer = box_coverage(-hi, -hi, width + hi, height + hi, t, px, py);
+                let inner = box_coverage(-lo, -lo, width + lo, height + lo, t, px, py);
+                return (outer - inner).clamp(0.0, 1.0);
+            }
+            n = 16;
         }
     }
     let covers = |sx: f32, sy: f32| {
@@ -3637,16 +3685,16 @@ fn pixel_coverage(
     if uniform {
         return if inside { 1.0 } else { 0.0 };
     }
-    let hits = (0..N * N)
+    let hits = (0..n * n)
         .filter(|k| {
-            let (i, j) = (k % N, k / N);
+            let (i, j) = (k % n, k / n);
             covers(
-                fx + (i as f32 + 0.5) / N as f32,
-                fy + (j as f32 + 0.5) / N as f32,
+                fx + (i as f32 + 0.5) / n as f32,
+                fy + (j as f32 + 0.5) / n as f32,
             )
         })
         .count();
-    hits as f32 / (N * N) as f32
+    hits as f32 / (n * n) as f32
 }
 
 /// Fill a polygon row by row instead of sampling it per pixel.
@@ -11784,7 +11832,16 @@ mod tests {
         // On the corner circle: the radius runs from (10,10) outwards, so
         // 10 - 10/sqrt2 ~ 2.93 along the diagonal is just inside it.
         assert_eq!(round.get(3, 3).a, 1.0, "the cut follows a circle");
-        assert_eq!(round.get(2, 2).a, 0.0, "just outside it, nothing");
+        // And a hair outside it, next to nothing. Not *nothing*: the
+        // pixel at (2,2) reaches to (3,3), which is 9.9 from the corner's
+        // centre and so a whisker inside a radius of 10, and a corner is
+        // sampled finely enough now to see the sliver that leaves. Four
+        // samples a side missed it and called the pixel empty.
+        assert!(
+            round.get(2, 2).a < 0.02,
+            "just outside it, next to nothing ({})",
+            round.get(2, 2).a
+        );
         // All four corners, and a bigger radius cuts more.
         for (x, y) in [(38, 1), (1, 38), (38, 38)] {
             assert_eq!(round.get(x, y).a, 0.0, "corner ({x},{y}) is rounded too");
@@ -13572,6 +13629,114 @@ mod tests {
         assert!(
             x0 < 4.0 && y0 < 4.0 && y1 > 20.0,
             "stroke overhang in bounds"
+        );
+    }
+
+    /// A rectangle's stroke: exact along its runs, and round where it
+    /// turns a corner.
+    ///
+    /// The band used to be sampled sixteen to a pixel like any other
+    /// shape, so its edges came out in quarters — a hairline eight
+    /// tenths of a pixel over a boundary was drawn as three quarters of
+    /// it, which is visible on a thin stroke and was the one place the
+    /// renderer that every other is held against was the coarser of
+    /// them. The band is one rectangle less another, and each of those
+    /// is the product of two 1-D overlaps the fill already had exact.
+    ///
+    /// Away from the corners only. A band is a range of *distances*, so
+    /// it turns a corner in a quarter circle of its own reach even on a
+    /// square-cornered rectangle; two rectangles differenced have square
+    /// corners and would fill in what the curve leaves out.
+    #[test]
+    fn a_rects_stroke_is_exact_along_its_runs_and_round_at_its_corners() {
+        let banded = |width: f32, at: f32| {
+            let mut doc = Document::new(40, 24, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "outline",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    width,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: Some(chitrakar_doc::StrokeAlign::Centre),
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at, 7.0),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+
+        // A band 1.5715 wide, centred on the left edge at x=10: it runs
+        // from 9.2 to 10.79, so the pixel at 9 is eight tenths covered
+        // and the one at 10 is a little under four fifths. Sampled four
+        // to a side those were three quarters each.
+        let s = banded(1.5715, 10.0);
+        let row = 12;
+        assert!(
+            (s.get(9, row).a - 0.7858).abs() < 0.002,
+            "the near pixel is exactly what the band covers ({})",
+            s.get(9, row).a
+        );
+        assert!(
+            (s.get(10, row).a - 0.7857).abs() < 0.002,
+            "and so is the far one ({})",
+            s.get(10, row).a
+        );
+
+        // The same band a fifth of a pixel along: the two pixels take
+        // their share of it, which quarters cannot say either.
+        let s = banded(2.0, 10.2);
+        assert!(
+            (s.get(9, row).a - 0.8).abs() < 0.002 && (s.get(11, row).a - 0.2).abs() < 0.002,
+            "a fifth of a pixel is a fifth ({} {})",
+            s.get(9, row).a,
+            s.get(11, row).a
+        );
+
+        // And the corner is a curve. A band four wide reaches two pixels
+        // out, so the outer corner of the rectangle at (10,7) is a
+        // quarter circle of radius two about that point: the pixel at
+        // (8,5) has its near corner inside it and its far corner out, so
+        // it is partly covered. Squared off it would be covered whole.
+        let s = banded(4.0, 10.0);
+        let corner = s.get(8, 5).a;
+        assert!(
+            corner > 0.05 && corner < 0.9,
+            "the corner is a curve rather than a square ({corner})"
+        );
+        // The run beside it is whole, which says the band is there at
+        // all and that the corner is not simply missing.
+        assert!(
+            (s.get(12, 5).a - 1.0).abs() < 0.002,
+            "the band itself is whole along its run ({})",
+            s.get(12, 5).a
         );
     }
 
