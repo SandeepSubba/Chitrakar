@@ -6148,6 +6148,95 @@ assert(
   await page.waitForTimeout(400);
 }
 
+// 9r. On a touch screen the chrome is big enough to press with a finger.
+//
+// A finger covers about a centimetre and cannot see under itself, so what
+// a mouse hits at five pixels a thumb cannot hit at all. The stylesheet
+// had grown the handles on the *artwork* under a coarse pointer and left
+// the chrome at its mouse sizes — and the worst of it was the corner that
+// opens a shared slot, a five-pixel triangle, which on a phone left the
+// ellipse, the polygon, the star and half the ways of selecting with no
+// way to reach them.
+//
+// A page of its own, since whether the pointer is coarse is decided when
+// the context is made and not by resizing one.
+{
+  const thumb = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+  });
+  await thumb.goto("http://localhost:8123/");
+  await thumb.waitForSelector("#engine-canvas");
+  await thumb.waitForTimeout(800);
+  assert(
+    await thumb.evaluate(() => matchMedia("(pointer: coarse)").matches),
+    "the page knows it is being touched rather than pointed at",
+  );
+  const sizes = await thumb.evaluate(() => {
+    const out = [];
+    for (const b of document.querySelectorAll("button, [role=button], input, select")) {
+      const r = b.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      if (getComputedStyle(b).visibility === "hidden") continue;
+      const name = b.getAttribute("aria-label") || b.textContent?.trim().slice(0, 18) || "";
+      out.push({
+        name,
+        cls: (b.className || "").toString(),
+        least: Math.round(Math.min(r.width, r.height)),
+      });
+    }
+    return out;
+  });
+  const tiny = sizes.filter((s) => s.least < 18);
+  assert(
+    tiny.length === 0,
+    `nothing is hint-sized: ${tiny.map((t) => `${t.name} ${t.least}`).join(", ")}`,
+  );
+  // What is pressed rather than typed into, and lives in the chrome.
+  const chrome = ["tool", "menu-label", "chrome-button", "panel-toggle", "fill-swatch"];
+  const small = sizes.filter(
+    (s) =>
+      chrome.some((c) => s.cls.split(" ").includes(c)) &&
+      !s.cls.split(" ").includes("grip") &&
+      s.least < 40,
+  );
+  assert(
+    small.length === 0,
+    `and what is pressed is worth pressing: ${small.map((t) => `${t.name} ${t.least}`).join(", ")}`,
+  );
+
+  // The reading that says the corner is reachable rather than merely
+  // bigger: tap it, and the rest of the shapes come out.
+  const corner = thumb.locator('button[aria-label="More shapes"]');
+  assert((await corner.count()) === 1, "the shape slot has a corner to open");
+  const cornerBox = await corner.boundingBox();
+  assert(
+    Math.min(cornerBox.width, cornerBox.height) >= 18,
+    `a corner a finger can find (${cornerBox.width}x${cornerBox.height})`,
+  );
+  await corner.tap();
+  await thumb.waitForTimeout(300);
+  assert(
+    await thumb.locator(".tool-flyout").isVisible(),
+    "and tapping it brings out the rest of the shapes",
+  );
+  // And the middle of the tool is still the tool's, not the corner's.
+  const slot = thumb.locator('nav[aria-label="Tools"] .tool-group').last();
+  const slotBox = await slot.boundingBox();
+  const atMiddle = await thumb.evaluate(
+    ([x, y]) => {
+      const at = document.elementFromPoint(x, y);
+      return at ? at.closest("button")?.getAttribute("aria-label") ?? "" : "";
+    },
+    [slotBox.x + slotBox.width / 2, slotBox.y + slotBox.height / 2],
+  );
+  assert(
+    atMiddle !== "More shapes",
+    `a corner that does not swallow the button it sits on (${atMiddle})`,
+  );
+  await thumb.close();
+}
+
 // 9q. Auto levels: the input points set to where the picture's own tones
 // start and stop, read off the same histogram the panel draws — and the
 // points are shown in the encoding that histogram is drawn in, so what

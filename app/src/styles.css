@@ -2042,4 +2042,72 @@ button.fold:hover {
   .guide-overlay .guide-hit {
     stroke-width: 22;
   }
+
+  /* The chrome, which had been left at its mouse sizes. A finger covers
+     about a centimetre and cannot see under itself, so what a mouse can
+     hit at five pixels a thumb cannot hit at all. */
+
+  /* The worst of them by far: the corner that opens the rest of a shared
+     slot was a five-pixel triangle — a hint to the eye and nothing at
+     all to a hand, which on a phone left the ellipse, the polygon, the
+     star and half the ways of selecting with no way to reach them. The
+     triangle stays exactly where it was, drawn now by a mark of its own,
+     and the *press* grows around it. Eighteen on a forty-four slot, so
+     the middle of the tool is still the tool's: a corner big enough to
+     swallow the button it sits on would be a different bug. */
+  .tool {
+    width: 44px;
+    height: 44px;
+  }
+
+  .tool-more {
+    right: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    border: none;
+  }
+
+  .tool-more::after {
+    content: "";
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-bottom: 5px solid var(--muted);
+  }
+
+  .tool-group:hover .tool-more::after {
+    border-bottom-color: var(--text);
+  }
+
+  /* And the bar's own: menu labels, the chrome buttons, the ink swatch
+     and the button that asks for the layers. The bar grows to hold what
+     it wraps, so giving these the height they need costs a row rather
+     than hiding one. */
+  .menu-label,
+  .chrome-button,
+  .panel-toggle,
+  .fill-swatch {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  /* The two fields in the bar are typed into rather than pressed, but a
+     field has to be got into first, and a nineteen-pixel line is a poor
+     place to aim. */
+  .doc-name,
+  .zoom-field input {
+    min-height: 36px;
+  }
+
+  /* A palette colour is a sixteen-pixel chip, which is right beside a
+     mouse and half a finger wide. Said the way the rule it is answering
+     says it, or it loses to it. */
+  .palette .swatch {
+    width: 28px;
+    height: 28px;
+  }
 }

@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1023 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1030 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2628,6 +2628,26 @@ chitrakar/
   With the bar's fix taken out it names three controls at 360 and 500,
   one at 640, and stays quiet from 720 up, which is the defect's own
   shape.
+- Touch targets ✅: the stylesheet had grown the handles on the *artwork*
+  under a coarse pointer and left the chrome at its mouse sizes. A finger
+  covers about a centimetre and cannot see under itself, so what a mouse
+  hits at five pixels a thumb cannot hit at all — and five pixels is
+  exactly what the corner that opens a shared slot was, which on a phone
+  left the ellipse, the polygon, the star and half the ways of selecting
+  with no way to reach them. The triangle stays where it was, drawn by a
+  mark of its own, and the press grows around it: eighteen on a
+  forty-four slot, so the middle of the tool is still the tool's, since a
+  corner big enough to swallow the button it sits on is a different bug.
+  The bar's own — menu labels, chrome buttons, the ink swatch, the layers
+  button — take forty; its two fields take thirty-six, because a field
+  has to be got into before it can be typed in; a palette chip takes
+  twenty-eight. Twenty-five controls were under forty-four on a phone;
+  what is left is the two fields, the two corners and the tools' own
+  thirty-eight. The suite asks this on a page of its own, since whether a
+  pointer is coarse is decided when the context is made and not by
+  resizing one, and the reading that matters is behavioural: tap the
+  corner and the rest of the shapes come out, while the middle of the
+  slot still answers as the tool.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
