@@ -1393,6 +1393,15 @@ body {
 
   .topbar {
     flex-wrap: wrap;
+    /* And it grows to hold what it wrapped. The bar is one row tall by
+       fixed height on a wide window, which is right while nothing wraps
+       and wrong the moment something does: a second row went on
+       overflowing *below* the bar, over the canvas and under the ruler,
+       where it could be seen and not pressed. The layers button is the
+       last thing in the bar and so the first thing to wrap, which made
+       the one way to the layers on a phone the thing that broke. */
+    height: auto;
+    min-height: 2.6rem;
   }
 
   .panel.overlay {

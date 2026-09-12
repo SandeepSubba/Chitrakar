@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~413),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1015 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1019 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2605,6 +2605,16 @@ chitrakar/
   no grip to carry it off by since down there it has one place to be.
   Reversed rather than reordered, so it is still the first thing a
   keyboard or a reader arrives at.
+  Measuring the phone layout to decide what to do next is what turned up
+  the defect that mattered: the top bar is one row tall by a *fixed*
+  height, which is right while nothing wraps and wrong the moment
+  something does. Below 900px it is told to wrap, and what it wrapped
+  went on overflowing below the bar, over the canvas and under the ruler
+  — visible and unpressable. The layers button is the last thing in the
+  bar and so the first to wrap, which made the one way to the layers on a
+  phone the thing that broke. The bar grows to hold its rows now, and the
+  suite presses that button at a phone's width rather than only at a
+  tablet's, where nothing had wrapped and nothing was wrong.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

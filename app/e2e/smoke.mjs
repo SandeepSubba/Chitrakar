@@ -6062,6 +6062,33 @@ assert(
     "and no grip to carry it off by",
   );
 
+  // The bar is one row tall by a fixed height on a wide window, which is
+  // right while nothing wraps and wrong the moment something does: the
+  // layers button is the last thing in it and so the first to wrap, and
+  // a second row went on overflowing *below* the bar, over the canvas and
+  // under the ruler — where it could be seen and not pressed. On a phone
+  // that is the one way to the layers.
+  const barBox = await page.locator(".topbar").boundingBox();
+  const toggleBox = await toggle.boundingBox();
+  assert(
+    toggleBox.y + toggleBox.height <= barBox.y + barBox.height + 1,
+    `the bar grows to hold what it wrapped (${toggleBox.y + toggleBox.height} against ${barBox.y + barBox.height})`,
+  );
+  assert(
+    await toggle.evaluate((b) => {
+      const r = b.getBoundingClientRect();
+      const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return b.contains(at);
+    }),
+    "so the layers button is the thing under the finger that presses it",
+  );
+  await toggle.click();
+  await page.waitForTimeout(300);
+  assert(await panel.isVisible(), "and pressing it brings the layers over the canvas");
+  await toggle.click();
+  await page.waitForTimeout(300);
+  assert(!(await panel.isVisible()), "and puts them away again");
+
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.waitForTimeout(500);
   assert(
