@@ -2230,16 +2230,20 @@ fn one(
     // what decides what "under it" means: the CPU renderer asks the
     // same question, so both give the adjustment the same page to
     // work on.
-    // A layer that rewrites what is under it has nothing left over
-    // to blend against it, and the CPU renderer reads it that way:
-    // it hands an adjustment and a filter their opacity and their
-    // mask and never looks at the blend mode. A surface of its own
-    // would be a different picture, so hand the page over instead.
-    if matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
-        && node.blend != BlendMode::Normal
-    {
-        return None;
-    }
+    // A layer that rewrites what is under it has nothing left over to
+    // blend against it, and the CPU renderer reads it that way: it hands
+    // an adjustment and a filter their opacity and their mask and never
+    // looks at the blend mode. Asked directly, a blend makes no
+    // difference at all to what it draws.
+    //
+    // This used to hand the page back, on the grounds that a blend would
+    // put the layer on a surface of its own and that would be a
+    // different picture. The surface was the problem, not the blend: the
+    // passes these two are drawn by carry their own parameters and never
+    // read `node.blend`, so the answer is to keep the blend from forcing
+    // a surface and then ignore it, which is what the renderer being
+    // matched does.
+    let rewrites = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
     let alone = !shadings.is_empty()
         // A brush layer always: its strokes go on one after another and
         // an eraser takes off what the ones before it left, which is a
@@ -2250,7 +2254,7 @@ fn one(
         // what source-over being associative makes identical when none
         // of them is.
         || matches!(node.kind, NodeKind::Paint { .. })
-        || node.blend != BlendMode::Normal
+        || (node.blend != BlendMode::Normal && !rewrites)
         || (matches!(node.kind, NodeKind::Group)
             && (node.opacity < 1.0
                 || node.mask.is_some()
@@ -7513,22 +7517,46 @@ mod tests {
         // pixelate test below holds them to the CPU's own grid.
         assert!(GpuRenderer::can_render(&with(F::Pixelate { size: 6.0 })));
 
-        // And a filter carrying a blend mode goes back too: the CPU
-        // renderer writes a filter straight into what it read and never
-        // looks at the mode, so a surface of its own here would be a
-        // different picture.
+        // And a filter carrying a blend mode is drawn as though it had
+        // none, which is what the renderer being matched does: it writes
+        // a filter straight into what it read and never looks at the
+        // mode. This used to hand the page back, on the grounds that a
+        // blend would put the layer on a surface of its own — true, and
+        // the surface was the thing to stop rather than the page.
         let mut doc = with(F::Vignette {
             amount: 0.8,
             radius: 0.2,
             softness: 0.4,
         });
         let id = doc.children_of(doc.root()).unwrap()[2];
+        let plain = chitrakar_render::render(&doc).unwrap();
+        for blend in [
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Difference,
+        ] {
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a filter wearing {blend:?} is drawn"
+            );
+            let reference = chitrakar_render::render(&doc).unwrap();
+            // First that the mode really is ignored on both sides, since
+            // that is the claim: the page is the one it draws with no
+            // mode at all.
+            let (was, _) = difference(&reference, &plain);
+            assert!(was < 1e-6, "the mode makes no difference to the reference");
+            let (mean, worst) = difference(&gpu.render(&doc).unwrap(), &reference);
+            assert!(
+                mean < 0.004,
+                "a filter wearing {blend:?}: mean {mean:.5} (worst {worst:.3})"
+            );
+        }
         doc.apply(Command::SetBlendMode {
             id,
-            blend: BlendMode::Multiply,
+            blend: BlendMode::Normal,
         })
         .unwrap();
-        assert!(!GpuRenderer::can_render(&doc));
 
         // Opacity and a mask weigh a filter exactly as they weigh an
         // adjustment: half of it is half the difference it makes, and
@@ -9634,15 +9662,15 @@ mod tests {
         const DRESS: [&str; 6] = ["plain", "faded", "blended", "masked", "clipped", "effects"];
         // What each kind can wear and still be drawn. Read across DRESS.
         const TABLE: [[bool; 6]; 9] = [
-            [true, true, true, true, true, true],   // vector
-            [true, true, true, true, true, true],   // raster
-            [true, true, true, true, true, true],   // text
-            [true, true, true, true, true, true],   // group
-            [true, true, true, true, true, true],   // paint
-            [true, true, true, true, true, false],  // clone
-            [true, true, false, true, true, false], // adjustment
-            [true, true, false, true, true, false], // filter
-            [true, true, true, true, true, true],   // copy
+            [true, true, true, true, true, true],  // vector
+            [true, true, true, true, true, true],  // raster
+            [true, true, true, true, true, true],  // text
+            [true, true, true, true, true, true],  // group
+            [true, true, true, true, true, true],  // paint
+            [true, true, true, true, true, false], // clone
+            [true, true, true, true, true, false], // adjustment
+            [true, true, true, true, true, false], // filter
+            [true, true, true, true, true, true],  // copy
         ];
         let mut wrong = Vec::new();
         for (k, kind) in KINDS.iter().enumerate() {
@@ -9847,15 +9875,20 @@ mod tests {
         // not have to land on the same number.
         //
         // The numbers go *up* when the backend learns something, because
-        // learning it means more pages are compared rather than declined:
-        // teaching it to isolate a copy took the pages drawn from 33 to
-        // 47 and brought six more rough ones with it, each carrying one
-        // of the three above — checked, not assumed. So a rise here is
-        // only good news when it comes with a rise in what is drawn, and
-        // the two are printed together for that reason. Antialiasing the
+        // learning it means more pages are compared rather than declined.
+        // Isolating a copy took the pages drawn from 33 to 47 and brought
+        // six more rough ones; ignoring a blend on an adjustment rather
+        // than refusing the page took it to 65 and brought seven more.
+        // Every one of those thirteen carries one of the three causes
+        // above, which was checked rather than assumed — for the seven,
+        // by taking the blend back off and finding the worst pixel
+        // unchanged to three decimal places, so the roughness was already
+        // in the page and only the comparison is new. A rise here is good
+        // news when what is drawn rises with it and bad news otherwise,
+        // which is why the two are printed together. Antialiasing the
         // stencilled path is what would bring it down.
         assert!(
-            rough.len() <= 26 && worst_seen < 0.31,
+            rough.len() <= 33 && worst_seen < 0.31,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");
