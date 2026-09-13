@@ -2505,6 +2505,19 @@ without reading anything else.*
      they draw *is* what is under them, so there is no silhouette to grow
      one from), and nor can a clone layer, which is never on a surface of
      its own.
+     The tally, asked a third time, then pointed at a layer *held to* one
+     that is dressed: the backend would clip only to a base that was
+     plain, on the grounds that a faded or masked base's alpha depends on
+     how it was composited. It does not depend on anything of the sort —
+     what the layer above is held to comes from `layer_coverage_at`, the
+     base drawn aside by the renderer being matched, so the base's own
+     opacity, mask and blend are already in the number both sides read.
+     Asked directly, a base faded, masked or blended lands within a
+     thousandth of the reference, which is where a plain one lands. A base
+     carrying an *effect* does not — the coverage then includes the shadow
+     the base casts and what the CPU holds the layer above to does not, so
+     that one still goes back. Seventy-six pages of a hundred and twenty
+     are drawn now, forty-four declined.
      And the coarsest antialiasing in the renderer was found by the same
      reading and is gone: the scanline path fill is exact across a row
      and was *sampled* down it, four sub-rows deep, so a near-horizontal
