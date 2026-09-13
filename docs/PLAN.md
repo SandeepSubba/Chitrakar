@@ -2483,12 +2483,21 @@ without reading anything else.*
      each of the things a layer can wear, asserted, with the reason beside
      every no. A limit closed by accident should show up as plainly as one
      opened on purpose, and the table is what makes the copy row's six
-     `no`s impossible to leave lying there unnoticed. Three `no`s are left
-     and all three are decisions: an adjustment and a filter cannot be
-     blended (they rewrite what is under them, so a blend has nothing left
-     to work against) and cannot carry an effect (what they draw *is* what
-     is under them, so there is no silhouette), and nor can a clone layer,
-     which is never on a surface of its own.
+     `no`s impossible to leave lying there unnoticed. Two more went the
+     same way immediately after: an adjustment and a filter *wearing a
+     blend* used to hand the page back, on the grounds that a blend puts a
+     layer on a surface of its own and that would be a different picture.
+     True — and the surface was the thing to stop rather than the page. The
+     passes those two are drawn by carry their own parameters and never
+     read the blend mode at all, which is also what the renderer being
+     matched does: asked directly, a blend makes no difference whatever to
+     what it draws there. So the blend is kept from forcing a surface and
+     then ignored, and the pages drawn went from forty-seven to sixty-five
+     of a hundred and twenty. Three `no`s are left and all three are
+     decisions: an adjustment and a filter cannot carry an *effect* (what
+     they draw *is* what is under them, so there is no silhouette to grow
+     one from), and nor can a clone layer, which is never on a surface of
+     its own.
      And the coarsest antialiasing in the renderer was found by the same
      reading and is gone: the scanline path fill is exact across a row
      and was *sampled* down it, four sub-rows deep, so a near-horizontal
