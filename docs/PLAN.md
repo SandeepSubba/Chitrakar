@@ -1861,11 +1861,26 @@ without reading anything else.*
   PNG rather than as bytes: a silhouette is a hundred kilobytes encoded
   against a couple of megabytes raw, and that is the difference between
   instant and a visible pause.
-  Still to do: the same entry point fed by an ONNX model — `tract` or
-  `ort` — so Windows, Linux, Android and the browser get the same answer
-  rather than the colour fallback. The engine side of that is already
-  built and is the same `pick_matte`; what is left is choosing a
-  licence-clean model and deciding whether it is committed or fetched.
+  The same entry point is fed by a U^2-Net ONNX model where there is no
+  system one — `shells/.../src/onnx.rs`, through `tract`, which is pure
+  Rust so there is no C++ toolchain to install and nothing to link. It is
+  the second thing tried rather than the first, and on Apple platforms it
+  also catches the case where the system model declines to find
+  anything.
+  The model is *found*, never carried, and that was a measurement rather
+  than a preference. The full one is 176 MB, which is not a thing to put
+  in a repository; the small one is 4.6 MB and would fit, and was tried
+  against the same photographs: it makes a soft, roughly-right shape of a
+  child against a plain curtain and finds *nothing at all* in a wedding
+  photograph of two people against a wall of flowers. Shipping that would
+  be shipping the appearance of the feature. So `~/.cache/chitrakar/u2net.onnx`
+  or `CHITRAKAR_SUBJECT_MODEL` if somebody has put one there, and the
+  colour pick if not. Which leaves one thing undone and worth doing
+  deliberately rather than by default: offering to fetch it, with the
+  size said out loud, instead of a silent 176 MB on first press. The
+  browser is still on the colour pick — running this in WASM means either
+  tract compiled into the engine or onnxruntime-web beside it, and that
+  is a bundle-size decision of its own.
 - **A mask's edge, softened:** `Mask::feather`, the one thing an edge can
   be asked for that its shape cannot say — a region picked out of a
   photograph almost never wants the edge the marquee drew, and a layer

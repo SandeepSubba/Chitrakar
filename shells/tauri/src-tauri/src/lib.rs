@@ -8,6 +8,7 @@
 
 use chitrakar_engine::{ColorMode, Session};
 
+mod onnx;
 mod subject;
 
 /// Ask the system for the subject of a photograph.

@@ -26,3 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chitrakar-engine = { path = "../../../core/engine" }
 chitrakar-codecs = { path = "../../../core/codecs" }
+# Pure Rust, so no C++ toolchain to install and nothing to link: a
+# self-contained inference engine matters more here than the last of the
+# speed, since this runs once per press of a button.
+tract-onnx = "0.23"

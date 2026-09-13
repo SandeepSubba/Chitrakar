@@ -12,15 +12,25 @@
 /// `Ok(None)` means there is nothing on this platform to ask, which is
 /// not a failure: the caller falls back to the engine's own pick.
 pub fn matte(png: &[u8]) -> Result<Option<(Vec<u8>, u32, u32)>, String> {
+    // The system's own first, where there is one. It is better than
+    // anything that could be carried, and it costs nothing to carry
+    // because it is already there.
     #[cfg(has_subject_matte)]
-    {
-        ask(png).map(Some)
+    if let Ok(found) = ask(png) {
+        return Ok(Some(found));
     }
-    #[cfg(not(has_subject_matte))]
-    {
-        let _ = png;
-        Ok(None)
+    // Then a model, if one has been put where `onnx` looks — which is
+    // what every platform without a system model has, and what this
+    // falls back to on Apple platforms when the system declines to find
+    // anything. See `onnx.rs` for why it is looked for and not shipped.
+    if crate::onnx::model_path().is_some() {
+        let img = chitrakar_codecs::decode(png)
+            .map_err(|e| format!("that picture could not be read: {e}"))?;
+        return crate::onnx::matte(&img.rgba8, img.width, img.height).map(Some);
     }
+    // Nothing to ask. Not a failure: the caller falls back to the
+    // engine's own pick, which is what this all existed as before.
+    Ok(None)
 }
 
 #[cfg(has_subject_matte)]

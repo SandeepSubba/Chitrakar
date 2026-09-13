@@ -54,13 +54,18 @@ CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
 license-clean to commit.
 
-"Pick out the subject" asks the system's own model where there is one:
-on macOS the shell compiles `shells/tauri/src-tauri/swift/subject.swift`
-(Vision's subject lifting) and hands the matte to `Session::pick_matte`.
-No weights are shipped — it is already on the machine. A build with no
-`swiftc` warns and falls back to the engine's colour-based
-`Session::pick_subject`, which is also what the browser uses, so nothing
-breaks by platform.
+"Pick out the subject" tries three things in order and falls through
+quietly. The system's own model where there is one: on macOS the shell
+compiles `shells/tauri/src-tauri/swift/subject.swift` (Vision's subject
+lifting) and hands the matte to `Session::pick_matte`; no weights are
+shipped because it is already on the machine, and a build with no
+`swiftc` just warns. Then a U^2-Net ONNX model, run through `tract`, if
+one has been put at `~/.cache/chitrakar/u2net.onnx` or named by
+`CHITRAKAR_SUBJECT_MODEL` — looked for and never committed: it is 176 MB,
+and the 4.6 MB version that would fit was measured on the same
+photographs and is not good enough to ship. Then the engine's own
+colour-based `Session::pick_subject`, which is what the browser gets and
+what answers when nothing else can.
 
 `app/e2e/runs.test.mjs` unit-tests `src/runs.ts` — the byte arithmetic
 behind styling part of a text block — without a browser: `npm run
