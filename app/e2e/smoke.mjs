@@ -7256,19 +7256,36 @@ assert(
   const pageAt = async () =>
     (await page.locator("#engine-page").boundingBox()).x;
   const home = await pageAt();
+  // Where a document point sits on screen is measured again here. The
+  // box `at` was built from was taken before the zoom went to 250% and
+  // the page was fitted back, so it says where things *were*; a drag
+  // aimed by it lands wherever the old geometry happens to point, which
+  // depends on how tall the chrome is and so on how wide the window is.
+  // That is how this block came to pass on one machine and fail on
+  // another while testing nothing it claims to.
+  const box = await page.locator("#engine-page").boundingBox();
+  const over = (x, y) => [
+    box.x + (x / 400) * box.width,
+    box.y + (y / 300) * box.height,
+  ];
+  // Deliberately on top of the picked layer — the second rect, which is
+  // the top row of the panel and the one just picked. "Carries nothing
+  // in the document with it" is only a claim worth making where there
+  // is something under the pointer to carry.
+  const [sx, sy] = over(245, 75);
   await page.keyboard.down("Space");
-  await page.mouse.move(...at(200, 150));
+  await page.mouse.move(sx, sy);
   await page.mouse.down();
-  await page.mouse.move(...at(300, 150), { steps: 8 });
+  await page.mouse.move(sx + 100, sy, { steps: 8 });
   await page.mouse.up();
   await page.keyboard.up("Space");
   await page.waitForTimeout(250);
   const spaced = await pageAt();
   assert(spaced > home + 40, `space-drag carries the view (${home} -> ${spaced})`);
 
-  await page.mouse.move(...at(300, 150));
+  await page.mouse.move(sx + 100, sy);
   await page.mouse.down({ button: "middle" });
-  await page.mouse.move(...at(200, 150), { steps: 8 });
+  await page.mouse.move(sx, sy, { steps: 8 });
   await page.mouse.up({ button: "middle" });
   await page.waitForTimeout(250);
   assert(
@@ -7277,7 +7294,11 @@ assert(
   );
   assert(
     (await layerX()) === stood,
-    "with nothing in the document moved by either",
+    `with nothing in the document moved by either (${stood} -> ${await layerX()})`,
+  );
+  assert(
+    (await picked()) === 1,
+    "and nothing in the document picked or let go of by either",
   );
 
   // "Shift-drag a band — adds to what is picked", which the band's own
