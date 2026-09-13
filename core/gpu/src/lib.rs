@@ -2195,9 +2195,18 @@ fn one(
             None => None,
             Some(base) => {
                 let b = doc.node(base).ok()?;
-                let draws = matches!(
+                // A base is a layer whose alpha is its *own*: it puts
+                // something down, so "the layer drawn aside" means
+                // something and both sides read the same number for it.
+                // A clone layer, an adjustment and a filter draw by
+                // reading what is under them and have no alpha of their
+                // own to be held to — drawn aside they are nothing, or
+                // nothing like what they are on the page, and the two
+                // renderers come apart by a sixth of full scale. Those
+                // three go back; everything that paints is a base.
+                let draws = !matches!(
                     b.kind,
-                    NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+                    NodeKind::Clone { .. } | NodeKind::Adjustment(_) | NodeKind::Filter(_)
                 );
                 // What the layer above is held to is the base's own
                 // alpha, and that reading comes from the renderer being
@@ -9830,6 +9839,174 @@ mod tests {
         );
     }
 
+    /// What a layer can be *held to*: anything that paints, and nothing
+    /// that draws by reading what is under it.
+    ///
+    /// A clipped layer shows where the layer below it has alpha, and that
+    /// alpha comes from the renderer being matched — the base drawn
+    /// aside. For a shape, a picture, a block of text, a group, a brush
+    /// layer, a copy or a frame that is a number both sides agree on to a
+    /// ten-thousandth. A clone layer, an adjustment and a filter have no
+    /// alpha of their own — what they draw *is* what is under them — and
+    /// drawn aside they are nothing like what they are on the page: held
+    /// to one of those, the two renderers come apart by a sixth of full
+    /// scale. So those three hand the page back and the rest are bases.
+    ///
+    /// The line used to be drawn at shapes, pictures and text, which let
+    /// four kinds that paint perfectly well decline for no reason.
+    #[test]
+    fn anything_that_paints_can_be_held_to() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let shape = VectorShape::Rect {
+            width: 24.0,
+            height: 18.0,
+            radius: 0.0,
+        };
+        for (kind, paints) in [
+            ("vector", true),
+            ("raster", true),
+            ("text", true),
+            ("group", true),
+            ("paint", true),
+            ("copy", true),
+            ("frame", true),
+            ("clone", false),
+            ("adjustment", false),
+            ("filter", false),
+        ] {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.8,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let node: Box<Node> = match kind {
+                "vector" => filled("base", shape.clone(), RED),
+                "raster" => {
+                    let id = doc.add_resource(
+                        2,
+                        2,
+                        vec![
+                            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                        ],
+                    );
+                    Box::new(Node::raster(
+                        "base",
+                        chitrakar_doc::RasterRef {
+                            resource_id: id,
+                            width: 20,
+                            height: 16,
+                        },
+                    ))
+                }
+                "text" => Box::new(Node::text(
+                    "base",
+                    chitrakar_doc::TextSpec::new("Abc", 18.0, RED),
+                )),
+                "group" => Box::new(Node::group("base")),
+                "frame" => Box::new(Node::artboard("base", 24.0, 18.0, Some(RED))),
+                "paint" | "clone" => {
+                    let stroke = chitrakar_doc::PaintStroke {
+                        points: vec![[2.0, 2.0], [20.0, 14.0]],
+                        radii: vec![4.0],
+                        color: RED,
+                        softness: 0.0,
+                        erase: false,
+                        source: if kind == "clone" {
+                            [8.0, 6.0]
+                        } else {
+                            [0.0, 0.0]
+                        },
+                        heal: false,
+                        clip: None,
+                    };
+                    let mut n = if kind == "clone" {
+                        Node::clone_layer("base")
+                    } else {
+                        Node::paint("base")
+                    };
+                    match &mut n.kind {
+                        NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+                            strokes.push(stroke)
+                        }
+                        _ => unreachable!(),
+                    }
+                    Box::new(n)
+                }
+                "adjustment" => Box::new(Node::adjustment(
+                    "base",
+                    chitrakar_doc::Adjustment::Exposure { stops: -0.6 },
+                )),
+                "copy" => {
+                    let of = doc.children_of(doc.root()).unwrap()[0];
+                    Box::new(Node::instance("base", of))
+                }
+                _ => Box::new(Node::filter(
+                    "base",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 1.0 },
+                )),
+            };
+            let base = add(&mut doc, node, Transform::translation(8.0, 6.0));
+            if kind == "group" {
+                doc.apply(Command::AddNode {
+                    parent: base,
+                    index: 0,
+                    node: filled("in", shape.clone(), RED),
+                })
+                .unwrap();
+            }
+            let over = add(
+                &mut doc,
+                filled(
+                    "over",
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: 26.0,
+                        radius: 0.0,
+                    },
+                    BLUE,
+                ),
+                Transform::translation(14.0, 10.0),
+            );
+            doc.apply(Command::SetClipped {
+                id: over,
+                clipped: true,
+            })
+            .unwrap();
+            assert_eq!(
+                GpuRenderer::can_render(&doc),
+                paints,
+                "held to a {kind}: drawn should be {paints}"
+            );
+            if !paints {
+                continue;
+            }
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "held to a {kind}: mean {mean:.5} (worst {worst:.3})"
+            );
+        }
+    }
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -9894,16 +10071,22 @@ mod tests {
         // six more rough ones; ignoring a blend on an adjustment rather
         // than refusing the page took it to 65 and brought seven more;
         // letting a clipped layer be held to a base that is faded, masked
-        // or blended took it further again and brought three more. Every
-        // one of those sixteen carries one of the three causes above,
-        // which was checked rather than assumed: take the blend back off,
-        // or undress the base, and the worst pixel is unchanged to three
-        // decimal places — so the roughness was already in the page and
-        // only the comparison is new. A rise here is good
+        // or blended took it further again and brought three more; and
+        // letting it be held to any layer that *paints* — a group, a
+        // brush layer, a copy, a frame, where before only a shape, a
+        // picture or a block of text would do — took it to 84 and brought
+        // five more. Every one of those twenty-one carries one of the
+        // three causes above, which was checked rather than assumed: take
+        // the blend back off, undress the base, or let the clip go, and
+        // the worst pixel is unchanged to three decimal places — so the
+        // roughness was already in the page and only the comparison is
+        // new. (Letting the clip go on one of them made it *worse*, the
+        // clip having been hiding rough pixels, which is the same answer
+        // said louder.) A rise here is good
         // news when what is drawn rises with it and bad news otherwise,
         // which is why the two are printed together.
         assert!(
-            rough.len() <= 36 && worst_seen < 0.37,
+            rough.len() <= 41 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

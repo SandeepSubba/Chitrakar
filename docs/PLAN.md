@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~430),
+- **Verify before committing:** `cargo test --workspace` (~431),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2516,8 +2516,18 @@ without reading anything else.*
      thousandth of the reference, which is where a plain one lands. A base
      carrying an *effect* does not — the coverage then includes the shadow
      the base casts and what the CPU holds the layer above to does not, so
-     that one still goes back. Seventy-six pages of a hundred and twenty
-     are drawn now, forty-four declined.
+     that one still goes back.
+     And the *kind* a layer may be held to, which was shapes, pictures and
+     text: a base is a layer whose alpha is its own, so a group, a brush
+     layer, a copy and a frame belong there too and were declining for no
+     reason. A clone layer, an adjustment and a filter do not — what they
+     draw *is* what is under them, and drawn aside they are nothing like
+     what they are on the page; held to one of those the two renderers
+     come apart by a sixth of full scale, which is what says the line is
+     in the right place rather than merely somewhere
+     (`anything_that_paints_can_be_held_to`). Eighty-four pages of a
+     hundred and twenty are drawn now, thirty-six declined — where three
+     passes ago it was thirty-three drawn and eighty-seven declined.
      And the coarsest antialiasing in the renderer was found by the same
      reading and is gone: the scanline path fill is exact across a row
      and was *sampled* down it, four sub-rows deep, so a near-horizontal
