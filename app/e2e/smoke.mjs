@@ -7291,16 +7291,27 @@ assert(
   ];
   const [sx, sy] = over(lx + lw / 2, ly + lh / 2);
   await page.keyboard.down("Space");
+  // Held for a beat before the press. The app decides whether a drag
+  // carries the view or the layer *at the moment the pointer goes
+  // down*, by whether space is down then; press too soon after the key
+  // and a loaded machine can start the drag on the layer and only then
+  // notice the key, whereupon the view pans out from under a layer that
+  // is being dragged and the layer moves by twice the distance. That is
+  // what this block was failing on, and only where the machine was busy
+  // enough for the two to arrive in the wrong order.
+  await page.waitForTimeout(150);
   await page.mouse.move(sx, sy);
   await page.mouse.down();
   await page.mouse.move(sx + 100, sy, { steps: 8 });
   await page.mouse.up();
+  await page.waitForTimeout(100);
   await page.keyboard.up("Space");
   await page.waitForTimeout(250);
   const spaced = await pageAt();
   assert(spaced > home + 40, `space-drag carries the view (${home} -> ${spaced})`);
 
   await page.mouse.move(sx + 100, sy);
+  await page.waitForTimeout(100);
   await page.mouse.down({ button: "middle" });
   await page.mouse.move(sx, sy, { steps: 8 });
   await page.mouse.up({ button: "middle" });
