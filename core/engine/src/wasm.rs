@@ -592,6 +592,49 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Pick the subject out of a photograph — what stands in front of
+    /// its background.
+    ///
+    /// `id` is the layer holding the picture: the edges of *that* are
+    /// read for the background's colours, not the edges of the page it
+    /// sits on. `tolerance` is how readily a colour counts as
+    /// background, 0 to 1, with a half leaving the decision to the
+    /// picture — higher leaves less of it a subject. `feather` softens
+    /// the edge as part of the same pick, so one press is one thing to
+    /// undo.
+    pub fn pick_subject(
+        &mut self,
+        id: f64,
+        tolerance: f64,
+        feather: f64,
+        how: &str,
+    ) -> Result<(), JsError> {
+        self.inner
+            .pick_subject(NodeId(id as u64), tolerance as f32, feather as f32, how)
+            .map_err(to_js)
+    }
+
+    /// Pick out a subject worked out by something else, handed over as
+    /// a matte encoded as a PNG.
+    ///
+    /// The way in for the system's own model on platforms that have one,
+    /// which knows things no reasoning about colour can reach — a white
+    /// shirt in front of a white curtain is still a shirt. Kept as a
+    /// matte rather than traced, so a soft edge stays soft. `confine`
+    /// holds it to a layer; pass a negative id for the whole page.
+    pub fn pick_matte_png(
+        &mut self,
+        png: &[u8],
+        confine: f64,
+        feather: f64,
+        how: &str,
+    ) -> Result<(), JsError> {
+        let confine = (confine >= 0.0).then(|| NodeId(confine as u64));
+        self.inner
+            .pick_matte_png(png, confine, feather as f32, how)
+            .map_err(to_js)
+    }
+
     /// Pick out the whole page.
     pub fn pick_all(&mut self) -> Result<(), JsError> {
         self.inner.pick_all().map_err(to_js)

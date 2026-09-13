@@ -1729,6 +1729,143 @@ without reading anything else.*
   inside on its right the whole way round, and makes them two rings
   rather than one pinched figure of eight. Taking whichever edge came to
   hand made that a coin toss that landed differently from run to run.
+- **The subject of a photograph:** `Session::pick_subject`, for the
+  region no marquee can be dragged round and the wand asks the wrong
+  question about — a coat, a face and a hand are three colours, and
+  spreading from a click on any of them stops at the next. What holds a
+  subject together is not a colour of its own but that it is *not* the
+  background, and the one thing a photograph says about its background
+  without being asked is that the background runs off the edges of the
+  frame: a portrait's wall meets all four and the face meets none.
+  A judgement from two sides, then. A band just inside the frame is read
+  for the colours the background comes in; whatever those colours cannot
+  account for is read for the colours the subject comes in; and every
+  pixel is asked which of the two spreads it looks more like and by how
+  much — a number, not a verdict. Spreads rather than averages, since a
+  background is usually several (a wall and a floor, a sky and a
+  horizon) and their average is a colour appearing nowhere in the
+  picture; blurred across the colour bins, so a colour the picture never
+  quite showed is still recognised as one of them, which a gradient
+  needs. Read on what the screen shows, the same footing the wand judges
+  likeness on, and confined to the pixels the layer actually occupies —
+  the shared `Session::layer_inside`, which is also what "pick out what
+  this layer covers" is built from — so this is a question about a
+  photograph rather than about the page it was placed on: pick the
+  picture first, or the page's own edges get read and the answer is the
+  whole picture. Though which picture is usually not worth asking: the
+  picked layer if there is one, since an explicit choice beats a guess,
+  and otherwise the one picture in the document.
+  Three things make it work on a photograph rather than only on a
+  diagram, and each was measured rather than guessed — against a set of
+  pictures with known answers, scored as overlap, because "looks better"
+  is not a number and the first version looked fine on everything easy.
+  **The numbers are smoothed over the picture before any line is drawn
+  through them**, which is most of it: judged a pixel at a time, grain
+  and texture and a hundred-colour background all cross any fixed line
+  back and forth between neighbours, and what comes back is lace. A
+  subject is a *region*, so a pixel's neighbours are evidence about it.
+  **The spreads are then read again from what was decided, and the
+  decision made again, a few times over**, which is what lets a bad
+  start be walked out of: a subject cropped by the frame — a portrait cut
+  off at the waist, which is most portraits — puts its own colours into
+  the band the background was read from, and read once, that picture
+  comes back with nothing in it at all. **And the subject's side is
+  seeded from what the background cannot explain rather than from a box
+  in the middle of the frame.** The box is the obvious thing and is
+  wrong: it is only the subject when the subject fills it, and around a
+  narrow figure it takes in as much sky as coat, whereupon a spread
+  taught half on sky answers "sky" about the sky. The frame's middle
+  survives only as the last resort for the cropped case, where the
+  background's own colours do explain everything; leaning on it in the
+  judgement itself measured worse on every picture tried, a subject off
+  to one side being exactly what it gets wrong. The work is done on a
+  copy of the picture a few hundred pixels across — partly cost, since
+  it is done several times over, but mostly because grain is not
+  evidence — while the region is still traced at full size, so the edge
+  that comes back is the picture's and not the grid's.
+  Two cleanups then earn their keep, and a flat test fixture missed both
+  until a noisy one was tried: a gap of background colour with subject
+  all round it is a hole rather than a piece of the background — a shirt
+  the colour of the wall is still the shirt — so the background is
+  flooded in from the frame's edge, the one place it is known to be, and
+  whatever the flood never reaches is given back; and a scattering of odd
+  pixels is not a subject, so pieces far smaller than the largest go,
+  measured against the largest rather than against the picture so that
+  two people both survive and a bird alone in a sky is not mistaken for
+  noise by being small. The softness rides along in the same command,
+  because a matte off a photograph almost always wants one and a pick
+  followed by a softening would be two things to undo where the hand did
+  one.
+  The tolerance is the knob this needs — whether a shadow under a chin
+  belongs to the face or to the floor is not a thing any fixed number
+  gets right for every photograph — and it is how readily a colour counts
+  as background, a half leaving the decision to the picture. A half
+  because that is where it scored best, not because a half is a pleasing
+  place to start, and it gives ground gently either side rather than
+  falling over.
+  It stays a judgement about colour and not a model of what a person
+  looks like, and there is a wall there worth naming so it is not walked
+  into twice. A *neutral* part of a subject against a neutral background
+  — a white school shirt in front of a white curtain, a groom in white
+  against white flowers — has no evidence of its own either way, and
+  measured on real photographs that is where it fails: the coloured half
+  of a subject comes back cleanly and the white half is left behind. The
+  principled answer to exactly that is the least-cost way of cutting the
+  whole picture at once, a minimum cut over the pixels with the cost of
+  splitting neighbours falling where the picture changes, so a region
+  with no evidence goes with the company it keeps. It was built —
+  Dinic's algorithm over the reduced grid, contrast-sensitive pair costs,
+  the spreads refitted between cuts — measured, and taken back out: it
+  scored slightly *worse* than the smoothing above on every picture with
+  a known answer, cost three times the time and a few hundred lines, and
+  did not fix the case it was built for. A white shirt is a large region
+  whose own evidence says background, and a prior on its *edge* cannot
+  outvote its *area* however strongly it is weighted — at forty times
+  the weight that held nothing and only started eating the background
+  elsewhere. Getting that right needs a model of what a person looks
+  like, which is a different kind of thing from anything else in here and
+  has no licence-clean weights to ship. So the honest place for the last
+  bit is the region itself: it comes back as a region like any other, and
+  a shirt the wand adds in one shift-click is a better answer than a
+  promise the method cannot keep.
+- **The subject, asked of the system:** `Session::pick_matte` and the
+  shell's `subject_matte` command. The colour method above has a wall in
+  front of it that no amount of tuning gets past — a *neutral* part of a
+  subject against a neutral background has nothing locally to say which
+  it is, and a white school shirt in front of a white curtain came back
+  missing every time. Apple platforms ship the model Photos uses to lift
+  a subject off its background (`VNGenerateForegroundInstanceMaskRequest`),
+  which has seen enough people to know the shirt is a shirt; on the
+  photographs that defeated the colour method it is essentially exact.
+  Nothing is shipped for it — no weights in the repository, no licence to
+  read, no download on first use — because it is already on the machine,
+  which is the whole reason for preferring it to carrying a model of our
+  own. `shells/tauri/swift/subject.swift` does the asking behind two C
+  functions, `build.rs` compiles it only on macOS and only when there is
+  a `swiftc` to do it with, and a build without one still builds: the
+  command answers "nothing here to ask" and the app falls back to the
+  engine's own pick, which is what the browser and every non-Apple
+  platform get. So the feature degrades by platform rather than failing
+  by platform.
+  The matte comes back as a matte rather than as an outline, which is the
+  point: `MaskKind::Raster` already existed for exactly this shape of
+  thing, so a model's soft edge on hair stays soft where a traced region
+  would have hardened it, and it is content-addressed, saved with the
+  document and undone in one press like any other selection. Two things
+  had to give way for it. `Session::region_rings` only knew how to answer
+  for a *shape*, so any other kind of region had no outline, no box and
+  nothing to add to — which had quietly been true of picking out a
+  layer's brushed mask all along; it now draws the coverage and traces it
+  at half, so the ants work for every kind of region. And the picture
+  crosses to the shell as a shrunk PNG and the matte crosses back as a
+  PNG rather than as bytes: a silhouette is a hundred kilobytes encoded
+  against a couple of megabytes raw, and that is the difference between
+  instant and a visible pause.
+  Still to do: the same entry point fed by an ONNX model — `tract` or
+  `ort` — so Windows, Linux, Android and the browser get the same answer
+  rather than the colour fallback. The engine side of that is already
+  built and is the same `pick_matte`; what is left is choosing a
+  licence-clean model and deciding whether it is committed or fetched.
 - **A mask's edge, softened:** `Mask::feather`, the one thing an edge can
   be asked for that its shape cannot say — a region picked out of a
   photograph almost never wants the edge the marquee drew, and a layer

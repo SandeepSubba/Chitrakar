@@ -82,6 +82,11 @@ page.on("dialog", async (d) => {
   else await d.accept(promptAnswer);
 });
 
+// macOS turns ctrl-click into a right-click, so a ctrl-click never reaches
+// the app as a click at all. The editor reads ctrl and cmd alike, so drive
+// it with whichever one the platform actually delivers.
+const MOD = process.platform === "darwin" ? "Meta" : "Control";
+
 const assert = (cond, msg) => {
   if (!cond) throw new Error("FAIL: " + msg);
   console.log("ok:", msg);
@@ -1442,7 +1447,7 @@ assert(
 
 // 8q. Group the two pen paths (ctrl-click multi-select), one undo ungroups.
 await page.locator(".panel ul li", { hasText: "Path" }).first().click();
-await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: ["Control"] });
+await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: [MOD] });
 await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
 await page.waitForTimeout(200);
 assert(
@@ -1474,7 +1479,7 @@ assert(
     "with the two that space evenly held back",
   );
   await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
-    modifiers: ["Control"],
+    modifiers: [MOD],
   });
   await page.waitForTimeout(200);
   assert(
@@ -1497,7 +1502,7 @@ assert(
   assert(beforeGap > 5, `the two paths start at different edges (${beforeGap})`);
   await page.locator(".panel ul li", { hasText: "Path" }).first().click();
   await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
-    modifiers: ["Control"],
+    modifiers: [MOD],
   });
   await page.waitForTimeout(150);
   await page.click('button[aria-label="Align left edges"]');
@@ -1543,7 +1548,7 @@ assert(
   // Now both: one press, both move, one history entry.
   await page.locator(".panel ul li", { hasText: "Path" }).first().click();
   await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({
-    modifiers: ["Control"],
+    modifiers: [MOD],
   });
   await page.waitForTimeout(150);
   await page.keyboard.press("Shift+ArrowRight");
@@ -1571,7 +1576,7 @@ assert(
 
 // 8r. Ungroup via the button.
 await page.locator(".panel ul li", { hasText: "Path" }).first().click();
-await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: ["Control"] });
+await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: [MOD] });
 await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
 await page.waitForTimeout(200);
 await page.locator(".panel ul li", { hasText: "Group 2" }).click();
@@ -2650,7 +2655,7 @@ assert(
   }
   await pickTool("Move");
   await page.locator(".panel ul li").first().click();
-  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
   await page.waitForTimeout(200);
   assert((await canvasPixel(120, 110))[3] === 255, "first rect is where it was drawn");
   assert((await canvasPixel(360, 110))[3] === 255, "and so is the second");
@@ -2950,7 +2955,7 @@ assert(
   await drawRect(200, 200, 400, 340);
   await pickTool("Move");
   await page.locator(".panel ul li").first().click();
-  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
   await page.waitForTimeout(200);
   assert(
     (await page.locator('button[aria-label="Unite shapes"]').count()) === 1,
@@ -2978,7 +2983,7 @@ assert(
   await drawRect(250, 170, 350, 230);
   await pickTool("Move");
   await page.locator(".panel ul li").first().click();
-  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
   await page.waitForTimeout(200);
   await page.click('button[aria-label="Subtract the shapes above"]');
   await page.waitForTimeout(400);
@@ -4199,7 +4204,7 @@ assert(
   await page.mouse.move(...at(80, 80), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(200);
-  await page.locator(".panel ul li", { hasText: "Rect 1" }).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click({ modifiers: [MOD] });
   await page.waitForTimeout(150);
   const rectInk = await inkCount(100, 100, 300, 250);
   await page.click('button[aria-label="Align left edges"]');
@@ -4349,6 +4354,18 @@ assert(
 // 8y. The clipboard survives the document it was copied from: copy a
 // shape, start a fresh document, paste it back.
 {
+  // A shape of its own to copy: the block above undoes its way back to a
+  // bare page, so there is nothing here to inherit.
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 250), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
   await page.keyboard.press("Control+c");
@@ -4914,7 +4931,10 @@ assert(
           x.drawImage(img, 0, 0);
           const d = x.getImageData(0, 0, c.width, c.height).data;
           let opaque = 0;
-          for (let i = 3; i < d.length; i += 4) if (d[i] > 200) opaque++;
+          // Any ink at all, not just solid ink: the brush is soft and the
+          // paint tool tapers with pointer speed, so a synthetic stroke
+          // lands mostly as partial coverage.
+          for (let i = 3; i < d.length; i += 4) if (d[i] > 0) opaque++;
           done({ opaque, total: d.length / 4 });
         };
         img.src = url;
@@ -5684,7 +5704,7 @@ assert(
 
   // Ctrl draws free of the lines: the same drag stays where it was
   // aimed.
-  await drawRect(160 + near, 120, 300, 260, "Control");
+  await drawRect(160 + near, 120, 300, 260, MOD);
   const free = await startsAt();
   assert(
     free > 160 + near - 1.5 && free < 160 + near + 1.5,
@@ -7917,7 +7937,7 @@ assert(
   await page
     .locator(".panel ul li", { hasText: "Rect 3" })
     .first()
-    .click({ modifiers: ["Control"] });
+    .click({ modifiers: [MOD] });
   await page.waitForTimeout(250);
   const grip = await page.locator(".handle.se").boundingBox();
   await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
@@ -8523,6 +8543,165 @@ assert(
   );
 }
 
+// 9al4. The subject of a picture, picked out by reading the background
+// off the picture's own edges. No marquee can be dragged round a person
+// and the wand asks the wrong question about one — a coat and a face are
+// two colours and spreading from either stops at the other — so what
+// holds a subject together is that it is not the background, and the
+// background is what runs off the edges of the frame.
+//
+// The picture here is a layer smaller than the page, with the subject
+// drawn on top of it and a decoy out on the page beyond it: reading the
+// *page's* edges instead of the picture's would call the whole picture a
+// subject, and reaching past the picture would take the decoy in.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [s.x + (x / 400) * s.width, s.y + (y / 300) * s.height];
+  await page.keyboard.press("Escape");
+
+  const drawRect = async (x0, y0, x1, y1, hex) => {
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+
+  // The photograph: a flat wall of a background, inset from the page.
+  await drawRect(60, 50, 340, 250, "#e8e8e8");
+  // The subject on it, in two quite different colours — so a pick that
+  // only ever finds one colour at a time shows up as finding half.
+  await drawRect(150, 90, 250, 150, "#33261f");
+  await drawRect(150, 150, 250, 210, "#1b6b33");
+  // And a decoy out on the page, past the picture's edge.
+  await drawRect(20, 260, 60, 290, "#101010");
+
+  // Pick the picture itself: the subject is read from *its* edges, so
+  // the layer is the question and not the page.
+  await page.keyboard.press("Escape");
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).first().click();
+  await page.waitForTimeout(250);
+
+  await pickTool("Select");
+  await page.waitForTimeout(250);
+  assert(
+    await page.locator('button[aria-label="Pick out the subject of this picture"]').isVisible(),
+    "the subject pick is offered while a way of selecting is in hand",
+  );
+  assert(
+    await page.locator('input[aria-label="Subject tolerance"]').isVisible(),
+    "and how readily a colour counts as background",
+  );
+
+  await page.click('button[aria-label="Pick out the subject of this picture"]');
+  await page.waitForTimeout(700);
+  assert((await page.locator(".ants").count()) === 1, "a subject was picked out");
+  const antBox = async () => {
+    const polys = await page.$$eval(".ants polygon", (els) =>
+      els.map((el) => el.getAttribute("points")),
+    );
+    const pts = polys
+      .join(" ")
+      .trim()
+      .split(/\s+/)
+      .map((p) => p.split(",").map(Number));
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  };
+  const box = await antBox();
+  const view = await page.locator("#engine-page").boundingBox();
+  // The subject spans 150..250 across of 400 and 90..210 down of 300 —
+  // a quarter of the page across and two fifths of it down. Both halves
+  // of it, so the second colour came too.
+  const across = (box[2] - box[0]) / view.width;
+  const down = (box[3] - box[1]) / view.height;
+  assert(
+    across > 0.18 && across < 0.34,
+    `it picked the subject and not the whole picture (${across.toFixed(3)} across)`,
+  );
+  assert(
+    down > 0.32 && down < 0.48,
+    `and both colours of it, not just the one (${down.toFixed(3)} down)`,
+  );
+  // The decoy sits at the bottom left of the page, outside the picture,
+  // and is darker than the subject: if the pick had reached off the
+  // picture at all, the region's left edge would be out there with it
+  // rather than at the subject's own.
+  assert(
+    box[0] > view.x + view.width * 0.2,
+    `the pick stayed on the picture and left the decoy out on the page alone (left edge ${((box[0] - view.x) / view.width).toFixed(3)} across)`,
+  );
+
+  // It is a region like any other: softened, grown, let go of, and put
+  // back by one undo — which is the whole point of handing back a
+  // region rather than a special kind of thing.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".ants").count()) === 0,
+    "one undo put the subject pick back",
+  );
+
+  // Asked about the page instead of a picture, it says which — a
+  // subject is found by reading the edges of the picture it is in, and
+  // with nothing picked there is no picture to read.
+  await page.keyboard.press("Escape");
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).first().click();
+  await page.waitForTimeout(200);
+  await menuClick("Edit", "Pick out the subject of this picture");
+  await page.waitForTimeout(700);
+  assert(
+    (await page.locator(".ants").count()) === 1,
+    "the same pick is on the menu as well as in the chrome",
+  );
+
+  // Which picture is usually not a question worth asking. A document
+  // holding one picture has one answer, and demanding it be picked in
+  // the panel first — then refusing when it was not — was the whole of
+  // "the button is there but it does nothing".
+  await newDocument(400, 300, "rgb");
+  const shot = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 200;
+    c.height = 150;
+    const g = c.getContext("2d");
+    g.fillStyle = "#dfe6f2";
+    g.fillRect(0, 0, 200, 150);
+    g.fillStyle = "#2d3f6b";
+    g.fillRect(70, 40, 60, 70);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles(
+    'input[accept="image/png,image/jpeg,image/svg+xml"]',
+    {
+      name: "subject.png",
+      mimeType: "image/png",
+      buffer: Buffer.from(shot, "base64"),
+    },
+  );
+  await page.waitForTimeout(700);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  await pickTool("Select");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected").count()) === 0,
+    "nothing is picked in the panel, which is the case being asked about",
+  );
+  await page.click(
+    'button[aria-label="Pick out the subject of this picture"]',
+  );
+  await page.waitForTimeout(900);
+  assert(
+    (await page.locator(".ants").count()) === 1,
+    "with one picture here and none picked, the pick found it anyway",
+  );
+}
+
 // 9am. A region taken from a layer rather than dragged out. The other
 // way round from handing a region to a layer: the shape a layer covers
 // comes back out into the page, which is the only way to pick out a
@@ -8857,7 +9036,7 @@ assert(
 
   // Ctrl-click forgets it — free of the three the combining uses — and
   // undo brings it back, since keeping is an edit like any other.
-  await chip.click({ modifiers: ["Control"] });
+  await chip.click({ modifiers: [MOD] });
   await page.waitForTimeout(400);
   assert((await chip.count()) === 0, "ctrl-click forgets it");
   await page.keyboard.press("Control+z");
@@ -9334,7 +9513,7 @@ assert(
   await page
     .locator(".panel ul li", { hasText: "Rect 1" })
     .first()
-    .click({ modifiers: ["Control"] });
+    .click({ modifiers: [MOD] });
   await page.waitForTimeout(250);
   const picked = await page
     .locator(".panel ul li.selected, .panel ul li.multi")
@@ -9585,7 +9764,7 @@ assert(
   await draw(40, 40, 180, 160);
   await draw(120, 100, 300, 240);
   await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
-  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: [MOD] });
   await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
   await page.waitForTimeout(300);
   const groupRow = page.locator(".panel ul li", { hasText: "Group 1" }).first();
@@ -9646,7 +9825,7 @@ assert(
   // A hidden group hands that to its layers rather than letting them
   // reappear. Wrap them again, hide the wrapper, dissolve it.
   await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
-  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: [MOD] });
   await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
   await page.waitForTimeout(300);
   const wrap = page.locator(".panel ul li", { hasText: "Group 2" }).first();
@@ -9911,7 +10090,7 @@ assert(
   await drawRect(120, 110, 180, 150);
   await pickTool("Move");
   await page.locator(".panel ul li").nth(1).click();
-  await page.locator(".panel ul li").nth(0).click({ modifiers: ["Control"] });
+  await page.locator(".panel ul li").nth(0).click({ modifiers: [MOD] });
   await page.waitForTimeout(250);
   await page.click('button[aria-label="Unite shapes"]');
   await page.waitForTimeout(400);

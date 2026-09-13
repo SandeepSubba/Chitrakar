@@ -25,3 +25,4 @@ tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chitrakar-engine = { path = "../../../core/engine" }
+chitrakar-codecs = { path = "../../../core/codecs" }

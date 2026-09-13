@@ -2840,9 +2840,33 @@ impl Session {
     /// be added to it, taken from it, or filled.
     fn region_rings(&self, mask: &chitrakar_doc::Mask) -> Result<Vec<Vec<[f32; 2]>>, EngineError> {
         let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
-            return Err(EngineError::BadCommand(
-                "this selection has no outline to combine with".into(),
-            ));
+            // A region that is not a shape — a matte handed in by
+            // something that looked at the picture, a mask brushed by
+            // hand, a mask read off an image — still has an outline;
+            // it just has to be looked at rather than read off. So it is
+            // drawn and traced at half covered, the same line the tracer
+            // draws everywhere else.
+            //
+            // Without this such a region is invisible: no ants, no box,
+            // and nothing to add to or take from. That was already true
+            // of picking out a layer's brushed mask before anything here
+            // needed it.
+            let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+            let clip = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            };
+            let cover = chitrakar_render::mask_plane_over(
+                &self.doc,
+                mask,
+                Transform::default(),
+                clip,
+                (w, h),
+            );
+            let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+            return Ok(chitrakar_render::trace_pixels(&inside, w, h));
         };
         let t = *transform;
         let mut rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
@@ -2884,6 +2908,26 @@ impl Session {
         })
     }
 
+    /// A rendered pixel as the screen shows it, which is the only
+    /// footing on which two colours can be asked whether they *look*
+    /// alike.
+    ///
+    /// Straight rather than premultiplied, and in the display encoding
+    /// rather than linear light: a colour over nothing and the same
+    /// colour at half alpha are not the same thing to look at, so alpha
+    /// is one of the four, and linear light does not agree with the eye
+    /// about distance. Both the wand and the subject pick judge
+    /// likeness, and they judge it the same way.
+    fn shown(p: chitrakar_color::LinearRgba) -> [f32; 4] {
+        let a = p.a.max(1e-6);
+        [
+            chitrakar_color::linear_to_srgb(p.r / a),
+            chitrakar_color::linear_to_srgb(p.g / a),
+            chitrakar_color::linear_to_srgb(p.b / a),
+            p.a,
+        ]
+    }
+
     /// Pick out the run of pixels round `(x, y)` that look like it.
     ///
     /// The wand. It reads the page as it is drawn — everything, the way
@@ -2916,18 +2960,7 @@ impl Session {
             return Err(EngineError::BadCommand("that is not on the page".into()));
         }
         let page = self.render()?;
-        let shown = |p: chitrakar_color::LinearRgba| {
-            // Straight, and in the encoding the screen shows: a colour
-            // over nothing and the same colour at half alpha are not the
-            // same thing to look at, so alpha is one of the four.
-            let a = p.a.max(1e-6);
-            [
-                chitrakar_color::linear_to_srgb(p.r / a),
-                chitrakar_color::linear_to_srgb(p.g / a),
-                chitrakar_color::linear_to_srgb(p.b / a),
-                p.a,
-            ]
-        };
+        let shown = Self::shown;
         let seed = shown(page.get(sx as u32, sy as u32));
         let near = |p: [f32; 4]| {
             (0..4)
@@ -3283,6 +3316,29 @@ impl Session {
     /// exactly the shape being asked for. A group answers for
     /// everything under it, together.
     pub fn pick_from_layer(&mut self, id: NodeId, how: &str) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let inside = self.layer_inside(id)?;
+        let rings = chitrakar_render::trace_pixels(&inside, w, h);
+        let Some(region) = Self::region_of(rings, 0.0) else {
+            return Err(EngineError::BadCommand(
+                "that layer covers nothing on the page".into(),
+            ));
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+            unreachable!("region_of makes a shape")
+        };
+        self.pick_region(shape, transform, how)
+    }
+
+    /// Which page pixels a layer occupies, drawn on its own.
+    ///
+    /// The shared half of [`Self::pick_from_layer`] — the part that
+    /// answers "where is this layer", before anything is decided about
+    /// what to do with the answer. Picking a subject out of a
+    /// photograph wants the same question asked first, so that the
+    /// judgement it makes is confined to the picture rather than let
+    /// loose over the page around it.
+    fn layer_inside(&self, id: NodeId) -> Result<Vec<bool>, EngineError> {
         let node = self.doc.node(id)?;
         let (opacity, visible, blend, effects) =
             (node.opacity, node.visible, node.blend, node.effects.clone());
@@ -3344,17 +3400,682 @@ impl Session {
         // most layers — the two are the same line.
         let peak = cover.iter().copied().fold(0.0f32, f32::max);
         let line = peak * 0.5;
-        let inside: Vec<bool> = cover.iter().map(|c| *c >= line && *c > 0.0).collect();
-        let rings = chitrakar_render::trace_pixels(&inside, w, h);
-        let Some(region) = Self::region_of(rings, 0.0) else {
+        Ok(cover.iter().map(|c| *c >= line && *c > 0.0).collect())
+    }
+
+    /// Pick the subject out of a photograph: what stands in front of its
+    /// background.
+    ///
+    /// No marquee can be dragged round a person, and the wand asks the
+    /// wrong question about one — a coat, a face and a hand are three
+    /// colours, and spreading from a click on any of them stops at the
+    /// next. What a subject has in common is not a colour of its own but
+    /// its place in the frame: a photograph is composed, and the thing
+    /// it is *of* is the thing in the middle of it, while the background
+    /// is what runs off the edges. A portrait's wall meets all four
+    /// sides; the face meets none.
+    ///
+    /// So this is a judgement made from two sides rather than one. The
+    /// edge of the picture is read for the colours the background comes
+    /// in, and then whatever those colours cannot account for is read
+    /// for the colours the subject comes in — each kept as a spread of
+    /// colours rather than an average, since a background is usually
+    /// several (a wall and a floor, a sky and a horizon) and their
+    /// average is a colour appearing nowhere in the picture. Every pixel
+    /// is then asked which of the two spreads it looks more like, and by
+    /// how much, which is a number rather than a verdict.
+    ///
+    /// The subject's side is read from what is left over rather than
+    /// from a box in the middle of the frame, which is the obvious thing
+    /// and is wrong: a box is only the subject when the subject fills
+    /// it, and around a narrow figure it takes in as much sky as coat —
+    /// a spread taught half on sky then answers "sky" about the sky.
+    /// Where the frame's middle is used at all it is a last resort,
+    /// below.
+    ///
+    /// Then the numbers are smoothed over the picture before any line is
+    /// drawn, and that is the part that matters. A judgement made a pixel
+    /// at a time comes apart into lace on a real photograph: grain,
+    /// texture and a background of a hundred colours all cross any fixed
+    /// line back and forth from one pixel to the next. Smoothing first
+    /// says what the earlier version could not — that a subject is a
+    /// *region*, so a pixel's neighbours are evidence about it — and a
+    /// region with a smooth edge is also the only kind anybody can work
+    /// with afterwards.
+    ///
+    /// And the two spreads are then read again from what was decided,
+    /// and the decision made again, a few times over. This is what lets
+    /// the answer escape a bad start: a subject cropped by the frame —
+    /// a portrait cut off at the waist, which is most portraits — puts
+    /// its own colours in the band the background was first read from,
+    /// and read once, that picture comes back with nothing in it at all.
+    /// Read again from the middle outwards, the coat is in the subject's
+    /// spread as well, and the second answer is right where the first
+    /// was empty.
+    ///
+    /// `tolerance` is how readily a colour counts as background, from 0
+    /// (almost nothing does, so the subject comes back generous) to 1
+    /// (almost everything does); a half is neutral, leaving the decision
+    /// to the picture. It is the knob this needs: whether a shadow under
+    /// a chin belongs to the face or to the floor is not a thing any
+    /// fixed number gets right for every photograph.
+    ///
+    /// `feather` softens the edge as part of the same pick, because a
+    /// matte off a photograph almost always wants that — the edge of a
+    /// person is not the staircase a set of pixels has — and a pick
+    /// followed by a softening would be two things to undo where the
+    /// hand did one.
+    ///
+    /// What comes back is a region like any other — added to, taken
+    /// from, softened, grown, handed to a layer as a mask. Deliberately
+    /// the same currency as the marquee's, because refining a matte is
+    /// most of the work and all of that already exists.
+    ///
+    /// It remains a judgement about colour and composition, not a model
+    /// of what a person looks like. Against a background wearing the
+    /// subject's own colours — a cream dress on pale sand — it will hand
+    /// back something that has to be tidied by hand, and the honest
+    /// place for that is the region it gives you rather than a promise it
+    /// cannot keep.
+    pub fn pick_subject(
+        &mut self,
+        id: NodeId,
+        tolerance: f32,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let inside = self.layer_inside(id)?;
+        let page = self.render()?;
+        let at = |x: u32, y: u32| (y * w + x) as usize;
+
+        // The box the picture occupies, so nothing below walks the whole
+        // page when the photograph is a corner of it.
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        let mut area = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                if inside[at(x, y)] {
+                    (x0, y0) = (x0.min(x), y0.min(y));
+                    (x1, y1) = (x1.max(x), y1.max(y));
+                    area += 1;
+                }
+            }
+        }
+        if area == 0 {
             return Err(EngineError::BadCommand(
                 "that layer covers nothing on the page".into(),
             ));
+        }
+        let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+
+        // The judgement is made on a smaller copy of the picture. Partly
+        // for the cost — the work below is done several times over and a
+        // photograph from a camera is a great many pixels — but mostly
+        // because grain is not evidence: averaging a block down is the
+        // first and cheapest way of saying that what one pixel does
+        // alone does not count. The region is still traced at full size,
+        // so the edge that comes back is the picture's and not the
+        // grid's.
+        const ACROSS: u32 = 384;
+        let step = (bw.max(bh) as f32 / ACROSS as f32).ceil().max(1.0) as u32;
+        let (rw, rh) = (bw.div_ceil(step), bh.div_ceil(step));
+        let rat = |i: u32, j: u32| (j * rw + i) as usize;
+        let mut color = vec![[0f32; 3]; (rw * rh) as usize];
+        // Held apart: a cell the picture only partly covers is a blend of
+        // picture and page and is no evidence about either, so it is not
+        // read for colour — but it is still part of the picture and gets
+        // an answer like everything else.
+        let (mut lit, mut whole) = (
+            vec![false; (rw * rh) as usize],
+            vec![false; (rw * rh) as usize],
+        );
+        for j in 0..rh {
+            for i in 0..rw {
+                let (mut acc, mut seen, mut all) = ([0f32; 3], 0u32, true);
+                for dy in 0..step {
+                    for dx in 0..step {
+                        let (x, y) = (x0 + i * step + dx, y0 + j * step + dy);
+                        if x > x1 || y > y1 {
+                            continue;
+                        }
+                        if !inside[at(x, y)] {
+                            all = false;
+                            continue;
+                        }
+                        let c = Self::shown(page.get(x, y));
+                        acc = [acc[0] + c[0], acc[1] + c[1], acc[2] + c[2]];
+                        seen += 1;
+                    }
+                }
+                if seen > 0 {
+                    let k = seen as f32;
+                    color[rat(i, j)] = [acc[0] / k, acc[1] / k, acc[2] / k];
+                    lit[rat(i, j)] = true;
+                    whole[rat(i, j)] = all;
+                }
+            }
+        }
+
+        // How deep into the picture a cell sits: 0 against the frame and
+        // 1 in the middle. Only ever a last resort — a photograph is
+        // composed, so the thing it is *of* tends to be in the middle of
+        // it, but that is a fact about photographers and not about
+        // pixels. Leaning on it in the judgement itself measured worse
+        // on every picture tried: around a narrow figure it claims the
+        // sky either side, and a subject off to one side is exactly what
+        // it gets wrong. So it is used for nothing but deciding where to
+        // start looking when the background's own colours explain the
+        // whole picture.
+        let depth = |i: u32, j: u32| {
+            let dx = (i.min(rw - 1 - i) * 2) as f32 / rw as f32;
+            let dy = (j.min(rh - 1 - j) * 2) as f32 / rh as f32;
+            dx.min(dy).clamp(0.0, 1.0)
         };
-        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
-            unreachable!("region_of makes a shape")
+
+        // Colours as a coarse spread, so that "looks like the
+        // background" is a question about a whole palette and not about
+        // one colour. Blurred across the bins afterwards, which is what
+        // lets a colour the picture never quite showed still be
+        // recognised as one of them — a gradient passes through colours
+        // no pixel lands on exactly.
+        const B: usize = 24;
+        let bin_of = |c: [f32; 3]| {
+            let q = |v: f32| ((v.clamp(0.0, 1.0) * (B - 1) as f32).round() as usize).min(B - 1);
+            (q(c[0]) * B + q(c[1])) * B + q(c[2])
         };
-        self.pick_region(shape, transform, how)
+        let spread = |cells: &dyn Fn(usize) -> bool| -> Option<Vec<f32>> {
+            let mut hist = vec![0f32; B * B * B];
+            let mut count = 0u32;
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if whole[k] && cells(k) {
+                        hist[bin_of(color[k])] += 1.0;
+                        count += 1;
+                    }
+                }
+            }
+            // Too little to speak for a side of the picture: a spread
+            // fitted to a handful of cells says more about those cells
+            // than about anything else.
+            if count < 8 {
+                return None;
+            }
+            // Blur the bins, one axis at a time — a cube is three lines
+            // run one after another.
+            for axis in 0..3 {
+                let was = hist.clone();
+                let place = |a: usize, b: usize, c: usize| match axis {
+                    0 => (c * B + a) * B + b,
+                    1 => (a * B + c) * B + b,
+                    _ => (a * B + b) * B + c,
+                };
+                for a in 0..B {
+                    for b in 0..B {
+                        for c in 0..B {
+                            let mut sum = was[place(a, b, c)];
+                            if c > 0 {
+                                sum += was[place(a, b, c - 1)];
+                            }
+                            if c + 1 < B {
+                                sum += was[place(a, b, c + 1)];
+                            }
+                            hist[place(a, b, c)] = sum;
+                        }
+                    }
+                }
+            }
+            let total: f32 = hist.iter().sum();
+            if total <= 0.0 {
+                return None;
+            }
+            // A floor under every bin, so that a colour neither side has
+            // ever shown is merely unlikely rather than impossible, and
+            // the arithmetic below has no zero to fall down.
+            let floor = 1e-4 / (B * B * B) as f32;
+            Some(hist.iter().map(|v| v / total + floor).collect())
+        };
+
+        // Where each side is read from to begin with: the background off
+        // a band just inside the frame, the subject out of the middle.
+        // Both from the start, rather than the background alone — read
+        // only from the edge, a picture whose subject touches the frame
+        // teaches the background the subject's own colours and comes
+        // back empty.
+        let reach = ((rw.min(rh) / 12).clamp(2, 8)) as i64;
+        let frame = |i: u32, j: u32| {
+            [(-reach, 0i64), (reach, 0), (0, -reach), (0, reach)]
+                .iter()
+                .any(|(dx, dy)| {
+                    let (ni, nj) = (i as i64 + dx, j as i64 + dy);
+                    ni < 0
+                        || nj < 0
+                        || ni >= rw as i64
+                        || nj >= rh as i64
+                        || !lit[rat(ni as u32, nj as u32)]
+                })
+        };
+        let mut seed_bg = vec![false; (rw * rh) as usize];
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if lit[k] && frame(i, j) {
+                    seed_bg[k] = true;
+                }
+            }
+        }
+        // The subject is seeded from what the background cannot account
+        // for, rather than from a box in the middle of the frame. A box
+        // is only the subject when the subject fills it: around a narrow
+        // figure it takes in as much sky as coat, and a spread taught
+        // half on sky answers "sky" about the sky.
+        let Some(first_bg) = spread(&|k| seed_bg[k]) else {
+            return Err(EngineError::BadCommand(
+                "this picture has no edge to read a background from".into(),
+            ));
+        };
+        let mut odds: Vec<f32> = Vec::new();
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if whole[k] {
+                    odds.push(first_bg[bin_of(color[k])].ln());
+                }
+            }
+        }
+        odds.sort_by(f32::total_cmp);
+        let middling = odds[odds.len() / 2];
+        let mut seed_fg = vec![false; (rw * rh) as usize];
+        let mut seeded = 0usize;
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if whole[k] && first_bg[bin_of(color[k])].ln() < middling - 1.5 {
+                    seed_fg[k] = true;
+                    seeded += 1;
+                }
+            }
+        }
+        // Unless the background's own spread already explains everything
+        // in the picture, which is what a subject cropped by the frame
+        // does: its colours went into the band the background was read
+        // from, so nothing is left over to be unlike it. Then the middle
+        // of the frame is all there is to go on — and it is enough,
+        // because the spreads are read again from the answer below.
+        if seeded * 24 < odds.len() {
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if lit[k] && depth(i, j) > 0.55 {
+                        seed_fg[k] = true;
+                    }
+                }
+            }
+        }
+
+        // How readily a colour counts as background, as a thumb on the
+        // scale rather than a threshold: the picture's own evidence is
+        // still what mostly decides, and a half leaves it to the
+        // picture entirely.
+        // A half is neutral and leaves the decision to the picture; the
+        // small lean towards background at that setting is measured
+        // rather than chosen, being where a set of photographs with
+        // known answers scored best.
+        let thumb = 0.4 + (tolerance.clamp(0.0, 1.0) - 0.5) * 8.0;
+        let mut score = vec![0f32; (rw * rh) as usize];
+        let mut fg: Vec<bool> = seed_fg.clone();
+        let mut bg: Vec<bool> = seed_bg.clone();
+        for round in 0..5 {
+            // Read each side's colours from what is currently thought to
+            // be that side — the seeds on the first pass, the answer
+            // itself afterwards, which is what lets a bad start be
+            // walked out of.
+            let (want_fg, want_bg): (Vec<bool>, Vec<bool>) = (fg.clone(), bg.clone());
+            let Some(pf) = spread(&|k| want_fg[k]).or_else(|| spread(&|k| seed_fg[k])) else {
+                return Err(EngineError::BadCommand(
+                    "this picture is too small to find a subject in".into(),
+                ));
+            };
+            let Some(pb) = spread(&|k| want_bg[k]).or_else(|| spread(&|k| seed_bg[k])) else {
+                return Err(EngineError::BadCommand(
+                    "this picture has no edge to read a background from".into(),
+                ));
+            };
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if !lit[k] {
+                        score[k] = 0.0;
+                        continue;
+                    }
+                    let b = bin_of(color[k]);
+                    // Which of the two spreads the colour looks more
+                    // like, and by how much.
+                    score[k] = (pf[b].ln() - pb[b].ln()).clamp(-6.0, 6.0) - thumb;
+                }
+            }
+            // Smooth the numbers before any line is drawn through them.
+            // The one change that turns lace into a region: a pixel's
+            // neighbours are evidence about it, because a subject is a
+            // region and not a scatter of pixels that happen to agree.
+            //
+            // A cheaper stand-in for the thing this really wants, which
+            // is the least-cost way of cutting the whole picture at
+            // once — the minimum cut of a graph over the pixels, with
+            // the cost of splitting two neighbours falling where the
+            // picture changes. That was built and measured and is not
+            // here, because it scored slightly worse than this on every
+            // picture with a known answer and did not fix the one thing
+            // it was built for: a white shirt against a white wall is a
+            // large region whose own evidence says background, and a
+            // prior on its *edge* cannot outvote its *area* however
+            // strongly it is weighted. Three times the time and a few
+            // hundred lines for that is not a trade worth making. The
+            // note is here so the next person does not build it twice.
+            for _ in 0..2 {
+                let was = score.clone();
+                for j in 0..rh {
+                    for i in 0..rw {
+                        let k = rat(i, j);
+                        if !lit[k] {
+                            continue;
+                        }
+                        let (mut sum, mut n) = (0.0, 0.0);
+                        for dj in -2i64..=2 {
+                            for di in -2i64..=2 {
+                                let (ni, nj) = (i as i64 + di, j as i64 + dj);
+                                if ni < 0 || nj < 0 || ni >= rw as i64 || nj >= rh as i64 {
+                                    continue;
+                                }
+                                let nk = rat(ni as u32, nj as u32);
+                                if !lit[nk] {
+                                    continue;
+                                }
+                                sum += was[nk];
+                                n += 1.0;
+                            }
+                        }
+                        score[k] = sum / n;
+                    }
+                }
+            }
+            if round + 1 < 5 {
+                for k in 0..score.len() {
+                    fg[k] = lit[k] && score[k] > 0.0;
+                    bg[k] = lit[k] && score[k] <= 0.0;
+                }
+            }
+        }
+
+        // Back up to the picture's own size, reading the smoothed
+        // numbers between cells rather than in blocks: the line then
+        // falls where the numbers cross rather than on the grid the
+        // judgement was made on.
+        let sample = |x: u32, y: u32| -> f32 {
+            let fx = (x - x0) as f32 / step as f32 - 0.5;
+            let fy = (y - y0) as f32 / step as f32 - 0.5;
+            let (i0, j0) = (fx.floor(), fy.floor());
+            let (tx, ty) = (fx - i0, fy - j0);
+            let get = |i: f32, j: f32| -> f32 {
+                let (i, j) = (
+                    (i.max(0.0) as u32).min(rw - 1),
+                    (j.max(0.0) as u32).min(rh - 1),
+                );
+                score[rat(i, j)]
+            };
+            let top = get(i0, j0) * (1.0 - tx) + get(i0 + 1.0, j0) * tx;
+            let bot = get(i0, j0 + 1.0) * (1.0 - tx) + get(i0 + 1.0, j0 + 1.0) * tx;
+            top * (1.0 - ty) + bot * ty
+        };
+        let mut subject = vec![false; (w * h) as usize];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let k = at(x, y);
+                if inside[k] && sample(x, y) > 0.0 {
+                    subject[k] = true;
+                }
+            }
+        }
+
+        // A gap of background colour with subject all round it is a hole
+        // in the subject rather than a piece of the background: a shirt
+        // the colour of the wall behind it is still the shirt, and a
+        // region full of such gaps is unusable. So the background is
+        // flooded in from the frame's edge — which is the one place it
+        // is known to be — and every background pixel the flood never
+        // reaches is given back to the subject.
+        let visible = |x: i64, y: i64| {
+            x >= 0
+                && y >= 0
+                && x < w as i64
+                && y < h as i64
+                && inside[(y as u32 * w + x as u32) as usize]
+        };
+        let mut open = vec![false; (w * h) as usize];
+        let mut queue = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if !inside[i]
+                    || subject[i]
+                    || ![(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .any(|(dx, dy)| !visible(x as i64 + dx, y as i64 + dy))
+                {
+                    continue;
+                }
+                open[i] = true;
+                queue.push((x, y));
+            }
+        }
+        while let Some((cx, cy)) = queue.pop() {
+            for (nx, ny) in [
+                (cx.wrapping_sub(1), cy),
+                (cx + 1, cy),
+                (cx, cy.wrapping_sub(1)),
+                (cx, cy + 1),
+            ] {
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let i = at(nx, ny);
+                if open[i] || subject[i] || !inside[i] {
+                    continue;
+                }
+                open[i] = true;
+                queue.push((nx, ny));
+            }
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if inside[i] && !open[i] {
+                    subject[i] = true;
+                }
+            }
+        }
+
+        // Confetti: a scattering of pixels that happen not to look like
+        // the background is not a subject, and an outline traced round
+        // one is a region nobody can work with. So the subject is broken
+        // into its pieces and the ones far smaller than the largest are
+        // dropped — measured against the largest rather than against the
+        // picture, so that two people both survive and a bird alone in a
+        // sky is not mistaken for noise by being small.
+        let mut piece = vec![0u32; (w * h) as usize];
+        let mut sizes = vec![0usize];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if !subject[i] || piece[i] != 0 {
+                    continue;
+                }
+                let label = sizes.len() as u32;
+                let mut count = 0usize;
+                piece[i] = label;
+                let mut walk = vec![(x, y)];
+                while let Some((cx, cy)) = walk.pop() {
+                    count += 1;
+                    for (nx, ny) in [
+                        (cx.wrapping_sub(1), cy),
+                        (cx + 1, cy),
+                        (cx, cy.wrapping_sub(1)),
+                        (cx, cy + 1),
+                    ] {
+                        if nx >= w || ny >= h {
+                            continue;
+                        }
+                        let j = at(nx, ny);
+                        if subject[j] && piece[j] == 0 {
+                            piece[j] = label;
+                            walk.push((nx, ny));
+                        }
+                    }
+                }
+                sizes.push(count);
+            }
+        }
+        let largest = sizes.iter().copied().max().unwrap_or(0);
+        if largest == 0 {
+            return Err(EngineError::BadCommand(
+                "nothing here stands out from its background".into(),
+            ));
+        }
+        let floor = (largest as f32 * 0.02).max(4.0) as usize;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if subject[i] && sizes[piece[i] as usize] < floor {
+                    subject[i] = false;
+                }
+            }
+        }
+
+        let rings = chitrakar_render::trace_pixels(&subject, w, h);
+        let Some(region) = Self::region_of(rings, feather.max(0.0)) else {
+            return Err(EngineError::BadCommand(
+                "nothing here stands out from its background".into(),
+            ));
+        };
+        self.pick_mask(region, how)
+    }
+
+    /// Pick out what something else decided, handed over as a matte.
+    ///
+    /// The way in for a judgement this crate did not make: a model that
+    /// knows what a person looks like, running wherever it can run.
+    /// [`Self::pick_subject`] reasons about colour, which is all it can
+    /// do, and colour cannot tell a white shirt from a white curtain —
+    /// nothing local can, because there is nothing locally to tell. A
+    /// model that has seen a great many people can, and the honest thing
+    /// is to let it, rather than to keep tuning a method against a wall
+    /// it is standing on the wrong side of.
+    ///
+    /// `matte` is one byte of coverage per pixel, `mw` by `mh`, laid
+    /// over the whole page — so the caller may hand in a smaller matte
+    /// than the page and it is stretched, which is what a model with a
+    /// fixed input size gives back anyway.
+    ///
+    /// It is kept as a matte rather than traced to an outline, which is
+    /// the point of taking one: a traced region has a hard edge, and
+    /// what a model gives back for hair is precisely *not* hard. Stored
+    /// as a resource like any other picture, so it is content-addressed,
+    /// saved with the document and undone with one press. The outline
+    /// drawn round it for the ants is traced at half covered, which is a
+    /// picture of the region rather than the region itself.
+    ///
+    /// `confine` holds it to a layer, for a matte worked out from a page
+    /// that has more on it than the photograph.
+    pub fn pick_matte(
+        &mut self,
+        matte: &[u8],
+        mw: u32,
+        mh: u32,
+        confine: Option<NodeId>,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        if mw == 0 || mh == 0 || matte.len() != (mw * mh) as usize {
+            return Err(EngineError::BadCommand(
+                "that matte is not the size it says it is".into(),
+            ));
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // Held to the layer, if asked: a matte worked out from the whole
+        // page can only be about the page, and a photograph sitting on
+        // one is not all of it.
+        let hold = match confine {
+            Some(id) => Some(self.layer_inside(id)?),
+            None => None,
+        };
+        let mut rgba = Vec::with_capacity((mw * mh * 4) as usize);
+        let mut any = false;
+        for j in 0..mh {
+            for i in 0..mw {
+                let mut v = matte[(j * mw + i) as usize];
+                if let Some(hold) = &hold {
+                    // The matte's own grid against the page's: nearest,
+                    // since this is a coverage and not a picture, and a
+                    // blend between covered and not is neither.
+                    let x = ((i as f32 + 0.5) * w as f32 / mw as f32) as u32;
+                    let y = ((j as f32 + 0.5) * h as f32 / mh as f32) as u32;
+                    if x >= w || y >= h || !hold[(y * w + x) as usize] {
+                        v = 0;
+                    }
+                }
+                if v >= 128 {
+                    any = true;
+                }
+                // Coverage is luminance times alpha, so the grey carries
+                // it and the alpha stays out of the way.
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        if !any {
+            return Err(EngineError::BadCommand(
+                "that matte picks out nothing on the page".into(),
+            ));
+        }
+        let resource_id = self.doc.add_resource(mw, mh, rgba);
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Raster {
+                resource_id,
+                width: mw,
+                height: mh,
+                transform: Transform {
+                    a: w as f32 / mw as f32,
+                    b: 0.0,
+                    c: 0.0,
+                    d: h as f32 / mh as f32,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            },
+            invert: false,
+            feather: feather.max(0.0),
+        };
+        self.pick_mask(mask, how)
+    }
+
+    /// The same, where the matte arrives as an image.
+    ///
+    /// Which is how it arrives from anywhere but this crate: a matte is
+    /// a silhouette, and a silhouette encoded as a PNG is a few tens of
+    /// kilobytes where its bytes are megabytes — worth caring about when
+    /// it has to cross out of a native shell and into a webview. Read
+    /// off the red channel, since the encoder that made it wrote grey.
+    pub fn pick_matte_png(
+        &mut self,
+        png: &[u8],
+        confine: Option<NodeId>,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let img = chitrakar_codecs::decode(png)
+            .map_err(|e| EngineError::BadCommand(format!("that matte could not be read: {e}")))?;
+        let grey: Vec<u8> = img.rgba8.chunks(4).map(|p| p[0]).collect();
+        self.pick_matte(&grey, img.width, img.height, confine, feather, how)
     }
 
     /// Pick out a layer's mask, as a region over the page.
@@ -9690,6 +10411,240 @@ mod tests {
         assert!(
             (b[2] - 40.0).abs() < 0.6,
             "the left one, still its own width: {b:?}"
+        );
+    }
+
+    /// A matte handed in by something that looked at the picture.
+    ///
+    /// The point of taking one rather than tracing it: what a model
+    /// gives back for hair is soft, and a region traced round it is not.
+    #[test]
+    fn a_matte_handed_in_keeps_its_soft_edge() {
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        // A matte covering the middle, fading out over a few pixels
+        // rather than stopping dead.
+        let (mw, mh) = (80u32, 60u32);
+        let matte: Vec<u8> = (0..mw * mh)
+            .map(|k| {
+                let (x, y) = ((k % mw) as f32, (k / mw) as f32);
+                let d = ((x - 40.0).abs() - 15.0).max((y - 30.0).abs() - 10.0);
+                // 1 well inside, 0 well outside, a ramp of six across the edge
+                (((0.5 - d / 6.0).clamp(0.0, 1.0)) * 255.0) as u8
+            })
+            .collect();
+        session
+            .pick_matte(&matte, mw, mh, None, 0.0, "replace")
+            .unwrap();
+
+        // It is a region: the ants have an outline to draw and a box to
+        // sit in, which a matte only has because it is looked at.
+        assert!(
+            !session.selection_outline().is_empty(),
+            "a matte came back with no outline, so nothing would be drawn \
+             round it and it could not be added to"
+        );
+        assert!(session.selection_bounds().is_some());
+        assert!(session.selection_covers(40.0, 30.0), "the middle is picked");
+        assert!(!session.selection_covers(2.0, 2.0), "the corner is not");
+
+        // And the edge is still soft. Read off the veil, which is drawn
+        // from the region's own coverage: partway across the ramp it is
+        // neither in nor out, which is the whole claim.
+        let png = session.selection_veil().unwrap();
+        let img = chitrakar_codecs::decode(&png).unwrap();
+        let alpha = |x: u32, y: u32| img.rgba8[((y * img.width + x) * 4 + 3) as usize];
+        let (inside, edge, outside) = (alpha(40, 30), alpha(25, 30), alpha(2, 2));
+        assert!(
+            inside < 40,
+            "the middle should be picked, so barely veiled: {inside}"
+        );
+        assert!(
+            outside > 100,
+            "the corner should not be picked, so veiled: {outside}"
+        );
+        assert!(
+            edge > inside + 10 && edge < outside - 10,
+            "the edge of a matte should be neither in nor out — it came \
+             back hard ({inside} / {edge} / {outside})"
+        );
+
+        // A matte that is the wrong size for what it claims is refused
+        // rather than read off the end of.
+        assert!(session
+            .pick_matte(&matte, mw, mh + 1, None, 0.0, "replace")
+            .is_err());
+        // And one that covers nothing says so.
+        assert!(session
+            .pick_matte(&vec![0u8; (mw * mh) as usize], mw, mh, None, 0.0, "replace")
+            .is_err());
+    }
+
+    /// The subject pick: what the edges of a photograph do not explain.
+    #[test]
+    fn the_subject_is_what_the_frame_s_edge_does_not_explain() {
+        // A photograph placed on a larger page, so that reading the
+        // *page's* edge instead of the picture's would call the whole
+        // picture a subject and this would catch it.
+        let (pw, ph) = (160u32, 120u32);
+        let (iw, ih) = (80u32, 60u32);
+        // Grain, so that nothing in the picture is a flat colour
+        // anywhere. A photograph has none, and a threshold sitting near
+        // a colour it has to judge comes apart into lace on real pixels
+        // while looking perfect on flat ones — which is exactly the way
+        // this went wrong once. Deterministic, so a failure is a failure
+        // and not a bad afternoon.
+        let grain = |x: u32, y: u32| {
+            let h = (x * 1973).wrapping_add(y * 9277).wrapping_mul(2654435761) >> 13;
+            (h % 13) as i32 - 6
+        };
+        let shift = |v: u8, by: i32| (v as i32 + by).clamp(0, 255) as u8;
+        let mut rgba = Vec::with_capacity((iw * ih * 4) as usize);
+        for y in 0..ih {
+            for x in 0..iw {
+                // A sky-ish background that is not one flat colour — it
+                // shades across the frame, which is the case a single
+                // averaged background colour gets wrong.
+                let shade = 200 + (x * 40 / iw) as u8;
+                let mut px = [shade, shade, 250, 255];
+                // A subject in the middle: two blocks of quite different
+                // colours, to show that a subject is not held together by
+                // having a colour of its own. The lower one stands only
+                // about a quarter of the way from the background behind
+                // it — a dark coat against dark ground — which is the
+                // margin a tolerance has to leave, and the first thing
+                // one set too wide eats.
+                let body = (24..56).contains(&x) && (16..44).contains(&y);
+                if body {
+                    px = if y < 30 {
+                        [40, 30, 30, 255]
+                    } else {
+                        [140, 150, 200, 255]
+                    };
+                    // A gap inside the subject wearing the background's
+                    // own colour — a shirt the colour of the wall. It
+                    // must come back as part of the subject.
+                    if (34..46).contains(&x) && (24..34).contains(&y) {
+                        px = [210, 210, 250, 255];
+                    }
+                }
+                // Confetti: a couple of lone pixels out in the
+                // background that look nothing like it.
+                if (x, y) == (6, 6) || (x, y) == (70, 52) {
+                    px = [0, 0, 0, 255];
+                }
+                let n = grain(x, y);
+                px = [shift(px[0], n), shift(px[1], n), shift(px[2], n), 255];
+                rgba.extend_from_slice(&px);
+            }
+        }
+        let mut session = Session::new(pw, ph, ColorMode::Rgb);
+        let resource_id = session.doc.add_resource(iw, ih, rgba);
+        let root = session.doc.root();
+        let node = Node::raster(
+            "photo",
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width: iw,
+                height: ih,
+            },
+        );
+        let photo = session.doc.peek_next_id();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        // Placed away from the page's own corner, so the picture's edge
+        // and the page's are not the same line.
+        session
+            .apply(Command::SetTransform {
+                id: photo,
+                transform: Transform::translation(40.0, 30.0),
+            })
+            .unwrap();
+
+        // The tolerance the app starts at: what ships is what is tested.
+        session.pick_subject(photo, 0.5, 0.0, "replace").unwrap();
+
+        // The body's own colours are picked; the background around it is
+        // not.
+        let subject_at = |s: &Session, x: f32, y: f32| s.selection_covers(40.0 + x, 30.0 + y);
+        assert!(
+            subject_at(&session, 30.0, 20.0),
+            "the top half of the subject was not picked"
+        );
+        assert!(
+            subject_at(&session, 30.0, 40.0),
+            "the bottom half is another colour and was not picked — a subject \
+             is not held together by having one colour"
+        );
+        assert!(
+            !subject_at(&session, 6.0, 30.0),
+            "the background was picked"
+        );
+        assert!(
+            !subject_at(&session, 74.0, 30.0),
+            "the far side of the shaded background was picked — a background \
+             read as one averaged colour would do this"
+        );
+        // The gap wearing the background's colour is inside the subject.
+        assert!(
+            subject_at(&session, 40.0, 29.0),
+            "a gap inside the subject the colour of the background was left \
+             out: a shirt the colour of the wall is still the shirt"
+        );
+        // And the lone pixels out in the background are not subjects.
+        assert!(
+            !subject_at(&session, 6.0, 6.0) && !subject_at(&session, 70.0, 52.0),
+            "a scattering of odd pixels came back as a subject"
+        );
+        // Nothing outside the photograph is picked, whatever the page
+        // around it looks like.
+        assert!(
+            !session.selection_covers(10.0, 10.0),
+            "the pick reached off the photograph and onto the page"
+        );
+
+        // It is a region like any other: the modifiers a marquee takes
+        // work, and one undo puts the whole thing back.
+        assert!(session.selection().is_some());
+        assert!(session.undo().unwrap());
+        assert!(
+            session.selection().is_none(),
+            "picking a subject took more than one undo to put back"
+        );
+
+        // A picture with nothing in it but its background has no subject,
+        // and says so rather than handing back the whole frame.
+        let flat: Vec<u8> = (0..iw * ih)
+            .flat_map(|i| {
+                let n = grain(i % iw, i / iw);
+                [shift(180, n), shift(180, n), shift(180, n), 255]
+            })
+            .collect();
+        let mut plain = Session::new(iw, ih, ColorMode::Rgb);
+        let resource_id = plain.doc.add_resource(iw, ih, flat);
+        let root = plain.doc.root();
+        let only = plain.doc.peek_next_id();
+        plain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::raster(
+                    "flat",
+                    chitrakar_doc::RasterRef {
+                        resource_id,
+                        width: iw,
+                        height: ih,
+                    },
+                )),
+            })
+            .unwrap();
+        assert!(
+            plain.pick_subject(only, 0.5, 0.0, "replace").is_err(),
+            "a photograph of a blank wall was said to have a subject in it"
         );
     }
 

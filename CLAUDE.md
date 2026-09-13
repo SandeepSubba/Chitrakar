@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~425)
+cargo test --workspace                      # engine tests (~427)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
@@ -54,6 +54,14 @@ CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
 license-clean to commit.
 
+"Pick out the subject" asks the system's own model where there is one:
+on macOS the shell compiles `shells/tauri/src-tauri/swift/subject.swift`
+(Vision's subject lifting) and hands the matte to `Session::pick_matte`.
+No weights are shipped — it is already on the machine. A build with no
+`swiftc` warns and falls back to the engine's colour-based
+`Session::pick_subject`, which is also what the browser uses, so nothing
+breaks by platform.
+
 `app/e2e/runs.test.mjs` unit-tests `src/runs.ts` — the byte arithmetic
 behind styling part of a text block — without a browser: `npm run
 test:unit` in `app/`, a second or two, and it is where a change to runs
@@ -62,7 +70,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1057 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1051 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or

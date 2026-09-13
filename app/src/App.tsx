@@ -1289,6 +1289,18 @@ export function App() {
   /** How far the wand's colour may stray from the one it was clicked on:
    * 0 is exactly that colour and 1 is the whole page. */
   const [wandTolerance, setWandTolerance] = useState(0.12);
+  /** How readily a colour counts as background when the subject is
+   * picked out: nothing at 0, everything at 1, and at a half the
+   * picture's own evidence decides. Its own knob rather than the wand's
+   * — the wand is told a colour by being clicked on one, and this is
+   * told a background by reading the frame, so the same number would not
+   * mean the same thing to them.
+   *
+   * A half because that is where it measured best against a set of
+   * photographs whose answers were known, not because a half is a
+   * pleasing place to start. Either way from there it gives ground
+   * gently rather than falling over. */
+  const [subjectTolerance, setSubjectTolerance] = useState(0.5);
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
   /** Whether the view is showing the picture as it was before the work
@@ -1610,6 +1622,83 @@ export function App() {
       refresh(session);
     } catch (err) {
       alert(`Select: ${err}`);
+    }
+  };
+  /** Pick the subject out of a photograph — what stands in front of its
+   * background.
+   *
+   * It asks about a *layer* rather than about the page, because the
+   * background it reads is the one running off that picture's edges:
+   * asked about a page with a photograph sitting on it, the edges are
+   * the page's and the answer is the whole photograph.
+   *
+   * Which picture, though, is usually not a question worth asking. A
+   * document holding one picture has one answer, and making somebody
+   * pick it in the panel first — then saying "pick the picture first"
+   * when they have not — is a demand for a decision that has already
+   * been made. So: the picked layer if there is one, since an explicit
+   * choice beats a guess; otherwise the one picture here. Only when
+   * there are several and none is picked is there really something to
+   * ask, and then it says so rather than choosing for them. */
+  const pickSubject = async () => {
+    if (!session) return;
+    // Hidden pictures are not candidates: a subject cannot be read off
+    // a layer that is not being drawn, and a document with an old
+    // version turned off behind the one in use would otherwise be
+    // "several pictures" with nothing to show for it.
+    const pictures = layers.filter((l) => l.kind === "raster" && l.visible);
+    const id = selected ?? (pictures.length === 1 ? pictures[0].id : null);
+    if (id === null) {
+      alert(
+        pictures.length === 0
+          ? "There is no picture here to find a subject in: open a photograph first."
+          : "Pick which picture: a subject is found by reading the edges of the picture it is in, and there is more than one here.",
+      );
+      return;
+    }
+    // The system's own model first, where the machine has one. It knows
+    // what a person looks like, which is the one thing reasoning about
+    // colour cannot get at: a white shirt in front of a white curtain
+    // has nothing locally to say it is a shirt. Nothing is shipped for
+    // it and nothing is downloaded — on macOS and iOS it is already
+    // there, and everywhere else this quietly does not happen and the
+    // engine's own pick answers instead.
+    if (isTauri()) {
+      try {
+        // Shrunk on the way out: the model works at its own size
+        // whatever it is given, the matte is stretched back over the
+        // page when it lands, and a twelve-megapixel PNG crossing into
+        // the shell is a pause nobody asked for.
+        const across = Math.max(session.width, session.height);
+        const page = session.export_png_at(Math.min(1, 1536 / across), 0, 0, 0, 0);
+        const { invoke } = await import("@tauri-apps/api/core");
+        const matte = await invoke<ArrayBuffer>("subject_matte", page);
+        if (matte && matte.byteLength > 0) {
+          // Held to the picture, since the matte was worked out from the
+          // whole page and a photograph placed on one is not all of it.
+          session.pick_matte_png(
+            new Uint8Array(matte),
+            id,
+            selectionFeather,
+            "replace",
+          );
+          refresh(session);
+          return;
+        }
+      } catch (err) {
+        // A shell too old to have been asked, a picture it made nothing
+        // of, a platform with no model: none of these is a failure worth
+        // stopping for when there is a second way of answering.
+        console.warn("the system's subject matte was not available:", err);
+      }
+    }
+    try {
+      // The softness rides along in the pick rather than following it,
+      // so one press of the button is one thing to undo.
+      session.pick_subject(id, subjectTolerance, selectionFeather, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select subject: ${err}`);
     }
   };
   /** The way back: a layer's mask, out into the page as a region. A
@@ -6168,6 +6257,7 @@ export function App() {
         item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, "Ctrl+Shift+I"),
         item("pick-nothing", "lasso", "Pick out nothing", pickNothing),
         item("pick-from-layer", "wand", "Pick out what this layer covers", pickFromLayer),
+        item("pick-subject", "wand", "Pick out the subject of this picture", pickSubject),
         item("fill-picked", "fill", "Fill what is picked", fillSelection),
         item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
           maskFromSelection(false),
@@ -6945,6 +7035,39 @@ export function App() {
               <option value="touching">Touching</option>
               <option value="anywhere">Anywhere</option>
             </select>
+          )}
+          {/* Picking the subject out of a photograph, and how far a
+              colour may stray from one the picture's edge shows and
+              still be background. The two sit together because a number
+              on its own says nothing about what presses it, and neither
+              waits for a region to exist: this is how one is made. */}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <button
+              className="chrome-button icon-only"
+              aria-label="Pick out the subject of this picture"
+              title="Pick out the subject of the picked picture, by reading the background off its edges"
+              onClick={pickSubject}
+            >
+              <Icon name="wand" />
+            </button>
+          )}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <input
+              className="tool-number"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(subjectTolerance * 100)}
+              title="How readily a colour counts as background, in percent — half leaves the decision to the picture, higher leaves less of it a subject"
+              aria-label="Subject tolerance"
+              onChange={(e) =>
+                setSubjectTolerance(
+                  Math.min(1, Math.max(0, Number(e.target.value) / 100)),
+                )
+              }
+              onKeyDown={(e) => e.stopPropagation()}
+            />
           )}
           {/* How many sides, or points, the next one has. Only while one
               of the two tools that asks is in hand. */}
