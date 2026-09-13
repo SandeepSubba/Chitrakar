@@ -7248,7 +7248,15 @@ assert(
 
   // The two ways it says the view can be carried, neither of which is
   // allowed to carry anything in the document with it.
-  await page.locator(".panel ul li").first().click();
+  // By name rather than by position. "The first row" is only the layer
+  // meant here when the panel holds exactly what this block put there,
+  // and a panel with anything else above the layers — on a narrower
+  // window, in another build — makes the rest of this quietly about
+  // something else.
+  await page
+    .locator(".panel ul li", { hasText: "Rect 2" })
+    .first()
+    .click();
   await page.waitForTimeout(200);
   const layerX = () =>
     page.locator('input[aria-label="X position"]').inputValue();
@@ -7268,11 +7276,20 @@ assert(
     box.x + (x / 400) * box.width,
     box.y + (y / 300) * box.height,
   ];
-  // Deliberately on top of the picked layer — the second rect, which is
-  // the top row of the panel and the one just picked. "Carries nothing
-  // in the document with it" is only a claim worth making where there
-  // is something under the pointer to carry.
-  const [sx, sy] = over(245, 75);
+  // Deliberately on top of the picked layer. "Carries nothing in the
+  // document with it" is only a claim worth making where there is
+  // something under the pointer to carry — and where that is, is asked
+  // of the layer rather than assumed, since assuming is what made this
+  // block pass on one machine and fail on another.
+  const num = async (label) =>
+    Number(await page.locator(`input[aria-label="${label}"]`).inputValue());
+  const [lx, ly, lw, lh] = [
+    await num("X position"),
+    await num("Y position"),
+    await num("W size"),
+    await num("H size"),
+  ];
+  const [sx, sy] = over(lx + lw / 2, ly + lh / 2);
   await page.keyboard.down("Space");
   await page.mouse.move(sx, sy);
   await page.mouse.down();
