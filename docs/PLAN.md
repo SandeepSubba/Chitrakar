@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~425),
+- **Verify before committing:** `cargo test --workspace` (~428),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2464,6 +2464,29 @@ without reading anything else.*
      correctness question — leave every edge live and every test still
      passes, slowly — so the benchmark was the witness for that half and
      nothing standing guards it.
+     An *ellipse* now rasterizes the same way, which is the bigger of the
+     two: its spans are two roots of a quadratic, so there was never any
+     reason to sample it. Sampled, a circle was quantized by the pattern
+     that took it — the flat top and bottom of it in quarters, where whole
+     rows of the box flip together — and it cost a box of sixteen tests at
+     every pixel of its box. Summing the alpha it lays down now recovers
+     the true area to a fiftieth of a pixel where sampling was ten times
+     further out (`an_ellipse_covers_the_area_it_really_has`), and eight
+     big overlapping ellipses at 1400x1000 went from 180ms a frame to
+     112ms. A turned ellipse is still sampled: it is still an ellipse and
+     its spans are still two roots, but of a conic written in the page's
+     axes rather than its own, which is arithmetic this does not do yet.
+     One thing tried and thrown away, which is worth recording: replacing
+     the sampler's four-by-four box with sixteen samples in a *rook*
+     pattern — one to a row and one to a column of a sixteenth grid, which
+     is what a graphics API does for the same reason. It buys sixteenths
+     on an edge standing square on the page, where the box can only say
+     quarters. It also stops stratifying the pixel in two dimensions, and
+     on a curve that costs more than it buys: the area an ellipse
+     integrates to came out twice as far off, and the SVG round trip
+     stopped holding. The box stayed. The right answer for a shape whose
+     spans are computable is not a better sample pattern, it is not
+     sampling — which is what the ellipse above does.
      Two: **ask an audit for the thing rather than an account of it** —
      the file audit compared a document written out as text and could not
      see wrong pixels; the clipboard audit compared a layer field by field

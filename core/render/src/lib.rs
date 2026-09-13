@@ -3808,33 +3808,114 @@ fn fill_path_scanlines(
                 }
             }
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            for span in xs.as_chunks::<2>().0 {
-                let lo = span[0].max(bbox.x0 as f32);
-                let hi = span[1].min(bbox.x1 as f32);
-                if hi <= lo {
-                    continue;
-                }
-                let first = (lo.floor().max(0.0) as u32).max(bbox.x0);
-                let last = (hi.ceil().max(0.0) as u32).min(bbox.x1);
-                for px in first..last {
-                    let overlap = (hi.min(px as f32 + 1.0) - lo.max(px as f32)).clamp(0.0, 1.0);
-                    cov[(px - bbox.x0) as usize] += overlap / N as f32;
-                }
-            }
+            add_spans(&mut cov, &xs, bbox, N);
         }
-        for px in bbox.x0..bbox.x1 {
-            let a = cov[(px - bbox.x0) as usize].min(1.0);
-            if a <= 0.0 {
+        blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
+    }
+}
+
+/// Add one sub-row's inside spans to a row's coverage, each pixel taking
+/// the fraction of itself the span really covers — which is what makes
+/// this rasterizer exact across a row however coarse it is down one.
+/// Crossings arrive sorted and pair up into spans, which is the even-odd
+/// rule.
+fn add_spans(cov: &mut [f32], xs: &[f32], bbox: ClipRect, sub_rows: u32) {
+    for span in xs.as_chunks::<2>().0 {
+        let lo = span[0].max(bbox.x0 as f32);
+        let hi = span[1].min(bbox.x1 as f32);
+        if hi <= lo {
+            continue;
+        }
+        let first = (lo.floor().max(0.0) as u32).max(bbox.x0);
+        let last = (hi.ceil().max(0.0) as u32).min(bbox.x1);
+        for px in first..last {
+            let overlap = (hi.min(px as f32 + 1.0) - lo.max(px as f32)).clamp(0.0, 1.0);
+            cov[(px - bbox.x0) as usize] += overlap / sub_rows as f32;
+        }
+    }
+}
+
+/// Lay one row of gathered coverage down.
+#[allow(clippy::too_many_arguments)]
+fn blend_row(
+    dst: &mut Surface,
+    doc: &Document,
+    inv: Inverse,
+    paint: &Paint,
+    mode: BlendMode,
+    mask: MaskRef<'_>,
+    cov: &[f32],
+    bbox: ClipRect,
+    py: u32,
+) {
+    for px in bbox.x0..bbox.x1 {
+        let a = cov[(px - bbox.x0) as usize].min(1.0);
+        if a <= 0.0 {
+            continue;
+        }
+        let c = a * coverage_at(doc, mask, px, py);
+        if c <= 0.0 {
+            continue;
+        }
+        let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+        let i = (py * dst.width + px) as usize;
+        dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
+    }
+}
+
+/// The same rasterizer for an ellipse standing square on the page: its
+/// spans are two roots of a quadratic rather than a list of crossings, so
+/// there is no polygon to flatten it into and nothing to sample.
+///
+/// Which matters twice over. A circle drawn by sampling is quantized by
+/// the pattern that samples it — the flat top and bottom of it in
+/// quarters, where the box of samples flips whole rows at once — and it
+/// costs a box of tests at every pixel of its box rather than two square
+/// roots a sub-row. Exact across the row and sixteen deep down it, like
+/// every other fill here.
+#[allow(clippy::too_many_arguments)]
+fn fill_ellipse_scanlines(
+    dst: &mut Surface,
+    doc: &Document,
+    rx: f32,
+    ry: f32,
+    t: Transform,
+    inv: Inverse,
+    paint: &Paint,
+    mode: BlendMode,
+    bbox: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    const N: u32 = 16;
+    if bbox.is_empty() {
+        return;
+    }
+    // The local ellipse is centred at (rx, ry) — see `shape_covers` — and
+    // an axis-aligned map takes it to another ellipse standing square on
+    // the page.
+    let (cx, cy) = to_device(t, rx, ry);
+    let (a, b) = ((rx * t.a).abs(), (ry * t.d).abs());
+    if !(a > 0.0 && b > 0.0) {
+        return;
+    }
+    let width = (bbox.x1 - bbox.x0) as usize;
+    let mut cov = vec![0f32; width];
+    let mut xs: Vec<f32> = Vec::new();
+    for py in bbox.y0..bbox.y1 {
+        cov.fill(0.0);
+        for j in 0..N {
+            let sy = py as f32 + (j as f32 + 0.5) / N as f32;
+            let dy = (sy - cy) / b;
+            if dy * dy >= 1.0 {
                 continue;
             }
-            let c = a * coverage_at(doc, mask, px, py);
-            if c <= 0.0 {
-                continue;
-            }
-            let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
-            let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
+            let half = a * (1.0 - dy * dy).sqrt();
+            xs.clear();
+            xs.push(cx - half);
+            xs.push(cx + half);
+            add_spans(&mut cov, &xs, bbox, N);
         }
+        blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
     }
 }
 
@@ -3890,8 +3971,18 @@ fn paint_shape(
     let Some(inv) = Inverse::of(t) else {
         return;
     };
-    // Path fills go through the scanline rasterizer; strokes stay on the
+    // Fills go through the scanline rasterizer; strokes stay on the
     // sampler, whose distance test has no scanline form.
+    if let (VectorShape::Ellipse { rx, ry }, None) = (shape, stroke) {
+        // Only while the map keeps it square on the page. Turned, it is
+        // still an ellipse and its spans are still two roots, but of a
+        // conic written in the page's axes rather than its own — which is
+        // arithmetic this does not do yet, so the sampler keeps it.
+        if t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
+            fill_ellipse_scanlines(dst, doc, *rx, *ry, t, inv, paint, mode, bbox, mask);
+            return;
+        }
+    }
     if let (
         VectorShape::Path {
             points, subpaths, ..
@@ -10310,6 +10401,59 @@ mod tests {
             "and one three fifths covered ({})",
             edge_at(8.4)
         );
+    }
+
+    /// An ellipse's coverage integrates to the area it really has.
+    ///
+    /// It used to be sampled: a box of sixteen tests at every pixel of
+    /// its box, which is quantized by the pattern that takes it — the
+    /// flat top and bottom of a circle in quarters, where whole rows of
+    /// the box flip together — and costs a great deal more than it needs
+    /// to. Its spans are two roots of a quadratic, so it rasterizes the
+    /// way every other fill here does: exact across the row, sixteen
+    /// sub-rows down it. Summing the alpha it lays down recovers the true
+    /// area to within a fiftieth of a pixel, where sampling was ten times
+    /// further out than that.
+    #[test]
+    fn an_ellipse_covers_the_area_it_really_has() {
+        for (rx, ry) in [(12.0f32, 8.0f32), (7.3, 11.9), (3.5, 3.5)] {
+            let mut doc = Document::new(48, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector("e", VectorShape::Ellipse { rx, ry });
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            // Off the pixel grid on purpose: an ellipse landed on whole
+            // pixels is the easy case.
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.3, 8.7),
+            })
+            .unwrap();
+            let drawn: f64 = render(&doc)
+                .unwrap()
+                .pixels
+                .iter()
+                .map(|p| p.a as f64)
+                .sum();
+            let want = std::f64::consts::PI * rx as f64 * ry as f64;
+            assert!(
+                (drawn - want).abs() < 0.05,
+                "an ellipse {rx} by {ry} covers {want:.3} and drew {drawn:.3}"
+            );
+        }
     }
 
     #[test]
