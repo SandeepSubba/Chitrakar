@@ -2528,6 +2528,20 @@ without reading anything else.*
      (`anything_that_paints_can_be_held_to`). Eighty-four pages of a
      hundred and twenty are drawn now, thirty-six declined — where three
      passes ago it was thirty-three drawn and eighty-seven declined.
+     A fifth pass took the last of them that was a gap rather than a
+     decision: a copy *of* a layer that is itself held to the one under it
+     was handed back, because this walk reaches the original through the
+     path that reads `clipped` and would have held the copy back by a
+     layer somewhere else entirely. The reference draws such a copy whole
+     — a copy draws the layer, not the layer's place in a run of clipped
+     ones, and a clip run is the parent group's business — which was asked
+     of it rather than assumed: the copy's far corner, nowhere near the
+     base the original is held to, carries the original's own colour. So
+     `one` is told whether it is drawing a layer among its siblings or as
+     what a copy draws, and the clip applies only in the first. Eighty-
+     eight of a hundred and twenty drawn, thirty-two declined. What is
+     left is decisions: an effect on an adjustment, a filter or a clone
+     layer, and a layer held to one of those three.
      And the coarsest antialiasing in the renderer was found by the same
      reading and is gone: the scanline path fill is exact across a row
      and was *sampled* down it, four sub-rows deep, so a near-horizontal

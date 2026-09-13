@@ -2116,7 +2116,7 @@ fn collect(
     out: &mut Scene,
 ) -> Option<()> {
     for &child in doc.children_of(group).ok()? {
-        one(doc, child, parent, opacity, bound, out)?;
+        one(doc, child, parent, opacity, bound, true, out)?;
     }
     Some(())
 }
@@ -2127,12 +2127,20 @@ fn collect(
 /// ask for it: a copy of another layer draws that layer where the copy
 /// is, which is this same work with a different space and no parent to
 /// have walked down from.
+#[allow(clippy::too_many_arguments)]
 fn one(
     doc: &Document,
     child: NodeId,
     parent: Transform,
     opacity: f32,
     bound: Option<chitrakar_render::ClipRect>,
+    // Whether this layer is being drawn in its own place among its
+    // siblings, where being held to the one below it means something, or
+    // as what a *copy* draws — where it does not. A copy draws the layer,
+    // not the layer's place in a run of clipped ones, so the renderer
+    // being matched draws the layer whole there: it reaches it through
+    // `render_layer`, and a clip run is the parent group's business.
+    in_a_run: bool,
     out: &mut Scene,
 ) -> Option<()> {
     let node = doc.node(child).ok()?;
@@ -2188,7 +2196,7 @@ fn one(
     // has an alpha that depends on how it was composited, and this
     // reading is of the layer alone. Any of those and the page goes
     // back to the CPU, which is always a safe answer.
-    let held_to = if node.clipped {
+    let held_to = if node.clipped && in_a_run {
         match chitrakar_render::clip_base(doc, child).ok()? {
             // Nothing under it to be held to — the first of a run
             // is what the rest are held to — so it draws whole.
@@ -2738,15 +2746,6 @@ fn one(
         // on a surface of its own there, and that is a different
         // picture from this, so it goes back.
         NodeKind::Instance { of, .. } => {
-            // A copy of a layer that is itself held to the one under
-            // *it*: what a copy draws is the layer, not the layer's place
-            // in a run of clipped ones, so the CPU renderer draws it
-            // whole. This walk reaches the original through the same path
-            // that reads `clipped`, and would hold the copy back by a
-            // layer somewhere else entirely.
-            if doc.node(*of).ok()?.clipped {
-                return None;
-            }
             let master = doc.node(*of).ok()?;
             let back = chitrakar_render::invert(master.transform)?;
             let stand_ins = if chitrakar_render::takes_stand_ins(doc, *of) {
@@ -2761,7 +2760,7 @@ fn one(
             let inner = if alone { 1.0 } else { opacity };
             let within = if alone { None } else { bound };
             if stand_ins.is_empty() {
-                one(doc, *of, t.compose(back), inner, within, out)?;
+                one(doc, *of, t.compose(back), inner, within, false, out)?;
             } else {
                 // What a copy with stand-ins draws is a list of layers
                 // rather than the group itself, and a group holding an
@@ -2774,7 +2773,7 @@ fn one(
                     return None;
                 }
                 for part in stand_ins {
-                    one(doc, part, t, inner, within, out)?;
+                    one(doc, part, t, inner, within, false, out)?;
                 }
             }
         } // No arm left over, and none wanted: every kind of layer is
@@ -4907,6 +4906,79 @@ mod tests {
             mean < 0.004,
             "held inside a copy: mean {mean:.5}, worst {worst:.3}"
         );
+
+        // A copy of a layer that is itself held to the one under *it* is
+        // drawn whole: a copy draws the layer, not the layer's place in a
+        // run of clipped ones, and the renderer being matched reaches it
+        // through `render_layer`, where a clip run is the parent group's
+        // business. Asked of the page, its far corner — nowhere near the
+        // base the original is held to — carries the original's own
+        // colour.
+        {
+            let mut apart = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut apart,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.8,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut apart,
+                filled("base", VectorShape::Ellipse { rx: 10.0, ry: 8.0 }, RED),
+                Transform::translation(4.0, 4.0),
+            );
+            let one_held = add(
+                &mut apart,
+                filled(
+                    "held",
+                    VectorShape::Rect {
+                        width: 24.0,
+                        height: 18.0,
+                        radius: 0.0,
+                    },
+                    BLUE,
+                ),
+                Transform::translation(8.0, 6.0),
+            );
+            apart
+                .apply(Command::SetClipped {
+                    id: one_held,
+                    clipped: true,
+                })
+                .unwrap();
+            add(
+                &mut apart,
+                Box::new(Node::instance("a copy", one_held)),
+                Transform::translation(30.0, 18.0),
+            );
+            let reference = chitrakar_render::render(&apart).unwrap();
+            let far = reference.get(52, 34);
+            assert!(
+                far.b > 0.5 && far.r < 0.2,
+                "the copy is whole out there rather than cut to a base it is not near ({far:?})"
+            );
+            assert!(
+                GpuRenderer::can_render(&apart),
+                "and the backend draws it rather than handing the page back"
+            );
+            let (mean, worst) = difference(&gpu.render(&apart).unwrap(), &reference);
+            assert!(
+                mean < 0.004,
+                "a copy of a held layer: mean {mean:.5} (worst {worst:.3})"
+            );
+        }
 
         // Faded, blended, masked or held to the layer under it, a copy
         // goes on a surface of its own and that surface is what lands —
@@ -10067,26 +10139,25 @@ mod tests {
         //
         // The numbers go *up* when the backend learns something, because
         // learning it means more pages are compared rather than declined.
-        // Isolating a copy took the pages drawn from 33 to 47 and brought
-        // six more rough ones; ignoring a blend on an adjustment rather
-        // than refusing the page took it to 65 and brought seven more;
-        // letting a clipped layer be held to a base that is faded, masked
-        // or blended took it further again and brought three more; and
-        // letting it be held to any layer that *paints* — a group, a
-        // brush layer, a copy, a frame, where before only a shape, a
-        // picture or a block of text would do — took it to 84 and brought
-        // five more. Every one of those twenty-one carries one of the
-        // three causes above, which was checked rather than assumed: take
-        // the blend back off, undress the base, or let the clip go, and
-        // the worst pixel is unchanged to three decimal places — so the
-        // roughness was already in the page and only the comparison is
-        // new. (Letting the clip go on one of them made it *worse*, the
-        // clip having been hiding rough pixels, which is the same answer
-        // said louder.) A rise here is good
-        // news when what is drawn rises with it and bad news otherwise,
-        // which is why the two are printed together.
+        // Five passes of asking which single layer, taken away, makes a
+        // declined page drawable took the pages drawn from 33 to 88 of
+        // 120: isolating a copy, ignoring a blend on an adjustment rather
+        // than refusing the page, letting a clipped layer be held to a
+        // base that is faded, masked or blended, letting it be held to
+        // anything that *paints* rather than only a shape, a picture or a
+        // block of text, and drawing a copy of a clipped layer whole the
+        // way the reference does. Twenty-three more rough pages came with
+        // those fifty-five, and every one of them carries one of the three
+        // causes above — checked rather than assumed: take the blend back
+        // off, undress the base, or let the clip go, and the worst pixel
+        // is unchanged to three decimal places, so the roughness was
+        // already in the page and only the comparison is new. (On one of
+        // them letting the clip go made it *worse*, the clip having been
+        // hiding rough pixels, which is the same answer said louder.) A
+        // rise here is good news when what is drawn rises with it and bad
+        // news otherwise, which is why the two are printed together.
         assert!(
-            rough.len() <= 41 && worst_seen < 0.37,
+            rough.len() <= 43 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");
