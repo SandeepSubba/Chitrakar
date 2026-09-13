@@ -4398,6 +4398,55 @@ assert(
   );
 }
 
+// 8y2. Carrying the view with the middle button does not paste.
+//
+// On X11 the middle button pastes the primary selection, and the middle
+// button is this app's own way of carrying the view — so every drag of
+// the view arrived as a paste event with nothing in it at all, and an
+// in-app clipboard holding a layer meant a stray copy of that layer
+// every time. Nothing said so: it was found by an unrelated assertion in
+// 9y tripping over the extra layer, which is the sort of thing a suite
+// should be asked directly.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(60, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 180), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+c");
+  await page.waitForTimeout(150);
+  const held = await page.locator(".panel ul li").count();
+  assert(held === 1, `one layer, and a copy of it in hand (${held})`);
+  const pageAt = async () =>
+    (await page.locator("#engine-page").boundingBox()).x;
+  const home = await pageAt();
+  await page.mouse.move(...at(250, 150));
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(...at(120, 150), { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(300);
+  assert((await pageAt()) < home - 40, "the middle button carries the view");
+  assert(
+    (await page.locator(".panel ul li").count()) === 1,
+    `and brings nothing in with it (${await page.locator(".panel ul li").count()} layers)`,
+  );
+  // And the keystroke still does what the gesture must not: the in-app
+  // clipboard is pasted by Ctrl+V, whatever the paste event carries.
+  await page.keyboard.press("Control+v");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "while Ctrl+V pastes what is in hand",
+  );
+}
+
 // 9. CMYK doc smoke: new doc, draw, still renders.
 await newDocument(1280, 720, "cmyk");
 await pickTool("Rect");

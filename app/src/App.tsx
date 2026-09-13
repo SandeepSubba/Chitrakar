@@ -4349,10 +4349,11 @@ export function App() {
           copySelected();
           deleteSelected();
         }
-        // Ctrl+V is left to the paste event, which can see the clipboard —
-        // with a fallback: a webview that never fires it on a non-editable
-        // target (WKWebView) still gets the in-app paste, a beat later,
-        // and one that does fire it has already been served by then.
+        // Ctrl+V pastes the in-app clipboard a beat later, unless the
+        // paste event has already served a picture from another
+        // application by then — the one thing only the event can see. A
+        // webview that never fires the event on a non-editable target
+        // (WKWebView) reaches the same place by the same road.
         if (k === "v") {
           pasteSeen.current = false;
           window.setTimeout(() => {
@@ -6026,19 +6027,30 @@ export function App() {
     }
   };
 
-  // Paste is handled at the event rather than the keystroke, because only
-  // the event knows what the clipboard holds: an image from another app
-  // becomes a layer, anything else falls back to the in-app clipboard.
+  // A picture from another application becomes a layer, and the paste
+  // *event* is what serves it: only the event can see what another
+  // application put on the clipboard. Nothing else is served here — the
+  // in-app clipboard is the keystroke's own business (see the Ctrl+V
+  // keydown, which pastes it a beat later unless this has already served
+  // the paste).
+  //
+  // Because a paste event is not always somebody asking to paste. On X11
+  // the middle button pastes the primary selection, and the middle button
+  // is this app's own way of carrying the view — so dragging the view
+  // delivered a paste event with nothing in it at all, and an in-app
+  // clipboard holding a layer meant a stray copy of that layer every
+  // time. Preventing the default on the gesture does not stop the event
+  // arriving; not acting on an empty one does.
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (isTextEntry(e.target)) return;
-      pasteSeen.current = true;
       const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
         f.type.startsWith("image/"),
       );
+      if (!image) return;
+      pasteSeen.current = true;
       e.preventDefault();
-      if (image) placeImageFile(image);
-      else pasteClipboard();
+      placeImageFile(image);
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);

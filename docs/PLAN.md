@@ -674,7 +674,7 @@ without reading anything else.*
   Add the test with the line when the sheet grows.
 - **Verify before committing:** `cargo test --workspace` (~428),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1057 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2612,6 +2612,21 @@ without reading anything else.*
   the verification gate, status, ship, the engine conventions skill, and a
   SessionStart hook (install: `/plugin marketplace add
   SandeepSubba/Chitrakar`, `/plugin install chitrakar@chitrakar`).
+- **A paste event is not always somebody asking to paste.** On X11 the
+  middle button pastes the primary selection, and the middle button is
+  this app's own way of carrying the view — so every drag of the view
+  arrived as a paste event with nothing in it at all, and an in-app
+  clipboard holding a layer meant a stray copy of that layer every time
+  the view was dragged. Preventing the default on the gesture does not
+  stop the event arriving (pointerdown, mousedown, mouseup and auxclick
+  were each tried). Not acting on it does: the paste *event* serves the
+  one thing only it can see — a picture another application put on the
+  clipboard — and the in-app clipboard is the keystroke's own business,
+  which it already was, since Ctrl+V pastes it a beat later unless the
+  event has served the paste. Asked directly by the suite now (8y2)
+  rather than found by an unrelated assertion tripping over the extra
+  layer.
+
 - **Known limits, deliberately:** the in-app clipboard carries layers
   between documents; out to other applications a selection goes as a
   picture (Edit › Copy as image puts a PNG on the system clipboard: a
