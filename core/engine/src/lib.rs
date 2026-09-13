@@ -7915,6 +7915,103 @@ mod tests {
         );
     }
 
+    /// A frame resized by dragging its corner undoes whole, including the
+    /// layers that only started moving partway through the drag.
+    ///
+    /// This is the gesture in the app that the "first inverse undoes the
+    /// lot" rule was actually wrong about, rather than only wrong in
+    /// principle. A frame resize emits one command per pinned child, and
+    /// it leaves out the children that do not move: pull the south edge
+    /// and a layer pinned to the east has nothing to do. Carry on into
+    /// the corner and the width changes too and that layer moves — on
+    /// the fifth pointer sample, say, in a gesture whose first sample
+    /// never mentioned it. Keeping only the first preview's inverse
+    /// undid the frame and the layers that moved early and left that one
+    /// where the drag put it.
+    #[test]
+    fn a_frame_dragged_into_its_corner_undoes_every_layer_it_moved() {
+        use chitrakar_doc::fixture::state;
+        use chitrakar_doc::{Pin, Pinning};
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::artboard("board", 100.0, 100.0, None)),
+            })
+            .unwrap();
+        let frame = session.document().children_of(root).unwrap()[0];
+        for (name, pin) in [
+            (
+                "moves with the bottom",
+                Pinning {
+                    x: Pin::Start,
+                    y: Pin::End,
+                },
+            ),
+            (
+                "moves with the right",
+                Pinning {
+                    x: Pin::End,
+                    y: Pin::Start,
+                },
+            ),
+        ] {
+            let index = session.document().children_of(frame).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: frame,
+                    index,
+                    node: filled_rect(name, 10.0, 10.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(frame).unwrap()[index];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(20.0 + index as f32 * 30.0, 20.0),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetPinning { id, pinned: pin })
+                .unwrap();
+        }
+        let [south, east] = <[NodeId; 2]>::try_from(session.document().children_of(frame).unwrap())
+            .expect("two children");
+        // History starts here: building the page is not the gesture.
+        let mut session = Session::from_document(session.document().clone());
+        let before = state(session.document());
+        let (was_south, was_east) = (
+            session.transform_of(south).unwrap(),
+            session.transform_of(east).unwrap(),
+        );
+
+        // The drag: down the south edge first, so only the layer pinned
+        // to the bottom is named, and then out into the corner.
+        for (w, h) in [(100.0, 110.0), (100.0, 125.0), (140.0, 150.0)] {
+            let cmd: Command =
+                serde_json::from_str(&session.artboard_resize(frame, w, h, 0.0, 0.0).unwrap())
+                    .unwrap();
+            session.preview(cmd).unwrap();
+        }
+        // Both layers moved, which is what makes the undo worth asking
+        // about — and the east one only on the last sample.
+        assert!(session.transform_of(south).unwrap().f > was_south.f + 1.0);
+        assert!(session.transform_of(east).unwrap().e > was_east.e + 1.0);
+
+        assert!(session.commit_preview());
+        assert!(
+            session.undo().unwrap() && !session.undo().unwrap(),
+            "the drag is one step of history"
+        );
+        if let Err(what) =
+            chitrakar_doc::fixture::came_back(&state(session.document()), &before, true)
+        {
+            panic!("the frame drag did not undo whole: {what}");
+        }
+    }
+
     /// And a drag still costs one command to undo, however long it is.
     ///
     /// The gesture keeps a list of inverses now, and the reason that is

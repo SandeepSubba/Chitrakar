@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~436),
+- **Verify before committing:** `cargo test --workspace` (~437),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2432,7 +2432,17 @@ without reading anything else.*
      it — record their inverse regardless
      (`a_gesture_of_more_than_one_kind_undoes_the_whole_of_itself`, a
      hundred and twenty gestures drawn from the same list of every
-     command there is). Undo is
+     command there is).
+     And it was live rather than only latent, which was worth finding
+     out: resizing a *frame* emits one command per pinned child and
+     leaves out the children that do not move. Pull the south edge and a
+     layer pinned to the east has nothing to do; carry on into the
+     corner and the width changes and that layer moves — on the fifth
+     pointer sample of a gesture whose first sample never mentioned it.
+     Under the old rule the frame came back and that layer stayed where
+     the drag left it. A test drives exactly that drag now and fails on
+     demand against the old rule
+     (`a_frame_dragged_into_its_corner_undoes_every_layer_it_moved`). Undo is
      the invariant this whole editor rests on, and it was audited one
      command at a time against a document nothing had happened to yet.
      That is not what undo is: it is a stack, and what it has to survive
