@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~434),
+- **Verify before committing:** `cargo test --workspace` (~436),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2409,7 +2409,30 @@ without reading anything else.*
      function. Three engine tests catch it; no fixture audit can, and
      none of them is blind by accident — a shared answer is a shared
      answer, the same as with the walk that resolves a copy's stand-ins.
-     Four, and new: **ask the stack rather than the command**. Undo is
+     Four, and new: **ask the stack rather than the command**, which
+     found a real defect one floor up as well. A gesture — the drag API
+     the whole editor's live editing runs through — kept the *first*
+     preview's inverse and threw the rest away. That is exactly right
+     for a drag, which restates the same command on every pointer
+     sample, and wrong for a gesture that writes more than one thing: a
+     gesture setting a layer's opacity and then its name undid the
+     opacity and left the name where the gesture put it, committed or
+     cancelled alike. Every gesture audit in the workspace previewed one
+     command, so nothing saw it. A gesture keeps the inverses it needs
+     now, applied in reverse so each lands in the state it was computed
+     for, and drops a preview that writes only where the gesture has
+     already recorded the way back — which is what a drag is after its
+     first sample, so two hundred samples are still one command to undo
+     and a brush stroke is two (`a_long_drag_is_still_one_inverse` says
+     so as the shape of what history holds, because "one undo step" was
+     true of the broken version too). Which slots a command writes is
+     named rather than guessed, and the two sorts that cannot be named —
+     the structural ones, and the ones that move the whole page, where a
+     second resize offsets every layer again from where the first left
+     it — record their inverse regardless
+     (`a_gesture_of_more_than_one_kind_undoes_the_whole_of_itself`, a
+     hundred and twenty gestures drawn from the same list of every
+     command there is). Undo is
      the invariant this whole editor rests on, and it was audited one
      command at a time against a document nothing had happened to yet.
      That is not what undo is: it is a stack, and what it has to survive

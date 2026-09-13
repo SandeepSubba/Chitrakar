@@ -90,6 +90,102 @@ struct HistoryEntry {
     label: String,
 }
 
+/// One thing a command writes to, which is how a gesture knows whether it
+/// has already recorded what puts that thing back.
+///
+/// A gesture records one undo step, and what it must apply to get there is
+/// the inverse of everything it did — except that a drag restates the same
+/// command on every pointer sample, and every one of those after the first
+/// is redundant: the first inverse already puts that field back. Naming
+/// the field is what lets the redundant ones be dropped without guessing.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Slot {
+    /// One field of one layer, set outright, so the first inverse for it
+    /// restores it whatever happens to it afterwards.
+    Field(NodeId, &'static str),
+    /// One stroke of a paint layer, replaced outright — which is what a
+    /// brush gesture does to the stroke it is still drawing.
+    Stroke(NodeId, usize, bool),
+    /// One thing the page itself holds, set outright.
+    Page(&'static str),
+}
+
+/// What a command writes, or `None` where it cannot be named that way —
+/// and `None` means "record the inverse regardless".
+///
+/// Two sorts answer `None`. Structural ones, which do not set a field but
+/// add, remove or reorder layers, so restating one is not restating
+/// anything. And the ones that move the whole page: a second resize
+/// offsets every layer again from where the first left it, so the first
+/// inverse restores neither the size nor the layers — the same is true of
+/// a second mirror or a second turn, and every one of them has to be
+/// undone in its own right.
+fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
+    let field = |id: &NodeId, what| Some(vec![Slot::Field(*id, what)]);
+    match cmd {
+        Command::SetOpacity { id, .. } => field(id, "opacity"),
+        Command::SetVisible { id, .. } => field(id, "visible"),
+        Command::SetLocked { id, .. } => field(id, "locked"),
+        Command::SetClipped { id, .. } => field(id, "clipped"),
+        Command::SetPinning { id, .. } => field(id, "pinned"),
+        Command::SetBlendMode { id, .. } => field(id, "blend"),
+        Command::SetTransform { id, .. } => field(id, "transform"),
+        Command::SetKind { id, .. } => field(id, "kind"),
+        Command::SetName { id, .. } => field(id, "name"),
+        Command::SetMask { id, .. } => field(id, "mask"),
+        Command::SetEffects { id, .. } => field(id, "effects"),
+        Command::SetStroke {
+            id, index, on_mask, ..
+        } => Some(vec![Slot::Stroke(*id, *index, *on_mask)]),
+        Command::SetGuides { .. } => Some(vec![Slot::Page("guides")]),
+        Command::SetSwatches { .. } => Some(vec![Slot::Page("swatches")]),
+        Command::SetRegions { .. } => Some(vec![Slot::Page("regions")]),
+        Command::SetSelection { .. } => Some(vec![Slot::Page("selection")]),
+        Command::Batch(cmds) => {
+            let mut all = Vec::new();
+            for cmd in cmds {
+                all.extend(slots_of(cmd)?);
+            }
+            Some(all)
+        }
+        Command::AddNode { .. }
+        | Command::RemoveNode { .. }
+        | Command::RestoreSubtree { .. }
+        | Command::MoveNode { .. }
+        | Command::AddStroke { .. }
+        | Command::RemoveStroke { .. }
+        | Command::ResizeCanvas { .. }
+        | Command::MirrorCanvas { .. }
+        | Command::StraightenCanvas { .. }
+        | Command::TurnCanvas { .. } => None,
+    }
+}
+
+/// A gesture in flight: what it will take to put the document back, and
+/// what it has already recorded putting back.
+///
+/// The inverses are oldest first and are applied in reverse, so each one
+/// lands in exactly the state it was computed for. A preview whose every
+/// slot is already covered adds nothing — which is the whole of a drag
+/// after its first sample, so the common case still keeps one command.
+struct Gesture {
+    label: String,
+    inverses: Vec<Command>,
+    covered: std::collections::HashSet<Slot>,
+}
+
+impl Gesture {
+    /// One command that puts the document back where the gesture found it.
+    fn undoing(mut self) -> Command {
+        if self.inverses.len() == 1 {
+            self.inverses.pop().expect("one")
+        } else {
+            self.inverses.reverse();
+            Command::Batch(self.inverses)
+        }
+    }
+}
+
 /// The verb a boolean operation is described by in history and in the name
 /// the combined layer takes.
 fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
@@ -182,9 +278,9 @@ pub struct Session {
     /// The presented surface's size when it is a viewport rather than the
     /// whole page.
     viewport: Option<(u32, u32)>,
-    /// Inverse restoring the state before the current preview gesture, with
-    /// the label captured from the gesture's first command.
-    preview_inverse: Option<HistoryEntry>,
+    /// What it would take to restore the state before the current preview
+    /// gesture, with the label captured from the gesture's first command.
+    preview_gesture: Option<Gesture>,
     /// The stroke a brush is in the middle of drawing: which layer it is
     /// going onto, where in that layer's order, and the stroke so far.
     painting: Option<Painting>,
@@ -254,7 +350,7 @@ impl Session {
             view_scale: 1.0,
             view_origin: (0.0, 0.0),
             viewport: None,
-            preview_inverse: None,
+            preview_gesture: None,
             painting: None,
             pixels_recomputed: 0,
             last_touched: None,
@@ -687,9 +783,26 @@ impl Session {
     /// gesture captures the inverse that undoes the whole gesture.
     pub fn preview(&mut self, cmd: Command) -> Result<(), EngineError> {
         let label = self.describe(&cmd);
+        let slots = slots_of(&cmd);
         let inverse = self.apply_internal(cmd)?;
-        if self.preview_inverse.is_none() {
-            self.preview_inverse = Some(HistoryEntry { inverse, label });
+        let gesture = self.preview_gesture.get_or_insert_with(|| Gesture {
+            label,
+            inverses: Vec::new(),
+            covered: std::collections::HashSet::new(),
+        });
+        // A preview that writes only where this gesture has already
+        // recorded the way back adds nothing: that is a drag after its
+        // first sample, and it is why a drag of two hundred samples is
+        // still one command to undo. Anything else — another field, a
+        // second layer, a command that cannot be named this way at all —
+        // has to be undone in its own right.
+        match slots {
+            Some(slots) if slots.iter().all(|s| gesture.covered.contains(s)) => {}
+            Some(slots) => {
+                gesture.covered.extend(slots);
+                gesture.inverses.push(inverse);
+            }
+            None => gesture.inverses.push(inverse),
         }
         Ok(())
     }
@@ -702,9 +815,13 @@ impl Session {
     /// preview was active.
     pub fn commit_preview(&mut self) -> bool {
         self.painting = None;
-        match self.preview_inverse.take() {
-            Some(entry) => {
-                self.undo.push(entry);
+        match self.preview_gesture.take() {
+            Some(gesture) => {
+                let label = gesture.label.clone();
+                self.undo.push(HistoryEntry {
+                    inverse: gesture.undoing(),
+                    label,
+                });
                 self.redo.clear();
                 true
             }
@@ -716,9 +833,9 @@ impl Session {
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
         self.painting = None;
-        match self.preview_inverse.take() {
-            Some(entry) => {
-                self.apply_internal(entry.inverse)?;
+        match self.preview_gesture.take() {
+            Some(gesture) => {
+                self.apply_internal(gesture.undoing())?;
                 Ok(true)
             }
             None => Ok(false),
@@ -7700,6 +7817,169 @@ mod tests {
         session.redo().unwrap();
         assert_eq!(session.transform_of(id).unwrap().e, 5.0);
         assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A gesture made of *different* commands undoes and cancels the whole
+    /// of itself.
+    ///
+    /// The audit above asks every command what it does as a gesture, one
+    /// command at a time, restated the way a drag restates it. What it
+    /// cannot ask is the gesture that writes more than one thing — and
+    /// that was a real hole rather than a hypothetical one: the gesture
+    /// kept the *first* preview's inverse and threw the rest away, so a
+    /// gesture that set a layer's opacity and then its name undid the
+    /// opacity and left the name where the gesture put it. Committed or
+    /// cancelled, both.
+    ///
+    /// So: gestures built by drawing from the same list of every command
+    /// there is, two to six of them, previewed in order. Committed, one
+    /// step of history, undone, compared. Cancelled, nothing in history,
+    /// compared. Drawn from a seed because the combinations worth asking
+    /// about are the ones nobody would write out.
+    #[test]
+    fn a_gesture_of_more_than_one_kind_undoes_the_whole_of_itself() {
+        use chitrakar_doc::fixture::state;
+        let f = chitrakar_doc::fixture::everything();
+        let pool: Vec<Command> = chitrakar_doc::fixture::every_command(&f)
+            .into_iter()
+            .filter(chitrakar_doc::fixture::exact)
+            .collect();
+        let before = state(&f.doc);
+
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut widest = 0usize;
+        for round in 0..120u32 {
+            let how_many = 2 + (next() % 5) as usize;
+            let mut cmds = Vec::new();
+            for _ in 0..how_many {
+                cmds.push(pool[(next() % pool.len() as u64) as usize].clone());
+            }
+            let mut route: Vec<String> = Vec::new();
+
+            let mut gesture = Session::from_document(f.doc.clone());
+            for cmd in &cmds {
+                if gesture.preview(cmd.clone()).is_ok() {
+                    route.push(format!("{cmd:?}"));
+                }
+            }
+            if route.is_empty() {
+                continue;
+            }
+            widest = widest.max(
+                gesture
+                    .preview_gesture
+                    .as_ref()
+                    .map_or(0, |g| g.inverses.len()),
+            );
+            assert!(gesture.commit_preview(), "round {round} was a gesture");
+            assert!(
+                gesture.undo().unwrap() && !gesture.undo().unwrap(),
+                "round {round} recorded more than one step for one gesture"
+            );
+            if let Err(what) =
+                chitrakar_doc::fixture::came_back(&state(gesture.document()), &before, true)
+            {
+                panic!(
+                    "round {round} did not undo the whole gesture\n{}\n{what}",
+                    route.join("\n")
+                );
+            }
+
+            let mut gesture = Session::from_document(f.doc.clone());
+            for cmd in &cmds {
+                let _ = gesture.preview(cmd.clone());
+            }
+            assert!(gesture.cancel_preview().unwrap(), "round {round} cancelled");
+            assert!(
+                !gesture.undo().unwrap(),
+                "round {round} left a cancelled gesture in history"
+            );
+            if let Err(what) =
+                chitrakar_doc::fixture::came_back(&state(gesture.document()), &before, true)
+            {
+                panic!(
+                    "round {round} did not cancel the whole gesture\n{}\n{what}",
+                    route.join("\n")
+                );
+            }
+        }
+        assert!(
+            widest > 3,
+            "the widest gesture needed only {widest} inverses, so the list of them proves nothing"
+        );
+    }
+
+    /// And a drag still costs one command to undo, however long it is.
+    ///
+    /// The gesture keeps a list of inverses now, and the reason that is
+    /// not a cost is that a preview writing only where the gesture has
+    /// already recorded the way back is dropped. A drag is exactly that
+    /// after its first sample. Said as the shape of what history holds,
+    /// because "one undo step" is true either way and would not have
+    /// noticed a list two hundred long.
+    #[test]
+    fn a_long_drag_is_still_one_inverse() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 8.0, 8.0);
+        for step in 1..=200 {
+            session
+                .preview(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(step as f32 * 0.25, 0.0),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            session
+                .preview_gesture
+                .as_ref()
+                .map(|g| g.inverses.len())
+                .unwrap(),
+            1,
+            "two hundred samples of one drag are one inverse"
+        );
+        assert!(session.commit_preview());
+        assert!(matches!(
+            session.undo.last().unwrap().inverse,
+            Command::SetTransform { .. }
+        ));
+        session.undo().unwrap();
+        assert_eq!(session.transform_of(id).unwrap().e, 0.0);
+
+        // And a brush, whose gesture is a stroke added and then rewritten
+        // on every sample: the add is what undoes it and the rewrites are
+        // covered by it, so that is one inverse too.
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let f = chitrakar_doc::fixture::everything();
+        let mut session = Session::from_document(f.doc.clone());
+        session
+            .paint_begin(f.painted, 10.0, 10.0, 4.0, ink, 0.5, false, false)
+            .unwrap();
+        for step in 1..=60 {
+            session
+                .paint_extend(10.0 + step as f32, 10.0 + step as f32, 0.5)
+                .unwrap();
+        }
+        assert_eq!(
+            session
+                .preview_gesture
+                .as_ref()
+                .map(|g| g.inverses.len())
+                .unwrap(),
+            2,
+            "a stroke laid down and then rewritten sixty times is the add and one rewrite"
+        );
     }
 
     #[test]
