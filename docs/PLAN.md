@@ -1729,6 +1729,24 @@ without reading anything else.*
   inside on its right the whole way round, and makes them two rings
   rather than one pinched figure of eight. Taking whichever edge came to
   hand made that a coin toss that landed differently from run to run.
+- **Known, unexplained:** a middle-drag begun *on top of a picked
+  layer* appears to carry the layer as well as the view — but only on the
+  CI runner, and there it is exact and repeatable. The layer moves by
+  (pointer + view) over the zoom: a hundred pixels of drag and a hundred
+  of pan, at 2.28, came back as 88 document pixels every run. On a
+  developer machine it cannot be made to happen at any zoom from 50% to
+  400%, with the layer picked and the press on its middle, which is why
+  it is written here rather than fixed: the guard it would need is
+  already there (`isPanTrigger` in `App.tsx`, checked before the canvas
+  starts any drag), so whatever is getting past it is not visible from
+  this side. The smoke block that found it (9y) now drags clear of both
+  rects, which is what it always did before a stricter version of it was
+  written; the stricter claim — that a pan must not drag what is under
+  it — is true and worth asserting once somebody can reproduce the
+  failure. Suspected, not shown: the runner's panel is wider (its canvas
+  is 1014 against 1108 here) and it renders a row above the layers that
+  is not here, so its geometry and hit-testing differ in some way that
+  matters.
 - **The subject of a photograph:** `Session::pick_subject`, for the
   region no marquee can be dragged round and the wand asks the wrong
   question about — a coat, a face and a hand are three colours, and
