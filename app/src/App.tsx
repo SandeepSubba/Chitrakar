@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, IconName } from "./icons";
+import {
+  isTauri,
+  menuSignature,
+  setNativeMenu,
+  type MenuEntry,
+  type MenuSpec,
+} from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import {
   Adjustment,
@@ -904,6 +911,20 @@ const toTransform = (v: ArrayLike<number>): Transform => ({
   e: v[4],
   f: v[5],
 });
+
+/** A line across a menu. */
+const SEP: MenuEntry = { kind: "sep" };
+/** A row in a menu. The id is what the native bar sends back when the
+ * row is picked, so it has to outlive the render that wrote it. */
+const item = (
+  id: string,
+  icon: IconName,
+  label: string,
+  run: () => void,
+  hint?: string,
+): MenuEntry => ({ kind: "item", id, icon, label, run, hint });
+/** Which menu is open, and what the four of them are called. */
+type MenuId = "file" | "edit" | "page" | "view";
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
@@ -6029,6 +6050,224 @@ export function App() {
     refresh(session);
   };
 
+  /** Every menu as data, so the bar in the window and the desktop
+   * shell's native bar are two renderings of one list rather than two
+   * lists that drift. */
+  const menus: (MenuSpec & { id: MenuId })[] = [
+    {
+      id: "file",
+      label: "File",
+      entries: [
+        item("new-doc", "newDoc", "New document\u2026", () => {
+          if (mayDiscard()) setNewDocOpen(true);
+        }),
+        SEP,
+        item("open", "open", "Open\u2026", () => {
+          if (mayDiscard()) pick(openInputRef);
+        }),
+        item("place-image", "image", "Place image\u2026", () => pick(placeInputRef)),
+        item("load-font", "text", "Load font\u2026", () => pick(fontInputRef)),
+        item("save", "save", "Save", saveFile),
+        SEP,
+        item("export-png", "export", "Export PNG", exportPng),
+        item("export-png-2x", "export", "Export PNG at 2\u00d7", () => exportPngAt(2), "@2x"),
+        item("export-png-3x", "export", "Export PNG at 3\u00d7", () => exportPngAt(3), "@3x"),
+        ...(selectionSet.length > 0 || antRings.length > 0
+          ? [
+              item("export-selection", "export", "Export selection as PNG", () =>
+                exportSelectionPng(1),
+              ),
+              // The same asset at the size a screen with two or three
+              // pixels to the point wants it, which is what the page's
+              // own exports offer and what a picked-out asset is
+              // usually for.
+              item("export-selection-2x", "export", "Export selection at 2\u00d7", () =>
+                exportSelectionPng(2), "@2x",
+              ),
+              item("export-selection-3x", "export", "Export selection at 3\u00d7", () =>
+                exportSelectionPng(3), "@3x",
+              ),
+            ]
+          : []),
+        ...(selectedLayer?.kind === "artboard"
+          ? [item("export-artboard", "frame", "Export this artboard", exportArtboard)]
+          : []),
+        ...(layers.some((l) => l.kind === "artboard")
+          ? [
+              item("export-artboards", "frame", "Export every artboard", exportArtboards,
+                "one each",
+              ),
+            ]
+          : []),
+        item("export-jpeg", "export", "Export JPEG", exportJpeg, "flattened"),
+        item("export-svg", "export", "Export SVG", exportSvg),
+        item("export-pdf", "export", "Export PDF", exportPdf, hasIcc ? "CMYK" : "sRGB"),
+        ...(layers.some((l) => l.kind === "artboard")
+          ? [
+              item("export-pdf-frames", "frame", "Export PDF of the frames", exportPdfFrames,
+                "a page each",
+              ),
+            ]
+          : []),
+        ...(hasIcc ? [item("export-tiff", "export", "Export TIFF", exportTiff, "CMYK")] : []),
+        SEP,
+        item(
+          "press-profile",
+          hasIcc ? "check" : "profile",
+          hasIcc ? "Replace press profile\u2026" : "Load press profile\u2026",
+          () => pick(iccInputRef),
+        ),
+        item(
+          "monitor-profile",
+          hasScreenIcc ? "check" : "proof",
+          hasScreenIcc ? "Replace monitor profile\u2026" : "Load monitor profile\u2026",
+          () => pick(screenIccInputRef),
+        ),
+        item("display-p3", "proof", "Show as Display P3", () => {
+          if (!session) return;
+          try {
+            session.set_display_profile(display_p3_profile());
+            setHasScreenIcc(true);
+            refresh(session);
+          } catch (err) {
+            alert(`Could not use monitor profile: ${err}`);
+          }
+        }),
+        ...(hasScreenIcc
+          ? [item("clear-screen-profile", "profile", "Show sRGB as it is", clearScreenProfile)]
+          : []),
+      ],
+    },
+    {
+      id: "edit",
+      label: "Edit",
+      entries: [
+        item("undo", "undo", "Undo", undo, "Ctrl+Z"),
+        item("redo", "redo", "Redo", redo, "Ctrl+Shift+Z"),
+        item("cut", "cut", "Cut", cutSelected, "Ctrl+X"),
+        item("copy", "copy", "Copy", copySelected, "Ctrl+C"),
+        ...(selectionSet.length > 0 || antRings.length > 0
+          ? [item("copy-as-image", "copy", "Copy as image", copyAsImage)]
+          : []),
+        item("paste", "paste", "Paste", pasteClipboard, "Ctrl+V"),
+        item("duplicate", "duplicate", "Duplicate", duplicateSelected, "Ctrl+D"),
+        item("copy-style", "copy", "Copy style", copyStyle, "Ctrl+Alt+C"),
+        item("paste-style", "paste", "Paste style", pasteStyle, "Ctrl+Alt+V"),
+        item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
+        item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
+        item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
+        item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
+        item("delete", "trash", "Delete", deleteSelected, "Del"),
+        item("select-all", "selectAll", "Select all", selectAll, "Ctrl+A"),
+        item("deselect", "check", "Deselect", deselect, "Esc"),
+        SEP,
+        // A region picked out of the page, rather than the layers picked
+        // in the panel. The two are different things and the menu says
+        // so by keeping them apart.
+        item("pick-page", "marquee", "Pick out the whole page", pickWholePage),
+        item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, "Ctrl+Shift+I"),
+        item("pick-nothing", "lasso", "Pick out nothing", pickNothing),
+        item("pick-from-layer", "wand", "Pick out what this layer covers", pickFromLayer),
+        item("fill-picked", "fill", "Fill what is picked", fillSelection),
+        item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
+          maskFromSelection(false),
+        ),
+        item("pick-layer-mask", "marquee", "Pick out this layer's mask", pickLayerMask),
+        item("hide-picked", "trash", "Hide what is picked, from this layer", () =>
+          maskFromSelection(true),
+        ),
+        item("crop-to-picked", "crop", "Crop the page to what is picked", cropToSelection),
+      ],
+    },
+    {
+      id: "page",
+      label: "Page",
+      entries: [
+        item("canvas-size", "crop", "Canvas size\u2026", () => setCanvasSizeOpen(true)),
+        SEP,
+        item("turn-right", "turnRight", "Turn right", () => turnPage(1)),
+        item("turn-left", "turnLeft", "Turn left", () => turnPage(3)),
+        item("turn-over", "turnRight", "Turn upside down", () => turnPage(2)),
+        item("straighten", "turnLeft", "Straighten\u2026", () => {
+          setStraightenBy(0);
+          setLevelling(false);
+          setStraightenOpen(true);
+        }),
+        SEP,
+        item("mirror-h", "flipH", "Mirror left to right", () => mirrorPage(true)),
+        item("mirror-v", "flipV", "Mirror top to bottom", () => mirrorPage(false)),
+      ],
+    },
+    {
+      id: "view",
+      label: "View",
+      entries: [
+        ...(["px", "mm", "in"] as Units[]).map((u) =>
+          item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "\u2713" : undefined),
+        ),
+        SEP,
+        item("fit", "fit", "Fit document to window", fitView, "Ctrl+0"),
+        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
+        item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), "Ctrl++"),
+        item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), "Ctrl+-"),
+        item("actual-size", "actualSize", "Actual size", () => zoomTo(1), "Ctrl+1"),
+        item("zoom-selection", "selectAll", "Zoom to selection", zoomToSelection),
+        item(
+          "guides",
+          showGuides ? "check" : "fit",
+          showGuides ? "Hide guides" : "Show guides",
+          () => setShowGuides((v) => !v),
+        ),
+        item("clear-guides", "trash", "Clear guides", () => setGuidesDoc([])),
+        SEP,
+        // A grid is a view setting and a set of lines to catch on, so it
+        // is offered by the size it should be rather than as a switch
+        // with a number hidden somewhere else.
+        item("grid-none", grid === 0 ? "check" : "fit", "No grid", () => setGrid(0)),
+        ...[8, 16, 32].map((size) =>
+          item(
+            `grid-${size}`,
+            grid === size ? "check" : "fit",
+            `Grid of ${size} px`,
+            () => setGrid(size),
+          ),
+        ),
+      ],
+    },
+  ];
+
+  // The desktop shell shows the menu on the system bar instead, built
+  // from the list above. Rebuilding it on every render would tear it
+  // down under the pointer, so it is rebuilt only when what it shows
+  // changes — and the rows call back through a ref, since the menu
+  // outlives the render that built it.
+  const menusRef = useRef(menus);
+  menusRef.current = menus;
+  const menuShape = menuSignature(menus);
+  // If the system bar will not take the menu, the one in the window comes
+  // back: an app with no menu at all is worse than an app with two.
+  const [nativeMenuFailed, setNativeMenuFailed] = useState(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    setNativeMenu(
+      menusRef.current,
+      (id) => {
+        for (const m of menusRef.current) {
+          for (const e of m.entries) {
+            if (e.kind === "item" && e.id === id) {
+              e.run();
+              return;
+            }
+          }
+        }
+      },
+      "Chitrakar",
+    ).catch((err) => {
+      console.error("native menu:", err);
+      setNativeMenuFailed(true);
+    });
+  }, [menuShape]);
+
   return (
     <div className="editor">
       {recoverable && (
@@ -6057,363 +6296,37 @@ export function App() {
       )}
       <header className="topbar">
         <span className="brand">Chitrakar</span>
-        <nav className="menubar" aria-label="Main menu">
-          <MenuButton
-            label="File"
-            open={openMenu === "file"}
-            onOpen={() => setOpenMenu(openMenu === "file" ? null : "file")}
-            onHover={() => openMenu && setOpenMenu("file")}
-            onClose={() => setOpenMenu(null)}
-          >
-            <MenuItem
-              icon="newDoc"
-              onClick={() => mayDiscard() && setNewDocOpen(true)}
-            >
-              New document…
-            </MenuItem>
-            <hr />
-            <MenuItem
-              icon="open"
-              onClick={() => mayDiscard() && pick(openInputRef)}
-            >
-              Open…
-            </MenuItem>
-            <MenuItem icon="image" onClick={() => pick(placeInputRef)}>
-              Place image…
-            </MenuItem>
-            <MenuItem icon="text" onClick={() => pick(fontInputRef)}>
-              Load font…
-            </MenuItem>
-            <MenuItem icon="save" onClick={saveFile}>
-              Save
-            </MenuItem>
-            <hr />
-            <MenuItem icon="export" onClick={exportPng}>
-              Export PNG
-            </MenuItem>
-            <MenuItem icon="export" onClick={() => exportPngAt(2)} hint="@2x">
-              Export PNG at 2×
-            </MenuItem>
-            <MenuItem icon="export" onClick={() => exportPngAt(3)} hint="@3x">
-              Export PNG at 3×
-            </MenuItem>
-            {(selectionSet.length > 0 || antRings.length > 0) && (
-              <>
-                <MenuItem
-                  icon="export"
-                  onClick={() => exportSelectionPng(1)}
-                >
-                  Export selection as PNG
-                </MenuItem>
-                {/* The same asset at the size a screen with two or three
-                    pixels to the point wants it, which is what the page's
-                    own exports offer and what a picked-out asset is
-                    usually for. */}
-                <MenuItem
-                  icon="export"
-                  onClick={() => exportSelectionPng(2)}
-                  hint="@2x"
-                >
-                  Export selection at 2×
-                </MenuItem>
-                <MenuItem
-                  icon="export"
-                  onClick={() => exportSelectionPng(3)}
-                  hint="@3x"
-                >
-                  Export selection at 3×
-                </MenuItem>
-              </>
-            )}
-            {selectedLayer?.kind === "artboard" && (
-              <MenuItem icon="frame" onClick={exportArtboard}>
-                Export this artboard
-              </MenuItem>
-            )}
-            {layers.some((l) => l.kind === "artboard") && (
-              <MenuItem
-                icon="frame"
-                onClick={exportArtboards}
-                hint="one each"
+        {/* The desktop shell puts these on the system menu bar, where a
+            Mac app's menus belong; in a browser they are here. */}
+        {(!isTauri() || nativeMenuFailed) && (
+          <nav className="menubar" aria-label="Main menu">
+            {menus.map((m) => (
+              <MenuButton
+                key={m.id}
+                label={m.label}
+                open={openMenu === m.id}
+                onOpen={() => setOpenMenu(openMenu === m.id ? null : m.id)}
+                onHover={() => openMenu && setOpenMenu(m.id)}
+                onClose={() => setOpenMenu(null)}
               >
-                Export every artboard
-              </MenuItem>
-            )}
-            <MenuItem icon="export" onClick={exportJpeg} hint="flattened">
-              Export JPEG
-            </MenuItem>
-            <MenuItem icon="export" onClick={exportSvg}>
-              Export SVG
-            </MenuItem>
-            <MenuItem
-              icon="export"
-              onClick={exportPdf}
-              hint={hasIcc ? "CMYK" : "sRGB"}
-            >
-              Export PDF
-            </MenuItem>
-            {layers.some((l) => l.kind === "artboard") && (
-              <MenuItem
-                icon="frame"
-                onClick={exportPdfFrames}
-                hint="a page each"
-              >
-                Export PDF of the frames
-              </MenuItem>
-            )}
-            {hasIcc && (
-              <MenuItem icon="export" onClick={exportTiff} hint="CMYK">
-                Export TIFF
-              </MenuItem>
-            )}
-            <hr />
-            <MenuItem
-              icon={hasIcc ? "check" : "profile"}
-              onClick={() => pick(iccInputRef)}
-            >
-              {hasIcc ? "Replace press profile…" : "Load press profile…"}
-            </MenuItem>
-            <MenuItem
-              icon={hasScreenIcc ? "check" : "proof"}
-              onClick={() => pick(screenIccInputRef)}
-            >
-              {hasScreenIcc
-                ? "Replace monitor profile…"
-                : "Load monitor profile…"}
-            </MenuItem>
-            <MenuItem
-              icon="proof"
-              onClick={() => {
-                if (!session) return;
-                try {
-                  session.set_display_profile(display_p3_profile());
-                  setHasScreenIcc(true);
-                  refresh(session);
-                } catch (err) {
-                  alert(`Could not use monitor profile: ${err}`);
-                }
-              }}
-            >
-              Show as Display P3
-            </MenuItem>
-            {hasScreenIcc && (
-              <MenuItem icon="profile" onClick={clearScreenProfile}>
-                Show sRGB as it is
-              </MenuItem>
-            )}
-          </MenuButton>
-
-          <MenuButton
-            label="Edit"
-            open={openMenu === "edit"}
-            onOpen={() => setOpenMenu(openMenu === "edit" ? null : "edit")}
-            onHover={() => openMenu && setOpenMenu("edit")}
-            onClose={() => setOpenMenu(null)}
-          >
-            <MenuItem icon="undo" onClick={undo} hint="Ctrl+Z">
-              Undo
-            </MenuItem>
-            <MenuItem icon="redo" onClick={redo} hint="Ctrl+Shift+Z">
-              Redo
-            </MenuItem>
-            <MenuItem icon="cut" onClick={cutSelected} hint="Ctrl+X">
-              Cut
-            </MenuItem>
-            <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
-              Copy
-            </MenuItem>
-            {(selectionSet.length > 0 || antRings.length > 0) && (
-              <MenuItem icon="copy" onClick={copyAsImage}>
-                Copy as image
-              </MenuItem>
-            )}
-            <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
-              Paste
-            </MenuItem>
-            <MenuItem
-              icon="duplicate"
-              onClick={duplicateSelected}
-              hint="Ctrl+D"
-            >
-              Duplicate
-            </MenuItem>
-            <MenuItem icon="copy" onClick={copyStyle} hint="Ctrl+Alt+C">
-              Copy style
-            </MenuItem>
-            <MenuItem icon="paste" onClick={pasteStyle} hint="Ctrl+Alt+V">
-              Paste style
-            </MenuItem>
-            <MenuItem
-              icon="raise"
-              onClick={() => orderSelected(true)}
-              hint="Ctrl+Shift+]"
-            >
-              Bring to front
-            </MenuItem>
-            <MenuItem
-              icon="lower"
-              onClick={() => orderSelected(false)}
-              hint="Ctrl+Shift+["
-            >
-              Send to back
-            </MenuItem>
-            <MenuItem icon="flipH" onClick={() => flipSelection(true)}>
-              Flip horizontal
-            </MenuItem>
-            <MenuItem icon="flipV" onClick={() => flipSelection(false)}>
-              Flip vertical
-            </MenuItem>
-            <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
-              Delete
-            </MenuItem>
-            <MenuItem icon="selectAll" onClick={selectAll} hint="Ctrl+A">
-              Select all
-            </MenuItem>
-            <MenuItem icon="check" onClick={deselect} hint="Esc">
-              Deselect
-            </MenuItem>
-            <hr />
-            {/* A region picked out of the page, rather than the layers
-                picked in the panel. The two are different things and the
-                menu says so by keeping them apart. */}
-            <MenuItem icon="marquee" onClick={pickWholePage}>
-              Pick out the whole page
-            </MenuItem>
-            <MenuItem
-              icon="marqueeEllipse"
-              onClick={pickInverse}
-              hint="Ctrl+Shift+I"
-            >
-              Pick out the rest instead
-            </MenuItem>
-            <MenuItem icon="lasso" onClick={pickNothing}>
-              Pick out nothing
-            </MenuItem>
-            <MenuItem icon="wand" onClick={pickFromLayer}>
-              Pick out what this layer covers
-            </MenuItem>
-            <MenuItem icon="fill" onClick={fillSelection}>
-              Fill what is picked
-            </MenuItem>
-            <MenuItem icon="mask" onClick={() => maskFromSelection(false)}>
-              Mask this layer with what is picked
-            </MenuItem>
-            <MenuItem icon="marquee" onClick={pickLayerMask}>
-              Pick out this layer's mask
-            </MenuItem>
-            <MenuItem icon="trash" onClick={() => maskFromSelection(true)}>
-              Hide what is picked, from this layer
-            </MenuItem>
-            <MenuItem icon="crop" onClick={cropToSelection}>
-              Crop the page to what is picked
-            </MenuItem>
-          </MenuButton>
-
-          <MenuButton
-            label="Page"
-            open={openMenu === "page"}
-            onOpen={() => setOpenMenu(openMenu === "page" ? null : "page")}
-            onHover={() => openMenu && setOpenMenu("page")}
-            onClose={() => setOpenMenu(null)}
-          >
-            <MenuItem icon="crop" onClick={() => setCanvasSizeOpen(true)}>
-              Canvas size…
-            </MenuItem>
-            <hr />
-            <MenuItem icon="turnRight" onClick={() => turnPage(1)}>
-              Turn right
-            </MenuItem>
-            <MenuItem icon="turnLeft" onClick={() => turnPage(3)}>
-              Turn left
-            </MenuItem>
-            <MenuItem icon="turnRight" onClick={() => turnPage(2)}>
-              Turn upside down
-            </MenuItem>
-            <MenuItem
-              icon="turnLeft"
-              onClick={() => {
-                setStraightenBy(0);
-                setLevelling(false);
-                setStraightenOpen(true);
-              }}
-            >
-              Straighten…
-            </MenuItem>
-            <hr />
-            <MenuItem icon="flipH" onClick={() => mirrorPage(true)}>
-              Mirror left to right
-            </MenuItem>
-            <MenuItem icon="flipV" onClick={() => mirrorPage(false)}>
-              Mirror top to bottom
-            </MenuItem>
-          </MenuButton>
-
-          <MenuButton
-            label="View"
-            open={openMenu === "view"}
-            onOpen={() => setOpenMenu(openMenu === "view" ? null : "view")}
-            onHover={() => openMenu && setOpenMenu("view")}
-            onClose={() => setOpenMenu(null)}
-          >
-            {(["px", "mm", "in"] as Units[]).map((u) => (
-              <MenuItem
-                key={u}
-                icon="units"
-                onClick={() => setUnits(u)}
-                hint={units === u ? "✓" : undefined}
-              >
-                {UNIT_LABELS[u]}
-              </MenuItem>
+                {m.entries.map((e, i) =>
+                  e.kind === "sep" ? (
+                    <hr key={`sep${i}`} />
+                  ) : (
+                    <MenuItem
+                      key={e.id}
+                      icon={e.icon as IconName}
+                      onClick={e.run}
+                      hint={e.hint}
+                    >
+                      {e.label}
+                    </MenuItem>
+                  ),
+                )}
+              </MenuButton>
             ))}
-            <hr />
-            <MenuItem icon="fit" onClick={fitView} hint="Ctrl+0">
-              Fit document to window
-            </MenuItem>
-            <MenuItem icon="text" onClick={() => setShowKeys(true)} hint="?">
-              Keys and gestures
-            </MenuItem>
-            <MenuItem icon="zoomIn" onClick={() => zoomBy(1.25)} hint="Ctrl++">
-              Zoom in
-            </MenuItem>
-            <MenuItem icon="zoomOut" onClick={() => zoomBy(0.8)} hint="Ctrl+-">
-              Zoom out
-            </MenuItem>
-            <MenuItem icon="actualSize" onClick={() => zoomTo(1)} hint="Ctrl+1">
-              Actual size
-            </MenuItem>
-            <MenuItem icon="selectAll" onClick={zoomToSelection}>
-              Zoom to selection
-            </MenuItem>
-            <MenuItem
-              icon={showGuides ? "check" : "fit"}
-              onClick={() => setShowGuides((v) => !v)}
-            >
-              {showGuides ? "Hide guides" : "Show guides"}
-            </MenuItem>
-            <MenuItem icon="trash" onClick={() => setGuidesDoc([])}>
-              Clear guides
-            </MenuItem>
-            <hr />
-            {/* A grid is a view setting and a set of lines to catch on,
-                so it is offered by the size it should be rather than as
-                a switch with a number hidden somewhere else. */}
-            <MenuItem
-              icon={grid === 0 ? "check" : "fit"}
-              onClick={() => setGrid(0)}
-            >
-              No grid
-            </MenuItem>
-            {[8, 16, 32].map((size) => (
-              <MenuItem
-                key={size}
-                icon={grid === size ? "check" : "fit"}
-                onClick={() => setGrid(size)}
-              >
-                {`Grid of ${size} px`}
-              </MenuItem>
-            ))}
-          </MenuButton>
-        </nav>
+          </nav>
+        )}
 
         <span className="spacer" />
 
