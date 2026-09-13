@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~432),
+- **Verify before committing:** `cargo test --workspace` (~434),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2409,7 +2409,33 @@ without reading anything else.*
      function. Three engine tests catch it; no fixture audit can, and
      none of them is blind by accident — a shared answer is a shared
      answer, the same as with the walk that resolves a copy's stand-ins.
-     Three, and new: **pages nobody wrote**
+     Four, and new: **ask the stack rather than the command**. Undo is
+     the invariant this whole editor rests on, and it was audited one
+     command at a time against a document nothing had happened to yet.
+     That is not what undo is: it is a stack, and what it has to survive
+     is a command applied to a document five other commands have already
+     changed, and somebody undoing three things, doing a fourth, and
+     finding the redo branch gone. So every command there is, shuffled
+     into a run and applied through the real `History`, then undone to
+     the bottom and compared and redone to the top and compared
+     (`a_run_of_commands_undoes_to_exactly_where_it_started`); and a
+     random walk of apply/undo/redo, which reaches the thrown-away
+     branch on its own, undone to the bottom and compared
+     (`undo_and_redo_interleaved_come_back_to_where_it_started`). Both
+     spot-check the narrowest claim as they go: one step back and
+     forward again is the document unchanged.
+     The two are stronger than the audit they sit beside, and it was
+     worth proving rather than assuming. Both `MoveNode`s in the shared
+     list crossed into another group, so reordering a layer *within* its
+     own parent — what dragging a layer up or down the list does, much
+     the commonest move there is — had never had its inverse checked at
+     all. Two went in. Then the plausible mistake was made on purpose:
+     the inverse index one too high in exactly the same-parent downward
+     case. The one-command audit still passes, because the group holds
+     two children and an index one too high clamps to the end, which is
+     where it belonged. Under a run, earlier commands have put more
+     children in that group, nothing clamps, and both new audits fail.
+     Three, and by now not new: **pages nobody wrote**
      (`chitrakar_doc::fixture::page(seed)`). The fixture answers "does
      this hold for a document with one of everything in it", which is the
      question worth asking first and the one a person can keep in their

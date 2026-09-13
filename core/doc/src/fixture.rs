@@ -1546,6 +1546,26 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             parent: root,
             index: 0,
         },
+        // And a layer reordered *within* its own parent, both ways.
+        // That is what dragging a layer up or down the list does, much
+        // the commonest move there is, and it is the one whose inverse
+        // index has a reservation on it: the old index is read while
+        // the layer is still in the list, so putting it back only lands
+        // if the undo takes it out first — which it does, and which
+        // nothing here said. Both moves above cross into another group,
+        // where the question cannot come up; an inverse index off by
+        // one in exactly the same-parent downward case passed every
+        // test in this workspace until these two went in.
+        Command::MoveNode {
+            id: over,
+            parent: group,
+            index: 0,
+        },
+        Command::MoveNode {
+            id: under,
+            parent: group,
+            index: 1,
+        },
         // A second turn at the variants most likely to be wrong about
         // pixels: a picture turned rather than moved, a block of text
         // rewritten the way the inline editor rewrites it on every

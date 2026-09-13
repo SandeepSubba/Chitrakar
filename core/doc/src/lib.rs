@@ -1680,6 +1680,209 @@ mod tests {
         }
     }
 
+    /// A whole *run* of commands undoes to exactly where it started, and
+    /// redoes to exactly where it ended.
+    ///
+    /// The audit above asks each command on its own, against a document
+    /// nothing has happened to yet. Undo is not that: it is a stack, and
+    /// what it has to survive is a command applied to a document five
+    /// other commands have already changed — a layer moved after the
+    /// group it was in was taken away and put back, a transform set on a
+    /// shape that has since been reordered, an inverse computed before
+    /// the thing it names was touched again. None of that is reachable
+    /// one command at a time, and all of it is what a person does.
+    ///
+    /// So: every command there is, shuffled into a run, applied through
+    /// the real `History` (what will not apply is skipped — a command
+    /// naming a layer an earlier one removed is not a failure, it is
+    /// what the editor already refuses), then undone to the bottom and
+    /// compared, then redone to the top and compared again. The orders
+    /// are drawn from a seed rather than written out, because the point
+    /// is the ones nobody thought to write.
+    ///
+    /// It is stronger than the audit above and the difference is not
+    /// theoretical. Move a layer down within its own parent and the
+    /// inverse index is read while the layer is still in the list, so
+    /// putting it back only lands if the undo takes it out first. Add
+    /// one to that index — the plausible mistake — and the audit above
+    /// still passes, because the group it moves within holds two
+    /// children and an index one too high clamps to the end, which is
+    /// where it belonged. Under a run, other commands have put more
+    /// children in that group, nothing clamps, and both this audit and
+    /// the walk below fail.
+    #[test]
+    fn a_run_of_commands_undoes_to_exactly_where_it_started() {
+        let f = fixture::everything();
+        // Everything but the one command that cannot come back bit for
+        // bit — a turn by anything but a quarter is a sine and a cosine
+        // that do not multiply out to one. Its inexactness is already
+        // what the audit above allows for; a run of them would compound
+        // it, and then this audit would be about a tolerance rather than
+        // about the stack.
+        let pool: Vec<Command> = fixture::every_command(&f)
+            .into_iter()
+            .filter(fixture::exact)
+            .collect();
+        assert!(pool.len() > 30, "only {} commands to shuffle", pool.len());
+        let start = f.doc;
+        let before = fixture::state(&start);
+
+        let mut seed = 0x5eed_1234_9abc_def0u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut deepest = 0usize;
+        for run in 0..80u32 {
+            let mut order: Vec<usize> = (0..pool.len()).collect();
+            for i in (1..order.len()).rev() {
+                order.swap(i, (next() % (i as u64 + 1)) as usize);
+            }
+            let mut doc = start.clone();
+            let mut history = History::default();
+            let mut applied: Vec<String> = Vec::new();
+            for &i in &order {
+                if history.apply(&mut doc, pool[i].clone()).is_ok() {
+                    applied.push(format!("{:?}", pool[i]));
+                }
+            }
+            let ended = fixture::state(&doc);
+            assert!(
+                applied.len() > 10,
+                "run {run}: only {} of {} commands applied",
+                applied.len(),
+                pool.len()
+            );
+            assert!(ended != before, "run {run} changed nothing");
+            deepest = deepest.max(applied.len());
+
+            while history.undo(&mut doc).expect("an inverse applies") {}
+            if fixture::state(&doc) != before {
+                panic!(
+                    "run {run} did not undo to where it started\n{}\nafter: {}",
+                    applied.join("\n"),
+                    fixture::differing(&fixture::state(&doc), &before)
+                );
+            }
+            while history.redo(&mut doc).expect("a command reapplies") {}
+            if fixture::state(&doc) != ended {
+                panic!(
+                    "run {run} did not redo to where it ended\n{}\nafter: {}",
+                    applied.join("\n"),
+                    fixture::differing(&fixture::state(&doc), &ended)
+                );
+            }
+        }
+        assert!(
+            deepest > 30,
+            "the deepest run was only {deepest} commands, which stacks nothing"
+        );
+    }
+
+    /// Undo and redo *interleaved*, which is the shape a person makes.
+    ///
+    /// The run above goes all the way up and all the way back down. The
+    /// stack's harder shape is the one where somebody undoes three
+    /// things, does a fourth, and finds the redo stack gone — a branch
+    /// thrown away — and then undoes to the bottom. What must hold
+    /// through all of it is that the bottom is where the document
+    /// started, whatever route was taken to get back to it, and that
+    /// stepping one command back and forward again is the document
+    /// unchanged.
+    ///
+    /// The walk is drawn from a seed: apply, undo or redo at every step,
+    /// with the command drawn from the same list of every command there
+    /// is. A walk that has undone to the bottom and then applies again
+    /// is exactly the branch-discarding case.
+    #[test]
+    fn undo_and_redo_interleaved_come_back_to_where_it_started() {
+        let f = fixture::everything();
+        let pool: Vec<Command> = fixture::every_command(&f)
+            .into_iter()
+            .filter(fixture::exact)
+            .collect();
+        let start = f.doc;
+        let before = fixture::state(&start);
+
+        let mut seed = 0xf00d_c0de_1234_5678u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut branches, mut steps_back) = (0u32, 0u32);
+        for walk in 0..60u32 {
+            let mut doc = start.clone();
+            let mut history = History::default();
+            let mut route: Vec<String> = Vec::new();
+            let mut on_a_branch = false;
+            for _ in 0..70 {
+                match next() % 100 {
+                    0..=59 => {
+                        let cmd = pool[(next() % pool.len() as u64) as usize].clone();
+                        let label = format!("{cmd:?}");
+                        if history.apply(&mut doc, cmd).is_ok() {
+                            if on_a_branch {
+                                branches += 1;
+                                on_a_branch = false;
+                            }
+                            route.push(label);
+                            // One step back and forward again is the
+                            // document unchanged: the narrowest claim
+                            // the stack makes, checked where it is
+                            // cheapest to check.
+                            if next() % 4 == 0 {
+                                let here = fixture::state(&doc);
+                                assert!(history.undo(&mut doc).expect("an inverse applies"));
+                                assert!(history.redo(&mut doc).expect("a command reapplies"));
+                                if fixture::state(&doc) != here {
+                                    panic!(
+                                        "walk {walk}: one step back and forward moved the \
+                                         document\n{}",
+                                        fixture::differing(&fixture::state(&doc), &here)
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    60..=84 => {
+                        if history.undo(&mut doc).expect("an inverse applies") {
+                            route.push("undo".into());
+                            steps_back += 1;
+                            on_a_branch = true;
+                        }
+                    }
+                    _ => {
+                        if history.redo(&mut doc).expect("a command reapplies") {
+                            route.push("redo".into());
+                        }
+                    }
+                }
+            }
+            // The redo stack is whatever is left of a branch; undoing to
+            // the bottom must not need it.
+            while history.undo(&mut doc).expect("an inverse applies") {}
+            assert!(!history.can_undo(), "walk {walk}: the stack has a floor");
+            if fixture::state(&doc) != before {
+                panic!(
+                    "walk {walk} did not come back to where it started\n{}\nafter: {}",
+                    route.join("\n"),
+                    fixture::differing(&fixture::state(&doc), &before)
+                );
+            }
+        }
+        // The two things this audit exists for, and neither is reached on
+        // purpose: a redo stack thrown away by doing something else, and
+        // a walk that went back at all.
+        assert!(
+            branches > 20 && steps_back > 200,
+            "{branches} branches thrown away and {steps_back} steps back is not a walk"
+        );
+    }
+
     /// A guide is a line, and a page that moves carries it along as one.
     /// A quarter turn stands it on its end, a mirror reflects it, and a
     /// straighten leaves it on the axis it was on — which is what asking
