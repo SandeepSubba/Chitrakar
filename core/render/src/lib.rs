@@ -3879,7 +3879,6 @@ fn fill_ellipse_scanlines(
     doc: &Document,
     rx: f32,
     ry: f32,
-    t: Transform,
     inv: Inverse,
     paint: &Paint,
     mode: BlendMode,
@@ -3887,15 +3886,31 @@ fn fill_ellipse_scanlines(
     mask: MaskRef<'_>,
 ) {
     const N: u32 = 16;
-    if bbox.is_empty() {
+    if bbox.is_empty() || !(rx > 0.0 && ry > 0.0) {
         return;
     }
-    // The local ellipse is centred at (rx, ry) — see `shape_covers` — and
-    // an axis-aligned map takes it to another ellipse standing square on
+    // Inside the ellipse is where `|u| <= 1`, with `u` the device point
+    // carried into the local space (`shape_covers` puts the centre at
+    // (rx, ry)) and then divided by the radii. That carry is affine, so
+    // `u` is affine in the device point and `|u|² <= 1` is a quadratic —
+    // one in x alone once a row is fixed, whose two roots are the span.
+    //
+    // Affine, so the map is read off three points rather than assembled:
+    // where the origin goes, and where a step across and a step down go.
+    // A turn or a shear is then nothing special, which is why this rule
+    // covers every ellipse rather than only the ones standing square on
     // the page.
-    let (cx, cy) = to_device(t, rx, ry);
-    let (a, b) = ((rx * t.a).abs(), (ry * t.d).abs());
-    if !(a > 0.0 && b > 0.0) {
+    let at00 = inv.at(0.0, 0.0);
+    let across = inv.at(1.0, 0.0);
+    let down = inv.at(0.0, 1.0);
+    let (mx0, mx1) = ((across.0 - at00.0) / rx, (across.1 - at00.1) / ry);
+    let (my0, my1) = ((down.0 - at00.0) / rx, (down.1 - at00.1) / ry);
+    let (o0, o1) = ((at00.0 - rx) / rx, (at00.1 - ry) / ry);
+    // How fast |u|² grows across a row. Zero only where the map has
+    // collapsed the row to a point, which `Inverse::of` has already
+    // refused.
+    let quad = mx0 * mx0 + mx1 * mx1;
+    if quad <= 0.0 {
         return;
     }
     let width = (bbox.x1 - bbox.x0) as usize;
@@ -3905,14 +3920,17 @@ fn fill_ellipse_scanlines(
         cov.fill(0.0);
         for j in 0..N {
             let sy = py as f32 + (j as f32 + 0.5) / N as f32;
-            let dy = (sy - cy) / b;
-            if dy * dy >= 1.0 {
+            let (b0, b1) = (o0 + my0 * sy, o1 + my1 * sy);
+            let lin = 2.0 * (mx0 * b0 + mx1 * b1);
+            let cst = b0 * b0 + b1 * b1 - 1.0;
+            let disc = lin * lin - 4.0 * quad * cst;
+            if disc <= 0.0 {
                 continue;
             }
-            let half = a * (1.0 - dy * dy).sqrt();
+            let root = disc.sqrt();
             xs.clear();
-            xs.push(cx - half);
-            xs.push(cx + half);
+            xs.push((-lin - root) / (2.0 * quad));
+            xs.push((-lin + root) / (2.0 * quad));
             add_spans(&mut cov, &xs, bbox, N);
         }
         blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
@@ -3974,14 +3992,8 @@ fn paint_shape(
     // Fills go through the scanline rasterizer; strokes stay on the
     // sampler, whose distance test has no scanline form.
     if let (VectorShape::Ellipse { rx, ry }, None) = (shape, stroke) {
-        // Only while the map keeps it square on the page. Turned, it is
-        // still an ellipse and its spans are still two roots, but of a
-        // conic written in the page's axes rather than its own — which is
-        // arithmetic this does not do yet, so the sampler keeps it.
-        if t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
-            fill_ellipse_scanlines(dst, doc, *rx, *ry, t, inv, paint, mode, bbox, mask);
-            return;
-        }
+        fill_ellipse_scanlines(dst, doc, *rx, *ry, inv, paint, mode, bbox, mask);
+        return;
     }
     if let (
         VectorShape::Path {
@@ -10452,6 +10464,64 @@ mod tests {
             assert!(
                 (drawn - want).abs() < 0.05,
                 "an ellipse {rx} by {ry} covers {want:.3} and drew {drawn:.3}"
+            );
+        }
+    }
+
+    /// And a *turned* one, which is the same rule rather than a harder
+    /// case: the span is still two roots, of a quadratic written in the
+    /// page's axes rather than the shape's. An affine map takes an
+    /// ellipse to an ellipse and multiplies its area by the determinant,
+    /// so the area is known for a turned and squashed one too.
+    #[test]
+    fn a_turned_ellipse_covers_the_area_it_really_has() {
+        for (deg, sx, sy) in [
+            (30.0f32, 1.0f32, 1.0f32),
+            (17.0, 1.4, 0.7),
+            (-52.0, 0.9, 1.3),
+        ] {
+            let (rx, ry) = (11.0f32, 7.0f32);
+            let mut doc = Document::new(80, 70, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector("e", VectorShape::Ellipse { rx, ry });
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            let r = deg.to_radians();
+            let (co, si) = (r.cos(), r.sin());
+            // Turned and scaled, and set down off the pixel grid.
+            let transform = Transform {
+                a: co * sx,
+                b: si * sx,
+                c: -si * sy,
+                d: co * sy,
+                e: 38.4,
+                f: 33.6,
+            };
+            doc.apply(Command::SetTransform { id, transform }).unwrap();
+            let drawn: f64 = render(&doc)
+                .unwrap()
+                .pixels
+                .iter()
+                .map(|p| p.a as f64)
+                .sum();
+            let det = (transform.a * transform.d - transform.b * transform.c).abs() as f64;
+            let want = std::f64::consts::PI * rx as f64 * ry as f64 * det;
+            assert!(
+                (drawn - want).abs() < 0.1,
+                "turned {deg} and scaled {sx}x{sy}: covers {want:.3}, drew {drawn:.3}"
             );
         }
     }

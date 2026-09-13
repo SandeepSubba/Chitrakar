@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~428),
+- **Verify before committing:** `cargo test --workspace` (~429),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2491,9 +2491,19 @@ without reading anything else.*
      the true area to a fiftieth of a pixel where sampling was ten times
      further out (`an_ellipse_covers_the_area_it_really_has`), and eight
      big overlapping ellipses at 1400x1000 went from 180ms a frame to
-     112ms. A turned ellipse is still sampled: it is still an ellipse and
-     its spans are still two roots, but of a conic written in the page's
-     axes rather than its own, which is arithmetic this does not do yet.
+     112ms. A turned one goes the same way ✅, and it
+     turned out to be the same rule rather than a harder case. Inside the
+     ellipse is where the device point, carried into the shape's space and
+     divided by the radii, has length at most one — and that carry is
+     affine, so the condition is a quadratic in the page's own axes, a row
+     of it is a quadratic in x, and its two roots are the span. The map is
+     read off three points (where the origin goes, and where a step across
+     and a step down go) rather than assembled, so a turn, a shear and a
+     mirror are nothing special and every ellipse is scanned. An affine
+     map multiplies an area by its determinant, which is what makes a
+     turned one's area known and so checkable
+     (`a_turned_ellipse_covers_the_area_it_really_has`); put it back on
+     the sampler and that fails.
      One thing tried and thrown away, which is worth recording: replacing
      the sampler's four-by-four box with sixteen samples in a *rook*
      pattern — one to a row and one to a column of a sixteenth grid, which
