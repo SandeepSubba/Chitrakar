@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "core/doc",
+    "core/color",
+    "core/render",
+    "core/codecs",
+    "core/engine",
+    "core/gpu",
+]
+# The Tauri shell is its own workspace: it needs platform system libraries
+# (webkit2gtk on Linux, etc.) that the core workspace must not depend on.
+exclude = ["shells/tauri/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/SandeepSubba/Chitrakar"
+
+[workspace.dependencies]
+chitrakar-doc = { path = "core/doc" }
+chitrakar-color = { path = "core/color" }
+chitrakar-render = { path = "core/render" }
+chitrakar-codecs = { path = "core/codecs" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Fat LTO and one codegen unit: slower to build, smaller and no slower to
+# run. The wasm bundle is what feels it — wasm-opt is off (its binaryen
+# download does not survive a restricted network), so the compiler's own
+# whole-program pass is the only size pass there is.
+lto = "fat"
+codegen-units = 1

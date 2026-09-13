@@ -1,0 +1,15824 @@
+//! The one crate the app shells embed.
+//!
+//! The UI never touches pixel buffers or the document directly: it sends
+//! [`Command`]s (as values natively, as JSON over the WASM boundary) and
+//! receives rendered frames. The [`wasm`] module is the wasm-bindgen surface
+//! the webview UI drives.
+//!
+//! [`Session`] keeps a cached composite and, for every mutation, computes the
+//! dirty document region from node bounds — so interactive edits (including
+//! live previews) re-render only the pixels they can affect.
+
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+use serde::Serialize;
+
+pub use chitrakar_color::ColorMode;
+pub use chitrakar_doc::{
+    Command, Document, History, Node, NodeId, NodeKind, Transform, VectorShape,
+};
+
+/// How far a duplicate or a paste is nudged from its original, in document
+/// units.
+const DUPLICATE_OFFSET: f32 = 12.0;
+
+/// A copied subtree, held whole rather than serialized: the clipboard is
+/// in-process state, and JSON would only cost a round trip through text.
+/// Resource pixels travel with it so a paste into a *different* document
+/// still has its image — resource ids are content-addressed, so re-adding
+/// the same bytes there yields the id the nodes already reference.
+#[derive(Clone)]
+struct ClipNode {
+    /// The id it had in the document it was copied from — kept so that
+    /// a copy of another layer, pasted alongside the layer it copies,
+    /// can be pointed at the one that arrived rather than the one left
+    /// behind.
+    id: NodeId,
+    node: Node,
+    children: Vec<ClipNode>,
+}
+
+#[derive(Clone)]
+struct Clipboard {
+    /// Everything that was copied, in the order the document held it, so
+    /// a paste rebuilds the stack rather than inverting it.
+    roots: Vec<ClipNode>,
+    resources: Vec<(u32, u32, Vec<u8>)>,
+}
+
+thread_local! {
+    /// Outlives any one Session, which is what makes copy in one document
+    /// and paste in the next work at all.
+    static CLIPBOARD: std::cell::RefCell<Option<Clipboard>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Is there anything to paste?
+pub fn clipboard_has_content() -> bool {
+    CLIPBOARD.with(|c| c.borrow().is_some())
+}
+pub use chitrakar_render::{Bounds, ClipRect, Surface};
+
+#[derive(Debug)]
+pub enum EngineError {
+    Doc(chitrakar_doc::DocError),
+    BadCommand(String),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Doc(e) => write!(f, "{e}"),
+            Self::BadCommand(e) => write!(f, "invalid command: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+impl From<chitrakar_doc::DocError> for EngineError {
+    fn from(e: chitrakar_doc::DocError) -> Self {
+        Self::Doc(e)
+    }
+}
+
+/// One recorded edit: the inverse that undoes it and a human-readable label
+/// for the history panel.
+struct HistoryEntry {
+    inverse: Command,
+    label: String,
+}
+
+/// The verb a boolean operation is described by in history and in the name
+/// the combined layer takes.
+fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
+    use chitrakar_render::boolean::BoolOp;
+    match op {
+        BoolOp::Union => "Union",
+        BoolOp::Intersect => "Intersect",
+        BoolOp::Subtract => "Subtract",
+        BoolOp::Exclude => "Exclude",
+    }
+}
+
+/// An open document plus its edit history and cached composite.
+/// The box that differs between two versions of one stroke.
+///
+/// The case worth catching is the one a brush makes every few
+/// milliseconds: the same stroke with more points on the end of it.
+/// Then only the last segment is new, and the box that changed starts
+/// at the point the shorter version ended on. Anything else — a
+/// different colour, a rewritten middle — is both boxes together.
+fn changed_bounds(
+    a: &chitrakar_doc::PaintStroke,
+    b: &chitrakar_doc::PaintStroke,
+) -> Option<[f32; 4]> {
+    let (long, short) = if a.points.len() >= b.points.len() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let n = short.points.len();
+    let appended = n > 0
+        && long.color == short.color
+        && long.softness == short.softness
+        && long.erase == short.erase
+        && long.clip == short.clip
+        && long.points[..n] == short.points[..]
+        && long.radii.len() >= short.radii.len()
+        && long.radii[..short.radii.len()] == short.radii[..];
+    if appended {
+        return long.bounds_from(n - 1);
+    }
+    match (a.bounds(), b.bounds()) {
+        (Some(p), Some(q)) => Some([
+            p[0].min(q[0]),
+            p[1].min(q[1]),
+            p[2].max(q[2]),
+            p[3].max(q[3]),
+        ]),
+        (some, None) | (None, some) => some,
+    }
+}
+
+/// A stroke being drawn: the layer it is going onto, where it sits in
+/// that layer's order, and what has been drawn of it so far.
+struct Painting {
+    layer: NodeId,
+    index: usize,
+    stroke: chitrakar_doc::PaintStroke,
+    /// Whether it is going onto the node's painted mask rather than onto
+    /// the node itself.
+    on_mask: bool,
+}
+
+pub struct Session {
+    doc: Document,
+    undo: Vec<HistoryEntry>,
+    redo: Vec<HistoryEntry>,
+    cache: Option<Surface>,
+    /// Reused scratch surface for padded region renders under filters.
+    scratch: Option<Surface>,
+    /// Region of `cache` that must be recomputed before the next present,
+    /// in document pixels — `render_cached` carries it into the cache's own
+    /// resolution.
+    stale: Option<ClipRect>,
+    /// Set when the whole presented surface must be redrawn rather than a
+    /// region of the page: a new or resized cache, or a viewport that has
+    /// moved. The dirty region is tracked in document pixels and so cannot
+    /// say anything about the part of the surface the page does not cover,
+    /// which is exactly the part a pan leaves stale.
+    stale_all: bool,
+    /// Resolution the cache is kept at, as a multiple of document pixels.
+    /// Presenting a magnified document at 1.0 and letting the display
+    /// enlarge the result is what makes a zoomed-in canvas look soft; the
+    /// fix is to render more pixels, not to interpolate the ones we have.
+    view_scale: f32,
+    /// Where the document's origin sits on the presented surface, in that
+    /// surface's own pixels. Non-zero once a viewport is set: the surface
+    /// is then a window onto the page rather than the page itself.
+    view_origin: (f32, f32),
+    /// The presented surface's size when it is a viewport rather than the
+    /// whole page.
+    viewport: Option<(u32, u32)>,
+    /// Inverse restoring the state before the current preview gesture, with
+    /// the label captured from the gesture's first command.
+    preview_inverse: Option<HistoryEntry>,
+    /// The stroke a brush is in the middle of drawing: which layer it is
+    /// going onto, where in that layer's order, and the stroke so far.
+    painting: Option<Painting>,
+    /// Total pixels re-rendered so far (observability for tests and tuning).
+    pixels_recomputed: u64,
+    /// The node the most recent command touched, when there was one. What
+    /// undo hands back so a selection can follow the layer it brings back
+    /// rather than being left pointing at nothing.
+    last_touched: Option<NodeId>,
+    /// Soft-proofing (display-only): round-trip presented pixels through the
+    /// document's press profile, optionally marking out-of-gamut pixels.
+    proof_cms: Option<chitrakar_color::cms::ProofCms>,
+    soft_proof: bool,
+    /// The screen's own profile, when one has been given: the last thing
+    /// applied to what is shown, and applied to nothing else. It belongs
+    /// to the machine rather than the document, so it is not saved with
+    /// the file and never reaches an export.
+    display_cms: Option<chitrakar_color::cms::DisplayCms>,
+    gamut_warn: bool,
+    /// What the view shows of the document: the page, one layer on its
+    /// own, or the picture under the work. A setting of the view like
+    /// soft proofing rather than an edit — each is a question about
+    /// looking, so it goes nowhere near the document, the history or
+    /// the file.
+    showing: chitrakar_render::Showing,
+    /// Whether any layer is a live copy of another. Kept rather than
+    /// looked up: the dirty region has to ask on every command, and the
+    /// answer is no for almost every document.
+    has_copies: bool,
+}
+
+impl Session {
+    /// A new document of that size. The size is held to what the engine
+    /// can actually draw — a page is sixteen bytes a pixel — so a caller
+    /// that asks for more gets the largest page there is rather than one
+    /// that cannot be rendered.
+    pub fn new(width: u32, height: u32, color_mode: ColorMode) -> Self {
+        let side = chitrakar_doc::MAX_CANVAS_SIDE;
+        let (mut w, mut h) = (width.clamp(1, side), height.clamp(1, side));
+        while !chitrakar_doc::canvas_fits(w, h) {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+        Self::from_document(Document::new(w, h, color_mode))
+    }
+
+    fn from_document(doc: Document) -> Self {
+        let mut session = Self::empty_over(doc);
+        // A document arriving whole — opened from a file, handed over by
+        // a test — may already hold copies, and until this is asked
+        // every edit that is not structural would leave them stale on
+        // screen: drag the original and the copies of it keep the paint
+        // they had.
+        session.note_copies();
+        session
+    }
+
+    fn empty_over(doc: Document) -> Self {
+        Self {
+            doc,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            cache: None,
+            scratch: None,
+            stale: None,
+            stale_all: true,
+            view_scale: 1.0,
+            view_origin: (0.0, 0.0),
+            viewport: None,
+            preview_inverse: None,
+            painting: None,
+            pixels_recomputed: 0,
+            last_touched: None,
+            proof_cms: None,
+            soft_proof: false,
+            display_cms: None,
+            gamut_warn: false,
+            showing: chitrakar_render::Showing::Everything,
+            has_copies: false,
+        }
+    }
+
+    pub fn document(&self) -> &Document {
+        &self.doc
+    }
+
+    pub fn pixels_recomputed(&self) -> u64 {
+        self.pixels_recomputed
+    }
+
+    /// The node a command touches, when knowable from the command alone.
+    fn command_target(cmd: &Command) -> Option<NodeId> {
+        match cmd {
+            // A resize touches the page and every top-level layer, so
+            // there is no one node to compute a dirty region from.
+            // A restored subtree knows its own root; an add does not know
+            // its id until it has happened, which is why apply_internal
+            // consults the inverse too.
+            Command::RestoreSubtree { subtree, .. } => Some(subtree.root_id()),
+            Command::AddNode { .. }
+            | Command::Batch(_)
+            | Command::ResizeCanvas { .. }
+            | Command::TurnCanvas { .. }
+            | Command::StraightenCanvas { .. }
+            | Command::MirrorCanvas { .. }
+            // Guides are not artwork: nothing renders them, so nothing
+            // needs repainting when they change; nor does a lock.
+            | Command::SetGuides { .. }
+            // The palette is not one node's business either: a colour
+            // standing for an entry can be anywhere, so a change to it is
+            // dirty everywhere (see `apply_internal`) rather than
+            // somewhere.
+            | Command::SetSwatches { .. }
+            // Nor the regions kept by name: a region put away is not on
+            // the page any more than a colour in the palette is.
+            | Command::SetRegions { .. }
+            // Nor what is picked out of the page. The marching ants are
+            // the app's to draw over the frame, not the renderer's to
+            // put in it — a selection is a region to hand to a layer,
+            // and nothing about the picture changes when it moves.
+            | Command::SetSelection { .. }
+            | Command::SetLocked { .. } => None,
+            Command::RemoveNode { id }
+            | Command::SetOpacity { id, .. }
+            | Command::SetVisible { id, .. }
+            | Command::SetClipped { id, .. }
+            | Command::SetPinning { id, .. }
+            | Command::SetBlendMode { id, .. }
+            | Command::SetEffects { id, .. }
+            | Command::SetTransform { id, .. }
+            | Command::SetKind { id, .. }
+            | Command::SetName { id, .. }
+            | Command::SetMask { id, .. }
+            | Command::MoveNode { id, .. }
+            | Command::AddStroke { id, .. }
+            | Command::RemoveStroke { id, .. }
+            | Command::SetStroke { id, .. } => Some(*id),
+        }
+    }
+
+    /// The box a command disturbs when that is narrower than the whole
+    /// node's: a stroke laid on, replaced in, or taken off a paint layer
+    /// touches only where that stroke is, and a painting can be large.
+    fn stroke_bounds(&self, cmd: &Command) -> Option<Bounds> {
+        let (id, box_, on_mask) = match cmd {
+            Command::AddStroke {
+                id,
+                stroke,
+                on_mask,
+                ..
+            } => (*id, stroke.bounds()?, *on_mask),
+            // A brush extending a stroke changes only its tail, and
+            // repainting the whole of a long one every time it grows is
+            // what would make a long stroke crawl.
+            Command::SetStroke {
+                id,
+                index,
+                stroke,
+                on_mask,
+            } => {
+                let box_ = match self.strokes_of(*id, *on_mask).and_then(|s| s.get(*index)) {
+                    Some(other) => changed_bounds(stroke, other)?,
+                    None => stroke.bounds()?,
+                };
+                (*id, box_, *on_mask)
+            }
+            Command::RemoveStroke { id, index, on_mask } => (
+                *id,
+                self.strokes_of(*id, *on_mask)?.get(*index)?.bounds()?,
+                *on_mask,
+            ),
+            _ => return None,
+        };
+        // The box is written in the space the brush wrote it in, which
+        // for a mask is the layer's parent's rather than the layer's own.
+        let t = chitrakar_render::brush_space(&self.doc, id, on_mask).ok()?;
+        Some(chitrakar_render::transformed_box(t, box_))
+    }
+
+    /// The strokes of a paint layer, or of a node's painted mask.
+    fn strokes_of(&self, id: NodeId, on_mask: bool) -> Option<&[chitrakar_doc::PaintStroke]> {
+        let node = self.doc.node(id).ok()?;
+        if on_mask {
+            return match node.mask.as_ref().map(|m| &m.kind) {
+                Some(chitrakar_doc::MaskKind::Painted { strokes }) => Some(strokes),
+                _ => None,
+            };
+        }
+        match &node.kind {
+            chitrakar_doc::NodeKind::Paint { strokes }
+            | chitrakar_doc::NodeKind::Clone { strokes } => Some(strokes),
+            _ => None,
+        }
+    }
+
+    fn bounds_of_target(&self, id: Option<NodeId>) -> Bounds {
+        id.and_then(|id| chitrakar_render::node_bounds(&self.doc, id).ok())
+            .unwrap_or(Bounds::None)
+    }
+
+    /// Where every live copy of a layer is — of the layer itself, of a
+    /// group it sits in, or through another copy. A change to the layer
+    /// changes all of them, wherever they were put, so the region to
+    /// repaint has to take them in.
+    fn copies_bounds(&self, id: Option<NodeId>) -> Bounds {
+        let Some(id) = id else {
+            return Bounds::None;
+        };
+        // Almost every document has no copies in it, and this runs on
+        // every command — a drag asks for it a hundred times a second.
+        if !self.has_copies {
+            return Bounds::None;
+        }
+        let mut order = Vec::new();
+        Self::painter_order(&self.doc, self.doc.root(), &mut order);
+        // A copy of a *group* draws everything in it, so changing one
+        // shape inside a group changes every copy of that group,
+        // wherever it was put. Following copies of the layer alone
+        // missed all of them, and the miss shows as paint left on the
+        // screen at the copy after the original has moved on. So the
+        // walk starts at the layer and at every group above it.
+        let mut following = vec![id];
+        let mut up = self.doc.parent_of(id);
+        while let Some(above) = up {
+            following.push(above);
+            up = self.doc.parent_of(above);
+        }
+        let mut bounds = Bounds::None;
+        // A copy of a copy follows the same original, so keep going until
+        // nothing new is found. The graph has no cycles, so it ends.
+        let mut at = 0;
+        while at < following.len() {
+            let cur = following[at];
+            at += 1;
+            for &other in &order {
+                let Ok(node) = self.doc.node(other) else {
+                    continue;
+                };
+                if matches!(node.kind, NodeKind::Instance { of, .. } if of == cur)
+                    && !following.contains(&other)
+                {
+                    following.push(other);
+                    if let Ok(b) = chitrakar_render::node_bounds(&self.doc, other) {
+                        bounds = bounds.union(b);
+                    }
+                }
+            }
+        }
+        bounds
+    }
+
+    fn mark_dirty(&mut self, bounds: Bounds) {
+        let Some(clip) = bounds.to_clip(self.doc.meta.width, self.doc.meta.height) else {
+            return;
+        };
+        self.stale = Some(match self.stale {
+            Some(prev) => prev.union(clip),
+            None => clip,
+        });
+    }
+
+    /// Apply a command to the document, computing the dirty region from the
+    /// target's bounds before and after. Returns the inverse.
+    /// Re-read whether the document holds any live copies. Cheap, and
+    /// only worth doing when a command could have changed the answer.
+    fn note_copies(&mut self) {
+        let mut order = Vec::new();
+        Self::painter_order(&self.doc, self.doc.root(), &mut order);
+        self.has_copies = order.iter().any(|&id| {
+            matches!(
+                self.doc.node(id).map(|n| &n.kind),
+                Ok(NodeKind::Instance { .. })
+            )
+        });
+    }
+
+    fn apply_internal(&mut self, cmd: Command) -> Result<Command, EngineError> {
+        // Each touches more than one node, so the whole canvas is the only
+        // safe dirty region — and a resize changes what "the whole canvas"
+        // even means. A palette change is in that company because a
+        // colour can stand for a swatch: any layer anywhere may have
+        // reached for the entry that just changed.
+        let batch = matches!(
+            cmd,
+            Command::Batch(_)
+                | Command::ResizeCanvas { .. }
+                | Command::TurnCanvas { .. }
+                | Command::StraightenCanvas { .. }
+                | Command::MirrorCanvas { .. }
+                | Command::SetSwatches { .. }
+        );
+        let target = Self::command_target(&cmd);
+        let pre = self
+            .stroke_bounds(&cmd)
+            .unwrap_or_else(|| self.bounds_of_target(target))
+            .union(self.copies_bounds(target));
+        let structural = matches!(
+            cmd,
+            Command::AddNode { .. }
+                | Command::RemoveNode { .. }
+                | Command::SetKind { .. }
+                | Command::RestoreSubtree { .. }
+                | Command::Batch(_)
+        );
+        let was_sized = (self.doc.meta.width, self.doc.meta.height);
+        let inverse = self.doc.apply(cmd)?;
+        if structural {
+            self.note_copies();
+        }
+        // A page that changed size changed what the surface is showing,
+        // not just what is on it. "Everything" is the *new* page, and
+        // where the old one reached further — which is what a viewport
+        // makes possible, since the surface is the window's size rather
+        // than the page's and does not itself change — that further part
+        // keeps the pixels the old page left there. So the whole surface
+        // goes, however the region works out.
+        if (self.doc.meta.width, self.doc.meta.height) != was_sized {
+            self.stale_all = true;
+        }
+        let post_target = Self::command_target(&inverse);
+        let post = self
+            .stroke_bounds(&inverse)
+            .unwrap_or_else(|| self.bounds_of_target(post_target))
+            .union(self.copies_bounds(post_target));
+        self.last_touched = post_target.or(target);
+        if batch {
+            self.mark_dirty(Bounds::Everything);
+        } else {
+            // Filters read pixel neighborhoods, so a change also affects
+            // pixels within the filter stack's reach of it. Grow the dirty
+            // region by that reach rather than invalidating everything;
+            // render_cached additionally computes a padded margin so the
+            // reported region's own values are correct.
+            let mut bounds = pre.union(post);
+            let reach = chitrakar_render::filter_reach(&self.doc) as f32;
+            if reach > 0.0 {
+                if let Bounds::Rect(x0, y0, x1, y1) = bounds {
+                    bounds = Bounds::Rect(x0 - reach, y0 - reach, x1 + reach, y1 + reach);
+                }
+            }
+            self.mark_dirty(bounds);
+        }
+        Ok(inverse)
+    }
+
+    /// Human-readable label for a command, read against the current document
+    /// (before the command applies, so names refer to the edited node).
+    fn describe(&self, cmd: &Command) -> String {
+        /// The word a command would be described by, for the ones a
+        /// batch is likely to be made of; `None` for those a count would
+        /// read oddly on.
+        fn verb_of(cmd: &Command) -> Option<&'static str> {
+            Some(match cmd {
+                Command::RemoveNode { .. } => "Delete",
+                Command::AddNode { .. } => "Add",
+                Command::MoveNode { .. } => "Reorder",
+                Command::SetTransform { .. } => "Move",
+                Command::SetOpacity { .. } => "Opacity of",
+                Command::SetBlendMode { .. } => "Blend of",
+                Command::SetKind { .. } => "Edit",
+                Command::SetVisible { visible: true, .. } => "Show",
+                Command::SetVisible { visible: false, .. } => "Hide",
+                Command::SetLocked { locked: true, .. } => "Lock",
+                Command::SetLocked { locked: false, .. } => "Unlock",
+                _ => return None,
+            })
+        }
+
+        let name = |id: &NodeId| {
+            self.doc
+                .node(*id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|_| "layer".into())
+        };
+        match cmd {
+            Command::AddNode { node, .. } => format!("Add {}", node.name),
+            Command::RemoveNode { id } => format!("Delete {}", name(id)),
+            Command::RestoreSubtree { .. } => "Restore layer".into(),
+            Command::SetOpacity { id, .. } => format!("Opacity of {}", name(id)),
+            Command::SetVisible { id, visible } => {
+                format!("{} {}", if *visible { "Show" } else { "Hide" }, name(id))
+            }
+            Command::SetLocked { id, locked } => {
+                format!("{} {}", if *locked { "Lock" } else { "Unlock" }, name(id))
+            }
+            Command::SetClipped { id, clipped } => {
+                format!("{} {}", if *clipped { "Clip" } else { "Unclip" }, name(id))
+            }
+            Command::SetPinning { id, .. } => format!("Pin {}", name(id)),
+            Command::SetBlendMode { id, .. } => format!("Blend of {}", name(id)),
+            Command::SetTransform { id, .. } => format!("Transform {}", name(id)),
+            Command::SetKind { id, .. } => format!("Edit {}", name(id)),
+            Command::SetName { id, .. } => format!("Rename {}", name(id)),
+            Command::AddStroke { id, stroke, .. } | Command::SetStroke { id, stroke, .. } => {
+                format!(
+                    "{} on {}",
+                    if stroke.erase { "Erase" } else { "Paint" },
+                    name(id)
+                )
+            }
+            Command::RemoveStroke { id, .. } => format!("Take a stroke off {}", name(id)),
+            Command::SetMask { id, mask } => format!(
+                "{} mask on {}",
+                if mask.is_some() { "Set" } else { "Clear" },
+                name(id)
+            ),
+            Command::SetEffects { id, effects } => format!(
+                "{} effects on {}",
+                if effects.is_empty() { "Clear" } else { "Set" },
+                name(id)
+            ),
+            Command::MoveNode { id, .. } => format!("Move {}", name(id)),
+            Command::SetGuides { guides } => {
+                if guides.is_empty() {
+                    "Clear guides".into()
+                } else {
+                    format!("{} guides", guides.len())
+                }
+            }
+            Command::SetSelection { selection } => {
+                if selection.is_none() {
+                    "Deselect".into()
+                } else {
+                    "Select".into()
+                }
+            }
+            Command::SetSwatches { swatches } => {
+                if swatches.is_empty() {
+                    "Clear the palette".into()
+                } else {
+                    format!("{} colours in the palette", swatches.len())
+                }
+            }
+            Command::SetRegions { regions } => {
+                if regions.is_empty() {
+                    "Forget the kept regions".into()
+                } else {
+                    format!("{} regions kept", regions.len())
+                }
+            }
+            Command::ResizeCanvas { width, height, .. } => {
+                format!("Resize canvas to {width}x{height}")
+            }
+            Command::MirrorCanvas { across_x } => {
+                if *across_x {
+                    "Mirror the page left to right".into()
+                } else {
+                    "Mirror the page top to bottom".into()
+                }
+            }
+            Command::StraightenCanvas { degrees, .. } => {
+                format!("Straighten the page by {degrees:.1}°")
+            }
+            Command::TurnCanvas { quarters } => match quarters % 4 {
+                1 => "Turn the page right".into(),
+                2 => "Turn the page upside down".into(),
+                3 => "Turn the page left".into(),
+                _ => "Leave the page as it is".into(),
+            },
+            // A batch of one kind of edit over several layers is that
+            // edit, said with a number — "Delete 3 layers" rather than
+            // "Multiple edits", which tells the history panel's reader
+            // nothing at all. A batch of different kinds still has no
+            // better name than that.
+            Command::Batch(cmds) => match cmds.as_slice() {
+                [] => "Multiple edits".into(),
+                [only] => self.describe(only),
+                many => match verb_of(&many[0]) {
+                    Some(verb) if many.iter().all(|c| verb_of(c) == Some(verb)) => {
+                        format!("{verb} {} layers", many.len())
+                    }
+                    _ => "Multiple edits".into(),
+                },
+            },
+        }
+    }
+
+    pub fn apply(&mut self, cmd: Command) -> Result<(), EngineError> {
+        self.apply_labeled(cmd, None)
+    }
+
+    fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
+        self.commit_preview(); // a stray preview must not leak into this edit
+        let label = label.unwrap_or_else(|| self.describe(&cmd));
+        let inverse = self.apply_internal(cmd)?;
+        self.undo.push(HistoryEntry { inverse, label });
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Apply a JSON-encoded command — the transport used across the WASM/IPC
+    /// boundary.
+    pub fn apply_json(&mut self, json: &str) -> Result<(), EngineError> {
+        self.apply(parse_command(json)?)
+    }
+
+    /// Apply a command as part of an in-flight gesture (drag preview). The
+    /// document updates and re-renders, but history records nothing until
+    /// [`commit_preview`](Self::commit_preview); the first preview of a
+    /// gesture captures the inverse that undoes the whole gesture.
+    pub fn preview(&mut self, cmd: Command) -> Result<(), EngineError> {
+        let label = self.describe(&cmd);
+        let inverse = self.apply_internal(cmd)?;
+        if self.preview_inverse.is_none() {
+            self.preview_inverse = Some(HistoryEntry { inverse, label });
+        }
+        Ok(())
+    }
+
+    pub fn preview_json(&mut self, json: &str) -> Result<(), EngineError> {
+        self.preview(parse_command(json)?)
+    }
+
+    /// End the gesture, recording it as one undo step. Returns false if no
+    /// preview was active.
+    pub fn commit_preview(&mut self) -> bool {
+        self.painting = None;
+        match self.preview_inverse.take() {
+            Some(entry) => {
+                self.undo.push(entry);
+                self.redo.clear();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Abort the gesture, restoring the pre-gesture state. Returns false if
+    /// no preview was active.
+    pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
+        self.painting = None;
+        match self.preview_inverse.take() {
+            Some(entry) => {
+                self.apply_internal(entry.inverse)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub fn undo(&mut self) -> Result<bool, EngineError> {
+        self.commit_preview();
+        match self.undo.pop() {
+            None => Ok(false),
+            Some(entry) => {
+                let redo = self.apply_internal(entry.inverse)?;
+                self.redo.push(HistoryEntry {
+                    inverse: redo,
+                    label: entry.label,
+                });
+                Ok(true)
+            }
+        }
+    }
+
+    pub fn redo(&mut self) -> Result<bool, EngineError> {
+        match self.redo.pop() {
+            None => Ok(false),
+            Some(entry) => {
+                let inverse = self.apply_internal(entry.inverse)?;
+                self.undo.push(HistoryEntry {
+                    inverse,
+                    label: entry.label,
+                });
+                Ok(true)
+            }
+        }
+    }
+
+    /// History labels for the panel: past edits oldest-first, then future
+    /// (undone) edits nearest-first. `undo_depth` marks the current position.
+    pub fn history_labels(&self) -> (Vec<String>, Vec<String>) {
+        (
+            self.undo.iter().map(|e| e.label.clone()).collect(),
+            self.redo.iter().rev().map(|e| e.label.clone()).collect(),
+        )
+    }
+
+    /// Move through history: negative = undo that many steps, positive =
+    /// redo. Stops early at either end.
+    pub fn jump(&mut self, delta: i32) -> Result<(), EngineError> {
+        for _ in 0..delta.unsigned_abs() {
+            let moved = if delta < 0 {
+                self.undo()?
+            } else {
+                self.redo()?
+            };
+            if !moved {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Group same-parent nodes into a new group at the topmost member's
+    /// position, as one undo step. Returns the group's id.
+    pub fn group_nodes(&mut self, ids: &[NodeId], name: &str) -> Result<NodeId, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing selected".into()));
+        }
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("cannot group the root".into()))?;
+        // All members must share the parent; order them bottom-to-top.
+        let siblings = self.doc.children_of(parent)?;
+        let mut ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "grouped layers must share a parent".into(),
+            ));
+        }
+        let top_index = siblings
+            .iter()
+            .position(|s| *s == *ordered.last().unwrap())
+            .unwrap();
+
+        let group_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index: top_index + 1,
+            node: Box::new(Node::group(name)),
+        }];
+        cmds.extend(
+            ordered
+                .drain(..)
+                .enumerate()
+                .map(|(i, id)| Command::MoveNode {
+                    id,
+                    parent: group_id,
+                    index: i,
+                }),
+        );
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Group into {name}")))?;
+        Ok(group_id)
+    }
+
+    /// Combine two or more shape layers into one compound path.
+    ///
+    /// Operands are taken bottom-to-top in the stack, which is what makes
+    /// "subtract" mean what it looks like: the shape underneath, with the
+    /// ones above cut out of it. The result keeps the bottom-most layer's
+    /// fill and stroke, because that is the shape the eye reads as the one
+    /// being operated on.
+    pub fn boolean_nodes(&mut self, ids: &[NodeId], op: &str) -> Result<NodeId, EngineError> {
+        let op = chitrakar_render::boolean::BoolOp::from_name(op)
+            .ok_or_else(|| EngineError::BadCommand(format!("unknown operation {op:?}")))?;
+        if ids.len() < 2 {
+            return Err(EngineError::BadCommand(
+                "combining needs at least two shapes".into(),
+            ));
+        }
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("cannot combine the root".into()))?;
+        let siblings = self.doc.children_of(parent)?.to_vec();
+        let ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "combined layers must share a parent".into(),
+            ));
+        }
+        // Every operand's outline, carried into the space they all share.
+        let mut rings: Vec<Vec<Vec<[f32; 2]>>> = Vec::new();
+        for id in &ordered {
+            let node = self.doc.node(*id)?;
+            let NodeKind::Vector { shape, .. } = &node.kind else {
+                return Err(EngineError::BadCommand(
+                    "only shapes can be combined".into(),
+                ));
+            };
+            let t = node.transform;
+            rings.push(
+                chitrakar_render::shape_rings(shape)
+                    .into_iter()
+                    .map(|ring| {
+                        ring.into_iter()
+                            .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                            .collect()
+                    })
+                    .collect(),
+            );
+        }
+        let mut acc = rings.remove(0);
+        for next in rings {
+            acc =
+                chitrakar_render::boolean::combine_or_nudge(&acc, &next, op).ok_or_else(|| {
+                    EngineError::BadCommand(
+                        "these outlines cannot be combined — their edges overlap exactly".into(),
+                    )
+                })?;
+        }
+        // Anchors are stored relative to the node's own origin, like every
+        // other path, so the transform carries the position.
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for p in acc.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+        }
+        if !x0.is_finite() {
+            return Err(EngineError::BadCommand("the result is empty".into()));
+        }
+        let shift = |ring: Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ring.into_iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+        };
+        let mut acc = acc.into_iter();
+        let points = shift(acc.next().unwrap());
+        let subpaths: Vec<Vec<[f32; 2]>> = acc.map(shift).collect();
+
+        // The result *is* the bottom-most shape, with a different
+        // outline: that is the whole reading behind taking its fill and
+        // stroke, and everything else the layer says about itself follows
+        // from the same reading. It is built from a copy of that layer
+        // rather than from a fresh one with a few fields put back, so a
+        // half-transparent shape with a drop shadow does not come out of
+        // a combine opaque and flat — and so whatever a `Node` is given
+        // next comes along without anybody remembering to add it here.
+        // Its mask is in the parent's space and the result goes in the
+        // same parent at the same place, so the mask needs no carrying.
+        let mut node = self.doc.node(ordered[0])?.clone();
+        node.name = format!("{} {}", node.name, label_for(op));
+        let NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = node.kind
+        else {
+            unreachable!("checked above")
+        };
+        node.kind = NodeKind::Vector {
+            shape: chitrakar_doc::VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths,
+            },
+            fill,
+            stroke,
+            gradient,
+        };
+        node.transform = Transform::translation(x0, y0);
+        let index = siblings
+            .iter()
+            .position(|s| *s == ordered[0])
+            .unwrap_or(siblings.len());
+        let new_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        }];
+        cmds.extend(ordered.iter().map(|id| Command::RemoveNode { id: *id }));
+        self.apply_labeled(
+            Command::Batch(cmds),
+            Some(format!("{} shapes", label_for(op))),
+        )?;
+        Ok(new_id)
+    }
+
+    /// Give one layer its own adjustment or filter: wrap the layer and the
+    /// new node in a group, where the group's isolation confines what the
+    /// node does to what the layer paints. That is the only machinery
+    /// involved — a group isolates whenever something inside it reads the
+    /// backdrop — and so the result is ordinary layers that can be opened
+    /// up, reordered and undone like any others. One history entry.
+    pub fn adjust_node(&mut self, id: NodeId, node: Node) -> Result<NodeId, EngineError> {
+        if !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_)) {
+            return Err(EngineError::BadCommand(
+                "only an adjustment or a filter can be scoped to a layer".into(),
+            ));
+        }
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot adjust the root".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .ok_or_else(|| EngineError::BadCommand("layer is not in its parent".into()))?;
+        let name = format!("{} + {}", self.doc.node(id)?.name, node.name);
+        let group_id = self.doc.peek_next_id();
+        let label = format!("Adjust {}", self.doc.node(id)?.name);
+        // How the layer met the page is the group's business now, not the
+        // layer's. A group holding something that reads the backdrop is
+        // drawn on a surface of its own, so a layer wrapped in one meets
+        // that surface rather than the page: a multiplying layer began
+        // multiplying against nothing and arrived over the page plainly,
+        // and a layer confined to the one below it was let out of it
+        // altogether. Both belong to the wrapper, which sits exactly where
+        // the layer sat; inside it the layer paints plainly, which is also
+        // what the adjustment above it wants to read.
+        //
+        // Opacity stays where it is. Source-over with a weight is
+        // associative, so it comes out the same either way — and leaving
+        // it means the adjustment reads the layer as the page shows it.
+        let held = self.doc.node(id)?;
+        let mut wrapper = Node::group(&name);
+        wrapper.blend = held.blend;
+        wrapper.clipped = held.clipped;
+        let mut cmds = vec![
+            Command::AddNode {
+                parent,
+                index: index + 1,
+                node: Box::new(wrapper),
+            },
+            Command::MoveNode {
+                id,
+                parent: group_id,
+                index: 0,
+            },
+        ];
+        if held.blend != chitrakar_doc::BlendMode::Normal {
+            cmds.push(Command::SetBlendMode {
+                id,
+                blend: chitrakar_doc::BlendMode::Normal,
+            });
+        }
+        if held.clipped {
+            cmds.push(Command::SetClipped { id, clipped: false });
+        }
+        cmds.push(Command::AddNode {
+            parent: group_id,
+            index: 1,
+            node: Box::new(node),
+        });
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(group_id)
+    }
+
+    /// Copy a node and everything under it, placed just above the original.
+    /// One undo step.
+    ///
+    /// A node carries no children of its own — the tree lives in the
+    /// document — so the copy is a walk that emits an AddNode per node.
+    /// Ids are allocated in order as the batch applies, which is what lets
+    /// each child name the parent that will exist by the time it is added.
+    /// Rasters keep pointing at the same resource: content is immutable and
+    /// shared, so a copy costs no pixels.
+    pub fn duplicate_node(&mut self, id: NodeId) -> Result<NodeId, EngineError> {
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot duplicate the root".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .unwrap_or(0)
+            + 1;
+        let mut next = self.doc.peek_next_id().0;
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        self.assign_copy_ids(id, &mut peek, &mut becomes)?;
+        let mut cmds = Vec::new();
+        let copy_id = self.emit_copy(
+            id,
+            parent,
+            index,
+            CopyStyle::Duplicate,
+            &mut next,
+            &becomes,
+            &mut cmds,
+        )?;
+        let label = format!("Duplicate {}", self.doc.node(id)?.name);
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(copy_id)
+    }
+
+    /// Add an empty layer to paint on at the top of the document.
+    pub fn add_paint_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(chitrakar_doc::Node::paint(name)),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Put a frame on the page: a box of its own size, at (x, y), that
+    /// cuts whatever goes into it to that box and exports at exactly that
+    /// many pixels. Frames go at the top level, under everything already
+    /// there, so a frame added to a page of loose layers does not cover
+    /// them.
+    pub fn add_artboard(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        background: Option<chitrakar_color::AuthoredColor>,
+    ) -> Result<NodeId, EngineError> {
+        if !(width > 0.0 && height > 0.0) {
+            return Err(EngineError::BadCommand("a frame needs a size".into()));
+        }
+        let parent = self.doc.root();
+        let mut node = chitrakar_doc::Node::artboard(name, width, height, background);
+        node.transform = Transform::translation(x, y);
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// The document as a layer sees it: everything from that layer
+    /// upward hidden, so what is left is what it is given rather than
+    /// what it makes. `None` asks for the finished page.
+    ///
+    /// A copy, since it is a question rather than an edit.
+    fn seen_by(&self, below: Option<NodeId>) -> Result<Document, EngineError> {
+        let mut doc = self.doc.clone();
+        if let Some(id) = below {
+            let mut order = Vec::new();
+            Self::painter_order(&doc, doc.root(), &mut order);
+            if let Some(at) = order.iter().position(|&n| n == id) {
+                for &later in &order[at..] {
+                    // Already invisible layers are left alone: setting
+                    // them again would only cost a command.
+                    if doc.node(later).map(|n| n.visible).unwrap_or(false) {
+                        doc.apply(Command::SetVisible {
+                            id: later,
+                            visible: false,
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(doc)
+    }
+
+    /// How the page's tones are spread, as four runs of 256 counts —
+    /// red, green, blue, then luminance — in the display encoding, which
+    /// is the encoding the graphs that read a histogram are drawn over.
+    ///
+    /// `below` asks for what an adjustment layer *sees* rather than for
+    /// the finished page: everything composited under it, which is what
+    /// its own graph has to be read against. Transparent pixels are not
+    /// counted — a histogram of a half-empty page should describe the
+    /// picture on it, not the hole around it.
+    ///
+    /// Taken from a render shrunk to about a hundred thousand pixels: a
+    /// histogram is a shape, and the shape settles long before the last
+    /// pixel is counted.
+    pub fn histogram(&self, below: Option<NodeId>) -> Result<Vec<u32>, EngineError> {
+        let doc = self.seen_by(below)?;
+        let (w, h) = (doc.meta.width.max(1) as f32, doc.meta.height.max(1) as f32);
+        let scale = (100_000.0 / (w * h)).sqrt().min(1.0);
+        let (pw, ph) = (
+            (w * scale).round().max(1.0) as u32,
+            (h * scale).round().max(1.0) as u32,
+        );
+        let mut surface = Surface::new(pw, ph);
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: pw,
+                y1: ph,
+            },
+            Transform {
+                a: scale,
+                d: scale,
+                ..Default::default()
+            },
+        )?;
+        // What is picked out, if anything is: a histogram is read to
+        // decide where a picture's tones sit, and with a region picked
+        // the picture in question is the region. It is on screen with
+        // ants round it, so nothing about the reading is hidden — and
+        // it is the reading the levels and curves graphs are drawn
+        // over, which is what makes a grade of one area possible at
+        // all. Worked out at the same reduced size the picture is, so
+        // the two line up pixel for pixel.
+        let picked = doc.selection().map(|region| {
+            chitrakar_render::mask_plane_over(
+                &doc,
+                region,
+                Transform {
+                    a: scale,
+                    d: scale,
+                    ..Default::default()
+                },
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: pw,
+                    y1: ph,
+                },
+                (pw, ph),
+            )
+        });
+        let mut bins = vec![0u32; 256 * 4];
+        for (at, px) in surface.pixels.iter().enumerate() {
+            if px.a <= 0.0 || picked.as_ref().is_some_and(|c| c[at] < 0.5) {
+                continue;
+            }
+            let [r, g, b, _] = px.to_srgb8();
+            bins[r as usize] += 1;
+            bins[256 + g as usize] += 1;
+            bins[512 + b as usize] += 1;
+            // Luminance is a linear quantity, encoded for display once it
+            // has been worked out — not an average of encoded channels.
+            let lin = |v: f32| v / px.a;
+            let y = 0.2126 * lin(px.r) + 0.7152 * lin(px.g) + 0.0722 * lin(px.b);
+            let y = chitrakar_color::linear_to_srgb(y.clamp(0.0, 1.0));
+            bins[768 + (y * 255.0).round() as usize] += 1;
+        }
+        Ok(bins)
+    }
+
+    /// Where the picture's own tones start and stop, as the black and
+    /// white points [`Adjustment::Levels`] wants — the answer to "make
+    /// this photograph use the whole range it has", which is where most
+    /// work on a photograph begins.
+    ///
+    /// Read off the same histogram the panel draws, so the numbers agree
+    /// with the graph they are set against, and given back in the linear
+    /// light the adjustment itself works in.
+    ///
+    /// A thousandth of the picture is left outside at each end. A
+    /// handful of stray pixels — a speck of dust, a clipped highlight off
+    /// a chrome bumper — should not be what decides where the whole
+    /// picture's black is; taking the outermost pixel instead is how an
+    /// auto-level does nothing at all to a picture with one bright speck
+    /// in it.
+    ///
+    /// A picture with nothing in it, or all of one tone, gets the range
+    /// back untouched rather than a stretch of nothing.
+    pub fn auto_levels(&self, below: Option<NodeId>) -> Result<[f32; 2], EngineError> {
+        // Off the same reading the graph is drawn over — which, with a
+        // region picked, is the region's. Auto and the graph cannot
+        // disagree about where a picture's tones stop, because there is
+        // only one answer to disagree about.
+        let bins = self.histogram(below)?;
+        // The luminance run: the fourth of the four.
+        let luma = &bins[768..1024];
+        let total: u64 = luma.iter().map(|&c| c as u64).sum();
+        let tail = total / 1000;
+        if total == 0 {
+            return Ok([0.0, 1.0]);
+        }
+        let mut run = 0u64;
+        let mut lo = 0usize;
+        for (i, &c) in luma.iter().enumerate() {
+            run += c as u64;
+            if run > tail {
+                lo = i;
+                break;
+            }
+        }
+        run = 0;
+        let mut hi = 255usize;
+        for (i, &c) in luma.iter().enumerate().rev() {
+            run += c as u64;
+            if run > tail {
+                hi = i;
+                break;
+            }
+        }
+        if hi <= lo {
+            return Ok([0.0, 1.0]);
+        }
+        Ok([
+            chitrakar_color::srgb_to_linear(lo as f32 / 255.0),
+            chitrakar_color::srgb_to_linear(hi as f32 / 255.0),
+        ])
+    }
+
+    /// Where each channel's own tones start and stop — red, green and
+    /// blue, in that order, as the pair of points a curve wants. Taking
+    /// each channel to the whole range on its own is what pulls a colour
+    /// cast out of a picture: a photograph under a blue light has a blue
+    /// channel that reaches further than its red, and stretching each to
+    /// its own ends is the same picture without the light.
+    ///
+    /// The same reading and the same thousandth left out at each end as
+    /// [`Session::auto_levels`], and in the display encoding, which is
+    /// where a curve is drawn.
+    ///
+    /// A channel with nothing in it, or all of one tone, is given the
+    /// range back untouched rather than a stretch of nothing.
+    pub fn auto_color(&self, below: Option<NodeId>) -> Result<[[f32; 2]; 3], EngineError> {
+        let bins = self.histogram(below)?;
+        let mut out = [[0.0, 1.0]; 3];
+        for (c, ends) in out.iter_mut().enumerate() {
+            let run = &bins[c * 256..(c + 1) * 256];
+            let total: u64 = run.iter().map(|&v| v as u64).sum();
+            if total == 0 {
+                continue;
+            }
+            let tail = total / 1000;
+            let mut seen = 0u64;
+            let mut lo = 0usize;
+            for (i, &v) in run.iter().enumerate() {
+                seen += v as u64;
+                if seen > tail {
+                    lo = i;
+                    break;
+                }
+            }
+            seen = 0;
+            let mut hi = 255usize;
+            for (i, &v) in run.iter().enumerate().rev() {
+                seen += v as u64;
+                if seen > tail {
+                    hi = i;
+                    break;
+                }
+            }
+            if hi > lo {
+                *ends = [lo as f32 / 255.0, hi as f32 / 255.0];
+            }
+        }
+        Ok(out)
+    }
+
+    /// The temperature and tint that would make the colour at a document
+    /// point neutral: "this is grey — make it grey", which is how a
+    /// picture taken under the wrong light is put right in one click
+    /// rather than by pushing two sliders about.
+    ///
+    /// Read from what the layer itself is given (everything under it),
+    /// not from the finished page, since the finished page already has
+    /// whatever balance is being replaced.
+    ///
+    /// White balance is a gain per channel — red up and blue down as it
+    /// warms, green against magenta for the tint — so making a colour
+    /// neutral is two equations in two unknowns and has an exact answer.
+    /// It is clamped to what the sliders can say, so a colour further
+    /// off than they reach gets as far as they go.
+    ///
+    /// `None` where there is nothing to balance: off the page, on a
+    /// transparent pixel, or on one so dark that its colour is noise.
+    pub fn neutral_balance(
+        &self,
+        below: Option<NodeId>,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<[f32; 2]>, EngineError> {
+        let doc = self.seen_by(below)?;
+        let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+        if !(x >= 0.0 && y >= 0.0 && x < w && y < h) {
+            return Ok(None);
+        }
+        let mut surface = Surface::new(1, 1);
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 1,
+                y1: 1,
+            },
+            Transform::translation(-x.floor(), -y.floor()),
+        )?;
+        let px = surface.get(0, 0);
+        if px.a <= 0.01 {
+            return Ok(None);
+        }
+        // The pixel is premultiplied linear light, which is the light the
+        // gains are applied to.
+        let (r, g, b) = (px.r / px.a, px.g / px.a, px.b / px.a);
+        if r + b < 1e-3 || g < 1e-3 {
+            return Ok(None);
+        }
+        // Red and blue move together and opposite: (1 + warm) and
+        // (1 - warm). Setting the two equal gives the warmth outright.
+        let warm = (b - r) / (b + r);
+        // Both ends then land on the same value, and the tint is what
+        // takes green to meet it.
+        let target = r * (1.0 + warm);
+        let mag = 1.0 - target / g;
+        Ok(Some([
+            (warm * 2.0).clamp(-1.0, 1.0),
+            (mag * 2.0).clamp(-1.0, 1.0),
+        ]))
+    }
+
+    /// The frame under a document point, if any — what a shape drawn
+    /// there should go into.
+    pub fn frame_at(&self, x: f32, y: f32) -> Option<NodeId> {
+        chitrakar_render::frame_at(&self.doc, x, y).ok().flatten()
+    }
+
+    /// A document point in the coordinates a layer inside `id` is written
+    /// in. `None` when that space has collapsed.
+    pub fn point_inside(&self, id: NodeId, x: f32, y: f32) -> Option<[f32; 2]> {
+        let space = chitrakar_render::own_space(&self.doc, id).ok()?;
+        let back = chitrakar_render::invert(space)?;
+        Some([
+            back.a * x + back.c * y + back.e,
+            back.b * x + back.d * y + back.f,
+        ])
+    }
+
+    /// How many layers a group or frame holds.
+    pub fn child_count(&self, id: NodeId) -> usize {
+        self.doc.children_of(id).map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Move a layer to a new parent and slot, keeping it exactly where it
+    /// is on the page: the new parent's space is undone from the layer's
+    /// own transform, so dropping a layer into a frame that sits at
+    /// (400, 200) does not throw it 400 pixels left. One entry in
+    /// history. A move within the same parent is a plain reorder and
+    /// leaves the transform alone.
+    pub fn reparent(
+        &mut self,
+        id: NodeId,
+        parent: NodeId,
+        index: usize,
+    ) -> Result<(), EngineError> {
+        let label = format!("Move {}", self.doc.node(id)?.name);
+        let move_it = Command::MoveNode { id, parent, index };
+        if self.doc.parent_of(id) == Some(parent) {
+            return self.apply_labeled(move_it, Some(label));
+        }
+        let was = chitrakar_render::ancestor_space(&self.doc, id);
+        let now = chitrakar_render::own_space(&self.doc, parent)?;
+        let Some(back) = chitrakar_render::invert(now) else {
+            return self.apply_labeled(move_it, Some(label));
+        };
+        // The one transform that carries the layer from the space it was
+        // written in to the space it is going to.
+        let carry = back.compose(was);
+        let node = self.doc.node(id)?;
+        let mut cmds = vec![
+            move_it,
+            Command::SetTransform {
+                id,
+                transform: carry.compose(node.transform),
+            },
+        ];
+        // A mask is written in the space its owner is *placed* in, and an
+        // effect's offset is a vector in that space, so neither travels
+        // with the layer's own transform: both have to be carried by hand
+        // (the same rule `Document::map_page` keeps for a page, and
+        // `ungroup_node` for a group being dissolved). Left behind, a
+        // mask goes on covering the part of the page it used to, which
+        // for a layer dropped into a group somewhere else is a layer that
+        // stays put while the hole in it jumps.
+        if let Some(mask) = &node.mask {
+            cmds.push(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.carried_through(carry))),
+            });
+        }
+        if !node.effects.is_empty() {
+            cmds.push(Command::SetEffects {
+                id,
+                effects: node
+                    .effects
+                    .iter()
+                    .map(|e| e.carried_through(carry))
+                    .collect(),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// Put a live copy of a layer beside it: a layer that draws whatever
+    /// that one holds, wherever the copy is put, so changing the original
+    /// changes every copy of it. Returns the copy's id.
+    ///
+    /// The copy goes in the original's own parent, directly above it, and
+    /// starts exactly on top of the original — the placement is the first
+    /// thing anyone changes about a copy, and starting it anywhere else
+    /// would only be a guess.
+    pub fn make_instance(&mut self, of: NodeId) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(of)?;
+        // A copy of a copy is a copy of the same original: a chain of
+        // them would work, but it is never what was meant and it makes
+        // the original hard to find.
+        let target = match node.kind {
+            NodeKind::Instance { of: original, .. } => original,
+            _ => of,
+        };
+        let name = format!("{} copy", self.doc.node(target)?.name);
+        let parent = self.doc.parent_of(of).unwrap_or_else(|| self.doc.root());
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|&c| c == of)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let mut copy = chitrakar_doc::Node::instance(&name, target);
+        // Written in the copy's parent space, which is where the
+        // original's own transform is written too.
+        copy.transform = self.doc.node(target)?.transform;
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(copy),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Give a copy a layer of its own in place of one of the original's,
+    /// so it can differ where it has to — a label with a different
+    /// string, a panel in a different colour — while everything else
+    /// still follows the original. Returns the copy's own layer, which
+    /// is then edited like any other.
+    ///
+    /// The stand-in starts as an exact copy of what it replaces, at the
+    /// same place: what is wanted is that layer, changed, and starting
+    /// from anything else would only be a guess.
+    pub fn override_child(
+        &mut self,
+        instance: NodeId,
+        index: usize,
+    ) -> Result<NodeId, EngineError> {
+        let NodeKind::Instance { of, replaces } = &self.doc.node(instance)?.kind else {
+            return Err(EngineError::BadCommand("that layer is not a copy".into()));
+        };
+        let (of, mut replaces) = (*of, replaces.clone());
+        if !chitrakar_render::takes_stand_ins(&self.doc, of) {
+            return Err(EngineError::BadCommand(
+                "only a plain group's layers can be stood in for; the original is drawn as a whole"
+                    .into(),
+            ));
+        }
+        let theirs = self.doc.children_of(of)?;
+        let Some(&original) = theirs.get(index) else {
+            return Err(EngineError::BadCommand(
+                "no such layer in the original".into(),
+            ));
+        };
+        if replaces.contains(&original) {
+            return Err(EngineError::BadCommand("already stood in for".into()));
+        }
+        let at = self.doc.children_of(instance)?.len();
+        let mut cmds = Vec::new();
+        // A stand-in for a *group* is a copy of it rather than a copy of
+        // its contents, so that standing in reaches further than one
+        // level without detaching everything on the way down. Change a
+        // card's label and the card still follows the original for the
+        // button it sits in and the panel that holds them; stand in for
+        // the button group the old way and none of that followed
+        // anything any more, because what you got was a deep copy of the
+        // lot. Which is the same thing said the other way: a stand-in
+        // starts as an exact copy of what it replaces, and for a group
+        // the exact copy that keeps its links is a copy *of* it.
+        //
+        // Only a plain group, since that is the only thing a copy can
+        // stand in for parts of; anything else is drawn as a whole and a
+        // copy of it could not be changed inside. And leaves are still
+        // copied by value: a copy of a shape draws the original's shape,
+        // and what is wanted here is a shape to edit.
+        let made = if chitrakar_render::takes_stand_ins(&self.doc, original) {
+            let id = self.doc.peek_next_id();
+            let mut node = chitrakar_doc::Node::instance(&self.doc.node(original)?.name, original);
+            node.transform = self.doc.node(original)?.transform;
+            cmds.push(Command::AddNode {
+                parent: instance,
+                index: at,
+                node: Box::new(node),
+            });
+            id
+        } else {
+            let mut next = self.doc.peek_next_id().0;
+            let mut becomes = std::collections::HashMap::new();
+            let mut peek = next;
+            self.assign_copy_ids(original, &mut peek, &mut becomes)?;
+            self.emit_copy(
+                original,
+                instance,
+                at,
+                CopyStyle::Exact,
+                &mut next,
+                &becomes,
+                &mut cmds,
+            )?
+        };
+        // By the layer rather than by where it sits: the original's
+        // layers can be added to and reordered afterwards, and a copy
+        // has to go on standing in for the layer it was pointed at.
+        replaces.push(original);
+        cmds.push(Command::SetKind {
+            id: instance,
+            kind: Box::new(NodeKind::Instance { of, replaces }),
+        });
+        let label = format!(
+            "Change {} in {}",
+            self.doc.node(original)?.name,
+            self.doc.node(instance)?.name
+        );
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(made)
+    }
+
+    /// Take a stand-in away again, so the copy follows the original there
+    /// once more.
+    pub fn clear_override(&mut self, instance: NodeId, index: usize) -> Result<(), EngineError> {
+        let NodeKind::Instance { of, replaces } = &self.doc.node(instance)?.kind else {
+            return Err(EngineError::BadCommand("that layer is not a copy".into()));
+        };
+        let (of, mut replaces) = (*of, replaces.clone());
+        let Some(&original) = self.doc.children_of(of)?.get(index) else {
+            return Ok(());
+        };
+        let Some(k) = replaces.iter().position(|&r| r == original) else {
+            return Ok(());
+        };
+        let Some(&mine) = self.doc.children_of(instance)?.get(k) else {
+            return Ok(());
+        };
+        replaces.remove(k);
+        let label = format!(
+            "Follow the original again in {}",
+            self.doc.node(instance)?.name
+        );
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::RemoveNode { id: mine },
+                Command::SetKind {
+                    id: instance,
+                    kind: Box::new(NodeKind::Instance { of, replaces }),
+                },
+            ]),
+            Some(label),
+        )
+    }
+
+    /// The layers of the original a copy could stand in for, as
+    /// `(name, whether this copy already does)`. What the panel lists.
+    pub fn overridable(&self, instance: NodeId) -> Vec<(String, bool)> {
+        let Ok(node) = self.doc.node(instance) else {
+            return Vec::new();
+        };
+        let NodeKind::Instance { of, replaces } = &node.kind else {
+            return Vec::new();
+        };
+        if !chitrakar_render::takes_stand_ins(&self.doc, *of) {
+            return Vec::new();
+        }
+        self.doc
+            .children_of(*of)
+            .map(|kids| {
+                kids.iter()
+                    .map(|&id| {
+                        let name = self
+                            .doc
+                            .node(id)
+                            .map(|n| n.name.clone())
+                            .unwrap_or_default();
+                        (name, replaces.contains(&id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The one command that gives a frame a new size and moves what is
+    /// in it by how each layer is pinned — as JSON, so a corner drag can
+    /// preview it every move and let go of it as a single entry.
+    ///
+    /// `dx`/`dy` shift the frame's own origin, in the frame's coordinates
+    /// before the resize: pulling the west or north edge moves the corner
+    /// everything inside is measured from, and the frame's transform has
+    /// to take that up so the rest of the page does not move.
+    ///
+    /// The layers inside are not told about that shift at all — their own
+    /// coordinates are unchanged by it, and a layer pinned to the start
+    /// edge should follow that edge, which is exactly what happens when
+    /// nothing is done. What the other pins need is the change in size.
+    pub fn artboard_resize(
+        &self,
+        id: NodeId,
+        width: f32,
+        height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<String, EngineError> {
+        let node = self.doc.node(id)?;
+        let NodeKind::Artboard {
+            width: w0,
+            height: h0,
+            background,
+            export_scale,
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand("that layer is not a frame".into()));
+        };
+        if !(width > 0.0 && height > 0.0) {
+            return Err(EngineError::BadCommand("a frame needs a size".into()));
+        }
+        let (dw, dh) = (width - w0, height - h0);
+        let mut cmds = vec![
+            Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Artboard {
+                    width,
+                    height,
+                    background: background.clone(),
+                    export_scale: *export_scale,
+                }),
+            },
+            Command::SetTransform {
+                id,
+                transform: node.transform.compose(Transform::translation(dx, dy)),
+            },
+        ];
+        for &child in self.doc.children_of(id)? {
+            let kid = self.doc.node(child)?;
+            let Bounds::Rect(x0, y0, x1, y1) =
+                chitrakar_render::bounds_in_parent_space(&self.doc, child)?
+            else {
+                // An adjustment or a filter fills whatever it is in and
+                // has no box to pin by; it needs no moving either.
+                continue;
+            };
+            let (sx, tx) = Self::axis(kid.pinned.x, x0, x1, dw);
+            let (sy, ty) = Self::axis(kid.pinned.y, y0, y1, dh);
+            if sx == 1.0 && sy == 1.0 && tx == 0.0 && ty == 0.0 {
+                continue;
+            }
+            // The move is written in the frame's space, so it goes on the
+            // outside of the layer's own transform.
+            let outer = Transform {
+                a: sx,
+                b: 0.0,
+                c: 0.0,
+                d: sy,
+                e: tx + x0 * (1.0 - sx),
+                f: ty + y0 * (1.0 - sy),
+            };
+            cmds.push(Command::SetTransform {
+                id: child,
+                transform: outer.compose(kid.transform),
+            });
+        }
+        serde_json::to_string(&Command::Batch(cmds))
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A frame's contents as a PNG, at the size the frame shows on the
+    /// page times `scale`. Errors when the node is not a frame.
+    pub fn artboard_png(&self, id: NodeId, scale: f32) -> Result<Vec<u8>, EngineError> {
+        let scale = scale.clamp(0.05, 16.0);
+        let Some(surface) = chitrakar_render::artboard_pixels(&self.doc, id, scale)? else {
+            return Err(EngineError::BadCommand("that layer is not a frame".into()));
+        };
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Start a brush stroke on a paint layer. The point is in document
+    /// space and is written into the layer's own; the stroke goes on as
+    /// a preview, so however many times it is extended the whole of it
+    /// is one entry in history when the gesture is committed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn paint_begin(
+        &mut self,
+        layer: NodeId,
+        x: f32,
+        y: f32,
+        radius: f32,
+        color: chitrakar_color::AuthoredColor,
+        softness: f32,
+        erase: bool,
+        on_mask: bool,
+    ) -> Result<(), EngineError> {
+        let index = self.stroke_count(layer, on_mask)?;
+        let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
+            return Ok(());
+        };
+        // A region picked out confines the stroke, and goes on confining
+        // it after the region is let go of: so it rides on the stroke,
+        // in the space the stroke's own points are written in.
+        let clip = self.region_in(chitrakar_render::brush_space(&self.doc, layer, on_mask)?);
+        let stroke = chitrakar_doc::PaintStroke {
+            points: vec![[lx, ly]],
+            radii: vec![self.radius_in_layer(layer, on_mask, radius)?],
+            color,
+            softness,
+            erase,
+            source: [0.0, 0.0],
+            heal: false,
+            clip,
+        };
+        self.preview(Command::AddStroke {
+            id: layer,
+            index,
+            stroke: Box::new(stroke.clone()),
+            on_mask,
+        })?;
+        self.painting = Some(Painting {
+            layer,
+            index,
+            stroke,
+            on_mask,
+        });
+        Ok(())
+    }
+
+    /// Carry the stroke being drawn on to another point. A point that
+    /// lands where the last one did is dropped: a pointer that has not
+    /// moved has nothing to add, and the stroke is redrawn every time it
+    /// grows.
+    pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), EngineError> {
+        let Some(painting) = self.painting.as_ref() else {
+            return Ok(());
+        };
+        let (layer, index, on_mask) = (painting.layer, painting.index, painting.on_mask);
+        let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
+            return Ok(());
+        };
+        let radius = self.radius_in_layer(layer, on_mask, radius)?;
+        let painting = self.painting.as_mut().expect("checked above");
+        if let Some(last) = painting.stroke.points.last() {
+            if (last[0] - lx).abs() < 0.01 && (last[1] - ly).abs() < 0.01 {
+                return Ok(());
+            }
+        }
+        painting.stroke.points.push([lx, ly]);
+        painting.stroke.radii.push(radius);
+        let stroke = Box::new(painting.stroke.clone());
+        self.preview(Command::SetStroke {
+            id: layer,
+            index,
+            stroke,
+            on_mask,
+        })
+    }
+
+    /// Whether a brush stroke is being drawn.
+    pub fn is_painting(&self) -> bool {
+        self.painting.is_some()
+    }
+
+    /// Give a layer a mask a brush can work on, when it has not got one.
+    ///
+    /// `false` when there is already a mask of another kind there: that
+    /// one was drawn or placed deliberately, and replacing it is not
+    /// this function's decision to make.
+    pub fn ensure_painted_mask(&mut self, id: NodeId) -> Result<bool, EngineError> {
+        match self.doc.node(id)?.mask.as_ref().map(|m| &m.kind) {
+            Some(chitrakar_doc::MaskKind::Painted { .. }) => Ok(true),
+            Some(_) => Ok(false),
+            None => {
+                self.apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted {
+                            strokes: Vec::new(),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// A small square picture of one layer on its own, for a panel that
+    /// shows what a layer holds rather than only what it is called.
+    /// RGBA8, `size * size * 4` bytes — empty when the layer has no
+    /// picture of its own, which an adjustment or a filter has not.
+    pub fn thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
+        Ok(chitrakar_render::thumbnail(&self.doc, id, Self::square(size))?.unwrap_or_default())
+    }
+
+    /// How big a small square picture of a layer is allowed to be. It
+    /// is a row in a panel: a few dozen pixels, asked for by the app,
+    /// and a number arriving from outside is still a surface.
+    fn square(size: u32) -> u32 {
+        size.clamp(1, 512)
+    }
+
+    /// A small square picture of a layer's mask, fitted the same way its
+    /// own picture is so the two line up: white where the layer shows
+    /// through and clear where it is hidden. Empty when there is no
+    /// mask.
+    pub fn mask_thumbnail(&self, id: NodeId, size: u32) -> Result<Vec<u8>, EngineError> {
+        Ok(
+            chitrakar_render::mask_thumbnail(&self.doc, id, Self::square(size))?
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Put a new anchor on a path at the point nearest a document point,
+    /// splitting the segment it lands on so the path keeps the shape it
+    /// had. Returns where the new anchor sits in the path's order.
+    ///
+    /// A curved segment is split properly rather than cut straight: the
+    /// two halves take the control points de Casteljau gives them, so
+    /// the curve through the new anchor is the curve that was there.
+    ///
+    /// `within` is how far from the outline the point may be, in the
+    /// layer's own units: an anchor goes on the outline, so a point that
+    /// is merely *inside* the shape is not asking for one.
+    pub fn insert_anchor(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<usize, EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        if points.len() < 2 {
+            return Err(EngineError::BadCommand("a path of one anchor".into()));
+        }
+        let Some((lx, ly)) = self.point_in_layer(id, false, x, y)? else {
+            return Ok(0);
+        };
+        // A smooth path carries no handles: its curve is a Catmull-Rom
+        // spline read off the anchors. Splitting a segment is arithmetic
+        // on control points, so the curve is written as the handles it
+        // already is before anything is done to it — otherwise the split
+        // reads zero handles, treats the segment as straight, and the
+        // path comes out a polyline, every bend in it gone.
+        let authored = handles.len() == points.len()
+            && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+        let mut hs = if !authored && *smooth && points.len() >= 3 {
+            chitrakar_render::smooth_handles(points, *closed)
+        } else {
+            padded_handles(handles, points.len())
+        };
+        let segments = if *closed {
+            points.len()
+        } else {
+            points.len() - 1
+        };
+        // The closest point on the path, found by walking each segment.
+        const STEPS: usize = 24;
+        let (mut best, mut at, mut best_t) = (f32::MAX, 0usize, 0.0f32);
+        for i in 0..segments {
+            let j = (i + 1) % points.len();
+            for k in 0..=STEPS {
+                let t = k as f32 / STEPS as f32;
+                let p = cubic_at(points[i], hs[i], points[j], hs[j], t);
+                let d = (p[0] - lx).powi(2) + (p[1] - ly).powi(2);
+                if d < best {
+                    (best, at, best_t) = (d, i, t);
+                }
+            }
+        }
+        if best.sqrt() > within.max(0.0) {
+            return Err(EngineError::BadCommand("no outline near that point".into()));
+        }
+        let j = (at + 1) % points.len();
+        let (a, b) = (points[at], points[j]);
+        let (c1, c2) = (
+            [a[0] + hs[at][2], a[1] + hs[at][3]],
+            [b[0] + hs[j][0], b[1] + hs[j][1]],
+        );
+        let t = best_t;
+        let mix = |p: [f32; 2], q: [f32; 2]| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+        let (p01, p12, p23) = (mix(a, c1), mix(c1, c2), mix(c2, b));
+        let (p012, p123) = (mix(p01, p12), mix(p12, p23));
+        let m = mix(p012, p123);
+        let off = |from: [f32; 2], to: [f32; 2]| [to[0] - from[0], to[1] - from[1]];
+
+        let mut points = points.clone();
+        hs[at] = [hs[at][0], hs[at][1], off(a, p01)[0], off(a, p01)[1]];
+        hs[j] = [off(b, p23)[0], off(b, p23)[1], hs[j][2], hs[j][3]];
+        let fresh = [
+            off(m, p012)[0],
+            off(m, p012)[1],
+            off(m, p123)[0],
+            off(m, p123)[1],
+        ];
+        points.insert(at + 1, m);
+        hs.insert(at + 1, fresh);
+        self.replace_path(
+            id,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: *closed,
+                smooth: *smooth,
+                handles: hs,
+                subpaths: subpaths.clone(),
+            },
+            "Add anchor",
+        )?;
+        Ok(at + 1)
+    }
+
+    /// Take an anchor off a path. Refuses to leave one that has nothing
+    /// left to be a path with.
+    pub fn remove_anchor(&mut self, id: NodeId, index: usize) -> Result<(), EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        let least = if *closed { 3 } else { 2 };
+        if index >= points.len() || points.len() <= least {
+            return Err(EngineError::BadCommand(
+                "a path needs the anchors it has left".into(),
+            ));
+        }
+        let mut points = points.clone();
+        let mut hs = padded_handles(handles, points.len());
+        points.remove(index);
+        hs.remove(index);
+        self.replace_path(
+            id,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: *closed,
+                smooth: *smooth,
+                handles: hs,
+                subpaths: subpaths.clone(),
+            },
+            "Remove anchor",
+        )
+    }
+
+    /// Put a rewritten path back on a layer, with its anchors normalized
+    /// to a (0,0) origin and the shift folded into the transform, which
+    /// is the invariant every other path edit keeps.
+    fn replace_path(
+        &mut self,
+        id: NodeId,
+        shape: chitrakar_doc::VectorShape,
+        label: &str,
+    ) -> Result<(), EngineError> {
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector {
+            fill,
+            stroke,
+            gradient,
+            ..
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let (fill, stroke, gradient) = (fill.clone(), stroke.clone(), gradient.clone());
+        let t = node.transform;
+        let chitrakar_doc::VectorShape::Path {
+            mut points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand("not a path".into()));
+        };
+        let (mut mx, mut my) = (f32::MAX, f32::MAX);
+        for p in points.iter().chain(subpaths.iter().flatten()) {
+            mx = mx.min(p[0]);
+            my = my.min(p[1]);
+        }
+        let mut subpaths = subpaths;
+        if mx.is_finite() && my.is_finite() && (mx != 0.0 || my != 0.0) {
+            for p in points.iter_mut().chain(subpaths.iter_mut().flatten()) {
+                p[0] -= mx;
+                p[1] -= my;
+            }
+        } else {
+            (mx, my) = (0.0, 0.0);
+        }
+        let moved = chitrakar_doc::Transform {
+            e: t.e + t.a * mx + t.c * my,
+            f: t.f + t.b * mx + t.d * my,
+            ..t
+        };
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::SetKind {
+                    id,
+                    kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Path {
+                            points,
+                            closed,
+                            smooth,
+                            handles,
+                            subpaths,
+                        },
+                        fill,
+                        stroke,
+                        gradient,
+                    }),
+                },
+                Command::SetTransform {
+                    id,
+                    transform: moved,
+                },
+            ]),
+            Some(label.to_string()),
+        )
+    }
+
+    /// Add an empty layer to clone onto at the top of the document.
+    pub fn add_clone_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        self.apply(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(chitrakar_doc::Node::clone_layer(name)),
+        })?;
+        Ok(self.doc.children_of(parent)?[index])
+    }
+
+    /// Where the stroke being drawn reads from, as an offset in the
+    /// layer's own space, and whether it heals — laying the source's
+    /// texture down in the colour of the place it lands. A clone stroke
+    /// set after it has begun still takes both, since the whole stroke
+    /// is one preview.
+    pub fn paint_source(&mut self, dx: f32, dy: f32, heal: bool) -> Result<(), EngineError> {
+        let Some(painting) = self.painting.as_ref() else {
+            return Ok(());
+        };
+        let (layer, index, on_mask) = (painting.layer, painting.index, painting.on_mask);
+        // The offset arrives in document units, like the point and the
+        // radius, and like them it is written in the layer's own.
+        let scale = chitrakar_render::layer_scale(&self.doc, layer, on_mask)?.max(1e-6);
+        let painting = self.painting.as_mut().expect("checked above");
+        painting.stroke.source = [dx / scale, dy / scale];
+        painting.stroke.heal = heal;
+        let stroke = Box::new(painting.stroke.clone());
+        self.preview(Command::SetStroke {
+            id: layer,
+            index,
+            stroke,
+            on_mask,
+        })
+    }
+
+    /// How many strokes a paint layer holds, which is where the next one
+    /// goes.
+    pub fn stroke_count(&self, id: NodeId, on_mask: bool) -> Result<usize, EngineError> {
+        self.strokes_of(id, on_mask)
+            .map(|s| s.len())
+            .ok_or(EngineError::Doc(chitrakar_doc::DocError::NotAPaintLayer(
+                id,
+            )))
+    }
+
+    /// A brush radius given in document units, in a layer's own — a
+    /// stroke is written in the layer's space, so a scaled layer takes a
+    /// smaller radius to paint the same width on the page.
+    fn radius_in_layer(&self, id: NodeId, on_mask: bool, radius: f32) -> Result<f32, EngineError> {
+        Ok(radius / chitrakar_render::layer_scale(&self.doc, id, on_mask)?.max(1e-6))
+    }
+
+    /// A document-space point in a layer's own space, which is where a
+    /// brush has to write its stroke.
+    pub fn point_in_layer(
+        &self,
+        id: NodeId,
+        on_mask: bool,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<(f32, f32)>, EngineError> {
+        Ok(chitrakar_render::point_in_layer(
+            &self.doc, id, on_mask, x, y,
+        )?)
+    }
+
+    /// Duplicate several layers as one undo step, each copy landing just
+    /// above the layer it was made from and nudged clear of it when
+    /// `offset`. Returns the copies in the order the originals were
+    /// given.
+    pub fn duplicate_nodes(
+        &mut self,
+        ids: &[NodeId],
+        offset: bool,
+    ) -> Result<Vec<NodeId>, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing to duplicate".into()));
+        }
+        let style = if offset {
+            CopyStyle::Duplicate
+        } else {
+            CopyStyle::InPlace
+        };
+        // Where each copy goes, read from the document as it stands.
+        let mut slots = Vec::with_capacity(ids.len());
+        for (at, &id) in ids.iter().enumerate() {
+            let parent = self
+                .doc
+                .parent_of(id)
+                .ok_or_else(|| EngineError::BadCommand("cannot duplicate the root".into()))?;
+            let index = self
+                .doc
+                .children_of(parent)?
+                .iter()
+                .position(|s| *s == id)
+                .unwrap_or(0)
+                + 1;
+            slots.push((at, id, parent, index));
+        }
+        // Topmost first: an insertion shifts everything above it, so the
+        // slots read a moment ago stay true if they are filled downwards.
+        slots.sort_by(|a, b| b.3.cmp(&a.3));
+        let mut next = self.doc.peek_next_id().0;
+        // Which id each layer being copied is about to be given — for
+        // all of them before any of them, since a copy of another layer
+        // in one of these subtrees may point at an original in another.
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        for (_, id, _, _) in &slots {
+            self.assign_copy_ids(*id, &mut peek, &mut becomes)?;
+        }
+        let mut cmds = Vec::new();
+        let mut copies = vec![NodeId(0); ids.len()];
+        for (at, id, parent, index) in slots {
+            copies[at] =
+                self.emit_copy(id, parent, index, style, &mut next, &becomes, &mut cmds)?;
+        }
+        let label = if ids.len() == 1 {
+            format!("Duplicate {}", self.doc.node(ids[0])?.name)
+        } else {
+            format!("Duplicate {} layers", ids.len())
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(copies)
+    }
+
+    /// The id every layer of a subtree is about to be given, in the
+    /// order [`emit_copy`](Self::emit_copy) will hand them out.
+    fn assign_copy_ids(
+        &self,
+        src: NodeId,
+        next: &mut u64,
+        becomes: &mut std::collections::HashMap<NodeId, NodeId>,
+    ) -> Result<(), EngineError> {
+        becomes.insert(src, NodeId(*next));
+        *next += 1;
+        for child in self.doc.children_of(src)?.to_vec() {
+            self.assign_copy_ids(child, next, becomes)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_copy(
+        &self,
+        src: NodeId,
+        parent: NodeId,
+        index: usize,
+        style: CopyStyle,
+        next: &mut u64,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
+        cmds: &mut Vec<Command>,
+    ) -> Result<NodeId, EngineError> {
+        let mut node = self.doc.node(src)?.clone();
+        if style != CopyStyle::Exact {
+            node.name = format!("{} copy", node.name);
+        }
+        // The same rule the clipboard goes by: a copy of a layer that is
+        // being copied alongside it points at the one being made, and
+        // one whose original is staying put keeps pointing at that.
+        // Duplicating a group holding an original and a copy of it
+        // otherwise gives a group whose copy still watches the original
+        // group — two things linked in a way nobody asked for.
+        if let NodeKind::Instance { of, replaces } = &mut node.kind {
+            if let Some(made) = becomes.get(of) {
+                *of = *made;
+            }
+            // And what each of its own layers stands in for, by the same
+            // rule: a stand-in points at the layer that arrived where
+            // the original travelled, and at the one left behind where
+            // it did not.
+            for r in replaces.iter_mut() {
+                if let Some(made) = becomes.get(r) {
+                    *r = *made;
+                }
+            }
+        }
+        if style == CopyStyle::Duplicate {
+            // Nudge the copy so it is visible rather than hiding exactly
+            // behind the original. A copy that is about to be dragged
+            // wants none: it starts where the pointer took hold of it.
+            node.transform.e += DUPLICATE_OFFSET;
+            node.transform.f += DUPLICATE_OFFSET;
+        }
+        let new_id = NodeId(*next);
+        *next += 1;
+        cmds.push(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        });
+        for (i, child) in self.doc.children_of(src)?.to_vec().iter().enumerate() {
+            self.emit_copy(*child, new_id, i, CopyStyle::Exact, next, becomes, cmds)?;
+        }
+        Ok(new_id)
+    }
+
+    /// Put a node and everything under it on the clipboard, pixels included.
+    pub fn copy_node(&self, id: NodeId) -> Result<(), EngineError> {
+        self.copy_nodes(&[id])
+    }
+
+    /// The same for several at once: what is picked is what is copied,
+    /// and a paste puts the lot back in the order they were in.
+    pub fn copy_nodes(&self, ids: &[NodeId]) -> Result<(), EngineError> {
+        let picked = self.in_document_order(ids);
+        if picked.is_empty() {
+            return Err(EngineError::BadCommand("nothing to copy".into()));
+        }
+        let roots = picked
+            .iter()
+            .map(|id| self.clip_of(*id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut resources = Vec::new();
+        for root in &roots {
+            self.collect_resources(root, &mut resources);
+        }
+        CLIPBOARD.with(|c| *c.borrow_mut() = Some(Clipboard { roots, resources }));
+        Ok(())
+    }
+
+    /// The picked nodes in the order the document holds them, leaving out
+    /// any that sit inside another of them: copying a group *and* one of
+    /// its children should not put that child down twice.
+    fn in_document_order(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        self.walk_for(self.doc.root(), ids, &mut out);
+        out
+    }
+
+    fn walk_for(&self, at: NodeId, want: &[NodeId], out: &mut Vec<NodeId>) {
+        let Ok(children) = self.doc.children_of(at) else {
+            return;
+        };
+        for child in children.iter().copied() {
+            if want.contains(&child) {
+                out.push(child);
+            } else {
+                self.walk_for(child, want, out);
+            }
+        }
+    }
+
+    fn clip_of(&self, id: NodeId) -> Result<ClipNode, EngineError> {
+        Ok(ClipNode {
+            id,
+            node: self.doc.node(id)?.clone(),
+            children: self
+                .doc
+                .children_of(id)?
+                .to_vec()
+                .iter()
+                .map(|c| self.clip_of(*c))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    fn collect_resources(&self, clip: &ClipNode, out: &mut Vec<(u32, u32, Vec<u8>)>) {
+        let mut take = |rid: &str| {
+            if let Some(r) = self.doc.resource(rid) {
+                if !r.rgba8.is_empty() {
+                    out.push((r.width, r.height, r.rgba8.clone()));
+                }
+            }
+        };
+        if let NodeKind::Raster(r) = &clip.node.kind {
+            take(&r.resource_id);
+        }
+        if let Some(m) = &clip.node.mask {
+            if let chitrakar_doc::MaskKind::Raster { resource_id, .. } = &m.kind {
+                take(resource_id);
+            }
+        }
+        for child in &clip.children {
+            self.collect_resources(child, out);
+        }
+    }
+
+    /// Paste the clipboard into `parent` (the root when None), nudged clear
+    /// of wherever it was copied from. One undo step whatever was copied;
+    /// an empty answer when there is nothing to paste. The layers come
+    /// back in the order they were in, bottom first.
+    pub fn paste(&mut self, parent: Option<NodeId>) -> Result<Vec<NodeId>, EngineError> {
+        let Some(clip) = CLIPBOARD.with(|c| c.borrow().clone()) else {
+            return Ok(Vec::new());
+        };
+        // Restore pixels first: content-addressed ids mean this is a no-op
+        // when pasting back into the document the copy came from.
+        for (w, h, bytes) in &clip.resources {
+            self.doc.add_resource(*w, *h, bytes.clone());
+        }
+        let parent = parent.unwrap_or_else(|| self.doc.root());
+        let index = self.doc.children_of(parent)?.len();
+        let mut next = self.doc.peek_next_id().0;
+        // Which id each copied layer is about to be given. Worked out
+        // before anything is emitted, because a copy of another layer
+        // can be emitted before the layer it copies: what it points at
+        // has to be known by then.
+        let mut becomes = std::collections::HashMap::new();
+        let mut peek = next;
+        for root in &clip.roots {
+            Self::assign_ids(root, &mut peek, &mut becomes);
+        }
+        // A copy whose original did not travel and is not in this
+        // document either would arrive drawing nothing at all, which is
+        // the quiet kind of failure. Say so instead.
+        for root in &clip.roots {
+            if let Some(name) = self.orphaned_copy(root, &becomes) {
+                return Err(EngineError::BadCommand(format!(
+                    "{name} is a copy of a layer that is not here: copy that layer too"
+                )));
+            }
+        }
+        let mut cmds = Vec::new();
+        let ids: Vec<NodeId> = clip
+            .roots
+            .iter()
+            .enumerate()
+            .map(|(n, root)| {
+                Self::emit_clip(
+                    root,
+                    parent,
+                    index + n,
+                    true,
+                    &mut next,
+                    &becomes,
+                    &mut cmds,
+                )
+            })
+            .collect();
+        let label = match clip.roots.as_slice() {
+            [only] => format!("Paste {}", only.node.name),
+            many => format!("Paste {} layers", many.len()),
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(ids)
+    }
+
+    /// The id every layer in a copied subtree is about to be given, in
+    /// the order [`emit_clip`](Self::emit_clip) will hand them out.
+    fn assign_ids(
+        clip: &ClipNode,
+        next: &mut u64,
+        becomes: &mut std::collections::HashMap<NodeId, NodeId>,
+    ) {
+        becomes.insert(clip.id, NodeId(*next));
+        *next += 1;
+        for child in &clip.children {
+            Self::assign_ids(child, next, becomes);
+        }
+    }
+
+    /// The name of a copied layer that copies something which neither
+    /// travelled with it nor is in this document.
+    fn orphaned_copy(
+        &self,
+        clip: &ClipNode,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
+    ) -> Option<String> {
+        if let NodeKind::Instance { of, .. } = &clip.node.kind {
+            if !becomes.contains_key(of) && self.doc.node(*of).is_err() {
+                return Some(clip.node.name.clone());
+            }
+        }
+        clip.children
+            .iter()
+            .find_map(|c| self.orphaned_copy(c, becomes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_clip(
+        clip: &ClipNode,
+        parent: NodeId,
+        index: usize,
+        offset: bool,
+        next: &mut u64,
+        becomes: &std::collections::HashMap<NodeId, NodeId>,
+        cmds: &mut Vec<Command>,
+    ) -> NodeId {
+        let mut node = clip.node.clone();
+        if offset {
+            node.transform.e += DUPLICATE_OFFSET;
+            node.transform.f += DUPLICATE_OFFSET;
+        }
+        // A copy of a layer that travelled with it points at the layer
+        // that arrived, not the one left behind: duplicating a group
+        // holding both an original and a copy of it gives a pair that
+        // is its own, and pasting one into another document gives a
+        // pair that works there. A copy whose original stayed where it
+        // was keeps pointing at it, which is what duplicating a copy on
+        // its own means.
+        if let NodeKind::Instance { of, replaces } = &mut node.kind {
+            if let Some(moved) = becomes.get(of) {
+                *of = *moved;
+            }
+            for r in replaces.iter_mut() {
+                if let Some(moved) = becomes.get(r) {
+                    *r = *moved;
+                }
+            }
+        }
+        let new_id = NodeId(*next);
+        *next += 1;
+        cmds.push(Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        });
+        for (i, child) in clip.children.iter().enumerate() {
+            Self::emit_clip(child, new_id, i, false, next, becomes, cmds);
+        }
+        new_id
+    }
+
+    /// Line up or space out several layers, as one undo step.
+    ///
+    /// `mode` is one of `left`, `center-h`, `right`, `top`, `middle-v`,
+    /// `bottom`, `distribute-h`, `distribute-v`. Alignment is measured in
+    /// document space — that is where "lined up" means anything — but a
+    /// node's transform is written in its parent's, so each move is carried
+    /// back through the ancestors before it is applied. Nodes may therefore
+    /// come from different groups.
+    /// The ids with any that sits inside another of them left out.
+    ///
+    /// A layer inside a group travels with the group. An operation that
+    /// treats a selection as one thing — moving it, flipping it,
+    /// aligning it — would then act on that layer twice, which puts it
+    /// where neither the group nor the layer was asked to go: a nudge
+    /// of one pixel moves it two, and a flip flips it back. So every one
+    /// of them asks this first.
+    fn without_nested(&self, ids: &[NodeId]) -> Vec<NodeId> {
+        ids.iter()
+            .copied()
+            .filter(|id| {
+                let mut at = self.doc.parent_of(*id);
+                while let Some(up) = at {
+                    if ids.contains(&up) {
+                        return false;
+                    }
+                    at = self.doc.parent_of(up);
+                }
+                true
+            })
+            .collect()
+    }
+
+    /// The box a lone layer is aligned against: the frame it sits in, or
+    /// the page.
+    ///
+    /// Aligning one thing to the others it is picked with is what two or
+    /// more mean. One on its own has no others, and the answer everybody
+    /// wants — centre this on the page — was an error message.
+    fn ground_of(&self, id: NodeId) -> [f32; 4] {
+        let page = [
+            0.0,
+            0.0,
+            self.doc.meta.width as f32,
+            self.doc.meta.height as f32,
+        ];
+        let mut at = self.doc.parent_of(id);
+        while let Some(up) = at {
+            if matches!(
+                self.doc.node(up).map(|n| &n.kind),
+                Ok(NodeKind::Artboard { .. })
+            ) {
+                return match self.bounds_of(up) {
+                    Some(b) => [b[0], b[1], b[0] + b[2], b[1] + b[3]],
+                    None => page,
+                };
+            }
+            at = self.doc.parent_of(up);
+        }
+        page
+    }
+
+    pub fn align_nodes(&mut self, ids: &[NodeId], mode: &str) -> Result<(), EngineError> {
+        let ids = &self.without_nested(ids)[..];
+        // Spacing evenly is a statement about the gaps between layers,
+        // so it needs layers to have gaps between; the rest is a
+        // statement about edges, and one layer has edges.
+        let spreading = mode == "distribute-h" || mode == "distribute-v";
+        if ids.is_empty() || (spreading && ids.len() < 2) {
+            return Err(EngineError::BadCommand(
+                if spreading {
+                    "spacing layers evenly needs at least two of them"
+                } else {
+                    "nothing to align"
+                }
+                .into(),
+            ));
+        }
+        // [x0, y0, x1, y1] per node, in document space.
+        let mut boxes: Vec<(NodeId, [f32; 4])> = Vec::new();
+        for id in ids {
+            if let Some(b) = self.bounds_of(*id) {
+                boxes.push((*id, [b[0], b[1], b[0] + b[2], b[1] + b[3]]));
+            }
+        }
+        if boxes.is_empty() || (spreading && boxes.len() < 2) {
+            return Err(EngineError::BadCommand("nothing to align".into()));
+        }
+        // What the alignment is measured against: the box round
+        // everything picked, or — for one layer, which has nothing to be
+        // picked out of — the frame it sits in, or the page.
+        let union = if boxes.len() > 1 {
+            boxes
+                .iter()
+                .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
+                    [
+                        acc[0].min(b[0]),
+                        acc[1].min(b[1]),
+                        acc[2].max(b[2]),
+                        acc[3].max(b[3]),
+                    ]
+                })
+        } else {
+            self.ground_of(boxes[0].0)
+        };
+
+        // Wanted document-space movement per node.
+        let mut deltas: Vec<(NodeId, f32, f32)> = Vec::new();
+        match mode {
+            "left" | "center-h" | "right" | "top" | "middle-v" | "bottom" => {
+                for (id, b) in &boxes {
+                    let (dx, dy) = match mode {
+                        "left" => (union[0] - b[0], 0.0),
+                        "right" => (union[2] - b[2], 0.0),
+                        "center-h" => ((union[0] + union[2] - b[0] - b[2]) / 2.0, 0.0),
+                        "top" => (0.0, union[1] - b[1]),
+                        "bottom" => (0.0, union[3] - b[3]),
+                        _ => (0.0, (union[1] + union[3] - b[1] - b[3]) / 2.0),
+                    };
+                    deltas.push((*id, dx, dy));
+                }
+            }
+            "distribute-h" | "distribute-v" => {
+                let horizontal = mode == "distribute-h";
+                let centre = |b: &[f32; 4]| {
+                    if horizontal {
+                        (b[0] + b[2]) / 2.0
+                    } else {
+                        (b[1] + b[3]) / 2.0
+                    }
+                };
+                boxes.sort_by(|a, b| {
+                    centre(&a.1)
+                        .partial_cmp(&centre(&b.1))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                // The outermost two stay put and the rest space evenly
+                // between them, which is what makes the result stable if you
+                // run it twice.
+                let (first, last) = (centre(&boxes[0].1), centre(&boxes[boxes.len() - 1].1));
+                let step = (last - first) / (boxes.len() - 1) as f32;
+                for (i, (id, b)) in boxes.iter().enumerate() {
+                    let want = first + step * i as f32;
+                    let d = want - centre(b);
+                    deltas.push((
+                        *id,
+                        if horizontal { d } else { 0.0 },
+                        if horizontal { 0.0 } else { d },
+                    ));
+                }
+            }
+            other => {
+                return Err(EngineError::BadCommand(format!(
+                    "unknown alignment: {other}"
+                )))
+            }
+        }
+
+        let mut cmds = Vec::new();
+        for (id, dx, dy) in deltas {
+            if dx == 0.0 && dy == 0.0 {
+                continue;
+            }
+            // A displacement in document space is a vector, so only the
+            // linear part of the ancestors' transform applies to it.
+            let a = chitrakar_render::ancestor_space(&self.doc, id);
+            let det = a.a * a.d - a.b * a.c;
+            let (px, py) = if det.abs() < 1e-9 {
+                (dx, dy)
+            } else {
+                ((a.d * dx - a.c * dy) / det, (a.a * dy - a.b * dx) / det)
+            };
+            let t = self.doc.node(id)?.transform;
+            cmds.push(Command::SetTransform {
+                id,
+                transform: Transform {
+                    e: t.e + px,
+                    f: t.f + py,
+                    ..t
+                },
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
+    }
+
+    /// The region picked out of the page, as the shape it is made of.
+    ///
+    /// A selection here is a coverage over the page, kept as a mask,
+    /// because this is a non-destructive editor: what a selection is
+    /// *for* is being handed to a layer, an adjustment or a filter as
+    /// the region it works on. Nothing is cut out of anything.
+    pub fn selection(&self) -> Option<&chitrakar_doc::Mask> {
+        self.doc.selection()
+    }
+
+    /// Whether a shape picked out of the page has any area in it, which
+    /// is what tells a drag apart from a click.
+    ///
+    /// Counting corners is not the question: a box dragged out to no
+    /// width still has four of them, and a click is exactly that.
+    fn worth_picking(shape: &VectorShape) -> bool {
+        chitrakar_render::shape_rings(shape).iter().any(|ring| {
+            let mut twice = 0.0f32;
+            for i in 0..ring.len() {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                twice += p[0] * q[1] - q[0] * p[1];
+            }
+            twice.abs() / 2.0 > 0.25
+        })
+    }
+
+    /// Pick a region out of the page, or add it to, take it from, or
+    /// keep only its overlap with what is picked already.
+    ///
+    /// `how` is "replace", or one of the names the shape combinations go
+    /// by — "union", "subtract", "intersect", "exclude" — which is not a
+    /// coincidence: adding to a selection with shift held *is* a union
+    /// of outlines, and the code that does it for two shapes on the page
+    /// does it here.
+    pub fn pick_region(
+        &mut self,
+        shape: VectorShape,
+        transform: Transform,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        if !Self::worth_picking(&shape) {
+            return Err(EngineError::BadCommand("nothing was picked out".into()));
+        }
+        self.pick_mask(
+            chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector { shape, transform },
+                invert: false,
+                feather: 0.0,
+            },
+            how,
+        )
+    }
+
+    /// Pick out a region already written as a mask, combining it with
+    /// what is picked the way `how` says.
+    ///
+    /// Where a drawn marquee comes in as a bare shape, this takes the
+    /// whole mask — softness, inside-out and all — so that putting a
+    /// kept region back picks out exactly what was kept rather than its
+    /// outline.
+    fn pick_mask(&mut self, fresh: chitrakar_doc::Mask, how: &str) -> Result<(), EngineError> {
+        if how == "replace" {
+            return self.apply_labeled(
+                Command::SetSelection {
+                    selection: Some(Box::new(fresh)),
+                },
+                Some("Select".into()),
+            );
+        }
+        let op = chitrakar_render::boolean::BoolOp::from_name(how)
+            .ok_or_else(|| EngineError::BadCommand(format!("unknown way to pick: {how:?}")))?;
+        // Nothing picked out yet: adding to it is picking it, and taking
+        // it away or keeping the overlap leaves nothing either way.
+        let Some(current) = self.doc.selection().cloned() else {
+            return match op {
+                chitrakar_render::boolean::BoolOp::Union
+                | chitrakar_render::boolean::BoolOp::Exclude => self.apply_labeled(
+                    Command::SetSelection {
+                        selection: Some(Box::new(fresh)),
+                    },
+                    Some("Select".into()),
+                ),
+                _ => Ok(()),
+            };
+        };
+        let want = self.region_rings(&current)?;
+        let have = self.region_rings(&fresh)?;
+        // A box dragged to take a bite out of a selection shares an edge
+        // with it whenever the drag starts on the same snap line, which
+        // is most of the time — see `combine_or_nudge`, which is what
+        // keeps that from being an error message.
+        let combined =
+            chitrakar_render::boolean::combine_or_nudge(&want, &have, op).ok_or_else(|| {
+                EngineError::BadCommand(
+                    "these regions cannot be combined — their edges overlap exactly".into(),
+                )
+            })?;
+        // The softness of what was already picked carries through: the
+        // second box says where, not how sharply.
+        let selection = Self::region_of(combined, current.feather).map(Box::new);
+        self.apply_labeled(
+            Command::SetSelection { selection },
+            Some(match op {
+                chitrakar_render::boolean::BoolOp::Subtract => "Take from selection".into(),
+                chitrakar_render::boolean::BoolOp::Intersect => "Keep the overlap".into(),
+                _ => "Add to selection".into(),
+            }),
+        )
+    }
+
+    /// A region's outlines in page coordinates.
+    ///
+    /// Only a shape has outlines: a region brushed by hand or read off a
+    /// picture is a coverage with no edge to combine, and says so rather
+    /// than guess. An inverted one *does* have an outline — the page's
+    /// own rectangle with what was picked as a hole in it, which is what
+    /// an even-odd path means by a ring inside a ring. Saying it had
+    /// none made "pick out the rest instead" a dead end: nothing could
+    /// be added to it, taken from it, or filled.
+    fn region_rings(&self, mask: &chitrakar_doc::Mask) -> Result<Vec<Vec<[f32; 2]>>, EngineError> {
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = &mask.kind else {
+            // A region that is not a shape — a matte handed in by
+            // something that looked at the picture, a mask brushed by
+            // hand, a mask read off an image — still has an outline;
+            // it just has to be looked at rather than read off. So it is
+            // drawn and traced at half covered, the same line the tracer
+            // draws everywhere else.
+            //
+            // Without this such a region is invisible: no ants, no box,
+            // and nothing to add to or take from. That was already true
+            // of picking out a layer's brushed mask before anything here
+            // needed it.
+            let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+            let clip = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            };
+            let cover = chitrakar_render::mask_plane_over(
+                &self.doc,
+                mask,
+                Transform::default(),
+                clip,
+                (w, h),
+            );
+            let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+            return Ok(chitrakar_render::trace_pixels(&inside, w, h));
+        };
+        let t = *transform;
+        let mut rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                    .collect()
+            })
+            .collect();
+        if mask.invert {
+            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+            rings.insert(0, vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]);
+        }
+        Ok(rings)
+    }
+
+    /// Outlines in page coordinates back into a region, or `None` where
+    /// the combination left nothing at all.
+    fn region_of(rings: Vec<Vec<[f32; 2]>>, feather: f32) -> Option<chitrakar_doc::Mask> {
+        let mut rings = rings.into_iter().filter(|r| r.len() >= 3);
+        let first = rings.next()?;
+        let subpaths: Vec<Vec<[f32; 2]>> = rings.collect();
+        Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Path {
+                    points: first,
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            // Combining keeps the softness: adding a box to a softened
+            // region should not quietly harden it.
+            feather,
+        })
+    }
+
+    /// A rendered pixel as the screen shows it, which is the only
+    /// footing on which two colours can be asked whether they *look*
+    /// alike.
+    ///
+    /// Straight rather than premultiplied, and in the display encoding
+    /// rather than linear light: a colour over nothing and the same
+    /// colour at half alpha are not the same thing to look at, so alpha
+    /// is one of the four, and linear light does not agree with the eye
+    /// about distance. Both the wand and the subject pick judge
+    /// likeness, and they judge it the same way.
+    fn shown(p: chitrakar_color::LinearRgba) -> [f32; 4] {
+        let a = p.a.max(1e-6);
+        [
+            chitrakar_color::linear_to_srgb(p.r / a),
+            chitrakar_color::linear_to_srgb(p.g / a),
+            chitrakar_color::linear_to_srgb(p.b / a),
+            p.a,
+        ]
+    }
+
+    /// Pick out the run of pixels round `(x, y)` that look like it.
+    ///
+    /// The wand. It reads the page as it is drawn — everything, the way
+    /// the eye sees it — spreads out from where it was clicked while the
+    /// colour holds, and hands the run of pixels to the tracer, which
+    /// gives back an outline. From there it is a region like any other:
+    /// added to, taken from, filled, handed to a layer.
+    ///
+    /// `tolerance` is 0 for exactly this colour and 1 for the whole
+    /// page, read on the values the screen shows rather than on linear
+    /// light — a wand is a judgement about what *looks* the same, and
+    /// linear light does not agree with the eye about that.
+    ///
+    /// `touching` says whether the question is about the run or about
+    /// the colour. A sky showing between branches is one colour in a
+    /// hundred pieces, and no amount of spreading walks from one piece
+    /// to the next; asked about the colour, every pixel that looks like
+    /// it is picked wherever it is, and comes back as that many rings.
+    pub fn pick_similar(
+        &mut self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        touching: bool,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let (sx, sy) = (x.floor(), y.floor());
+        if !(sx >= 0.0 && sy >= 0.0 && sx < w as f32 && sy < h as f32) {
+            return Err(EngineError::BadCommand("that is not on the page".into()));
+        }
+        let page = self.render()?;
+        let shown = Self::shown;
+        let seed = shown(page.get(sx as u32, sy as u32));
+        let near = |p: [f32; 4]| {
+            (0..4)
+                .map(|i| (p[i] - seed[i]).abs())
+                .fold(0.0f32, f32::max)
+                <= tolerance.clamp(0.0, 1.0)
+        };
+        // Spread out from the seed while the colour holds. Four-connected,
+        // so pixels that touch only at a corner are separate runs — which
+        // is what the tracer says about them too.
+        //
+        // Unless the question was about the colour rather than the run:
+        // a sky showing between branches is one colour in a hundred
+        // pieces, and no amount of spreading walks from one to the next.
+        // Then every pixel that looks like it is picked, wherever it is,
+        // and the tracer gives back as many rings as that comes to.
+        let mut inside = vec![false; (w * h) as usize];
+        if !touching {
+            for y in 0..h {
+                for x in 0..w {
+                    inside[(y * w + x) as usize] = near(shown(page.get(x, y)));
+                }
+            }
+            let rings = chitrakar_render::trace_pixels(&inside, w, h);
+            let Some(region) = Self::region_of(rings, 0.0) else {
+                return Err(EngineError::BadCommand("nothing there looks alike".into()));
+            };
+            let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+                unreachable!("region_of makes a shape")
+            };
+            return self.pick_region(shape, transform, how);
+        }
+        let mut queue = vec![(sx as u32, sy as u32)];
+        inside[(sy as u32 * w + sx as u32) as usize] = true;
+        while let Some((cx, cy)) = queue.pop() {
+            for (nx, ny) in [
+                (cx.wrapping_sub(1), cy),
+                (cx + 1, cy),
+                (cx, cy.wrapping_sub(1)),
+                (cx, cy + 1),
+            ] {
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let at = (ny * w + nx) as usize;
+                if inside[at] || !near(shown(page.get(nx, ny))) {
+                    continue;
+                }
+                inside[at] = true;
+                queue.push((nx, ny));
+            }
+        }
+        let rings = chitrakar_render::trace_pixels(&inside, w, h);
+        let Some(region) = Self::region_of(rings, 0.0) else {
+            return Err(EngineError::BadCommand("nothing there looks alike".into()));
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+            unreachable!("region_of makes a shape")
+        };
+        self.pick_region(shape, transform, how)
+    }
+
+    /// Pick out the whole page.
+    pub fn pick_all(&mut self) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        self.pick_region(
+            VectorShape::Rect {
+                width: w,
+                height: h,
+                radius: 0.0,
+            },
+            Transform::default(),
+            "replace",
+        )
+    }
+
+    /// Let go of what is picked out. Nothing to let go of is not an
+    /// error and records nothing: pressing Escape twice should not fill
+    /// the history with nothing happening.
+    pub fn pick_none(&mut self) -> Result<bool, EngineError> {
+        if self.doc.selection().is_none() {
+            return Ok(false);
+        }
+        self.apply_labeled(
+            Command::SetSelection { selection: None },
+            Some("Deselect".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Soften the edge of what is picked out, in page pixels.
+    ///
+    /// A region is handed to a layer as its mask, and a mask's edge is
+    /// where a selection's softness lives — so this is the same number
+    /// the mask panel shows, set before the handing over rather than
+    /// after.
+    pub fn feather_selection(&mut self, feather: f32) -> Result<bool, EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        let want = feather.max(0.0);
+        if (selection.feather - want).abs() < 1e-4 {
+            return Ok(false);
+        }
+        selection.feather = want;
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(selection)),
+            },
+            Some("Soften the edge".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Add a layer, held to what is picked out when something is.
+    ///
+    /// A region picked out and an adjustment put over it are one wish,
+    /// not two: the region is *why* the layer is being added, and the
+    /// only thing to do with it afterwards is hand it to that layer.
+    /// The histogram the graph is drawn over is already the region's,
+    /// so the numbers being set are the region's numbers — a layer that
+    /// then covered the whole page would be answering a question nobody
+    /// asked.
+    ///
+    /// One entry in the history, since it is one wish: the id the add
+    /// will use is known before it happens, so the mask can be named in
+    /// the same batch.
+    pub fn add_over_selection(
+        &mut self,
+        parent: NodeId,
+        index: usize,
+        node: Box<Node>,
+    ) -> Result<NodeId, EngineError> {
+        let id = self.doc.peek_next_id();
+        let label = format!("Add {}", node.name);
+        let add = Command::AddNode {
+            parent,
+            index,
+            node,
+        };
+        let Some(region) = self.doc.selection().cloned() else {
+            self.apply_labeled(add, Some(label))?;
+            return Ok(id);
+        };
+        // A mask is written in the space its layer is placed in, which
+        // for a layer not yet added is its parent's own.
+        let space = chitrakar_render::world_transform(&self.doc, parent)?;
+        let Some(mask) = Self::carried_into(&region, space) else {
+            self.apply_labeled(add, Some(label))?;
+            return Ok(id);
+        };
+        self.apply_labeled(
+            Command::Batch(vec![
+                add,
+                Command::SetMask {
+                    id,
+                    mask: Some(Box::new(mask)),
+                },
+            ]),
+            Some(label),
+        )?;
+        Ok(id)
+    }
+
+    /// Keep what is picked out, under a name, to be picked up again.
+    ///
+    /// A region is often the expensive thing on a page — a sky wanded
+    /// out between branches, a lasso drawn round somebody's hair — and
+    /// there was nowhere to put one but the layer it was handed to.
+    /// Kept, it is the same mask: put away and picked up again are a
+    /// copy each way, softness and inside-out included, rather than a
+    /// conversion that loses either. A name already kept is replaced,
+    /// since that is what naming it the same thing means.
+    pub fn keep_selection(&mut self, name: &str) -> Result<(), EngineError> {
+        let Some(mask) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::BadCommand("a kept region wants a name".into()));
+        }
+        let mut regions = self.doc.regions().to_vec();
+        let kept = chitrakar_doc::KeptRegion {
+            name: name.to_string(),
+            mask,
+        };
+        match regions.iter().position(|r| r.name == name) {
+            Some(at) => regions[at] = kept,
+            None => regions.push(kept),
+        }
+        self.apply_labeled(
+            Command::SetRegions { regions },
+            Some(format!("Keep {name}")),
+        )
+    }
+
+    /// Pick out a region kept earlier, combining it with what is picked
+    /// the way `how` says.
+    pub fn pick_kept(&mut self, index: usize, how: &str) -> Result<(), EngineError> {
+        let Some(kept) = self.doc.regions().get(index).cloned() else {
+            return Err(EngineError::BadCommand("no such kept region".into()));
+        };
+        self.pick_mask(kept.mask, how)
+    }
+
+    /// Forget a kept region.
+    pub fn forget_region(&mut self, index: usize) -> Result<(), EngineError> {
+        let mut regions = self.doc.regions().to_vec();
+        if index >= regions.len() {
+            return Err(EngineError::BadCommand("no such kept region".into()));
+        }
+        let gone = regions.remove(index);
+        self.apply_labeled(
+            Command::SetRegions { regions },
+            Some(format!("Forget {}", gone.name)),
+        )
+    }
+
+    /// The names of the regions this document has kept, in order.
+    pub fn kept_regions(&self) -> Vec<String> {
+        self.doc.regions().iter().map(|r| r.name.clone()).collect()
+    }
+
+    /// Take what is picked out further out, or further in, by a
+    /// distance in page pixels. A negative `by` shrinks it.
+    ///
+    /// The matting move: a wand pick carries a pixel of whatever was
+    /// behind the thing it picked, and shrinking by one loses that
+    /// fringe; a region grown by two is what an outline is drawn in.
+    /// It is a *distance*, not a scaling — a long thin region grown by
+    /// four gets four pixels wider at both ends and along both sides,
+    /// which is what "grow" means about a region and is not what
+    /// scaling it by anything would do.
+    ///
+    /// The distance is read on what is covered rather than on the
+    /// outline, so it works the same on every kind of region — a
+    /// rectangle, a painted one, an inverted one — and the answer comes
+    /// back traced, the way the wand's does. The softness of the edge
+    /// is kept: how far out the region reaches and how sharply it ends
+    /// are separate questions.
+    pub fn grow_selection(&mut self, by: f32) -> Result<bool, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        if by == 0.0 {
+            return Ok(false);
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let cover = chitrakar_render::mask_plane_over(
+            &self.doc,
+            &region,
+            Transform::default(),
+            clip,
+            (w, h),
+        );
+        let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
+        let rings =
+            chitrakar_render::trace_pixels(&chitrakar_render::grown(&inside, w, h, by), w, h);
+        let Some(grown) = Self::region_of(rings, region.feather) else {
+            return Err(EngineError::BadCommand(
+                "shrinking that far leaves nothing picked out".into(),
+            ));
+        };
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(grown)),
+            },
+            Some(
+                if by > 0.0 {
+                    "Grow what is picked"
+                } else {
+                    "Shrink what is picked"
+                }
+                .into(),
+            ),
+        )?;
+        Ok(true)
+    }
+
+    /// Swap what is picked out for what is not.
+    pub fn pick_inverse(&mut self) -> Result<bool, EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
+            return Ok(false);
+        };
+        selection.invert = !selection.invert;
+        self.apply_labeled(
+            Command::SetSelection {
+                selection: Some(Box::new(selection)),
+            },
+            Some("Inverse selection".into()),
+        )?;
+        Ok(true)
+    }
+
+    /// Give a layer the region picked out of the page as its mask.
+    ///
+    /// This is what a selection is for here. The region is written in
+    /// the page's space and a mask in the space its layer is placed in,
+    /// so it is carried across; the two are the same kind of thing
+    /// either side of that.
+    pub fn mask_from_selection(&mut self, id: NodeId, hide: bool) -> Result<(), EngineError> {
+        let Some(mut selection) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        // The other way round: hold the layer to everything *but* what
+        // is picked, which is what deleting a selection means in an
+        // editor that cuts pixels out — done here by hiding them, so
+        // the layer is whole underneath and the region can be changed
+        // its mind about.
+        if hide {
+            selection.invert = !selection.invert;
+        }
+        let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        let Some(mask) = Self::carried_into(&selection, parent) else {
+            return Err(EngineError::BadCommand(
+                "this layer sits in a space with no thickness".into(),
+            ));
+        };
+        self.apply_labeled(
+            Command::SetMask {
+                id,
+                mask: Some(Box::new(mask)),
+            },
+            Some(if hide {
+                "Hide what is picked".into()
+            } else {
+                "Mask from selection".into()
+            }),
+        )
+    }
+
+    /// Pick out what a layer covers.
+    ///
+    /// The mirror of handing a region to a layer: there a region
+    /// written in the page's space becomes a layer's mask, here a
+    /// layer's own shape comes back out into the page as a region. It
+    /// is how a photograph is masked into the shape of the words over
+    /// it, or a glow made to follow a drawing — neither of which any
+    /// marquee can be dragged into.
+    ///
+    /// What is picked is the shape the layer *occupies*, not the
+    /// picture it makes: drawn on its own at full strength, with its
+    /// blend, its opacity and its effects set aside, since a layer at
+    /// two tenths still covers what it covers and a drop shadow is not
+    /// part of the drawing that casts it. Its mask is not set aside —
+    /// a masked layer covers only what the mask lets through, which is
+    /// exactly the shape being asked for. A group answers for
+    /// everything under it, together.
+    pub fn pick_from_layer(&mut self, id: NodeId, how: &str) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let inside = self.layer_inside(id)?;
+        let rings = chitrakar_render::trace_pixels(&inside, w, h);
+        let Some(region) = Self::region_of(rings, 0.0) else {
+            return Err(EngineError::BadCommand(
+                "that layer covers nothing on the page".into(),
+            ));
+        };
+        let chitrakar_doc::MaskKind::Vector { shape, transform } = region.kind else {
+            unreachable!("region_of makes a shape")
+        };
+        self.pick_region(shape, transform, how)
+    }
+
+    /// Which page pixels a layer occupies, drawn on its own.
+    ///
+    /// The shared half of [`Self::pick_from_layer`] — the part that
+    /// answers "where is this layer", before anything is decided about
+    /// what to do with the answer. Picking a subject out of a
+    /// photograph wants the same question asked first, so that the
+    /// judgement it makes is confined to the picture rather than let
+    /// loose over the page around it.
+    fn layer_inside(&self, id: NodeId) -> Result<Vec<bool>, EngineError> {
+        let node = self.doc.node(id)?;
+        let (opacity, visible, blend, effects) =
+            (node.opacity, node.visible, node.blend, node.effects.clone());
+        let mut alone = self.doc.clone();
+        if opacity < 1.0 {
+            alone.apply(Command::SetOpacity { id, opacity: 1.0 })?;
+        }
+        if !visible {
+            alone.apply(Command::SetVisible { id, visible: true })?;
+        }
+        if blend != chitrakar_doc::BlendMode::Normal {
+            alone.apply(Command::SetBlendMode {
+                id,
+                blend: chitrakar_doc::BlendMode::Normal,
+            })?;
+        }
+        if !effects.is_empty() {
+            alone.apply(Command::SetEffects {
+                id,
+                effects: Vec::new(),
+            })?;
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // An adjustment and a filter have no picture of their own: they
+        // rewrite what is under them, and what they cover is what their
+        // mask lets through — the whole page where there is no mask.
+        // Drawn alone they come out empty, and "that layer covers
+        // nothing" is the wrong answer about a layer whose mask is
+        // often the most careful thing on the page.
+        let cover = if matches!(
+            self.doc.node(id)?.kind,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_)
+        ) {
+            let clip = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            };
+            match self.doc.node(id)?.mask.as_ref() {
+                Some(mask) => chitrakar_render::mask_plane_over(
+                    &self.doc,
+                    mask,
+                    chitrakar_render::ancestor_space(&self.doc, id),
+                    clip,
+                    (w, h),
+                ),
+                None => vec![1.0; (w * h) as usize],
+            }
+        } else {
+            chitrakar_render::layer_coverage(&alone, id)?
+        };
+        // Half covered is inside, which is where a shape's antialiased
+        // edge crosses the edge it is drawing. Half of what the layer
+        // manages at its strongest, though, not half of opaque: a shape
+        // painted in a colour that is itself a third transparent still
+        // covers what it covers, and against a fixed half it would be
+        // said to cover nothing at all. At full strength — which is
+        // most layers — the two are the same line.
+        let peak = cover.iter().copied().fold(0.0f32, f32::max);
+        let line = peak * 0.5;
+        Ok(cover.iter().map(|c| *c >= line && *c > 0.0).collect())
+    }
+
+    /// Pick the subject out of a photograph: what stands in front of its
+    /// background.
+    ///
+    /// No marquee can be dragged round a person, and the wand asks the
+    /// wrong question about one — a coat, a face and a hand are three
+    /// colours, and spreading from a click on any of them stops at the
+    /// next. What a subject has in common is not a colour of its own but
+    /// its place in the frame: a photograph is composed, and the thing
+    /// it is *of* is the thing in the middle of it, while the background
+    /// is what runs off the edges. A portrait's wall meets all four
+    /// sides; the face meets none.
+    ///
+    /// So this is a judgement made from two sides rather than one. The
+    /// edge of the picture is read for the colours the background comes
+    /// in, and then whatever those colours cannot account for is read
+    /// for the colours the subject comes in — each kept as a spread of
+    /// colours rather than an average, since a background is usually
+    /// several (a wall and a floor, a sky and a horizon) and their
+    /// average is a colour appearing nowhere in the picture. Every pixel
+    /// is then asked which of the two spreads it looks more like, and by
+    /// how much, which is a number rather than a verdict.
+    ///
+    /// The subject's side is read from what is left over rather than
+    /// from a box in the middle of the frame, which is the obvious thing
+    /// and is wrong: a box is only the subject when the subject fills
+    /// it, and around a narrow figure it takes in as much sky as coat —
+    /// a spread taught half on sky then answers "sky" about the sky.
+    /// Where the frame's middle is used at all it is a last resort,
+    /// below.
+    ///
+    /// Then the numbers are smoothed over the picture before any line is
+    /// drawn, and that is the part that matters. A judgement made a pixel
+    /// at a time comes apart into lace on a real photograph: grain,
+    /// texture and a background of a hundred colours all cross any fixed
+    /// line back and forth from one pixel to the next. Smoothing first
+    /// says what the earlier version could not — that a subject is a
+    /// *region*, so a pixel's neighbours are evidence about it — and a
+    /// region with a smooth edge is also the only kind anybody can work
+    /// with afterwards.
+    ///
+    /// And the two spreads are then read again from what was decided,
+    /// and the decision made again, a few times over. This is what lets
+    /// the answer escape a bad start: a subject cropped by the frame —
+    /// a portrait cut off at the waist, which is most portraits — puts
+    /// its own colours in the band the background was first read from,
+    /// and read once, that picture comes back with nothing in it at all.
+    /// Read again from the middle outwards, the coat is in the subject's
+    /// spread as well, and the second answer is right where the first
+    /// was empty.
+    ///
+    /// `tolerance` is how readily a colour counts as background, from 0
+    /// (almost nothing does, so the subject comes back generous) to 1
+    /// (almost everything does); a half is neutral, leaving the decision
+    /// to the picture. It is the knob this needs: whether a shadow under
+    /// a chin belongs to the face or to the floor is not a thing any
+    /// fixed number gets right for every photograph.
+    ///
+    /// `feather` softens the edge as part of the same pick, because a
+    /// matte off a photograph almost always wants that — the edge of a
+    /// person is not the staircase a set of pixels has — and a pick
+    /// followed by a softening would be two things to undo where the
+    /// hand did one.
+    ///
+    /// What comes back is a region like any other — added to, taken
+    /// from, softened, grown, handed to a layer as a mask. Deliberately
+    /// the same currency as the marquee's, because refining a matte is
+    /// most of the work and all of that already exists.
+    ///
+    /// It remains a judgement about colour and composition, not a model
+    /// of what a person looks like. Against a background wearing the
+    /// subject's own colours — a cream dress on pale sand — it will hand
+    /// back something that has to be tidied by hand, and the honest
+    /// place for that is the region it gives you rather than a promise it
+    /// cannot keep.
+    pub fn pick_subject(
+        &mut self,
+        id: NodeId,
+        tolerance: f32,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let inside = self.layer_inside(id)?;
+        let page = self.render()?;
+        let at = |x: u32, y: u32| (y * w + x) as usize;
+
+        // The box the picture occupies, so nothing below walks the whole
+        // page when the photograph is a corner of it.
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        let mut area = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                if inside[at(x, y)] {
+                    (x0, y0) = (x0.min(x), y0.min(y));
+                    (x1, y1) = (x1.max(x), y1.max(y));
+                    area += 1;
+                }
+            }
+        }
+        if area == 0 {
+            return Err(EngineError::BadCommand(
+                "that layer covers nothing on the page".into(),
+            ));
+        }
+        let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+
+        // The judgement is made on a smaller copy of the picture. Partly
+        // for the cost — the work below is done several times over and a
+        // photograph from a camera is a great many pixels — but mostly
+        // because grain is not evidence: averaging a block down is the
+        // first and cheapest way of saying that what one pixel does
+        // alone does not count. The region is still traced at full size,
+        // so the edge that comes back is the picture's and not the
+        // grid's.
+        const ACROSS: u32 = 384;
+        let step = (bw.max(bh) as f32 / ACROSS as f32).ceil().max(1.0) as u32;
+        let (rw, rh) = (bw.div_ceil(step), bh.div_ceil(step));
+        let rat = |i: u32, j: u32| (j * rw + i) as usize;
+        let mut color = vec![[0f32; 3]; (rw * rh) as usize];
+        // Held apart: a cell the picture only partly covers is a blend of
+        // picture and page and is no evidence about either, so it is not
+        // read for colour — but it is still part of the picture and gets
+        // an answer like everything else.
+        let (mut lit, mut whole) = (
+            vec![false; (rw * rh) as usize],
+            vec![false; (rw * rh) as usize],
+        );
+        for j in 0..rh {
+            for i in 0..rw {
+                let (mut acc, mut seen, mut all) = ([0f32; 3], 0u32, true);
+                for dy in 0..step {
+                    for dx in 0..step {
+                        let (x, y) = (x0 + i * step + dx, y0 + j * step + dy);
+                        if x > x1 || y > y1 {
+                            continue;
+                        }
+                        if !inside[at(x, y)] {
+                            all = false;
+                            continue;
+                        }
+                        let c = Self::shown(page.get(x, y));
+                        acc = [acc[0] + c[0], acc[1] + c[1], acc[2] + c[2]];
+                        seen += 1;
+                    }
+                }
+                if seen > 0 {
+                    let k = seen as f32;
+                    color[rat(i, j)] = [acc[0] / k, acc[1] / k, acc[2] / k];
+                    lit[rat(i, j)] = true;
+                    whole[rat(i, j)] = all;
+                }
+            }
+        }
+
+        // How deep into the picture a cell sits: 0 against the frame and
+        // 1 in the middle. Only ever a last resort — a photograph is
+        // composed, so the thing it is *of* tends to be in the middle of
+        // it, but that is a fact about photographers and not about
+        // pixels. Leaning on it in the judgement itself measured worse
+        // on every picture tried: around a narrow figure it claims the
+        // sky either side, and a subject off to one side is exactly what
+        // it gets wrong. So it is used for nothing but deciding where to
+        // start looking when the background's own colours explain the
+        // whole picture.
+        let depth = |i: u32, j: u32| {
+            let dx = (i.min(rw - 1 - i) * 2) as f32 / rw as f32;
+            let dy = (j.min(rh - 1 - j) * 2) as f32 / rh as f32;
+            dx.min(dy).clamp(0.0, 1.0)
+        };
+
+        // Colours as a coarse spread, so that "looks like the
+        // background" is a question about a whole palette and not about
+        // one colour. Blurred across the bins afterwards, which is what
+        // lets a colour the picture never quite showed still be
+        // recognised as one of them — a gradient passes through colours
+        // no pixel lands on exactly.
+        const B: usize = 24;
+        let bin_of = |c: [f32; 3]| {
+            let q = |v: f32| ((v.clamp(0.0, 1.0) * (B - 1) as f32).round() as usize).min(B - 1);
+            (q(c[0]) * B + q(c[1])) * B + q(c[2])
+        };
+        let spread = |cells: &dyn Fn(usize) -> bool| -> Option<Vec<f32>> {
+            let mut hist = vec![0f32; B * B * B];
+            let mut count = 0u32;
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if whole[k] && cells(k) {
+                        hist[bin_of(color[k])] += 1.0;
+                        count += 1;
+                    }
+                }
+            }
+            // Too little to speak for a side of the picture: a spread
+            // fitted to a handful of cells says more about those cells
+            // than about anything else.
+            if count < 8 {
+                return None;
+            }
+            // Blur the bins, one axis at a time — a cube is three lines
+            // run one after another.
+            for axis in 0..3 {
+                let was = hist.clone();
+                let place = |a: usize, b: usize, c: usize| match axis {
+                    0 => (c * B + a) * B + b,
+                    1 => (a * B + c) * B + b,
+                    _ => (a * B + b) * B + c,
+                };
+                for a in 0..B {
+                    for b in 0..B {
+                        for c in 0..B {
+                            let mut sum = was[place(a, b, c)];
+                            if c > 0 {
+                                sum += was[place(a, b, c - 1)];
+                            }
+                            if c + 1 < B {
+                                sum += was[place(a, b, c + 1)];
+                            }
+                            hist[place(a, b, c)] = sum;
+                        }
+                    }
+                }
+            }
+            let total: f32 = hist.iter().sum();
+            if total <= 0.0 {
+                return None;
+            }
+            // A floor under every bin, so that a colour neither side has
+            // ever shown is merely unlikely rather than impossible, and
+            // the arithmetic below has no zero to fall down.
+            let floor = 1e-4 / (B * B * B) as f32;
+            Some(hist.iter().map(|v| v / total + floor).collect())
+        };
+
+        // Where each side is read from to begin with: the background off
+        // a band just inside the frame, the subject out of the middle.
+        // Both from the start, rather than the background alone — read
+        // only from the edge, a picture whose subject touches the frame
+        // teaches the background the subject's own colours and comes
+        // back empty.
+        let reach = ((rw.min(rh) / 12).clamp(2, 8)) as i64;
+        let frame = |i: u32, j: u32| {
+            [(-reach, 0i64), (reach, 0), (0, -reach), (0, reach)]
+                .iter()
+                .any(|(dx, dy)| {
+                    let (ni, nj) = (i as i64 + dx, j as i64 + dy);
+                    ni < 0
+                        || nj < 0
+                        || ni >= rw as i64
+                        || nj >= rh as i64
+                        || !lit[rat(ni as u32, nj as u32)]
+                })
+        };
+        let mut seed_bg = vec![false; (rw * rh) as usize];
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if lit[k] && frame(i, j) {
+                    seed_bg[k] = true;
+                }
+            }
+        }
+        // The subject is seeded from what the background cannot account
+        // for, rather than from a box in the middle of the frame. A box
+        // is only the subject when the subject fills it: around a narrow
+        // figure it takes in as much sky as coat, and a spread taught
+        // half on sky answers "sky" about the sky.
+        let Some(first_bg) = spread(&|k| seed_bg[k]) else {
+            return Err(EngineError::BadCommand(
+                "this picture has no edge to read a background from".into(),
+            ));
+        };
+        let mut odds: Vec<f32> = Vec::new();
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if whole[k] {
+                    odds.push(first_bg[bin_of(color[k])].ln());
+                }
+            }
+        }
+        odds.sort_by(f32::total_cmp);
+        let middling = odds[odds.len() / 2];
+        let mut seed_fg = vec![false; (rw * rh) as usize];
+        let mut seeded = 0usize;
+        for j in 0..rh {
+            for i in 0..rw {
+                let k = rat(i, j);
+                if whole[k] && first_bg[bin_of(color[k])].ln() < middling - 1.5 {
+                    seed_fg[k] = true;
+                    seeded += 1;
+                }
+            }
+        }
+        // Unless the background's own spread already explains everything
+        // in the picture, which is what a subject cropped by the frame
+        // does: its colours went into the band the background was read
+        // from, so nothing is left over to be unlike it. Then the middle
+        // of the frame is all there is to go on — and it is enough,
+        // because the spreads are read again from the answer below.
+        if seeded * 24 < odds.len() {
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if lit[k] && depth(i, j) > 0.55 {
+                        seed_fg[k] = true;
+                    }
+                }
+            }
+        }
+
+        // How readily a colour counts as background, as a thumb on the
+        // scale rather than a threshold: the picture's own evidence is
+        // still what mostly decides, and a half leaves it to the
+        // picture entirely.
+        // A half is neutral and leaves the decision to the picture; the
+        // small lean towards background at that setting is measured
+        // rather than chosen, being where a set of photographs with
+        // known answers scored best.
+        let thumb = 0.4 + (tolerance.clamp(0.0, 1.0) - 0.5) * 8.0;
+        let mut score = vec![0f32; (rw * rh) as usize];
+        let mut fg: Vec<bool> = seed_fg.clone();
+        let mut bg: Vec<bool> = seed_bg.clone();
+        for round in 0..5 {
+            // Read each side's colours from what is currently thought to
+            // be that side — the seeds on the first pass, the answer
+            // itself afterwards, which is what lets a bad start be
+            // walked out of.
+            let (want_fg, want_bg): (Vec<bool>, Vec<bool>) = (fg.clone(), bg.clone());
+            let Some(pf) = spread(&|k| want_fg[k]).or_else(|| spread(&|k| seed_fg[k])) else {
+                return Err(EngineError::BadCommand(
+                    "this picture is too small to find a subject in".into(),
+                ));
+            };
+            let Some(pb) = spread(&|k| want_bg[k]).or_else(|| spread(&|k| seed_bg[k])) else {
+                return Err(EngineError::BadCommand(
+                    "this picture has no edge to read a background from".into(),
+                ));
+            };
+            for j in 0..rh {
+                for i in 0..rw {
+                    let k = rat(i, j);
+                    if !lit[k] {
+                        score[k] = 0.0;
+                        continue;
+                    }
+                    let b = bin_of(color[k]);
+                    // Which of the two spreads the colour looks more
+                    // like, and by how much.
+                    score[k] = (pf[b].ln() - pb[b].ln()).clamp(-6.0, 6.0) - thumb;
+                }
+            }
+            // Smooth the numbers before any line is drawn through them.
+            // The one change that turns lace into a region: a pixel's
+            // neighbours are evidence about it, because a subject is a
+            // region and not a scatter of pixels that happen to agree.
+            //
+            // A cheaper stand-in for the thing this really wants, which
+            // is the least-cost way of cutting the whole picture at
+            // once — the minimum cut of a graph over the pixels, with
+            // the cost of splitting two neighbours falling where the
+            // picture changes. That was built and measured and is not
+            // here, because it scored slightly worse than this on every
+            // picture with a known answer and did not fix the one thing
+            // it was built for: a white shirt against a white wall is a
+            // large region whose own evidence says background, and a
+            // prior on its *edge* cannot outvote its *area* however
+            // strongly it is weighted. Three times the time and a few
+            // hundred lines for that is not a trade worth making. The
+            // note is here so the next person does not build it twice.
+            for _ in 0..2 {
+                let was = score.clone();
+                for j in 0..rh {
+                    for i in 0..rw {
+                        let k = rat(i, j);
+                        if !lit[k] {
+                            continue;
+                        }
+                        let (mut sum, mut n) = (0.0, 0.0);
+                        for dj in -2i64..=2 {
+                            for di in -2i64..=2 {
+                                let (ni, nj) = (i as i64 + di, j as i64 + dj);
+                                if ni < 0 || nj < 0 || ni >= rw as i64 || nj >= rh as i64 {
+                                    continue;
+                                }
+                                let nk = rat(ni as u32, nj as u32);
+                                if !lit[nk] {
+                                    continue;
+                                }
+                                sum += was[nk];
+                                n += 1.0;
+                            }
+                        }
+                        score[k] = sum / n;
+                    }
+                }
+            }
+            if round + 1 < 5 {
+                for k in 0..score.len() {
+                    fg[k] = lit[k] && score[k] > 0.0;
+                    bg[k] = lit[k] && score[k] <= 0.0;
+                }
+            }
+        }
+
+        // Back up to the picture's own size, reading the smoothed
+        // numbers between cells rather than in blocks: the line then
+        // falls where the numbers cross rather than on the grid the
+        // judgement was made on.
+        let sample = |x: u32, y: u32| -> f32 {
+            let fx = (x - x0) as f32 / step as f32 - 0.5;
+            let fy = (y - y0) as f32 / step as f32 - 0.5;
+            let (i0, j0) = (fx.floor(), fy.floor());
+            let (tx, ty) = (fx - i0, fy - j0);
+            let get = |i: f32, j: f32| -> f32 {
+                let (i, j) = (
+                    (i.max(0.0) as u32).min(rw - 1),
+                    (j.max(0.0) as u32).min(rh - 1),
+                );
+                score[rat(i, j)]
+            };
+            let top = get(i0, j0) * (1.0 - tx) + get(i0 + 1.0, j0) * tx;
+            let bot = get(i0, j0 + 1.0) * (1.0 - tx) + get(i0 + 1.0, j0 + 1.0) * tx;
+            top * (1.0 - ty) + bot * ty
+        };
+        let mut subject = vec![false; (w * h) as usize];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let k = at(x, y);
+                if inside[k] && sample(x, y) > 0.0 {
+                    subject[k] = true;
+                }
+            }
+        }
+
+        // A gap of background colour with subject all round it is a hole
+        // in the subject rather than a piece of the background: a shirt
+        // the colour of the wall behind it is still the shirt, and a
+        // region full of such gaps is unusable. So the background is
+        // flooded in from the frame's edge — which is the one place it
+        // is known to be — and every background pixel the flood never
+        // reaches is given back to the subject.
+        let visible = |x: i64, y: i64| {
+            x >= 0
+                && y >= 0
+                && x < w as i64
+                && y < h as i64
+                && inside[(y as u32 * w + x as u32) as usize]
+        };
+        let mut open = vec![false; (w * h) as usize];
+        let mut queue = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if !inside[i]
+                    || subject[i]
+                    || ![(-1i64, 0i64), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .any(|(dx, dy)| !visible(x as i64 + dx, y as i64 + dy))
+                {
+                    continue;
+                }
+                open[i] = true;
+                queue.push((x, y));
+            }
+        }
+        while let Some((cx, cy)) = queue.pop() {
+            for (nx, ny) in [
+                (cx.wrapping_sub(1), cy),
+                (cx + 1, cy),
+                (cx, cy.wrapping_sub(1)),
+                (cx, cy + 1),
+            ] {
+                if nx >= w || ny >= h {
+                    continue;
+                }
+                let i = at(nx, ny);
+                if open[i] || subject[i] || !inside[i] {
+                    continue;
+                }
+                open[i] = true;
+                queue.push((nx, ny));
+            }
+        }
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if inside[i] && !open[i] {
+                    subject[i] = true;
+                }
+            }
+        }
+
+        // Confetti: a scattering of pixels that happen not to look like
+        // the background is not a subject, and an outline traced round
+        // one is a region nobody can work with. So the subject is broken
+        // into its pieces and the ones far smaller than the largest are
+        // dropped — measured against the largest rather than against the
+        // picture, so that two people both survive and a bird alone in a
+        // sky is not mistaken for noise by being small.
+        let mut piece = vec![0u32; (w * h) as usize];
+        let mut sizes = vec![0usize];
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if !subject[i] || piece[i] != 0 {
+                    continue;
+                }
+                let label = sizes.len() as u32;
+                let mut count = 0usize;
+                piece[i] = label;
+                let mut walk = vec![(x, y)];
+                while let Some((cx, cy)) = walk.pop() {
+                    count += 1;
+                    for (nx, ny) in [
+                        (cx.wrapping_sub(1), cy),
+                        (cx + 1, cy),
+                        (cx, cy.wrapping_sub(1)),
+                        (cx, cy + 1),
+                    ] {
+                        if nx >= w || ny >= h {
+                            continue;
+                        }
+                        let j = at(nx, ny);
+                        if subject[j] && piece[j] == 0 {
+                            piece[j] = label;
+                            walk.push((nx, ny));
+                        }
+                    }
+                }
+                sizes.push(count);
+            }
+        }
+        let largest = sizes.iter().copied().max().unwrap_or(0);
+        if largest == 0 {
+            return Err(EngineError::BadCommand(
+                "nothing here stands out from its background".into(),
+            ));
+        }
+        let floor = (largest as f32 * 0.02).max(4.0) as usize;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = at(x, y);
+                if subject[i] && sizes[piece[i] as usize] < floor {
+                    subject[i] = false;
+                }
+            }
+        }
+
+        let rings = chitrakar_render::trace_pixels(&subject, w, h);
+        let Some(region) = Self::region_of(rings, feather.max(0.0)) else {
+            return Err(EngineError::BadCommand(
+                "nothing here stands out from its background".into(),
+            ));
+        };
+        self.pick_mask(region, how)
+    }
+
+    /// Pick out what something else decided, handed over as a matte.
+    ///
+    /// The way in for a judgement this crate did not make: a model that
+    /// knows what a person looks like, running wherever it can run.
+    /// [`Self::pick_subject`] reasons about colour, which is all it can
+    /// do, and colour cannot tell a white shirt from a white curtain —
+    /// nothing local can, because there is nothing locally to tell. A
+    /// model that has seen a great many people can, and the honest thing
+    /// is to let it, rather than to keep tuning a method against a wall
+    /// it is standing on the wrong side of.
+    ///
+    /// `matte` is one byte of coverage per pixel, `mw` by `mh`, laid
+    /// over the whole page — so the caller may hand in a smaller matte
+    /// than the page and it is stretched, which is what a model with a
+    /// fixed input size gives back anyway.
+    ///
+    /// It is kept as a matte rather than traced to an outline, which is
+    /// the point of taking one: a traced region has a hard edge, and
+    /// what a model gives back for hair is precisely *not* hard. Stored
+    /// as a resource like any other picture, so it is content-addressed,
+    /// saved with the document and undone with one press. The outline
+    /// drawn round it for the ants is traced at half covered, which is a
+    /// picture of the region rather than the region itself.
+    ///
+    /// `confine` holds it to a layer, for a matte worked out from a page
+    /// that has more on it than the photograph.
+    pub fn pick_matte(
+        &mut self,
+        matte: &[u8],
+        mw: u32,
+        mh: u32,
+        confine: Option<NodeId>,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        if mw == 0 || mh == 0 || matte.len() != (mw * mh) as usize {
+            return Err(EngineError::BadCommand(
+                "that matte is not the size it says it is".into(),
+            ));
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // Held to the layer, if asked: a matte worked out from the whole
+        // page can only be about the page, and a photograph sitting on
+        // one is not all of it.
+        let hold = match confine {
+            Some(id) => Some(self.layer_inside(id)?),
+            None => None,
+        };
+        let mut rgba = Vec::with_capacity((mw * mh * 4) as usize);
+        let mut any = false;
+        for j in 0..mh {
+            for i in 0..mw {
+                let mut v = matte[(j * mw + i) as usize];
+                if let Some(hold) = &hold {
+                    // The matte's own grid against the page's: nearest,
+                    // since this is a coverage and not a picture, and a
+                    // blend between covered and not is neither.
+                    let x = ((i as f32 + 0.5) * w as f32 / mw as f32) as u32;
+                    let y = ((j as f32 + 0.5) * h as f32 / mh as f32) as u32;
+                    if x >= w || y >= h || !hold[(y * w + x) as usize] {
+                        v = 0;
+                    }
+                }
+                if v >= 128 {
+                    any = true;
+                }
+                // Coverage is luminance times alpha, so the grey carries
+                // it and the alpha stays out of the way.
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        if !any {
+            return Err(EngineError::BadCommand(
+                "that matte picks out nothing on the page".into(),
+            ));
+        }
+        let resource_id = self.doc.add_resource(mw, mh, rgba);
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Raster {
+                resource_id,
+                width: mw,
+                height: mh,
+                transform: Transform {
+                    a: w as f32 / mw as f32,
+                    b: 0.0,
+                    c: 0.0,
+                    d: h as f32 / mh as f32,
+                    e: 0.0,
+                    f: 0.0,
+                },
+            },
+            invert: false,
+            feather: feather.max(0.0),
+        };
+        self.pick_mask(mask, how)
+    }
+
+    /// The same, where the matte arrives as an image.
+    ///
+    /// Which is how it arrives from anywhere but this crate: a matte is
+    /// a silhouette, and a silhouette encoded as a PNG is a few tens of
+    /// kilobytes where its bytes are megabytes — worth caring about when
+    /// it has to cross out of a native shell and into a webview. Read
+    /// off the red channel, since the encoder that made it wrote grey.
+    pub fn pick_matte_png(
+        &mut self,
+        png: &[u8],
+        confine: Option<NodeId>,
+        feather: f32,
+        how: &str,
+    ) -> Result<(), EngineError> {
+        let img = chitrakar_codecs::decode(png)
+            .map_err(|e| EngineError::BadCommand(format!("that matte could not be read: {e}")))?;
+        let grey: Vec<u8> = img.rgba8.chunks(4).map(|p| p[0]).collect();
+        self.pick_matte(&grey, img.width, img.height, confine, feather, how)
+    }
+
+    /// Pick out a layer's mask, as a region over the page.
+    ///
+    /// The way back from "mask this layer with what is picked". A mask
+    /// is moved and resized on canvas but not reshaped there, and this
+    /// is what reshaping one is: take it out as a region, add to it,
+    /// take from it, soften it, grow it, and hand it back. A mask is
+    /// written in the space its layer is placed in and a region in the
+    /// page's own, so it is carried across — the same carry as the way
+    /// in, read the other way round, softness included.
+    pub fn pick_layer_mask(&mut self, id: NodeId, how: &str) -> Result<(), EngineError> {
+        let Some(mask) = self.doc.node(id)?.mask.clone() else {
+            return Err(EngineError::BadCommand("that layer has no mask".into()));
+        };
+        let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        let Some(out) = Self::seen_from(parent).and_then(|back| Self::carried_into(&mask, back))
+        else {
+            return Err(EngineError::BadCommand(
+                "this layer sits in a space with no thickness".into(),
+            ));
+        };
+        self.pick_mask(out, how)
+    }
+
+    /// The page's own space seen from `space` — the transform that
+    /// carries a page-space thing into it.
+    fn seen_from(space: Transform) -> Option<Transform> {
+        let det = space.a * space.d - space.b * space.c;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let (a, b, c, d) = (space.d / det, -space.b / det, -space.c / det, space.a / det);
+        Some(Transform {
+            a,
+            b,
+            c,
+            d,
+            e: -(a * space.e + c * space.f),
+            f: -(b * space.e + d * space.f),
+        })
+    }
+
+    /// A mask written in the page's space, carried into `space`.
+    ///
+    /// The shape goes through the transform, as a shape does. So does
+    /// the softness, which is easy to forget because it is a bare number
+    /// rather than a point: it is a *distance*, read against whatever
+    /// space it lands in, so a feather of four handed to a layer inside
+    /// a group scaled by two would fade over eight page pixels instead
+    /// of four.
+    fn carried_into(mask: &chitrakar_doc::Mask, space: Transform) -> Option<chitrakar_doc::Mask> {
+        // The same carry a page being mapped and a group being dissolved
+        // do, read the other way round: `space` is where the coverage is
+        // going and its inverse is the transform that takes it there.
+        // Written out a second time here, this had the gaps that one has
+        // since had fixed — a brushed coverage's radii and the region a
+        // stroke was confined to went through untouched, so a rubbed-out
+        // piece of a layer inside a group scaled by two came back out as
+        // a region with the brush still the size it was inside.
+        Some(mask.carried_through(Self::seen_from(space)?))
+    }
+
+    /// What is picked out of the page, carried into `space`, ready to
+    /// ride on a stroke laid down there.
+    fn region_in(&self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
+        Self::carried_into(self.doc.selection()?, space).map(Box::new)
+    }
+
+    /// Whether the page point `(x, y)` is inside what is picked out.
+    ///
+    /// Asked of the engine rather than worked out from the outline in
+    /// the app, because the outline is not the whole answer: an inverted
+    /// region is everything *but* its rings, a softened one has an edge
+    /// that is neither in nor out, and a painted one has no rings at
+    /// all. Coverage knows all three.
+    pub fn selection_covers(&self, x: f32, y: f32) -> bool {
+        let Some(mask) = self.doc.selection() else {
+            return false;
+        };
+        let (px, py) = (x.floor(), y.floor());
+        if px < 0.0 || py < 0.0 {
+            return false;
+        }
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let (px, py) = (px as u32, py as u32);
+        if px >= w || py >= h {
+            return false;
+        }
+        let clip = chitrakar_render::ClipRect {
+            x0: px,
+            y0: py,
+            x1: px + 1,
+            y1: py + 1,
+        };
+        chitrakar_render::mask_plane_over(&self.doc, mask, Transform::default(), clip, (w, h))
+            .first()
+            .is_some_and(|c| *c >= 0.5)
+    }
+
+    /// The outline of what is picked out, in page coordinates: rings,
+    /// each a closed loop. Empty where there is nothing picked out, or
+    /// where what is picked has no outline to give.
+    pub fn selection_outline(&self) -> Vec<Vec<[f32; 2]>> {
+        self.doc
+            .selection()
+            .and_then(|m| self.region_rings(m).ok())
+            .unwrap_or_default()
+    }
+
+    /// The page-space box round what is picked out.
+    pub fn selection_bounds(&self) -> Option<[f32; 4]> {
+        let rings = self.region_rings(self.doc.selection()?).ok()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        x0.is_finite().then_some([x0, y0, x1, y1])
+    }
+
+    /// Take the page in to what is picked out.
+    ///
+    /// The same crop the tool draws, with the region standing in for the
+    /// rectangle: which is the use for a marquee that wants no new
+    /// machinery at all, since a crop is a resize and the region already
+    /// knows the box it fits in.
+    pub fn crop_to_selection(&mut self) -> Result<(), EngineError> {
+        let Some([x0, y0, x1, y1]) = self.selection_bounds() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let page = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        let (x0, y0) = (x0.max(0.0).floor(), y0.max(0.0).floor());
+        let (x1, y1) = (x1.min(page.0).ceil(), y1.min(page.1).ceil());
+        let (w, h) = ((x1 - x0) as i64, (y1 - y0) as i64);
+        if w < 1 || h < 1 {
+            return Err(EngineError::BadCommand(
+                "what is picked out is not on the page".into(),
+            ));
+        }
+        self.apply_labeled(
+            Command::ResizeCanvas {
+                width: w as u32,
+                height: h as u32,
+                dx: -x0,
+                dy: -y0,
+            },
+            Some("Crop to what is picked".into()),
+        )
+    }
+
+    /// What is picked out, as a wash over what is not: a page-sized
+    /// PNG, clear where the region is and tinted where it is not.
+    ///
+    /// The ants say where the edge is and cannot say more than that. A
+    /// softened edge is neither in nor out; an inverted region is
+    /// everything *but* its rings, which the ants draw the same way
+    /// round either way; a region of a hundred rings is a thicket of
+    /// them. A wash says all three at a glance, which is what a
+    /// rubylith was for — and it is the coverage itself, so it cannot
+    /// disagree with what the region will do to a layer.
+    pub fn selection_veil(&self) -> Result<Vec<u8>, EngineError> {
+        let Some(region) = self.doc.selection() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        // Not at the page's own size. A wash is remade every time what
+        // is picked changes — which, while a marquee is being dragged,
+        // is every frame — and a twelve-megapixel page encoded that
+        // often would make the drag it exists to show crawl. It is an
+        // indicator rather than a mask: worked out at most a thousand
+        // pixels across and stretched over the page, which costs the
+        // same whatever size the page is.
+        const ACROSS: f32 = 1024.0;
+        let scale = (ACROSS / w.max(h) as f32).min(1.0);
+        let (w, h) = (
+            ((w as f32 * scale).ceil() as u32).max(1),
+            ((h as f32 * scale).ceil() as u32).max(1),
+        );
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let seen = Transform {
+            a: scale,
+            b: 0.0,
+            c: 0.0,
+            d: scale,
+            e: 0.0,
+            f: 0.0,
+        };
+        let cover = chitrakar_render::mask_plane_over(&self.doc, region, seen, clip, (w, h));
+        let mut rgba8 = Vec::with_capacity(cover.len() * 4);
+        for c in &cover {
+            // Straight bytes rather than premultiplied: a PNG carries a
+            // colour and its alpha side by side.
+            let a = ((1.0 - c).clamp(0.0, 1.0) * 0.55 * 255.0).round() as u8;
+            rgba8.extend_from_slice(&[220, 40, 40, a]);
+        }
+        chitrakar_codecs::encode_png(w, h, &rgba8)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The page inside what is picked out, as a PNG.
+    ///
+    /// The one way a region reaches other applications, which have no
+    /// idea what a region is and take a picture. The region's box, with
+    /// the region's own coverage in the alpha — so a lasso comes out in
+    /// the shape it was drawn in and a softened region comes out with
+    /// its edge, rather than either as the rectangle around it. A
+    /// softened region's box is grown to leave the fade somewhere to
+    /// go, the way a softened fill's is: cut at the outline, the
+    /// outward half of a fade is not there to fade.
+    pub fn selection_png(&self, scale: f32) -> Result<Vec<u8>, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let Some([x0, y0, x1, y1]) = self.selection_bounds() else {
+            return Err(EngineError::BadCommand(
+                "what is picked out has no outline".into(),
+            ));
+        };
+        let pad = region.feather * 3.0;
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: (x0 - pad).max(0.0).floor() as u32,
+            y0: (y0 - pad).max(0.0).floor() as u32,
+            x1: ((x1 + pad).min(pw as f32).ceil() as u32).min(pw),
+            y1: ((y1 + pad).min(ph as f32).ceil() as u32).min(ph),
+        };
+        if clip.is_empty() {
+            return Err(EngineError::BadCommand(
+                "what is picked out is not on the page".into(),
+            ));
+        }
+        // At a scale, the region's box is the region's box and the
+        // picture in it is drawn bigger — the same thing an export at
+        // twice does to the page, so an asset picked out of a design
+        // comes out at the size the screen it is for wants.
+        let scale = scale.clamp(0.05, 16.0);
+        let (bx, by) = (clip.x0 as f32, clip.y0 as f32);
+        let mut out = self.render_scaled(
+            scale,
+            Some([
+                bx,
+                by,
+                (clip.x1 - clip.x0) as f32,
+                (clip.y1 - clip.y0) as f32,
+            ]),
+        )?;
+        let (w, h) = (out.width, out.height);
+        // The coverage is asked for at that scale, in the space the
+        // picture was drawn in: the region carried through the export's
+        // own transform rather than worked out small and stretched.
+        let seen = Transform {
+            a: scale,
+            d: scale,
+            e: -bx * scale,
+            f: -by * scale,
+            ..Default::default()
+        };
+        let cover = chitrakar_render::mask_plane_over(
+            &self.doc,
+            &region,
+            seen,
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            (w, h),
+        );
+        for (p, c) in out.pixels.iter_mut().zip(&cover) {
+            // Premultiplied, so scaling the whole pixel by the coverage
+            // is the same as scaling the alpha alone.
+            *p = chitrakar_color::LinearRgba {
+                r: p.r * c,
+                g: p.g * c,
+                b: p.b * c,
+                a: p.a * c,
+            };
+        }
+        chitrakar_codecs::encode_png(w, h, &out.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Turn what is picked out into a shape layer of its own, in `color`.
+    ///
+    /// Filling a region in an editor that cuts pixels would put paint on
+    /// a layer. Here it makes the region into artwork — a shape with the
+    /// outline that was picked — which is a layer like any other
+    /// afterwards: moved, recoloured, given a gradient, taken away.
+    /// A lasso is the only way to draw some of these shapes at all.
+    pub fn fill_selection(
+        &mut self,
+        color: chitrakar_color::AuthoredColor,
+    ) -> Result<NodeId, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        let feather = region.feather;
+        // Inverted, the outline is the page's own rectangle with what
+        // was picked as a hole in it — which `region_rings` says, so
+        // filling the rest of the page needs nothing special here.
+        let rings = self.region_rings(&region)?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        if !x0.is_finite() {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        }
+        // Anchors sit relative to the layer's own origin, like every
+        // other path, so the transform carries the position.
+        let mut rings = rings
+            .into_iter()
+            .map(|ring| {
+                ring.into_iter()
+                    .map(|p| [p[0] - x0, p[1] - y0])
+                    .collect::<Vec<[f32; 2]>>()
+            })
+            .collect::<Vec<_>>()
+            .into_iter();
+        let points = rings.next().expect("checked above");
+        let mut node = Node::vector(
+            "Filled region",
+            VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rings.collect(),
+            },
+        );
+        node.transform = Transform::translation(x0, y0);
+        if feather > 0.0 {
+            // Three sigma out, which is where a Gaussian has nothing
+            // left to say, clamped to the page: the fade has nowhere
+            // else to go.
+            let pad = feather * 3.0;
+            let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+            let (bx0, by0) = ((x0 - pad).max(0.0), (y0 - pad).max(0.0));
+            let (bx1, by1) = ((x1 + pad).min(w), (y1 + pad).min(h));
+            node.kind = NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: (bx1 - bx0).max(0.0),
+                    height: (by1 - by0).max(0.0),
+                    radius: 0.0,
+                },
+                fill: None,
+                stroke: None,
+                gradient: None,
+            };
+            node.transform = Transform::translation(bx0, by0);
+        }
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(color);
+        }
+        // A softened region filled has to come out soft, or the fill is
+        // not what was picked. A shape has no softness of its own, so
+        // the softness is said the way it is always said here — with a
+        // mask, which is what a region turns into anyway.
+        //
+        // But a mask can only take coverage away, and the outward half
+        // of a fade lies *outside* the outline: laid over the region's
+        // own shape it would be cut off there, leaving an edge soft on
+        // the inside and sheer on the outside. So a softened fill is a
+        // rectangle with room for the fade, shaped entirely by the mask.
+        // A hard one keeps the outline it was picked with, which is a
+        // shape worth editing afterwards; a softened one's outline is
+        // the mask's business and a rectangle is the honest carrier.
+        let soft = (feather > 0.0)
+            .then(|| Self::carried_into(&region, Transform::default()))
+            .flatten();
+        let parent = self.doc.root();
+        let index = self.doc.children_of(parent)?.len();
+        let id = self.doc.peek_next_id();
+        let add = Command::AddNode {
+            parent,
+            index,
+            node: Box::new(node),
+        };
+        self.apply_labeled(
+            match soft {
+                None => add,
+                Some(mask) => Command::Batch(vec![
+                    add,
+                    Command::SetMask {
+                        id,
+                        mask: Some(Box::new(mask)),
+                    },
+                ]),
+            },
+            Some("Fill what is picked".into()),
+        )?;
+        Ok(id)
+    }
+
+    /// Set the opacity of several layers as one undo step.
+    pub fn set_opacity_of(&mut self, ids: &[NodeId], opacity: f32) -> Result<(), EngineError> {
+        self.set_each(ids, "Opacity", |id| Command::SetOpacity { id, opacity })
+    }
+
+    /// A layer's look, without its shape: what it is painted with, what
+    /// hangs off it, and how it sits on what is under it. Carried as
+    /// JSON so it outlives the document it was taken from, the way the
+    /// layer clipboard does.
+    pub fn copy_style(&self, id: NodeId) -> Result<String, EngineError> {
+        let node = self.doc.node(id)?;
+        let (fill, stroke, gradient) = match &node.kind {
+            chitrakar_doc::NodeKind::Vector {
+                fill,
+                stroke,
+                gradient,
+                ..
+            } => (fill.clone(), stroke.clone(), gradient.clone()),
+            chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill.clone()), None, None),
+            _ => (None, None, None),
+        };
+        let style = Style {
+            fill,
+            stroke,
+            gradient,
+            effects: node.effects.clone(),
+            opacity: node.opacity,
+            blend: node.blend,
+        };
+        serde_json::to_string(&style).map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Give that look to every layer named, in one entry.
+    ///
+    /// A layer takes what it can carry: a shape takes the fill, the
+    /// stroke and the gradient, a block of text takes the fill alone,
+    /// and everything takes the effects, the opacity and the blend.
+    /// Nothing takes another layer's shape — that is not what a style
+    /// is.
+    pub fn paste_style(&mut self, json: &str, ids: &[NodeId]) -> Result<(), EngineError> {
+        let style: Style =
+            serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        // A look taken from a layer that has nothing to paint with — an
+        // adjustment, a group, a placed photo — says nothing about how
+        // to paint, so it leaves the target's own paint alone rather
+        // than stripping it. A shape that really is painted with
+        // nothing but a stroke still clears a fill, which is the answer
+        // that was asked for.
+        let paints = style.fill.is_some() || style.stroke.is_some() || style.gradient.is_some();
+        let mut cmds = Vec::new();
+        for &id in ids {
+            let node = self.doc.node(id)?;
+            match &node.kind {
+                chitrakar_doc::NodeKind::Vector { shape, .. } if paints => {
+                    cmds.push(Command::SetKind {
+                        id,
+                        kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                            shape: shape.clone(),
+                            fill: style.fill.clone(),
+                            stroke: style.stroke.clone(),
+                            gradient: style.gradient.clone(),
+                        }),
+                    });
+                }
+                chitrakar_doc::NodeKind::Text(spec) if paints => {
+                    if let Some(ref fill) = style.fill {
+                        let mut spec = spec.clone();
+                        spec.fill = fill.clone();
+                        cmds.push(Command::SetKind {
+                            id,
+                            kind: Box::new(chitrakar_doc::NodeKind::Text(spec)),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            cmds.push(Command::SetEffects {
+                id,
+                effects: style.effects.clone(),
+            });
+            cmds.push(Command::SetOpacity {
+                id,
+                opacity: style.opacity,
+            });
+            cmds.push(Command::SetBlendMode {
+                id,
+                blend: style.blend,
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        let label = if ids.len() == 1 {
+            "Paste style".to_string()
+        } else {
+            format!("Paste style on {} layers", ids.len())
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// Set the blend mode of several layers as one undo step.
+    pub fn set_blend_of(
+        &mut self,
+        ids: &[NodeId],
+        blend: chitrakar_doc::BlendMode,
+    ) -> Result<(), EngineError> {
+        self.set_each(ids, "Blend", |id| Command::SetBlendMode { id, blend })
+    }
+
+    /// The same edit on every layer named, in one entry called after
+    /// what was changed and what it was changed on.
+    fn set_each(
+        &mut self,
+        ids: &[NodeId],
+        what: &str,
+        make: impl Fn(NodeId) -> Command,
+    ) -> Result<(), EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing to change".into()));
+        }
+        let label = if ids.len() == 1 {
+            format!("{what} of {}", self.doc.node(ids[0])?.name)
+        } else {
+            format!("{what} of {} layers", ids.len())
+        };
+        let cmds = ids.iter().map(|id| make(*id)).collect();
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// Mirror layers about their shared box — left for right, or top for
+    /// bottom — as one undo step. The box is the union of the picked
+    /// layers' document-space bounds, so a pair flips as a pair and a
+    /// single layer flips in place. A layer's transform is written in its
+    /// parent's space, so the document-space mirror is carried through
+    /// the ancestors and back.
+    pub fn flip_nodes(&mut self, ids: &[NodeId], horizontal: bool) -> Result<(), EngineError> {
+        let ids = &self.without_nested(ids)[..];
+        let boxes: Vec<(NodeId, [f32; 4])> = ids
+            .iter()
+            .filter_map(|id| self.bounds_of(*id).map(|b| (*id, b)))
+            .collect();
+        if boxes.is_empty() {
+            return Err(EngineError::BadCommand("nothing to flip".into()));
+        }
+        let union = boxes
+            .iter()
+            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |acc, (_, b)| {
+                [
+                    acc[0].min(b[0]),
+                    acc[1].min(b[1]),
+                    acc[2].max(b[0] + b[2]),
+                    acc[3].max(b[1] + b[3]),
+                ]
+            });
+        let mirror = if horizontal {
+            Transform {
+                a: -1.0,
+                e: union[0] + union[2],
+                ..Default::default()
+            }
+        } else {
+            Transform {
+                d: -1.0,
+                f: union[1] + union[3],
+                ..Default::default()
+            }
+        };
+        let mut cmds = Vec::new();
+        for (id, _) in boxes {
+            // The node draws through A·t; it should draw through M·A·t,
+            // so its own transform becomes A⁻¹·M·A·t.
+            let a = chitrakar_render::ancestor_space(&self.doc, id);
+            let det = a.a * a.d - a.b * a.c;
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let inv = Transform {
+                a: a.d / det,
+                b: -a.b / det,
+                c: -a.c / det,
+                d: a.a / det,
+                e: (a.c * a.f - a.d * a.e) / det,
+                f: (a.b * a.e - a.a * a.f) / det,
+            };
+            let t = self.doc.node(id)?.transform;
+            cmds.push(Command::SetTransform {
+                id,
+                transform: inv.compose(mirror).compose(a).compose(t),
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        let label = if horizontal {
+            "Flip horizontal"
+        } else {
+            "Flip vertical"
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label.to_string()))
+    }
+
+    /// Set a text block along a shape layer's outline: the shape's
+    /// geometry is copied into the block's own space, so the block stands
+    /// alone afterwards and the shape layer can go or stay. One undo step.
+    pub fn text_along(&mut self, text: NodeId, shape: NodeId) -> Result<(), EngineError> {
+        let NodeKind::Text(spec) = &self.doc.node(text)?.kind else {
+            return Err(EngineError::BadCommand(
+                "only text goes along a path".into(),
+            ));
+        };
+        let NodeKind::Vector { shape: guide, .. } = &self.doc.node(shape)?.kind else {
+            return Err(EngineError::BadCommand("the guide must be a shape".into()));
+        };
+        // Shape space → document → text space.
+        let to_doc = chitrakar_render::ancestor_space(&self.doc, shape)
+            .compose(self.doc.node(shape)?.transform);
+        let text_to_doc = chitrakar_render::ancestor_space(&self.doc, text)
+            .compose(self.doc.node(text)?.transform);
+        let d = text_to_doc.a * text_to_doc.d - text_to_doc.b * text_to_doc.c;
+        if d.abs() < 1e-9 {
+            return Err(EngineError::BadCommand("the text block has no size".into()));
+        }
+        let t = text_to_doc;
+        let from_doc = Transform {
+            a: t.d / d,
+            b: -t.b / d,
+            c: -t.c / d,
+            d: t.a / d,
+            e: (t.c * t.f - t.d * t.e) / d,
+            f: (t.b * t.e - t.a * t.f) / d,
+        };
+        let m = from_doc.compose(to_doc);
+        let map = |p: [f32; 2]| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+        let map_offset = |p: [f32; 2]| [m.a * p[0] + m.c * p[1], m.b * p[0] + m.d * p[1]];
+        let along = match guide {
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed,
+                smooth,
+                handles,
+                ..
+            } => chitrakar_doc::VectorShape::Path {
+                points: points.iter().map(|p| map(*p)).collect(),
+                closed: *closed,
+                smooth: *smooth,
+                handles: handles
+                    .iter()
+                    .map(|h| {
+                        let i = map_offset([h[0], h[1]]);
+                        let o = map_offset([h[2], h[3]]);
+                        [i[0], i[1], o[0], o[1]]
+                    })
+                    .collect(),
+                subpaths: Vec::new(),
+            },
+            other => chitrakar_doc::VectorShape::Path {
+                points: chitrakar_render::shape_rings(other)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(map)
+                    .collect(),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        };
+        let mut spec = spec.clone();
+        spec.along = Some(along);
+        spec.along_offset = 0.0;
+        self.apply_labeled(
+            Command::SetKind {
+                id: text,
+                kind: Box::new(NodeKind::Text(spec)),
+            },
+            Some("Text on path".to_string()),
+        )
+    }
+
+    /// Dissolve a group: its children move to its position in the parent,
+    /// the empty group is removed. One undo step.
+    ///
+    /// A group is not only a place to put layers — it is also a thing that
+    /// can be given a transform, an opacity, a blend mode, a mask, effects,
+    /// or a clip to the layer below. Some of that can be handed to the
+    /// children on the way out and some cannot, and the difference is not a
+    /// matter of taste: a group is drawn by compositing its children onto a
+    /// surface of its own and then treating that surface as one layer. Being
+    /// hidden or locked means the same thing said of each child; being
+    /// half-transparent does not, because two children overlapping inside a
+    /// 50% group show one edge and at 50% each show two. So the ones that
+    /// carry are carried, and the ones that do not are said out loud rather
+    /// than dropped on the floor — a layer that comes out of a group looking
+    /// different from how it went in is the kind of thing that gets noticed
+    /// three edits later, with no way back but undo.
+    pub fn ungroup_node(&mut self, id: NodeId) -> Result<(), EngineError> {
+        if !matches!(self.doc.node(id)?.kind, NodeKind::Group) {
+            return Err(EngineError::BadCommand("not a group".into()));
+        }
+        let label = format!("Ungroup {}", self.doc.node(id)?.name);
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("cannot ungroup the root".into()))?;
+        let position = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|s| *s == id)
+            .unwrap();
+        let children = self.doc.children_of(id)?.to_vec();
+        {
+            // What this group says about itself as a whole, and so has
+            // nobody inside to say it instead.
+            let g = self.doc.node(id)?;
+            let mut whole: Vec<&str> = Vec::new();
+            if g.opacity < 1.0 {
+                whole.push("an opacity of its own");
+            }
+            if g.blend != chitrakar_doc::BlendMode::Normal {
+                whole.push("a blend mode");
+            }
+            if g.mask.is_some() {
+                whole.push("a mask");
+            }
+            if !g.effects.is_empty() {
+                whole.push("effects");
+            }
+            // The bottom layer of a parent has nothing under it to be
+            // confined to, so the flag is ignored there — and refusing
+            // over a flag that is doing nothing would be refusing over
+            // nothing. Above the bottom it is real: the children would
+            // each end up clipped to the layer under the group rather
+            // than to whatever they were clipped to inside it.
+            if g.clipped && position > 0 {
+                whole.push("a clip to the layer below");
+            }
+            if !whole.is_empty() {
+                let list = match whole.len() {
+                    1 => whole[0].to_string(),
+                    n => format!("{} and {}", whole[..n - 1].join(", "), whole[n - 1]),
+                };
+                return Err(EngineError::BadCommand(format!(
+                    "this group carries {list}, which describes the group as one \
+                     layer — there is nothing inside it to hand that to. Clear it \
+                     first, or leave the group as it is."
+                )));
+            }
+        }
+        // The group's transform reached its children while they were inside
+        // it; once they leave, each has to carry that part itself or the
+        // whole group would jump back to where it was before it was moved.
+        let group_t = self.doc.node(id)?.transform;
+        // Hidden and locked, on the other hand, mean exactly the same
+        // thing said of every child, so they come out with them: a
+        // hidden group whose layers reappear on being dissolved is the
+        // picture changing behind the user's back.
+        let hidden = !self.doc.node(id)?.visible;
+        let locked = self.doc.node(id)?.locked;
+        let mut cmds: Vec<Command> = Vec::new();
+        for (i, child) in children.iter().enumerate() {
+            if group_t != Transform::default() {
+                let kid = self.doc.node(*child)?;
+                cmds.push(Command::SetTransform {
+                    id: *child,
+                    transform: group_t.compose(kid.transform),
+                });
+                // A mask is written in the space its owner is *placed*
+                // in, so it does not travel with the layer's own
+                // transform and has to be taken along by hand. Left
+                // behind, it goes on covering the part of the page it
+                // used to — which for a layer that has moved out from
+                // under it is the whole layer. The same for an effect's
+                // offset, which is a vector in that space: a group
+                // turned a quarter round and then dissolved would light
+                // every layer in it from a new direction.
+                if let Some(mask) = &kid.mask {
+                    cmds.push(Command::SetMask {
+                        id: *child,
+                        mask: Some(Box::new(mask.carried_through(group_t))),
+                    });
+                }
+                if !kid.effects.is_empty() {
+                    cmds.push(Command::SetEffects {
+                        id: *child,
+                        effects: kid
+                            .effects
+                            .iter()
+                            .map(|e| e.carried_through(group_t))
+                            .collect(),
+                    });
+                }
+            }
+            if hidden {
+                cmds.push(Command::SetVisible {
+                    id: *child,
+                    visible: false,
+                });
+            }
+            if locked {
+                cmds.push(Command::SetLocked {
+                    id: *child,
+                    locked: true,
+                });
+            }
+            cmds.push(Command::MoveNode {
+                id: *child,
+                parent,
+                index: position + i,
+            });
+        }
+        cmds.push(Command::RemoveNode { id });
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// Present the current document state, re-rendering only what changed
+    /// since the last call. Returns the cached surface and the region that
+    /// was just recomputed (None if the cache was already clean).
+    pub fn render_cached(&mut self) -> Result<(&Surface, Option<ClipRect>), EngineError> {
+        let view = self.view_transform();
+        let scale = self.view_scale;
+        let (w, h) = self.present_size();
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        if self.cache.as_ref().map(|c| (c.width, c.height)) != Some((w, h)) {
+            self.cache = Some(Surface::new(w, h));
+            self.scratch = None;
+            self.stale_all = true;
+        }
+        // A layer being shown on its own can go — by an undo as easily
+        // as by a delete — and a view of nothing is not what anybody
+        // asked for, so the page comes back.
+        if matches!(self.showing, chitrakar_render::Showing::Alone(id) if self.doc.node(id).is_err())
+        {
+            self.showing = chitrakar_render::Showing::Everything;
+            self.stale_all = true;
+        }
+        let doc_clip = self.stale.take();
+        let everything = std::mem::take(&mut self.stale_all);
+        match (everything, doc_clip) {
+            (false, None) => Ok((self.cache.as_ref().unwrap(), None)),
+            (everything, doc_clip) => {
+                // The dirty region arrives in document pixels; the cache is
+                // kept in the view's, so carry it through the view and
+                // widen it outwards to whole pixels rather than trusting a
+                // rounded edge.
+                let clip = if everything {
+                    full
+                } else {
+                    let d = doc_clip.unwrap();
+                    ClipRect::from_float(
+                        d.x0 as f32 * scale + view.e,
+                        d.y0 as f32 * scale + view.f,
+                        d.x1 as f32 * scale + view.e,
+                        d.y1 as f32 * scale + view.f,
+                        w,
+                        h,
+                    )
+                    .intersect(full)
+                };
+                if clip.is_empty() {
+                    // The change happened off-screen. Nothing to present,
+                    // but the cache is still whole.
+                    return Ok((self.cache.as_ref().unwrap(), None));
+                }
+                // Filters sample neighbors: a region render is only correct
+                // deeper than the filter stack's reach inside its own edge.
+                // So compute a padded region in scratch and copy back just
+                // the exact region — the padding ring, whose values clamp
+                // against stale surroundings, is discarded. The reach is a
+                // document-space figure, so it scales with the view too.
+                let pad = (chitrakar_render::filter_reach(&self.doc) as f32 * scale).ceil() as u32;
+                // Less than the page: one layer on its own, or the
+                // picture under the work. Neither has a filter stack
+                // left under it to reach across, so neither wants the
+                // padded region a filter makes necessary.
+                if self.showing != chitrakar_render::Showing::Everything {
+                    let cache = self.cache.as_mut().unwrap();
+                    chitrakar_render::render_showing_at(
+                        &self.doc,
+                        cache,
+                        clip,
+                        view,
+                        self.showing,
+                    )?;
+                    self.pixels_recomputed += clip.area();
+                } else if pad == 0 {
+                    let cache = self.cache.as_mut().unwrap();
+                    chitrakar_render::render_region_at(&self.doc, cache, clip, view)?;
+                    self.pixels_recomputed += clip.area();
+                } else {
+                    let compute = ClipRect {
+                        x0: clip.x0.saturating_sub(pad),
+                        y0: clip.y0.saturating_sub(pad),
+                        x1: (clip.x1 + pad).min(w),
+                        y1: (clip.y1 + pad).min(h),
+                    };
+                    let scratch = self.scratch.get_or_insert_with(|| Surface::new(w, h));
+                    chitrakar_render::render_region_at(&self.doc, scratch, compute, view)?;
+                    self.cache.as_mut().unwrap().copy_region_from(scratch, clip);
+                    self.pixels_recomputed += compute.area();
+                }
+                Ok((self.cache.as_ref().unwrap(), Some(clip)))
+            }
+        }
+    }
+
+    /// The document-to-surface mapping the cache is kept in.
+    fn view_transform(&self) -> Transform {
+        Transform {
+            a: self.view_scale,
+            d: self.view_scale,
+            e: self.view_origin.0,
+            f: self.view_origin.1,
+            ..Default::default()
+        }
+    }
+
+    /// Size of the surface [`render_cached`](Self::render_cached) presents:
+    /// the viewport when one has been set, and otherwise the whole document
+    /// at the view's resolution.
+    pub fn present_size(&self) -> (u32, u32) {
+        match self.viewport {
+            Some(size) => size,
+            None => {
+                let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+                (
+                    ((w as f32 * self.view_scale).round() as u32).max(1),
+                    ((h as f32 * self.view_scale).round() as u32).max(1),
+                )
+            }
+        }
+    }
+
+    /// Present only what a viewport of `(width, height)` device pixels can
+    /// see, with the document's origin at `(x, y)` within it and `scale`
+    /// device pixels to the document pixel.
+    ///
+    /// This is what stops a big document costing a big render: an A4 page
+    /// at 300dpi is nine megapixels whatever the screen is, and composing
+    /// all of it to show a screenful was most of the cost of showing
+    /// anything. Passing a viewport also lifts the resolution cap, since
+    /// the surface no longer grows with the zoom.
+    pub fn set_viewport(&mut self, scale: f32, x: f32, y: f32, width: u32, height: u32) {
+        let scale = scale.clamp(0.01, 64.0);
+        // A viewport is a surface, and a surface has to be one the
+        // machine can hold: the same rule a page is held to, since the
+        // window it stands for is measured in device pixels and this
+        // side of the boundary has only the caller's word for it.
+        let side = chitrakar_doc::MAX_CANVAS_SIDE;
+        let (mut vw, mut vh) = (width.clamp(1, side), height.clamp(1, side));
+        while !chitrakar_doc::canvas_fits(vw, vh) {
+            vw = (vw / 2).max(1);
+            vh = (vh / 2).max(1);
+        }
+        let size = (vw, vh);
+        let same = (scale - self.view_scale).abs() < 1e-4
+            && (x - self.view_origin.0).abs() < 1e-3
+            && (y - self.view_origin.1).abs() < 1e-3
+            && self.viewport == Some(size);
+        if same {
+            return;
+        }
+        self.view_scale = scale;
+        self.view_origin = (x, y);
+        self.viewport = Some(size);
+        // Everything the surface shows has moved; none of it can be reused,
+        // and that includes the part beside the page, which a document-space
+        // dirty region has no way to name.
+        self.cache = None;
+        self.scratch = None;
+        self.stale = None;
+        self.stale_all = true;
+    }
+
+    pub fn view_scale(&self) -> f32 {
+        self.view_scale
+    }
+
+    /// Render the current document state from scratch (export path; the
+    /// interactive path is [`render_cached`](Self::render_cached)).
+    pub fn render(&self) -> Result<Surface, EngineError> {
+        Ok(chitrakar_render::render(&self.doc)?)
+    }
+
+    /// Export the composite as a CMYK TIFF separated through — and with —
+    /// the document's press profile. Requires a loaded profile.
+    pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, EngineError> {
+        let Some(icc) = self.doc.cmyk_profile_bytes() else {
+            return Err(EngineError::BadCommand(
+                "CMYK TIFF export needs a press profile: load an ICC first".into(),
+            ));
+        };
+        let surface = self.render()?;
+        chitrakar_codecs::export_cmyk_tiff(&surface.pixels, surface.width, surface.height, icc)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Export a one-page PDF: live vectors and images where PDF can carry
+    /// them, this renderer's pixels where it cannot. With a press profile
+    /// loaded the page is written in ink and carries that profile;
+    /// otherwise it is sRGB.
+    pub fn export_pdf(&self) -> Result<Vec<u8>, EngineError> {
+        chitrakar_codecs::export_pdf_document(&self.doc)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Export the document's frames as the pages of one PDF, in the order
+    /// they sit on it: each page its frame's own size, showing that frame
+    /// and nothing of the document around it. A document with no frames
+    /// exports as the one page it always did.
+    pub fn export_pdf_frames(&self) -> Result<Vec<u8>, EngineError> {
+        chitrakar_codecs::export_pdf_frames(&self.doc)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Export vector layers (and embedded rasters/text) as SVG.
+    pub fn export_svg(&self) -> Result<String, EngineError> {
+        Ok(chitrakar_codecs::export_svg(&self.doc)?)
+    }
+
+    /// Render and encode as PNG — used by export and tests.
+    pub fn render_png(&self) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render()?;
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Render a region of the document — the whole page when `region` is
+    /// None, otherwise `[x, y, w, h]` in document pixels — at `scale`
+    /// pixels to the document pixel. This is what an export at 2x or of the
+    /// selection is: the same root affine the viewport uses, aimed at a
+    /// surface the size of what is wanted, so nothing is rendered and then
+    /// cut down.
+    pub fn render_scaled(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Surface, EngineError> {
+        let scale = scale.clamp(0.05, 16.0);
+        let [x, y, w, h] = region.unwrap_or([
+            0.0,
+            0.0,
+            self.doc.meta.width as f32,
+            self.doc.meta.height as f32,
+        ]);
+        if !(w > 0.0 && h > 0.0) {
+            return Err(EngineError::BadCommand("the export region is empty".into()));
+        }
+        let (pw, ph) = (
+            (w * scale).round().max(1.0) as u32,
+            (h * scale).round().max(1.0) as u32,
+        );
+        // Said no to rather than attempted: an export is a surface, and
+        // a surface too big to hold is an allocation that fails, which
+        // ends the process rather than the export. The region comes
+        // from the caller and is not held to the page — a layer hanging
+        // off the edge exports the part that hangs — so its size is the
+        // thing to be sure of.
+        if !chitrakar_doc::canvas_fits(pw, ph) {
+            return Err(EngineError::BadCommand(format!(
+                "an export of {pw}x{ph} is larger than can be made"
+            )));
+        }
+        let mut surface = Surface::new(pw, ph);
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: pw,
+            y1: ph,
+        };
+        chitrakar_render::render_region_at(
+            &self.doc,
+            &mut surface,
+            full,
+            Transform {
+                a: scale,
+                d: scale,
+                e: -x * scale,
+                f: -y * scale,
+                ..Default::default()
+            },
+        )?;
+        Ok(surface)
+    }
+
+    /// PNG of a region at a scale; see [`render_scaled`](Self::render_scaled).
+    pub fn render_png_at(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render_scaled(scale, region)?;
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// JPEG of a region at a scale; transparency flattens onto white.
+    pub fn export_jpeg_at(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+        quality: u8,
+    ) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render_scaled(scale, region)?;
+        chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Render and encode as JPEG. Transparency flattens onto white, since
+    /// JPEG carries no alpha.
+    pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
+        let surface = self.render()?;
+        chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// What one axis of a resize does to a layer, as a scale and a shift in
+    /// the frame's own coordinates: `from`..`to` is the layer's span on that
+    /// axis and `change` is how much longer the frame just became.
+    fn axis(pin: chitrakar_doc::Pin, from: f32, to: f32, change: f32) -> (f32, f32) {
+        use chitrakar_doc::Pin;
+        let span = to - from;
+        match pin {
+            // Its distance from the start edge is its own coordinate, which
+            // nothing here touches.
+            Pin::Start => (1.0, 0.0),
+            Pin::End => (1.0, change),
+            Pin::Middle => (1.0, change / 2.0),
+            // Both distances kept, so the layer takes up the difference. A
+            // layer with no width on this axis has nothing to stretch and is
+            // left where a start-pinned one would be.
+            Pin::Stretch if span > 1e-6 => ((span + change).max(1e-3) / span, 0.0),
+            Pin::Stretch => (1.0, 0.0),
+        }
+    }
+
+    /// Every layer in the order the page is painted in — a parent before
+    /// what it holds, and each layer before the ones drawn over it. What
+    /// "everything below this layer" means.
+    fn painter_order(doc: &Document, group: NodeId, out: &mut Vec<NodeId>) {
+        let Ok(children) = doc.children_of(group) else {
+            return;
+        };
+        for &id in children {
+            out.push(id);
+            if doc
+                .node(id)
+                .map(|n| n.kind.holds_children())
+                .unwrap_or(false)
+            {
+                Self::painter_order(doc, id, out);
+            }
+        }
+    }
+
+    /// Flattened layer tree (depth-first, topmost layer first) for the UI's
+    /// layers panel.
+    pub fn layers(&self) -> Vec<LayerInfo> {
+        let mut out = Vec::new();
+        self.collect_layers(self.doc.root(), 0, &mut out);
+        out
+    }
+
+    fn collect_layers(&self, group: NodeId, depth: u32, out: &mut Vec<LayerInfo>) {
+        let Ok(children) = self.doc.children_of(group) else {
+            return;
+        };
+        // Children are stored bottom-to-top; panels list top-to-bottom.
+        for (index, &id) in children.iter().enumerate().rev() {
+            let Ok(node) = self.doc.node(id) else {
+                continue;
+            };
+            out.push(LayerInfo {
+                id: id.0,
+                name: node.name.clone(),
+                kind: match &node.kind {
+                    NodeKind::Group => "group",
+                    NodeKind::Artboard { .. } => "artboard",
+                    NodeKind::Vector { .. } => "vector",
+                    NodeKind::Raster(_) => "raster",
+                    NodeKind::Adjustment(_) => "adjustment",
+                    NodeKind::Filter(_) => "filter",
+                    NodeKind::Text(_) => "text",
+                    NodeKind::Paint { .. } => "paint",
+                    NodeKind::Clone { .. } => "clone",
+                    NodeKind::Instance { .. } => "instance",
+                },
+                visible: node.visible,
+                opacity: node.opacity,
+                blend: node.blend,
+                has_mask: node.mask.is_some(),
+                painted_mask: matches!(
+                    node.mask.as_ref().map(|m| &m.kind),
+                    Some(chitrakar_doc::MaskKind::Painted { .. })
+                ),
+                has_effects: !node.effects.is_empty(),
+                copies: match node.kind {
+                    NodeKind::Instance { of, .. } => of.0,
+                    _ => 0,
+                },
+                locked: node.locked,
+                clipped: node.clipped && index > 0,
+                pinned: node.pinned,
+                depth,
+                parent: group.0,
+                index,
+                sibling_count: children.len(),
+            });
+            if node.kind.holds_children() {
+                self.collect_layers(id, depth + 1, out);
+            }
+        }
+    }
+
+    /// Decode image bytes, pool them as a resource, and add a raster object
+    /// referencing them at the top of the root group (one undo step).
+    pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
+        let img =
+            chitrakar_codecs::decode(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let (width, height) = (img.width, img.height);
+        let resource_id = self.doc.add_resource(width, height, img.rgba8);
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        let id = self.doc.peek_next_id();
+        let mut node = Node::raster(
+            name,
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width,
+                height,
+            },
+        );
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        // A picture put into a document with nothing in it and nothing
+        // behind it is a picture being *opened*, and a photograph opened
+        // on somebody else's page size is the wrong answer to that: the
+        // page takes the picture's own size. Nothing is disturbed by it,
+        // since there was nothing there — which is exactly the condition
+        // being asked, rather than "the page looks empty".
+        let opening = index == 0
+            && self.undo.is_empty()
+            && chitrakar_doc::canvas_fits(width, height)
+            && (width, height) != (pw, ph);
+        if opening {
+            return self
+                .apply_labeled(
+                    Command::Batch(vec![
+                        Command::ResizeCanvas {
+                            width,
+                            height,
+                            dx: 0.0,
+                            dy: 0.0,
+                        },
+                        Command::AddNode {
+                            parent: root,
+                            index,
+                            node: Box::new(node),
+                        },
+                    ]),
+                    Some(format!("Open {name}")),
+                )
+                .map(|()| id);
+        }
+        // Otherwise it is being placed on a page that is already
+        // somebody's: laid down whole and in the middle, taken down to
+        // fit if it is bigger than the page. At its own size it would
+        // hang off three sides and show a corner of itself, which is
+        // not a picture anybody placed.
+        let fit = (pw as f32 / width as f32)
+            .min(ph as f32 / height as f32)
+            .min(1.0);
+        node.transform = Transform {
+            a: fit,
+            d: fit,
+            e: (pw as f32 - width as f32 * fit) / 2.0,
+            f: (ph as f32 - height as f32 * fit) / 2.0,
+            ..Default::default()
+        };
+        self.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })?;
+        Ok(id)
+    }
+
+    /// Bring an SVG in as a group of shape layers named after the file,
+    /// on top of the stack, as one undo step. Returns the group's id.
+    pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
+        let imported = chitrakar_codecs::import_svg(bytes).map_err(EngineError::BadCommand)?;
+        if imported.shapes.is_empty() {
+            return Err(EngineError::BadCommand(
+                "the SVG holds nothing to draw".into(),
+            ));
+        }
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        let group = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(Node::group(name)),
+        }];
+        for (i, shape) in imported.shapes.into_iter().enumerate() {
+            cmds.push(Command::AddNode {
+                parent: group,
+                index: i,
+                node: Box::new(shape),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Place {name}")))?;
+        Ok(group)
+    }
+
+    /// Make a font available to every text block that names it, for the
+    /// rest of the process. Names are the ones the Text panel offers.
+    pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), EngineError> {
+        chitrakar_render::text::register_font(name, bytes).map_err(EngineError::BadCommand)
+    }
+
+    pub fn font_names() -> Vec<String> {
+        chitrakar_render::text::font_names()
+    }
+
+    /// The node the last command — an undo or redo included — touched, if
+    /// it still exists, so a selection can follow it.
+    pub fn last_touched_node(&self) -> Option<NodeId> {
+        self.last_touched.filter(|id| self.doc.node(*id).is_ok())
+    }
+
+    /// The colour the page shows at a document point, as straight sRGB
+    /// with alpha — what an eyedropper picks up. Nothing off the page.
+    /// Composited for that pixel alone rather than read from the frame,
+    /// so it is the document's colour whatever the view is doing.
+    pub fn color_at(&self, x: f32, y: f32) -> Option<[u8; 4]> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        if !(x >= 0.0 && y >= 0.0 && x < w && y < h) {
+            return None;
+        }
+        let mut surface = Surface::new(1, 1);
+        chitrakar_render::render_region_at(
+            &self.doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 1,
+                y1: 1,
+            },
+            Transform::translation(-x.floor(), -y.floor()),
+        )
+        .ok()?;
+        Some(surface.get(0, 0).to_srgb8())
+    }
+
+    /// Topmost clickable node at a document-space point.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        chitrakar_render::hit_test(&self.doc, x, y).ok().flatten()
+    }
+
+    pub fn transform_of(&self, id: NodeId) -> Result<Transform, EngineError> {
+        Ok(self.doc.node(id)?.transform)
+    }
+
+    /// A node's kind (shape, fill, stroke, adjustment parameters…) as JSON —
+    /// what a properties panel edits and sends back via `SetKind`.
+    pub fn kind_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.kind)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A node's mask as JSON (`null` when unmasked) — edited via `SetMask`.
+    pub fn mask_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.mask)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Change the page's size, shifting top-level layers by `(dx, dy)` so
+    /// the picture stays where it was. Cropping to a rectangle is this with
+    /// the rectangle's size and the negative of its origin.
+    pub fn resize_canvas(
+        &mut self,
+        width: u32,
+        height: u32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), EngineError> {
+        self.apply(Command::ResizeCanvas {
+            width,
+            height,
+            dx,
+            dy,
+        })
+    }
+
+    /// Turn the page a quarter of the way round, `quarters` times
+    /// clockwise, carrying everything on it round with it.
+    pub fn turn_canvas(&mut self, quarters: u8) -> Result<(), EngineError> {
+        self.apply(Command::TurnCanvas { quarters })
+    }
+
+    /// The page a straighten by `degrees` would leave: the largest
+    /// rectangle of the page's own proportions that still fits inside it
+    /// once turned, which is where the crop that follows a straighten
+    /// stops.
+    pub fn straighten_size(&self, degrees: f32) -> (u32, u32) {
+        chitrakar_doc::straightened_size(self.doc.meta.width, self.doc.meta.height, degrees)
+    }
+
+    /// Turn the page by any angle about its own middle and crop it back
+    /// to its own proportions — what a crooked horizon is put right with.
+    pub fn straighten(&mut self, degrees: f32) -> Result<(), EngineError> {
+        let (width, height) = self.straighten_size(degrees);
+        self.apply(Command::StraightenCanvas {
+            degrees,
+            width,
+            height,
+        })
+    }
+
+    /// Mirror the page across its own middle, left to right when
+    /// `across_x` and top to bottom when not.
+    pub fn mirror_canvas(&mut self, across_x: bool) -> Result<(), EngineError> {
+        self.apply(Command::MirrorCanvas { across_x })
+    }
+
+    /// Force the next present to recompute the whole canvas. The surface
+    /// the frame is copied into lives outside the engine, so when that is
+    /// replaced — a resized canvas element, say — the engine has to be
+    /// told that its idea of what is already on screen is gone.
+    pub fn invalidate(&mut self) {
+        self.stale_all = true;
+    }
+
+    /// The document's guides as JSON.
+    pub fn guides_json(&self) -> String {
+        serde_json::to_string(self.doc.guides()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// The document's palette as JSON.
+    pub fn swatches_json(&self) -> String {
+        serde_json::to_string(self.doc.swatches()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// A node's effect list as JSON.
+    pub fn effects_json(&self, id: NodeId) -> Result<String, EngineError> {
+        serde_json::to_string(&self.doc.node(id)?.effects)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Doc-space bounds of a node as `[x, y, w, h]`, if it has any.
+    pub fn bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
+        // The layer's own box, not what its effects can reach: this is the
+        // number the panel shows, the box alignment lines up, and the
+        // lines snapping catches on.
+        match chitrakar_render::node_visual_bounds(&self.doc, id).ok()? {
+            Bounds::None => None,
+            Bounds::Everything => Some([
+                0.0,
+                0.0,
+                self.doc.meta.width as f32,
+                self.doc.meta.height as f32,
+            ]),
+            Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1 - x0, y1 - y0]),
+        }
+    }
+
+    /// The transform carrying a node's parent space into document space —
+    /// identity for a top-level layer, the enclosing groups' transforms for
+    /// a nested one. A node's own transform is written against this, so a
+    /// drag has to convert the cursor through it.
+    pub fn parent_space_of(&self, id: NodeId) -> [f32; 6] {
+        let t = chitrakar_render::ancestor_space(&self.doc, id);
+        [t.a, t.b, t.c, t.d, t.e, t.f]
+    }
+
+    /// A node's bounds in its own space, `[x0, y0, x1, y1]`, for drawing a
+    /// selection box that turns with the layer.
+    pub fn local_bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
+        chitrakar_render::local_bounds_of(&self.doc, id)
+            .ok()
+            .flatten()
+    }
+
+    /// The document's resolution, which sizes its page in print.
+    pub fn dpi(&self) -> f32 {
+        self.doc.meta.dpi
+    }
+
+    /// Set the resolution. Not a command: like the press profile, it is
+    /// document setup, not an edit — nothing on the page moves.
+    pub fn set_dpi(&mut self, dpi: f32) -> Result<(), EngineError> {
+        if !(dpi.is_finite() && (1.0..=2400.0).contains(&dpi)) {
+            return Err(EngineError::BadCommand(format!(
+                "resolution {dpi} is out of range (1..=2400 dpi)"
+            )));
+        }
+        self.doc.meta.dpi = dpi;
+        Ok(())
+    }
+
+    /// Set the CMYK press profile authored CMYK colors render through.
+    /// Not a command: like resources, it is document setup, not an edit.
+    pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), EngineError> {
+        self.doc
+            .set_cmyk_profile(icc)
+            .map_err(EngineError::BadCommand)?;
+        // An active proof must follow the new profile; otherwise rebuild lazily.
+        self.proof_cms = if self.soft_proof {
+            Some(
+                chitrakar_color::cms::ProofCms::new(self.doc.cmyk_profile_bytes().unwrap())
+                    .map_err(EngineError::BadCommand)?,
+            )
+        } else {
+            None
+        };
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    /// Toggle display soft-proofing through the document's press profile.
+    /// Fails when proofing is requested without a loaded profile.
+    /// Show one layer on its own, or `None` for the page again.
+    ///
+    /// A setting of the view rather than an edit: nothing about the
+    /// document changes, so nothing goes into the history or the file,
+    /// and the page comes back exactly as it was when it is let go of.
+    /// A layer that has gone takes the setting with it, since a view of
+    /// nothing is not what anybody asked for.
+    pub fn set_solo(&mut self, id: Option<NodeId>) -> bool {
+        self.show(match id.filter(|id| self.doc.node(*id).is_ok()) {
+            Some(id) => chitrakar_render::Showing::Alone(id),
+            None => chitrakar_render::Showing::Everything,
+        })
+    }
+
+    /// The layer being shown on its own, if any.
+    pub fn solo(&self) -> Option<NodeId> {
+        match self.showing {
+            chitrakar_render::Showing::Alone(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Show the picture as it was before the work: the page with every
+    /// layer that only changes what is under it left out.
+    ///
+    /// The question a photograph asks every few minutes, and the only
+    /// way to ask it was to hide each adjustment by hand and undo them
+    /// all again afterwards — six edits the file would remember for a
+    /// glance nobody meant to keep.
+    pub fn set_untouched(&mut self, untouched: bool) -> bool {
+        self.show(if untouched {
+            chitrakar_render::Showing::Untouched
+        } else {
+            chitrakar_render::Showing::Everything
+        })
+    }
+
+    /// Whether the view is showing the picture under the work.
+    pub fn untouched(&self) -> bool {
+        self.showing == chitrakar_render::Showing::Untouched
+    }
+
+    fn show(&mut self, want: chitrakar_render::Showing) -> bool {
+        if want == self.showing {
+            return false;
+        }
+        self.showing = want;
+        // Everything, since what is on the page is a different picture.
+        self.stale_all = true;
+        true
+    }
+
+    pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), EngineError> {
+        if proof && self.proof_cms.is_none() {
+            let Some(bytes) = self.doc.cmyk_profile_bytes() else {
+                return Err(EngineError::BadCommand(
+                    "soft proofing needs a CMYK profile loaded first".into(),
+                ));
+            };
+            self.proof_cms =
+                Some(chitrakar_color::cms::ProofCms::new(bytes).map_err(EngineError::BadCommand)?);
+        }
+        self.soft_proof = proof;
+        self.gamut_warn = gamut_warn;
+        // The composite is unchanged, but everything presented must re-encode.
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    /// Encode a region of the cached surface for display, applying the
+    /// soft-proof transform when enabled. `out` is the full-frame RGBA8
+    /// buffer (row stride = document width).
+    pub fn encode_present_region(&self, clip: ClipRect, out: &mut [u8]) {
+        let Some(surface) = &self.cache else {
+            return;
+        };
+        surface.encode_srgb8_region(clip, out);
+        let proof = self.soft_proof.then_some(self.proof_cms.as_ref()).flatten();
+        if proof.is_none() && self.display_cms.is_none() {
+            return;
+        }
+        let w = surface.width as usize;
+        for y in clip.y0..clip.y1 {
+            let row = (y as usize * w + clip.x0 as usize) * 4;
+            let end = (y as usize * w + clip.x1 as usize) * 4;
+            if let Some(proof) = proof {
+                proof.proof_rgba8(&mut out[row..end], self.gamut_warn);
+            }
+            // The screen's own profile is the last word: proofing says
+            // what the press would make of the picture, and this says
+            // what this screen will make of that.
+            if let Some(display) = &self.display_cms {
+                display.to_display_rgba8(&mut out[row..end]);
+            }
+        }
+    }
+
+    /// Show through a monitor's own profile: everything presented is
+    /// taken from sRGB to that screen's numbers, so a wide-gamut display
+    /// draws the picture as it is rather than as far out as its own red
+    /// will go. Nothing else is touched — not the document, not an
+    /// export, not a colour picked off the page.
+    pub fn set_display_profile(&mut self, icc: &[u8]) -> Result<(), EngineError> {
+        self.display_cms =
+            Some(chitrakar_color::cms::DisplayCms::new(icc).map_err(EngineError::BadCommand)?);
+        // The composite is unchanged; what is shown of it is not.
+        self.mark_dirty(Bounds::Everything);
+        Ok(())
+    }
+
+    /// Go back to showing sRGB numbers as they are, which is what a
+    /// screen without a profile of its own is assumed to want.
+    pub fn clear_display_profile(&mut self) {
+        self.display_cms = None;
+        self.mark_dirty(Bounds::Everything);
+    }
+
+    pub fn has_display_profile(&self) -> bool {
+        self.display_cms.is_some()
+    }
+
+    pub fn has_cmyk_profile(&self) -> bool {
+        self.doc.cmyk_cms().is_some()
+    }
+
+    /// Serialize to `.chitra` container bytes. The faces the document's
+    /// text is set in travel inside it, so it reads the same wherever it
+    /// is opened next — all but the bundled face, which every build has.
+    pub fn save(&self) -> Result<Vec<u8>, EngineError> {
+        let names = self.fonts_used();
+        let fonts: Vec<(&str, &[u8])> = names
+            .iter()
+            .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
+            .collect();
+        chitrakar_codecs::save_chitra_with_fonts(&self.doc, &fonts)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The faces this document's text blocks draw with — each one named,
+    /// and the oblique twin an italic block is set in — each once, in the
+    /// order they sort. Names nothing answers to are listed too: they are
+    /// what the file asks for, whether or not this process can oblige.
+    pub fn fonts_used(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .doc
+            .nodes()
+            .flat_map(|(_, n)| match &n.kind {
+                NodeKind::Text(spec) => chitrakar_render::text::faces_used(spec),
+                _ => Vec::new(),
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Open a `.chitra` container. The loaded document starts with a fresh
+    /// history (undo does not cross save boundaries for now). Fonts the
+    /// file carries are registered for names this process does not know
+    /// yet; a face already loaded keeps precedence, and one that will not
+    /// parse is passed over so the document still opens.
+    pub fn load(bytes: &[u8]) -> Result<Self, EngineError> {
+        let opened = chitrakar_codecs::load_chitra_with_fonts(bytes)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        for (name, bytes) in opened.fonts {
+            if !chitrakar_render::text::has_font(&name) {
+                let _ = chitrakar_render::text::register_font(&name, bytes);
+            }
+        }
+        let mut session = Self::from_document(opened.doc);
+        // An opened file can already hold copies; the flag is only kept
+        // in step by the commands that could change it.
+        session.note_copies();
+        Ok(session)
+    }
+}
+
+fn parse_command(json: &str) -> Result<Command, EngineError> {
+    serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))
+}
+
+/// How a copy differs from what it was made from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyStyle {
+    /// A duplicate: named "… copy" and nudged clear of the original, so
+    /// it is visible rather than hiding exactly behind it.
+    Duplicate,
+    /// The same, left where it stands — for a drag about to carry it off.
+    InPlace,
+    /// Neither renamed nor moved: a child inside a subtree being copied,
+    /// which belongs exactly where it was.
+    Exact,
+}
+
+/// A path's handles, one per anchor: an anchor with none gets a pair of
+/// zeroes, which is a corner.
+fn padded_handles(handles: &[[f32; 4]], n: usize) -> Vec<[f32; 4]> {
+    let mut out = handles.to_vec();
+    out.resize(n, [0.0; 4]);
+    out
+}
+
+/// A point on the cubic between two anchors, given their handles.
+fn cubic_at(a: [f32; 2], ha: [f32; 4], b: [f32; 2], hb: [f32; 4], t: f32) -> [f32; 2] {
+    let (c1, c2) = ([a[0] + ha[2], a[1] + ha[3]], [b[0] + hb[0], b[1] + hb[1]]);
+    let u = 1.0 - t;
+    let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    [
+        w0 * a[0] + w1 * c1[0] + w2 * c2[0] + w3 * b[0],
+        w0 * a[1] + w1 * c1[1] + w2 * c2[1] + w3 * b[1],
+    ]
+}
+
+/// A layer's look, without its shape — see [`Session::copy_style`].
+#[derive(Serialize, serde::Deserialize)]
+struct Style {
+    fill: Option<chitrakar_color::AuthoredColor>,
+    stroke: Option<chitrakar_doc::Stroke>,
+    gradient: Option<chitrakar_doc::Gradient>,
+    effects: Vec<chitrakar_doc::Effect>,
+    opacity: f32,
+    blend: chitrakar_doc::BlendMode,
+}
+
+/// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
+/// the node's slot in its group (painter's order: index 0 = bottom) so the
+/// UI can issue reorder commands without mirroring the tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerInfo {
+    pub id: u64,
+    pub name: String,
+    pub kind: &'static str,
+    pub visible: bool,
+    pub opacity: f32,
+    pub blend: chitrakar_doc::BlendMode,
+    pub has_mask: bool,
+    /// Whether that mask is one a brush can work on, which decides
+    /// whether the brush paints the layer or the mask over it.
+    pub painted_mask: bool,
+    pub has_effects: bool,
+    /// The layer this one is a live copy of, or 0 when it is not a copy.
+    pub copies: u64,
+    pub locked: bool,
+    /// Confined to the layer below it. The bottom layer of a parent has
+    /// nothing under it, so the flag reads false there however it is set.
+    pub clipped: bool,
+    /// What it does when the frame around it is given a new size.
+    pub pinned: chitrakar_doc::Pinning,
+    pub depth: u32,
+    pub parent: u64,
+    pub index: usize,
+    pub sibling_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How far apart two pages are, and where.
+    pub(super) fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
+        let mut worst = (0.0f32, 0u32, 0u32);
+        for y in 0..b.height.min(a.height) {
+            for x in 0..b.width.min(a.width) {
+                let (p, q) = (a.get(x, y), b.get(x, y));
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs());
+                if d > worst.0 {
+                    worst = (d, x, y);
+                }
+            }
+        }
+        worst
+    }
+
+    /// A brush repaints the stroke it is drawing, all of it.
+    ///
+    /// Extending a stroke dirties only what changed between the old
+    /// stroke and the new one — repainting the whole of a long stroke on
+    /// every pointer sample is what would make a long one crawl. That
+    /// optimisation is a bounds computation of its own
+    /// (`changed_bounds`), it runs on every sample of every stroke
+    /// anybody draws, and a stroke is the one thing in this editor that
+    /// is drawn *while* being looked at: a region a pixel short does not
+    /// show up later, it shows up as a gap in the line under the cursor.
+    ///
+    /// So draw one the way a hand does — a path that turns back over
+    /// itself, with the radius swelling and shrinking — and after every
+    /// sample compare the page the session repainted against the same
+    /// document drawn from nothing. Through a viewport, because that is
+    /// what is on screen while it happens.
+    #[test]
+    fn a_brush_repaints_the_whole_stroke_it_is_drawing() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.95,
+            g: 0.3,
+            b: 0.1,
+            a: 1.0,
+        };
+        // A hand's path: out, back over itself, and round again, so the
+        // new tail keeps landing on ground the stroke has already
+        // covered rather than only on bare page.
+        let path: Vec<(f32, f32, f32)> = (0..24)
+            .map(|i| {
+                let t = i as f32 / 4.0;
+                (
+                    20.0 + 18.0 * t.cos() + 2.2 * t,
+                    30.0 + 14.0 * (t * 1.7).sin(),
+                    3.0 + 2.5 * (t * 0.9).sin(),
+                )
+            })
+            .collect();
+
+        for on_mask in [false, true] {
+            for erase in [false, true] {
+                let f = chitrakar_doc::fixture::everything();
+                let mut kept = Session::from_document(f.doc.clone());
+                // The mask has to exist before a brush can work on it.
+                let layer = if on_mask {
+                    assert!(kept.ensure_painted_mask(f.over).unwrap());
+                    f.over
+                } else {
+                    f.painted
+                };
+                kept.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                kept.render_cached().expect("the page draws");
+                let (x, y, r) = path[0];
+                kept.paint_begin(layer, x, y, r, ink.clone(), 0.35, erase, on_mask)
+                    .unwrap();
+                for (n, &(x, y, r)) in path.iter().enumerate().skip(1) {
+                    kept.paint_extend(x, y, r).unwrap();
+                    let (drawn, dirty) = kept.render_cached().unwrap();
+                    let (drawn, dirty) = (drawn.clone(), dirty);
+                    let mut fresh = Session::from_document(kept.document().clone());
+                    fresh.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                    let whole = fresh.render_cached().unwrap().0.clone();
+                    let worst = apart(&drawn, &whole);
+                    assert!(
+                        worst.0 < 0.002,
+                        "sample {n} (mask {on_mask}, erase {erase}) left {},{} \
+                         unpainted: {:?} against {:?}, having said {dirty:?} was stale",
+                        worst.1,
+                        worst.2,
+                        drawn.get(worst.1, worst.2),
+                        whole.get(worst.1, worst.2)
+                    );
+                }
+                // The whole of it goes when the gesture is abandoned.
+                assert!(kept.cancel_preview().unwrap());
+                let after = kept.render_cached().unwrap().0.clone();
+                let mut bare = Session::from_document(kept.document().clone());
+                bare.set_viewport(1.9, -14.5, -9.25, 130, 100);
+                let worst = apart(&after, &bare.render_cached().unwrap().0.clone());
+                assert!(
+                    worst.0 < 0.002,
+                    "an abandoned stroke (mask {on_mask}, erase {erase}) left {},{}",
+                    worst.1,
+                    worst.2
+                );
+            }
+        }
+    }
+
+    /// A gesture is the same command, told in two halves.
+    ///
+    /// Every drag in the editor goes through preview/commit/cancel: the
+    /// document updates on every pointer move so the user sees it, and
+    /// history records one entry when the mouse comes up, or none at all
+    /// if Escape comes first. Two things have to hold for that to be
+    /// true, and neither is checked by the command's own test.
+    ///
+    /// Committing has to leave the document exactly where applying the
+    /// command plainly would, with one entry in history rather than one
+    /// per pointer move. Cancelling has to leave it exactly where it
+    /// started, with none — and it has to leave the *page* where it
+    /// started too, because a cancel that repaints too little is how
+    /// Escape leaves a smear of the abandoned drag on screen.
+    ///
+    /// Which rests on a contract worth stating: only the *first* preview
+    /// of a gesture keeps an inverse, so that one inverse has to undo
+    /// everything the gesture goes on to do. Two shapes satisfy it, and
+    /// both are in use. Every drag restates the whole edit from the
+    /// pre-gesture document — the full transform on each pointer move,
+    /// never a delta — so any one of them undoes all of them. The brush
+    /// takes the other shape: it adds a stroke and then rewrites that
+    /// same stroke as the pointer travels, and removing it undoes the
+    /// lot. This asks about both.
+    #[test]
+    fn every_gesture_commits_or_cancels_like_the_command_it_previews() {
+        let f = chitrakar_doc::fixture::everything();
+        use chitrakar_doc::fixture::{came_back, state};
+        for cmd in chitrakar_doc::fixture::every_command(&f) {
+            let label = format!("{cmd:?}");
+            let short = &label[..label.len().min(60)];
+            let before = state(&f.doc);
+
+            // Committed: the same document the plain command leaves, and
+            // one step of history for the whole gesture however many
+            // moves it took.
+            // A gesture is more than one edit: a drag restates the
+            // whole thing on every pointer move, always from where the
+            // document was when the drag began. So preview each of
+            // these twice wherever asking twice is a restatement —
+            // which is the Set… family, the one drags are made of — and
+            // once where it is not, since adding a node twice adds two.
+            let repeatable = {
+                let mut once = f.doc.clone();
+                once.apply(cmd.clone()).unwrap();
+                let after = state(&once);
+                once.apply(cmd.clone()).is_ok_and(|_| state(&once) == after)
+            };
+            let mut plain = Session::from_document(f.doc.clone());
+            plain.apply(cmd.clone()).unwrap();
+            let mut gesture = Session::from_document(f.doc.clone());
+            gesture.preview(cmd.clone()).unwrap();
+            if repeatable {
+                gesture.preview(cmd.clone()).unwrap();
+            }
+            assert!(gesture.commit_preview(), "{short} was a gesture");
+            // Straightening the page is the one command that cannot be
+            // exact — it re-fits the page to the turned artwork — so it
+            // is asked to be near instead.
+            let exact = chitrakar_doc::fixture::exact(&cmd);
+            if let Err(what) =
+                came_back(&state(gesture.document()), &state(plain.document()), exact)
+            {
+                panic!("{short} committed to somewhere else than applying it: {what}");
+            }
+            assert!(
+                gesture.undo().unwrap() && !gesture.undo().unwrap(),
+                "{short} recorded one step for the gesture, not two"
+            );
+
+            // Cancelled: back where it started, in the document and on
+            // the page, with nothing in history to undo. Asked through
+            // a zoomed, panned viewport, because that is what the app
+            // is showing while a drag is in flight — an Escape that
+            // repaints too little leaves the smear there, not in an
+            // export.
+            let mut gesture = Session::from_document(f.doc.clone());
+            gesture.set_viewport(1.75, -23.5, -11.25, 120, 90);
+            gesture.render_cached().expect("the page draws");
+            gesture.preview(cmd.clone()).unwrap();
+            if repeatable {
+                gesture.preview(cmd).unwrap();
+            }
+            assert!(gesture.cancel_preview().unwrap(), "{short} was cancelled");
+            if let Err(what) = came_back(&state(gesture.document()), &before, exact) {
+                panic!("{short} cancelled to somewhere else than where it started: {what}");
+            }
+            assert!(
+                !gesture.undo().unwrap(),
+                "{short} left a cancelled gesture in history"
+            );
+            let smeared = gesture.render_cached().unwrap().0.clone();
+            let mut clean = Session::from_document(gesture.document().clone());
+            clean.set_viewport(1.75, -23.5, -11.25, 120, 90);
+            let want = clean.render_cached().unwrap().0.clone();
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..want.height {
+                for x in 0..want.width {
+                    let (a, b) = (smeared.get(x, y), want.get(x, y));
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 0.002,
+                "{short} left {},{} of the abandoned drag on screen: {:?} against {:?}",
+                worst.1,
+                worst.2,
+                smeared.get(worst.1, worst.2),
+                want.get(worst.1, worst.2)
+            );
+        }
+
+        // The gesture's other shape, which no command in the list above
+        // takes: a first preview whose inverse subsumes what follows,
+        // rather than a restatement of it. That is the brush — a stroke
+        // added, then that same stroke rewritten as the pointer travels
+        // — and removing it undoes every one of those rewrites at once.
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let mut brush = Session::from_document(f.doc.clone());
+        let was = state(brush.document());
+        let clean = brush.render_cached().expect("the page draws").0.clone();
+        brush
+            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink.clone(), 0.2, false, false)
+            .unwrap();
+        for step in 1..4 {
+            brush
+                .paint_extend(20.0 + 9.0 * step as f32, 24.0, 5.0)
+                .unwrap();
+        }
+        assert!(brush.is_painting(), "a stroke is being drawn");
+        assert!(brush.cancel_preview().unwrap(), "and then abandoned");
+        if let Err(what) = came_back(&state(brush.document()), &was, true) {
+            panic!("an abandoned brush stroke left something behind: {what}");
+        }
+        assert!(!brush.undo().unwrap(), "and nothing in history");
+        let after = brush.render_cached().unwrap().0.clone();
+        let worst = apart(&after, &clean);
+        assert!(
+            worst.0 < 0.002,
+            "an abandoned stroke left {},{} of itself on screen: {:?}",
+            worst.1,
+            worst.2,
+            after.get(worst.1, worst.2)
+        );
+
+        // And committed, it is one entry for the whole stroke however
+        // many samples the pointer gave.
+        let mut brush = Session::from_document(f.doc.clone());
+        brush
+            .paint_begin(f.painted, 20.0, 20.0, 5.0, ink, 0.2, false, false)
+            .unwrap();
+        for step in 1..4 {
+            brush
+                .paint_extend(20.0 + 9.0 * step as f32, 24.0, 5.0)
+                .unwrap();
+        }
+        assert!(brush.commit_preview(), "the stroke is committed");
+        assert!(
+            brush.undo().unwrap() && !brush.undo().unwrap(),
+            "one step for the stroke, not one per sample"
+        );
+    }
+
+    /// Every command repaints every pixel it changes — and so does
+    /// undoing it, and redoing it.
+    ///
+    /// The engine draws the page once and afterwards repaints only the
+    /// region a command is computed to have made stale. That is the
+    /// optimisation the whole interactive loop rests on, and getting it
+    /// wrong does not fail loudly: it leaves a stripe of the last frame
+    /// on screen, in the one place the user was looking.
+    ///
+    /// So ask it of every command at once, and ask it the way a user
+    /// would notice: draw the page, apply the command, and compare what
+    /// the session repainted against the same document drawn from
+    /// nothing. Undo and redo are asked the same question, because an
+    /// inverse is a different command with a region of its own — a
+    /// removal's inverse puts a node back, and nobody computes that
+    /// region twice.
+    ///
+    /// What it can see: the engine keeps a couple of pixels of margin
+    /// around a dirty region already, so a region one or two pixels too
+    /// small is absorbed and this passes. Three is caught, and a region
+    /// that forgot a whole node or a whole reach is far more than three.
+    #[test]
+    fn every_command_repaints_every_pixel_it_changes() {
+        let f = chitrakar_doc::fixture::everything();
+        /// Both halves of the promise, for one step of a command.
+        ///
+        /// `was` is the page before the step. The session repaints what
+        /// it computed to be stale and says which region that is; what
+        /// it drew has to match the same document drawn from nothing,
+        /// *and* everything that actually moved has to be inside the
+        /// region it named — the app uploads that rectangle to the
+        /// canvas and nothing else, so a pixel that changed outside it
+        /// stays on screen as it was however correctly the engine drew
+        /// it into its own buffer.
+        #[allow(clippy::type_complexity)]
+        fn same(
+            kept: &mut Session,
+            was: &Surface,
+            label: &str,
+            step: &str,
+            view: Option<(f32, f32, f32, u32, u32)>,
+        ) -> Surface {
+            let (patched, dirty) = kept.render_cached().unwrap();
+            let (patched, dirty) = (patched.clone(), dirty);
+            let mut fresh = Session::from_document(kept.document().clone());
+            if let Some((scale, x, y, w, h)) = view {
+                fresh.set_viewport(scale, x, y, w, h);
+            }
+            let whole = fresh.render_cached().unwrap().0.clone();
+            assert_eq!(
+                (patched.width, patched.height),
+                (whole.width, whole.height),
+                "{label} ({step}) left the two the same size"
+            );
+            // Not a tolerance for a pixel the region missed — a missed
+            // pixel is a whole colour out — but for the last bit of a
+            // float, since a region drawn on its own and the same region
+            // drawn as part of the page need not add up in the same
+            // order.
+            let worst = apart(&patched, &whole);
+            assert!(
+                worst.0 < 0.002,
+                "{label} ({step}) left {},{} unrepainted: {:?} against {:?}",
+                worst.1,
+                worst.2,
+                patched.get(worst.1, worst.2),
+                whole.get(worst.1, worst.2)
+            );
+            // A page that changed size is a new page, and the whole of
+            // it is uploaded.
+            if (was.width, was.height) == (patched.width, patched.height) {
+                for y in 0..patched.height {
+                    for x in 0..patched.width {
+                        let (p, q) = (patched.get(x, y), was.get(x, y));
+                        let moved = (p.r - q.r)
+                            .abs()
+                            .max((p.g - q.g).abs())
+                            .max((p.b - q.b).abs())
+                            .max((p.a - q.a).abs());
+                        if moved <= 0.002 {
+                            continue;
+                        }
+                        let inside =
+                            dirty.is_some_and(|d| x >= d.x0 && x < d.x1 && y >= d.y0 && y < d.y1);
+                        assert!(
+                            inside,
+                            "{label} ({step}) changed {x},{y} but said only {dirty:?} was stale"
+                        );
+                    }
+                }
+            }
+            patched
+        }
+        // Twice over: the whole page at its own resolution, which is
+        // what an export does, and then through a viewport that is
+        // zoomed and panned and does not begin on a whole document
+        // pixel, which is what the app actually shows. The dirty region
+        // is computed in document pixels and carried into the view's,
+        // and that carrying is exactly where a pixel goes missing.
+        for view in [
+            None,
+            // Zoomed in and panned, on a fraction of a document pixel.
+            Some((1.75f32, -23.5f32, -11.25f32, 120u32, 90u32)),
+            // And zoomed out, where a document pixel is smaller than a
+            // device one and a region that rounds the wrong way loses a
+            // whole row of the page rather than a row of itself.
+            Some((0.4f32, 6.5f32, 3.25f32, 60u32, 44u32)),
+        ] {
+            let start = |doc: Document| {
+                let mut s = Session::from_document(doc);
+                if let Some((scale, x, y, w, h)) = view {
+                    s.set_viewport(scale, x, y, w, h);
+                }
+                s
+            };
+            let where_ = if view.is_some() {
+                "through a viewport"
+            } else {
+                "on the whole page"
+            };
+            for cmd in chitrakar_doc::fixture::every_command(&f) {
+                let label = format!("{cmd:?} {where_}");
+                let short = &label[..label.len().min(72)];
+                // A session that has already drawn the page, and so from
+                // here on repaints only what it is told went stale.
+                let mut kept = start(f.doc.clone());
+                let was = kept.render_cached().expect("the page draws").0.clone();
+                kept.apply(cmd)
+                    .unwrap_or_else(|e| panic!("{short} could not be applied: {e:?}"));
+                let was = same(&mut kept, &was, short, "applied", view);
+                kept.undo().expect("it undoes");
+                let was = same(&mut kept, &was, short, "undone", view);
+                kept.redo().expect("it redoes");
+                same(&mut kept, &was, short, "redone", view);
+            }
+        }
+    }
+    use chitrakar_color::AuthoredColor;
+    use chitrakar_doc::VectorShape;
+
+    fn filled_rect(name: &str, w: f32, h: f32) -> Box<Node> {
+        let mut node = Node::vector(
+            name,
+            VectorShape::Rect {
+                width: w,
+                height: h,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            });
+        }
+        Box::new(node)
+    }
+
+    /// The same, in a colour of its own.
+    pub(super) fn rect_of(name: &str, w: f32, h: f32, color: AuthoredColor) -> Box<Node> {
+        let mut node = filled_rect(name, w, h);
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(color);
+        }
+        node
+    }
+
+    fn add_rect(session: &mut Session, name: &str, w: f32, h: f32) -> NodeId {
+        let root = session.document().root();
+        let index = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index,
+                node: filled_rect(name, w, h),
+            })
+            .unwrap();
+        *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap()
+    }
+
+    fn assert_cache_matches_fresh(session: &mut Session) {
+        let fresh = session.render().unwrap().to_srgb8();
+        let (cached, _) = session.render_cached().unwrap();
+        assert_eq!(cached.to_srgb8(), fresh, "cache diverged from full render");
+    }
+
+    /// A copy of a copy follows the same original, so changing the
+    /// original has to repaint both — the one that is a picture of the
+    /// layer and the one that is a picture of *that*.
+    ///
+    /// The walk that finds them keeps going until nothing new turns up.
+    /// One round finds the copies of the layer and of the groups above
+    /// it; the copy of *those* is only found by the round after, and a
+    /// walk that stopped early would leave the second copy showing what
+    /// the layer used to be — on the screen, since only the cache would
+    /// be wrong, which is why this asks the cache rather than the render.
+    #[test]
+    fn changing_a_layer_repaints_the_copy_of_the_copy_of_it() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let shape = add_rect(&mut session, "shape", 20.0, 20.0);
+        let copy_of = |session: &mut Session, of: NodeId, name: &str, at: f32| -> NodeId {
+            let root = session.document().root();
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(Node::instance(name, of)),
+                })
+                .unwrap();
+            let id = *session
+                .document()
+                .children_of(root)
+                .unwrap()
+                .last()
+                .unwrap();
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: chitrakar_doc::Transform::translation(at, 30.0),
+                })
+                .unwrap();
+            id
+        };
+        let copy = copy_of(&mut session, shape, "a copy", 40.0);
+        let echo = copy_of(&mut session, copy, "a copy of a copy", 80.0);
+
+        // Draw once so there is a cache to be wrong, and check the two
+        // copies are actually drawing something to be stale. Read out
+        // rather than held on to: the cache is the session's.
+        let read = |session: &mut Session| -> [[u8; 4]; 3] {
+            let (s, _) = session.render_cached().unwrap();
+            [
+                // The shape where it stands, and the two copies where
+                // they were put.
+                s.get(10, 10).to_srgb8(),
+                s.get(50, 40).to_srgb8(),
+                s.get(90, 40).to_srgb8(),
+            ]
+        };
+        let before = read(&mut session);
+        assert_eq!(before[0], before[1], "the copy draws the shape");
+        assert_eq!(
+            before[0], before[2],
+            "and the copy of the copy draws it too"
+        );
+
+        // Now change the original. Both copies are pictures of it.
+        let kind = match session.document().node(shape).unwrap().kind.clone() {
+            NodeKind::Vector { shape, stroke, .. } => NodeKind::Vector {
+                shape,
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.9,
+                    b: 0.3,
+                    a: 1.0,
+                }),
+                stroke,
+                gradient: None,
+            },
+            other => panic!("expected a shape, got {other:?}"),
+        };
+        session
+            .apply(Command::SetKind {
+                id: shape,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        let after = read(&mut session);
+        assert_ne!(after[0], before[0], "the original changed");
+        assert_eq!(after[1], after[0], "the copy followed it");
+        assert_eq!(after[2], after[0], "and so did the copy of the copy");
+        let _ = echo;
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn a_viewport_shows_the_part_of_the_page_it_is_pointed_at() {
+        // The surface is a window onto the document now, not the document:
+        // it is the size it was told, the page lands where the origin says,
+        // and nothing is painted outside the page's own edge.
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 200.0, 200.0);
+        let _ = id;
+        session.set_viewport(1.0, 20.0, 30.0, 100, 80);
+        let (s, dirty) = session.render_cached().unwrap();
+        assert_eq!(
+            (s.width, s.height),
+            (100, 80),
+            "the surface is the viewport"
+        );
+        assert!(dirty.is_some());
+        assert_eq!(s.get(10, 10).a, 0.0, "above and left of the page: nothing");
+        assert_eq!(s.get(50, 50).a, 1.0, "and the page itself is painted");
+        assert_eq!(s.get(19, 40).a, 0.0, "the page's left edge is respected");
+        assert_eq!(s.get(21, 40).a, 1.0, "just inside it, painted");
+    }
+
+    #[test]
+    fn a_viewport_still_clips_artwork_to_the_page() {
+        // With the surface no longer being the page, a layer hanging off
+        // the page's edge would otherwise paint onto the desk beside it.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "over", 80.0, 80.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(-40.0, -40.0),
+            })
+            .unwrap();
+        session.set_viewport(1.0, 50.0, 50.0, 200, 200);
+        let (s, _) = session.render_cached().unwrap();
+        assert_eq!(s.get(60, 60).a, 1.0, "the part on the page is painted");
+        assert_eq!(s.get(30, 30).a, 0.0, "the part hanging off it is not");
+        assert_eq!(s.get(49, 60).a, 0.0, "not even a pixel past the edge");
+    }
+
+    #[test]
+    fn moving_the_viewport_presents_the_whole_surface() {
+        // The caller copies the reported region and nothing else, so after
+        // a pan that region has to be the whole surface: the part beside
+        // the page still holds the last frame's picture of the page, and a
+        // document-space dirty region cannot name it.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        add_rect(&mut session, "r", 100.0, 100.0);
+        session.set_viewport(1.0, 20.0, 20.0, 200, 200);
+        let (_, first) = session.render_cached().unwrap();
+        assert_eq!(
+            first.map(|c| (c.x1 - c.x0, c.y1 - c.y0)),
+            Some((200, 200)),
+            "the first frame is the whole surface"
+        );
+        session.render_cached().unwrap();
+        session.set_viewport(1.0, 60.0, 60.0, 200, 200);
+        let (_, after_pan) = session.render_cached().unwrap();
+        assert_eq!(
+            after_pan.map(|c| (c.x0, c.y0, c.x1, c.y1)),
+            Some((0, 0, 200, 200)),
+            "and so is the one after a pan"
+        );
+        // An ordinary edit still reports only what it touched.
+        let id = *session
+            .document()
+            .children_of(session.document().root())
+            .unwrap()
+            .last()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let (_, after_edit) = session.render_cached().unwrap();
+        let c = after_edit.expect("the edit dirties something");
+        assert!(
+            (c.x1 - c.x0) < 200 || (c.y1 - c.y0) < 200,
+            "an edit is not a whole-surface repaint: {c:?}"
+        );
+    }
+
+    #[test]
+    fn a_viewport_can_be_zoomed_past_what_the_whole_page_would_cost() {
+        // The surface no longer grows with the zoom, so the zoom is not
+        // capped by what a full-page surface would cost. A print-sized
+        // document at 4x is a screenful of pixels like any other.
+        let mut session = Session::new(2480, 3508, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(100.0, 100.0),
+            })
+            .unwrap();
+        session.set_viewport(4.0, -380.0, -380.0, 400, 300);
+        let (s, _) = session.render_cached().unwrap();
+        assert_eq!((s.width, s.height), (400, 300));
+        // The rect covers document (100,100)-(140,140), which at 4x with
+        // that origin is (20,20)-(180,180) on the surface.
+        assert_eq!(s.get(100, 100).a, 1.0, "the magnified rect is there");
+        assert_eq!(s.get(200, 200).a, 0.0, "and stops where it should");
+    }
+
+    #[test]
+    fn an_edit_inside_a_viewport_repaints_the_right_pixels() {
+        // The dirty region is tracked in document pixels and has to be
+        // carried through both the scale and the pan. Get either wrong and
+        // an edit leaves a stale band, so compare against a full render.
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session.set_viewport(2.0, -30.0, -20.0, 150, 150);
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(40.0, 35.0),
+            })
+            .unwrap();
+        let (cached, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_some(), "moving a layer dirties something");
+        let cached = cached.to_srgb8();
+        let mut fresh = Surface::new(150, 150);
+        chitrakar_render::render_region_at(
+            session.document(),
+            &mut fresh,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 150,
+                y1: 150,
+            },
+            Transform {
+                a: 2.0,
+                d: 2.0,
+                e: -30.0,
+                f: -20.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cached, fresh.to_srgb8(), "incremental cache diverged");
+    }
+
+    #[test]
+    fn an_edit_entirely_off_screen_presents_nothing() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(300.0, 300.0),
+            })
+            .unwrap();
+        session.set_viewport(1.0, 0.0, 0.0, 100, 100);
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        let (_, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_none(), "nothing on screen changed: {dirty:?}");
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn a4_viewport_probe() {
+        let mut session = Session::new(2480, 3508, ColorMode::Rgb);
+        add_rect(&mut session, "bg", 2480.0, 3508.0);
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            session.invalidate();
+            session.render_cached().unwrap();
+        }
+        println!("A4 whole page: {:?}", t0.elapsed() / 3);
+        session.set_viewport(0.4, 0.0, 0.0, 1400, 900);
+        let t0 = std::time::Instant::now();
+        for _ in 0..3 {
+            session.invalidate();
+            session.render_cached().unwrap();
+        }
+        println!("A4 through a 1400x900 viewport: {:?}", t0.elapsed() / 3);
+    }
+
+    #[test]
+    fn guides_are_document_state_that_costs_no_repaint() {
+        // Guides belong to the layout, so they undo and they save; they
+        // are not artwork, so changing them repaints nothing.
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        add_rect(&mut session, "r", 20.0, 20.0);
+        session.render_cached().unwrap();
+        let before = session.pixels_recomputed();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(32.0), Guide::Horizontal(10.0)],
+            })
+            .unwrap();
+        assert_eq!(session.document().guides().len(), 2);
+        let (_, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_none(), "placing a guide repainted something");
+        assert_eq!(session.pixels_recomputed(), before, "and cost pixels");
+
+        assert!(session.undo().unwrap());
+        assert!(session.document().guides().is_empty(), "and it undoes");
+        // They survive a save and reopen.
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(12.5)],
+            })
+            .unwrap();
+        let bytes = session.save().unwrap();
+        let reopened = Session::load(&bytes).unwrap();
+        assert_eq!(reopened.document().guides(), &[Guide::Vertical(12.5)]);
+    }
+
+    /// Two 40x40 squares on a 100x100 page, overlapping in a 20x20 corner.
+    fn two_overlapping_squares() -> (Session, Vec<NodeId>) {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let b = add_rect(&mut session, "b", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: b,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        (session, vec![a, b])
+    }
+
+    /// How many pixels the composite covers.
+    fn ink(session: &mut Session) -> usize {
+        session
+            .render()
+            .unwrap()
+            .pixels
+            .iter()
+            .filter(|p| p.a > 0.5)
+            .count()
+    }
+
+    #[test]
+    fn booleans_combine_two_shapes_into_one_layer() {
+        // Areas are the check: union is both minus the overlap counted
+        // twice, intersect is the overlap, subtract is the lower shape
+        // less the overlap.
+        for (op, expected) in [
+            ("union", 40 * 40 * 2 - 20 * 20),
+            ("intersect", 20 * 20),
+            ("subtract", 40 * 40 - 20 * 20),
+        ] {
+            let (mut session, ids) = two_overlapping_squares();
+            let before = ink(&mut session);
+            assert_eq!(before, 40 * 40 * 2 - 20 * 20, "the two squares as drawn");
+            let id = session.boolean_nodes(&ids, op).unwrap();
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap(),
+                &[id],
+                "{op} left one layer"
+            );
+            let got = ink(&mut session);
+            assert!(
+                (got as i32 - expected).abs() < 200,
+                "{op}: covered {got}, expected about {expected}"
+            );
+            assert!(session.undo().unwrap());
+            assert_eq!(ink(&mut session), before, "{op} undoes as one step");
+            assert_eq!(
+                session
+                    .document()
+                    .children_of(session.document().root())
+                    .unwrap()
+                    .len(),
+                2,
+                "{op} brings both shapes back"
+            );
+        }
+    }
+
+    #[test]
+    fn subtracting_an_enclosed_shape_punches_a_hole() {
+        // The result is one layer whose middle is empty — a compound path,
+        // which is the whole reason a path can carry extra rings.
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let outer = add_rect(&mut session, "outer", 60.0, 60.0);
+        session
+            .apply(Command::SetTransform {
+                id: outer,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        session.boolean_nodes(&[outer, inner], "subtract").unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(25, 25).a, 1.0, "the ring is filled");
+        assert_eq!(s.get(50, 50).a, 0.0, "and the middle is a hole");
+        assert_eq!(s.get(10, 10).a, 0.0, "outside is still outside");
+    }
+
+    #[test]
+    fn combining_refuses_what_it_cannot_answer_for() {
+        let (mut session, ids) = two_overlapping_squares();
+        assert!(
+            session.boolean_nodes(&ids[..1], "union").is_err(),
+            "needs two"
+        );
+        assert!(session.boolean_nodes(&ids, "invert").is_err(), "unknown op");
+        // A text layer has no outline to combine.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::text(
+                    "t",
+                    chitrakar_doc::TextSpec::new(
+                        "hi",
+                        12.0,
+                        AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    ),
+                )),
+            })
+            .unwrap();
+        let text = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        assert!(session.boolean_nodes(&[ids[0], text], "union").is_err());
+        // And nothing was half-applied.
+        assert_eq!(session.document().children_of(root).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_drop_shadow_repaints_the_ground_it_covers() {
+        // The shadow reaches outside the layer, so the dirty region has to
+        // as well. If it does not, adding or removing one leaves a stain
+        // where the cache was never revisited.
+        let mut session = Session::new(48, 48, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 16.0, 16.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(12.0, 12.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 7.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![shadow],
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        // And taking it away has to clear the ground it covered.
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        assert!(session.undo().unwrap(), "the shadow comes back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cropping_keeps_the_picture_where_it_was() {
+        // A crop is a resize plus the shift that cancels it: the page gets
+        // smaller, and what was inside the crop rectangle stays put.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(35, 35).a, 1.0);
+
+        // Crop to (20,20)-(52,52): the rect should land at (10,10).
+        session.resize_canvas(32, 32, -20.0, -20.0).unwrap();
+        assert_eq!(session.document().meta.width, 32);
+        let (after, _) = session.render_cached().unwrap();
+        assert_eq!((after.width, after.height), (32, 32), "the cache resized");
+        assert_eq!(after.get(15, 15).a, 1.0, "the rect moved with the page");
+        assert_eq!(after.get(5, 5).a, 0.0, "and nothing else came with it");
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap());
+        assert_eq!(session.document().meta.width, 64);
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(35, 35).a, 1.0, "undo puts the page back");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn turning_the_page_carries_everything_round_with_it() {
+        use chitrakar_doc::Guide;
+        // A wide page with a mark in one corner, so which way round it
+        // came out is a question with an answer.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 0.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(5, 5).a, 1.0, "the mark is in the top left");
+
+        // A quarter turn to the right: the page stands up, and the mark
+        // that was top-left is now top-right.
+        session.turn_canvas(1).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (40, 80),
+            "an odd turn swaps the page's sides"
+        );
+        let (turned, _) = session.render_cached().unwrap();
+        assert_eq!((turned.width, turned.height), (40, 80));
+        assert_eq!(turned.get(35, 5).a, 1.0, "the mark went round to the right");
+        assert_eq!(turned.get(5, 5).a, 0.0, "and is not where it was");
+        // A line down the page at x=10 is now a line across it at y=10;
+        // one across at y=4 is now down it, ten from the right-hand edge.
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Horizontal(10.0), Guide::Vertical(36.0)],
+            "the guides went round with the artwork"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap(), "and it undoes");
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40)
+        );
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 5).a, 1.0, "the mark is back in the corner");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            "and so are the guides"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // Four quarter turns is where it started, whichever way they are
+        // taken, and a turn of none is not an edit at all.
+        for _ in 0..4 {
+            session.turn_canvas(1).unwrap();
+        }
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40)
+        );
+        let (round, _) = session.render_cached().unwrap();
+        assert_eq!(round.get(5, 5).a, 1.0, "all the way round is where it was");
+        session.turn_canvas(3).unwrap();
+        session.turn_canvas(1).unwrap();
+        let (both, _) = session.render_cached().unwrap();
+        assert_eq!(both.get(5, 5).a, 1.0, "left and then right is neither");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn mirroring_the_page_reflects_everything_on_it() {
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 0.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            })
+            .unwrap();
+
+        session.mirror_canvas(true).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40),
+            "a mirror leaves the page the size it was"
+        );
+        let (flipped, _) = session.render_cached().unwrap();
+        assert_eq!(flipped.get(75, 5).a, 1.0, "the mark crossed to the right");
+        assert_eq!(flipped.get(5, 5).a, 0.0, "and is not where it was");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(70.0), Guide::Horizontal(4.0)],
+            "a line down the page crossed with it; one across it did not"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // Its own inverse: twice is nothing, and so is one and an undo.
+        session.mirror_canvas(true).unwrap();
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 5).a, 1.0, "twice over is where it started");
+        assert!(session.undo().unwrap());
+        let (once, _) = session.render_cached().unwrap();
+        assert_eq!(once.get(75, 5).a, 1.0, "and undo takes one of them back");
+        assert_cache_matches_fresh(&mut session);
+
+        // The other way round moves what the first one left alone.
+        session.undo().unwrap();
+        session.mirror_canvas(false).unwrap();
+        let (down, _) = session.render_cached().unwrap();
+        assert_eq!(down.get(5, 35).a, 1.0, "the mark went to the bottom");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(10.0), Guide::Horizontal(36.0)],
+            "and the line across the page went with it"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// What masks a layer and what a layer casts are written in the space
+    /// the layer is placed in, not in the layer's own — so neither
+    /// travels with the layer's transform, and a page operation has to
+    /// take them along by hand. Left behind, a mask goes on hiding the
+    /// part of the page it used to cover, which for a page that moved
+    /// out from under it is the whole layer.
+    #[test]
+    fn what_masks_a_layer_and_what_it_casts_travel_with_the_page() {
+        let masked = |session: &mut Session, id| {
+            session
+                .apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            // The left half of a forty-square layer.
+                            shape: chitrakar_doc::VectorShape::Rect {
+                                width: 20.0,
+                                height: 40.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::default(),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+        };
+
+        // Cropping: the page keeps its size and the artwork moves right.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 40.0);
+        masked(&mut session, id);
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(5, 20).a, 1.0, "the mask shows the left half");
+        assert_eq!(before.get(30, 20).a, 0.0, "and hides the right");
+
+        session.resize_canvas(80, 40, 40.0, 0.0).unwrap();
+        let (moved, _) = session.render_cached().unwrap();
+        assert_eq!(
+            moved.get(45, 20).a,
+            1.0,
+            "the mask went with the layer, so the same half still shows"
+        );
+        assert_eq!(moved.get(70, 20).a, 0.0, "and the same half is hidden");
+        assert_cache_matches_fresh(&mut session);
+        assert!(session.undo().unwrap());
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(5, 20).a, 1.0, "and it comes back with it");
+
+        // Turning: the layer stands on its end and its mask with it, so
+        // the half that showed is still the half that shows.
+        session.turn_canvas(1).unwrap();
+        let (turned, _) = session.render_cached().unwrap();
+        assert_eq!((turned.width, turned.height), (40, 80), "the page stood up");
+        // The layer's left half was doc x 0..20, which a quarter turn to
+        // the right puts along the top of the standing page.
+        assert_eq!(turned.get(20, 10).a, 1.0, "the shown half turned with it");
+        assert_eq!(turned.get(20, 30).a, 0.0, "and so did the hidden half");
+        assert_cache_matches_fresh(&mut session);
+
+        // A shadow is cast in that same space. Turned a quarter round
+        // with the light left where it was, every layer on the page
+        // would be lit from a new direction.
+        let mut lit = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut lit, "r", 20.0, 20.0);
+        lit.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(30.0, 10.0),
+        })
+        .unwrap();
+        lit.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 6.0,
+                dy: 0.0,
+                blur: 0.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        let (flat, _) = lit.render_cached().unwrap();
+        assert!(
+            flat.get(54, 20).a > 0.5 && flat.get(24, 20).a == 0.0,
+            "the shadow falls to the right of the layer"
+        );
+        lit.turn_canvas(1).unwrap();
+        let (stood, _) = lit.render_cached().unwrap();
+        // Turned right, the layer's right-hand side faces down the page,
+        // so what fell to its right now falls below it.
+        assert!(
+            stood.get(20, 54).a > 0.5,
+            "the shadow turned with what casts it"
+        );
+        assert_eq!(
+            stood.get(20, 24).a,
+            0.0,
+            "and is not still pointing the old way"
+        );
+        assert_cache_matches_fresh(&mut lit);
+    }
+
+    /// A pixelate block is the average of what it covers, and its grid is
+    /// laid out on the document rather than on the window — so a region
+    /// redrawn on its own has to come out what the whole page came out,
+    /// down to the blocks that hang over the region's edge.
+    #[test]
+    fn pixelate_blocks_are_the_document_s_own() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        // A half-and-half page, so a block that straddles the line has an
+        // average of its own that neither half has.
+        let left = add_rect(&mut session, "left", 40.0, 80.0);
+        let right = add_rect(&mut session, "right", 40.0, 80.0);
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        let mut blue = session.document().node(right).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, .. } = &mut blue {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::SetKind {
+                id: right,
+                kind: Box::new(blue),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: session.document().root(),
+                index: 2,
+                node: Box::new(Node::filter(
+                    "blocks",
+                    chitrakar_doc::Filter::Pixelate { size: 16.0 },
+                )),
+            })
+            .unwrap();
+
+        let (page, _) = session.render_cached().unwrap();
+        // A block is sixteen across and the grid starts at the page's own
+        // origin, so the third block runs 32..48 and straddles the line
+        // between the two halves: half of one colour and half the other.
+        let straddling = page.get(40, 40);
+        assert!(
+            straddling.r > 0.1 && straddling.b > 0.1,
+            "the block over the join is the average of both sides: {straddling:?}"
+        );
+        // And a block well inside one half is that half, flat.
+        let (a, b) = (page.get(4, 40), page.get(12, 40));
+        assert!(
+            (a.r - b.r).abs() < 1e-5 && (a.b - b.b).abs() < 1e-5,
+            "one block is one colour throughout: {a:?} vs {b:?}"
+        );
+        assert!(a.b < 0.01, "and it is the colour of its own half: {a:?}");
+        // The whole point: redrawn a region at a time it comes out the
+        // same, blocks over the edges included.
+        assert_cache_matches_fresh(&mut session);
+        session
+            .apply(Command::SetTransform {
+                id: left,
+                transform: Transform::translation(0.0, 4.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Grain is a function of where a speck sits in the document and of
+    /// nothing else, so the same page grains the same way however it is
+    /// drawn — and a region redrawn on its own leaves no seam.
+    #[test]
+    fn grain_is_settled_by_the_page_not_by_the_window() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let id = add_rect(&mut session, "flat", 80.0, 80.0);
+        session
+            .apply(Command::AddNode {
+                parent: session.document().root(),
+                index: 1,
+                node: Box::new(Node::filter(
+                    "grain",
+                    chitrakar_doc::Filter::Noise {
+                        amount: 0.5,
+                        grain: 1.0,
+                        mono: true,
+                        seed: 7,
+                    },
+                )),
+            })
+            .unwrap();
+        // Kept as its own pixels, since the next line asks the document
+        // to be drawn again and the cache is borrowed from the session.
+        let grained: Vec<chitrakar_color::LinearRgba> = {
+            let (s, _) = session.render_cached().unwrap();
+            s.pixels.clone()
+        };
+        let at = |px: &[chitrakar_color::LinearRgba], x: u32, y: u32| px[(y * 80 + x) as usize];
+        let vals: Vec<f32> = (0..40).map(|i| at(&grained, i, 20).r).collect();
+        let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+        let varies = vals.iter().map(|v| (v - mean).abs()).sum::<f32>() / vals.len() as f32;
+        assert!(varies > 0.01, "a flat colour comes out grained ({varies})");
+        // Drawn again it is the same grain, not a fresh sprinkling.
+        let again = chitrakar_render::render(session.document()).unwrap();
+        for x in 0..80 {
+            assert!(
+                (at(&grained, x, 20).r - again.get(x, 20).r).abs() < 1e-6,
+                "the same page grains the same way at x={x}"
+            );
+        }
+        assert_cache_matches_fresh(&mut session);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, 2.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cropping_carries_the_guides_with_the_artwork() {
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(40.0), Guide::Horizontal(50.0)],
+            })
+            .unwrap();
+        session.resize_canvas(60, 60, -20.0, -20.0).unwrap();
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(20.0), Guide::Horizontal(30.0)],
+            "a guide placed against the rect's edge is still against it"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(40.0), Guide::Horizontal(50.0)],
+            "and undo puts them back"
+        );
+    }
+
+    #[test]
+    fn a_blur_inside_a_scaled_group_pads_by_what_it_actually_reaches() {
+        // A filter's sigma is written in the space it sits in, so a group
+        // scaled up multiplies its reach. Padding a region render by the
+        // unscaled figure leaves a ring of stale pixels at the edge, which
+        // comparing against a full render catches.
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("under", 40.0, 40.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+        let group = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 3.0,
+                    d: 3.0,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 4.0 },
+                )),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let rect = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .first()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(6.0, 6.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn undo_says_which_layer_it_brought_back() {
+        // Undoing a delete restores the layer; what it hands back is that
+        // layer's id, so a selection can follow it instead of pointing at
+        // nothing. Undoing an add removes the layer again, so nothing.
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 8.0, 8.0);
+        assert_eq!(session.last_touched_node(), Some(id), "the add touched it");
+        session.apply(Command::RemoveNode { id }).unwrap();
+        assert_eq!(
+            session.last_touched_node(),
+            None,
+            "gone, so nothing to point at"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.last_touched_node(),
+            Some(id),
+            "undo brought it back"
+        );
+        assert!(session.undo().unwrap(), "undo the add itself");
+        assert_eq!(session.last_touched_node(), None);
+        assert!(session.redo().unwrap());
+        assert_eq!(
+            session.last_touched_node(),
+            Some(id),
+            "and redo restores it"
+        );
+    }
+
+    #[test]
+    fn an_adjustment_scoped_to_a_layer_leaves_the_rest_alone() {
+        // Two rects side by side; darken one. The group's isolation is
+        // what confines the adjustment, and one undo takes the whole
+        // arrangement away.
+        let mut session = Session::new(64, 32, ColorMode::Rgb);
+        let left = add_rect(&mut session, "left", 20.0, 20.0);
+        let right = add_rect(&mut session, "right", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+        let group = session
+            .adjust_node(
+                right,
+                Node::adjustment(
+                    "Exposure",
+                    chitrakar_doc::Adjustment::Exposure { stops: -3.0 },
+                ),
+            )
+            .unwrap();
+        let root = session.document().root();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[left, group],
+            "the layer moved into a group where it stood"
+        );
+        assert_eq!(session.document().children_of(group).unwrap().len(), 2);
+        let after = session.render().unwrap();
+        assert!(
+            after.get(50, 10).r < before.get(50, 10).r * 0.3,
+            "the adjusted layer darkened: {} -> {}",
+            before.get(50, 10).r,
+            after.get(50, 10).r
+        );
+        assert_eq!(after.get(10, 10), before.get(10, 10), "the other did not");
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[left, right]
+        );
+        assert_eq!(session.render().unwrap().to_srgb8(), before.to_srgb8());
+        // Only adjustments and filters can be scoped.
+        assert!(session
+            .adjust_node(right, *filled_rect("no", 1.0, 1.0))
+            .is_err());
+    }
+
+    #[test]
+    fn exporting_at_a_scale_and_of_a_region_renders_just_that() {
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 10.0),
+            })
+            .unwrap();
+        // Twice the size: twice the pixels, and the rect's edge twice as
+        // far in — re-solved, so it is a hard edge there rather than a
+        // blurred one.
+        let two = session.render_scaled(2.0, None).unwrap();
+        assert_eq!((two.width, two.height), (200, 120));
+        assert_eq!(two.get(59, 30).a, 0.0, "just outside the rect at 2x");
+        assert_eq!(two.get(61, 30).a, 1.0, "just inside it");
+        assert_eq!(two.get(99, 30).a, 1.0);
+        assert_eq!(two.get(101, 30).a, 0.0);
+        // A region: only what is inside it, at its own size, with the
+        // document's origin no longer at the corner.
+        let part = session
+            .render_scaled(1.0, Some([25.0, 5.0, 30.0, 30.0]))
+            .unwrap();
+        assert_eq!((part.width, part.height), (30, 30));
+        assert_eq!(part.get(2, 10).a, 0.0, "the five pixels before the rect");
+        assert_eq!(part.get(10, 10).a, 1.0, "the rect, shifted by the region");
+        assert_eq!(
+            part.get(24, 10).a,
+            1.0,
+            "its far edge, five short of the region's"
+        );
+        assert_eq!(part.get(27, 10).a, 0.0);
+        // Nothing outside the page is painted even when the region hangs
+        // off it, and an empty region is refused.
+        let off = session
+            .render_scaled(1.0, Some([-10.0, -10.0, 20.0, 20.0]))
+            .unwrap();
+        assert_eq!(off.get(2, 2).a, 0.0);
+        assert!(session
+            .render_scaled(1.0, Some([0.0, 0.0, 0.0, 5.0]))
+            .is_err());
+        // The PNG carries the scaled size.
+        let png = session.render_png_at(3.0, None).unwrap();
+        let w = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+        assert_eq!(w, 300);
+    }
+
+    #[test]
+    fn a_zero_sized_canvas_is_refused() {
+        let mut session = Session::new(16, 16, ColorMode::Rgb);
+        assert!(session.resize_canvas(0, 10, 0.0, 0.0).is_err());
+        assert_eq!(session.document().meta.width, 16, "and changes nothing");
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn many_layers_probe() {
+        // A document with hundreds of small layers: what one drag frame
+        // costs, and what the panel's per-refresh reads cost.
+        let mut session = Session::new(1600, 1000, ColorMode::Rgb);
+        let mut ids = Vec::new();
+        for i in 0..300 {
+            let id = add_rect(&mut session, &format!("r{i}"), 40.0, 30.0);
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(
+                        (i % 30) as f32 * 52.0,
+                        (i / 30) as f32 * 95.0,
+                    ),
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        session.set_viewport(0.8, 0.0, 0.0, 1400, 900);
+        session.render_cached().unwrap();
+        let t0 = std::time::Instant::now();
+        for k in 0..20 {
+            session
+                .preview(Command::SetTransform {
+                    id: ids[150],
+                    transform: Transform::translation(300.0 + k as f32, 400.0),
+                })
+                .unwrap();
+            session.render_cached().unwrap();
+        }
+        println!("300 layers, drag frame: {:?}", t0.elapsed() / 20);
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = session.layers();
+            for id in &ids {
+                let _ = session.bounds_of(*id);
+            }
+        }
+        println!(
+            "300 layers, panel refresh (layers + every bounds_of): {:?}",
+            t0.elapsed() / 20
+        );
+    }
+
+    #[test]
+    fn json_command_roundtrip_drives_the_engine() {
+        let mut session = Session::new(16, 16, ColorMode::Rgb);
+        let root = session.document().root();
+        let cmd = Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("layer 1")),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+
+        session.apply_json(&json).unwrap();
+        assert_eq!(session.document().node_count(), 2);
+
+        assert!(session.undo().unwrap());
+        assert_eq!(session.document().node_count(), 1);
+        assert!(session.redo().unwrap());
+        assert_eq!(session.document().node_count(), 2);
+    }
+
+    #[test]
+    fn render_png_produces_a_valid_png() {
+        let session = Session::new(8, 8, ColorMode::Cmyk);
+        let png = session.render_png().unwrap();
+        assert_eq!(&png[1..4], b"PNG");
+    }
+
+    #[test]
+    fn bad_json_is_rejected_not_panicked() {
+        let mut session = Session::new(8, 8, ColorMode::Rgb);
+        assert!(matches!(
+            session.apply_json("{nope"),
+            Err(EngineError::BadCommand(_))
+        ));
+    }
+
+    #[test]
+    fn cached_render_stays_pixel_identical_through_edit_sequence() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        assert_cache_matches_fresh(&mut session);
+
+        let a = add_rect(&mut session, "a", 20.0, 20.0);
+        assert_cache_matches_fresh(&mut session);
+
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        assert_cache_matches_fresh(&mut session);
+
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        session
+            .apply(Command::SetOpacity {
+                id: b,
+                opacity: 0.4,
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        session.apply(Command::RemoveNode { id: b }).unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        session.undo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+        session.undo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+        session.redo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn small_edit_recomputes_small_region() {
+        let mut session = Session::new(512, 512, ColorMode::Rgb);
+        let small = add_rect(&mut session, "small", 8.0, 8.0);
+        session.render_cached().unwrap();
+
+        let before = session.pixels_recomputed();
+        session
+            .apply(Command::SetTransform {
+                id: small,
+                transform: Transform::translation(4.0, 4.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let recomputed = session.pixels_recomputed() - before;
+
+        assert!(
+            recomputed < 1500,
+            "moving an 8×8 rect recomputed {recomputed} pixels on a 512×512 canvas"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cache_stays_correct_with_a_filter_layer_present() {
+        let mut session = Session::new(48, 48, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "r", 12.0, 12.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 2.0 },
+                )),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        // An edit below the filter still produces a pixel-exact cache: the
+        // dirty region grows by the filter's reach and the compute region
+        // is padded further, so blur halos update correctly.
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        session.undo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn filter_edits_render_incrementally_not_whole_canvas() {
+        let mut session = Session::new(512, 512, ColorMode::Rgb);
+        let small = add_rect(&mut session, "small", 8.0, 8.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "blur",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 3.0 },
+                )),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+
+        let before = session.pixels_recomputed();
+        session
+            .apply(Command::SetTransform {
+                id: small,
+                transform: Transform::translation(4.0, 4.0),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        let recomputed = session.pixels_recomputed() - before;
+
+        // Whole canvas would be 262144; the padded region is a small
+        // fraction of that even with a σ=3 blur in the stack.
+        assert!(
+            recomputed < 20_000,
+            "moving an 8×8 rect under a blur recomputed {recomputed} px of 262144"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn preview_gesture_is_one_undo_step() {
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 4.0, 4.0);
+
+        for step in 1..=5 {
+            session
+                .preview(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(step as f32, 0.0),
+                })
+                .unwrap();
+        }
+        assert!(session.commit_preview());
+        assert_eq!(session.transform_of(id).unwrap().e, 5.0);
+
+        // One undo covers the whole gesture, back to the pre-drag transform.
+        session.undo().unwrap();
+        assert_eq!(session.transform_of(id).unwrap().e, 0.0);
+        session.redo().unwrap();
+        assert_eq!(session.transform_of(id).unwrap().e, 5.0);
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn cancelled_preview_restores_state_and_records_nothing() {
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 4.0, 4.0);
+
+        session
+            .preview(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        assert!(session.cancel_preview().unwrap());
+        assert_eq!(session.transform_of(id).unwrap().e, 0.0);
+
+        // The only undo step is the AddNode, not the cancelled drag.
+        session.undo().unwrap();
+        assert_eq!(session.document().node_count(), 1);
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn group_and_ungroup_are_single_undo_steps() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        let root = session.document().root();
+
+        let group = session.group_nodes(&[a, b], "duo").unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[group]);
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+
+        // One undo dissolves the grouping entirely.
+        session.undo().unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[a, b]);
+        session.redo().unwrap();
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+
+        session.ungroup_node(group).unwrap();
+        assert_eq!(session.document().children_of(root).unwrap(), &[a, b]);
+        assert!(session.document().node(group).is_err(), "group removed");
+        session.undo().unwrap();
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+
+        // Mixed-parent grouping is refused.
+        let c = add_rect(&mut session, "c", 4.0, 4.0);
+        assert!(session.group_nodes(&[a, c], "bad").is_err());
+    }
+
+    #[test]
+    fn ungrouping_a_moved_group_leaves_its_children_where_they_look() {
+        // The group's transform reaches its children while they are inside
+        // it. Dissolving the group has to fold that transform into each of
+        // them, or everything springs back to where it was before the group
+        // was moved.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let group = session.group_nodes(&[a, b], "pair").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(20.0, 12.0),
+            })
+            .unwrap();
+
+        let before = session.bounds_of(a).unwrap();
+        session.ungroup_node(group).unwrap();
+        let after = session.bounds_of(a).unwrap();
+        assert!(
+            before.iter().zip(after).all(|(x, y)| (x - y).abs() < 1e-3),
+            "a child must not move when its group dissolves: {before:?} -> {after:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // And it is still one undo step, which puts the group back.
+        session.undo().unwrap();
+        assert!(matches!(
+            session.document().node(group).map(|n| &n.kind),
+            Ok(NodeKind::Group)
+        ));
+    }
+
+    #[test]
+    fn duplicating_a_group_copies_everything_under_it() {
+        // A node carries no children, so a duplicate is a walk. What makes
+        // it worth testing is that the copy's children hang off the copy —
+        // not off the original — and that the whole thing is one undo step.
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let group = session.group_nodes(&[a, b], "pair").unwrap();
+
+        let copy = session.duplicate_node(group).unwrap();
+        assert_ne!(copy, group);
+        let kids = session.document().children_of(copy).unwrap().to_vec();
+        assert_eq!(kids.len(), 2, "both children were copied");
+        assert!(
+            !kids.contains(&a) && !kids.contains(&b),
+            "the copy has its own children, not the originals"
+        );
+        assert_eq!(
+            session.document().children_of(group).unwrap(),
+            &[a, b],
+            "and the original is untouched"
+        );
+        assert_eq!(session.document().node(copy).unwrap().name, "pair copy");
+        assert_cache_matches_fresh(&mut session);
+
+        // Sits just above the original, offset so it is visible.
+        let root = session.document().root();
+        let top = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(
+            top.iter().position(|n| *n == copy),
+            top.iter().position(|n| *n == group).map(|i| i + 1),
+        );
+        let (ob, cb) = (
+            session.bounds_of(group).unwrap(),
+            session.bounds_of(copy).unwrap(),
+        );
+        assert!(cb[0] > ob[0] && cb[1] > ob[1], "the copy is nudged clear");
+
+        // One undo takes the whole subtree away again.
+        session.undo().unwrap();
+        assert!(session.document().node(copy).is_err());
+        assert_eq!(session.document().children_of(group).unwrap(), &[a, b]);
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Every kind of layer there is, copied into another document.
+    ///
+    /// The clipboard is the one place a layer leaves the document it
+    /// was made in, and what has to travel with it differs by kind: a
+    /// picture's pixels, a mask's, a paint layer's strokes, an
+    /// adjustment's numbers. A kind added later reaches this code
+    /// without anybody thinking about it, and the failure is quiet — a
+    /// layer that arrives looking right and drawing nothing.
+    ///
+    /// So: each of the fixture's layers, one at a time, into a fresh
+    /// document, and the arrival held against what was sent.
+    #[test]
+    fn every_kind_of_layer_survives_the_clipboard() {
+        let f = chitrakar_doc::fixture::everything();
+        let from = Session::from_document(f.doc.clone());
+        // A copy of another layer needs the layer it copies, so the two
+        // travel together; the rest go one at a time.
+        from.copy_nodes(&[f.group, f.copy]).unwrap();
+        {
+            let mut to = Session::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            let pasted = to.paste(None).expect("a copy and its original travel");
+            assert_eq!(pasted.len(), 2, "both arrived");
+            let NodeKind::Instance { of, .. } = &to.document().node(pasted[1]).unwrap().kind else {
+                panic!("the second is the copy");
+            };
+            assert_eq!(
+                *of, pasted[0],
+                "and it copies the one that arrived, not the one left behind"
+            );
+            assert!(to.render().is_ok(), "and the document draws");
+        }
+        // The same rule where a layer is copied without leaving the
+        // document: duplicating a group holding an original and a copy
+        // of it gives a pair that is its own. Without this the new copy
+        // goes on watching the old original, and the two groups are
+        // linked in a way nobody asked for.
+        {
+            let mut same = Session::from_document(f.doc.clone());
+            let pair = same.group_nodes(&[f.group, f.copy], "a pair").unwrap();
+            let made = same.duplicate_node(pair).unwrap();
+            let inside = same.document().children_of(made).unwrap().to_vec();
+            let NodeKind::Instance { of, .. } = &same.document().node(inside[1]).unwrap().kind
+            else {
+                panic!("the second of the pair is the copy");
+            };
+            assert_eq!(
+                *of, inside[0],
+                "the duplicate's copy watches the duplicate's original"
+            );
+        }
+
+        // On its own it is a copy of something that is not here, which
+        // is a layer that would arrive drawing nothing: said rather
+        // than shrugged at.
+        from.copy_node(f.copy).unwrap();
+        {
+            let mut to = Session::new(20, 20, chitrakar_color::ColorMode::Rgb);
+            let refused = to.paste(None).unwrap_err().to_string();
+            assert!(
+                refused.contains("copy that layer too"),
+                "an orphan says what is missing: {refused}"
+            );
+        }
+
+        for (what, id, covers) in [
+            ("a group", f.group, true),
+            ("a shape", f.under, true),
+            ("a paint layer", f.painted, true),
+            ("a picture", f.picture, true),
+            ("a block of text", f.words, true),
+            ("a frame", f.frame, true),
+            // The four that draw by reading what is under them have no
+            // picture of their own to hold against anything: drawn on
+            // their own there is nothing there to adjust, to blur, or to
+            // read from. For those the written-out comparison above is
+            // the whole of the claim.
+            ("an adjustment", f.lifted, false),
+            ("a filter", f.softened, false),
+            ("a clone layer", f.borrowed, false),
+        ] {
+            from.copy_node(id)
+                .unwrap_or_else(|e| panic!("copying {what}: {e}"));
+            let mut to = Session::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            let pasted = to
+                .paste(None)
+                .unwrap_or_else(|e| panic!("pasting {what}: {e}"));
+            assert_eq!(pasted.len(), 1, "one layer sent, one arrived: {what}");
+            let there = to.document().node(pasted[0]).unwrap();
+            let here = from.document().node(id).unwrap();
+            // The kind carries everything that makes the layer what it
+            // is, resource ids included — and those are content
+            // addresses, so they match only if the bytes came too.
+            assert_eq!(
+                format!("{:?}", there.kind),
+                format!("{:?}", here.kind),
+                "{what} arrived as something else"
+            );
+            for (field, a, b) in [
+                (
+                    "its mask",
+                    format!("{:?}", there.mask),
+                    format!("{:?}", here.mask),
+                ),
+                (
+                    "its effects",
+                    format!("{:?}", there.effects),
+                    format!("{:?}", here.effects),
+                ),
+                (
+                    "how it composites",
+                    format!("{:?}", (there.opacity, there.blend, there.clipped)),
+                    format!("{:?}", (here.opacity, here.blend, here.clipped)),
+                ),
+            ] {
+                assert_eq!(a, b, "{what} lost {field}");
+            }
+            // And the picture it makes, which the account above cannot
+            // see: everything compared so far is the layer written out as
+            // text, and a layer can hold the same values and draw
+            // something else — a resource id that names bytes which did
+            // not travel, a mask read in the wrong space, an effect whose
+            // reach was cut. Each layer is drawn on its own, where the
+            // page puts it, on both sides.
+            let alone = |s: &Session, id: NodeId| {
+                let (w, h) = (f.doc.meta.width, f.doc.meta.height);
+                let mut surface = Surface::new(w, h);
+                chitrakar_render::render_showing_at(
+                    s.document(),
+                    &mut surface,
+                    ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: w,
+                        y1: h,
+                    },
+                    Transform::default(),
+                    chitrakar_render::Showing::Alone(id),
+                )
+                .unwrap();
+                surface
+            };
+            if !covers {
+                assert!(
+                    to.render().is_ok(),
+                    "the document {what} arrived in still draws"
+                );
+                continue;
+            }
+            let sent = alone(&from, id);
+            let arrived = alone(&to, pasted[0]);
+            assert!(
+                sent.pixels.iter().any(|p| p.a > 0.01),
+                "{what} draws something to begin with"
+            );
+            // Pasting nudges what it pastes, so that a copy is visible
+            // rather than hiding exactly behind the original — so the two
+            // pictures are held against each other with that nudge
+            // allowed for, and nothing else.
+            let by = DUPLICATE_OFFSET as u32;
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..(f.doc.meta.height - by) {
+                for x in 0..(f.doc.meta.width - by) {
+                    let (p, q) = (sent.get(x, y), arrived.get(x + by, y + by));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 1e-5,
+                "{what} arrived drawing something else ({} at {},{})",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        }
+    }
+
+    /// Every kind of layer goes into a group and comes back out again.
+    ///
+    /// Grouping is the one edit that changes a layer's parent without
+    /// changing the layer, and the way it goes wrong is quiet: the page
+    /// looks right while the layers are wrapped, and something is
+    /// different once they are loose again. What differs depends on the
+    /// kind — a picture's transform has to be composed on the way out, an
+    /// adjustment stops seeing the layers it used to — so the fixture's
+    /// ten kinds each go in alone and come back, and both the page and the
+    /// node are held against what they were.
+    ///
+    /// Three of the ten are expected to look different *while* wrapped,
+    /// and it is not a bug but the whole point of putting an adjustment in
+    /// a group: a layer that draws by reading what is under it reads only
+    /// its own group's contents once it is in one. That is asserted too,
+    /// so that it changing is noticed.
+    #[test]
+    fn every_kind_of_layer_goes_into_a_group_and_comes_back() {
+        let f = chitrakar_doc::fixture::everything();
+        for (what, id, confined) in [
+            ("a group", f.group, false),
+            ("a shape", f.under, false),
+            ("a paint layer", f.painted, false),
+            ("a picture", f.picture, false),
+            ("a block of text", f.words, false),
+            ("a frame", f.frame, false),
+            ("an adjustment", f.lifted, true),
+            ("a filter", f.softened, true),
+            ("a clone layer", f.borrowed, true),
+            ("a copy of another layer", f.copy, false),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            let before = s.render().unwrap();
+            let was = format!("{:?}", s.document().node(id).unwrap());
+            let g = s
+                .group_nodes(&[id], "wrap")
+                .unwrap_or_else(|e| panic!("grouping {what}: {e}"));
+            let wrapped = s.render().unwrap();
+            // The same *picture*, rather than the same bytes. Wrapping a
+            // layer moves the window a blurred effect is worked out
+            // over — a group's box is its children's, and a new group
+            // has a different one — and three box passes summed along a
+            // different run do not land on the same last bit of a
+            // float. What is claimed here is that the page looks the
+            // same, and a difference in the seventh decimal is not the
+            // way that goes wrong: what would go wrong is a layer
+            // landing somewhere else, which is a whole level or more.
+            let same = |a: &Surface, b: &Surface| {
+                a.pixels.iter().zip(&b.pixels).all(|(p, q)| {
+                    (p.r - q.r).abs() < 1e-4
+                        && (p.g - q.g).abs() < 1e-4
+                        && (p.b - q.b).abs() < 1e-4
+                        && (p.a - q.a).abs() < 1e-4
+                })
+            };
+            assert_eq!(
+                same(&wrapped, &before),
+                !confined,
+                "{what}: wrapping it changed the page, or failed to"
+            );
+            // And it is one undo step, not one per layer moved.
+            assert_eq!(
+                s.history_labels().0.last().map(String::as_str),
+                Some("Group into wrap"),
+                "{what}: grouping is one step"
+            );
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("ungrouping {what}: {e}"));
+            let after = s.render().unwrap();
+            assert_eq!(
+                after.pixels, before.pixels,
+                "{what}: the page did not come back"
+            );
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap()),
+                was,
+                "{what}: the layer did not come back"
+            );
+            // Both halves undo, one step each, back to the start.
+            s.undo().unwrap();
+            s.undo().unwrap();
+            assert_eq!(
+                s.render().unwrap().pixels,
+                before.pixels,
+                "{what}: two undos put it back"
+            );
+        }
+    }
+
+    /// A group is a layer too, and dissolving one has to answer for what
+    /// the group itself was carrying.
+    ///
+    /// The group's transform was already handed to its children. The rest
+    /// splits in two. Hidden and locked mean exactly the same thing said
+    /// of each child, so they come out with them — and a hidden group
+    /// whose layers reappear on being dissolved is the kind of bug that
+    /// gets found by somebody's client. Opacity, blend, mask and effects
+    /// describe the group's composite, which no child can stand in for;
+    /// those are refused out loud, because a page that quietly changes is
+    /// worse than an edit that declines.
+    #[test]
+    fn dissolving_a_group_answers_for_what_the_group_carried() {
+        let f = chitrakar_doc::fixture::everything();
+        // The two that carry: the page is exactly what it was with the
+        // group still there, and every child says it itself.
+        for (what, cmd, reads) in [
+            (
+                "hidden",
+                Command::SetVisible {
+                    id: NodeId(0),
+                    visible: false,
+                },
+                true,
+            ),
+            (
+                "locked",
+                Command::SetLocked {
+                    id: NodeId(0),
+                    locked: true,
+                },
+                false,
+            ),
+        ] {
+            // The wrapper's id is not known until it exists, so the
+            // command is rebuilt against it.
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            let cmd = match cmd {
+                Command::SetVisible { visible, .. } => Command::SetVisible { id: g, visible },
+                Command::SetLocked { locked, .. } => Command::SetLocked { id: g, locked },
+                other => other,
+            };
+            s.apply(cmd).unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("a {what} group: {e}"));
+            let child = s.document().node(f.over).unwrap();
+            if reads {
+                assert!(!child.visible, "a {what} group hands that to its layers");
+                assert_eq!(
+                    s.render().unwrap().pixels,
+                    before.pixels,
+                    "a {what} group's layers do not reappear"
+                );
+            } else {
+                assert!(child.locked, "a {what} group hands that to its layers");
+            }
+            // And one undo takes the whole thing back.
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(f.over).unwrap()),
+                format!(
+                    "{:?}",
+                    Session::from_document(f.doc.clone())
+                        .document()
+                        .node(f.over)
+                        .unwrap()
+                ),
+                "undoing a {what} group's dissolve puts the layer back"
+            );
+        }
+
+        // The four that cannot: each refused, and each named.
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 2.0,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        for (what, said) in [
+            ("opacity", "an opacity of its own"),
+            ("blend", "a blend mode"),
+            ("mask", "a mask"),
+            ("effects", "effects"),
+            ("clip", "a clip to the layer below"),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            s.apply(match what {
+                "opacity" => Command::SetOpacity {
+                    id: g,
+                    opacity: 0.5,
+                },
+                "blend" => Command::SetBlendMode {
+                    id: g,
+                    blend: chitrakar_doc::BlendMode::Multiply,
+                },
+                "mask" => Command::SetMask {
+                    id: g,
+                    mask: Some(Box::new(mask.clone())),
+                },
+                "effects" => Command::SetEffects {
+                    id: g,
+                    effects: vec![outline.clone()],
+                },
+                _ => Command::SetClipped {
+                    id: g,
+                    clipped: true,
+                },
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            let refused = s
+                .ungroup_node(g)
+                .expect_err("a group carrying its own {what} cannot just be dissolved")
+                .to_string();
+            assert!(
+                refused.contains(said),
+                "the refusal names what it is: {refused}"
+            );
+            // A refusal leaves everything alone — no half-dissolved group.
+            assert!(s.document().node(g).is_ok(), "the group is still there");
+            assert_eq!(
+                s.render().unwrap().pixels,
+                before.pixels,
+                "and the page is untouched"
+            );
+            // Clearing it is the way through, and then it dissolves.
+            s.apply(match what {
+                "opacity" => Command::SetOpacity {
+                    id: g,
+                    opacity: 1.0,
+                },
+                "blend" => Command::SetBlendMode {
+                    id: g,
+                    blend: chitrakar_doc::BlendMode::Normal,
+                },
+                "mask" => Command::SetMask { id: g, mask: None },
+                "effects" => Command::SetEffects {
+                    id: g,
+                    effects: vec![],
+                },
+                _ => Command::SetClipped {
+                    id: g,
+                    clipped: false,
+                },
+            })
+            .unwrap();
+            s.ungroup_node(g)
+                .unwrap_or_else(|e| panic!("cleared, a {what} group dissolves: {e}"));
+        }
+
+        // More than one thing at once is said as a list.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            s.apply(Command::SetOpacity {
+                id: g,
+                opacity: 0.5,
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id: g,
+                effects: vec![outline.clone()],
+            })
+            .unwrap();
+            let refused = s.ungroup_node(g).unwrap_err().to_string();
+            assert!(
+                refused.contains("an opacity of its own and effects"),
+                "both are named: {refused}"
+            );
+        }
+
+        // A clip that is not doing anything is not worth refusing over:
+        // the bottom layer of a parent has nothing under it to be
+        // confined to, so the flag there is already ignored.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.under], "wrap").unwrap();
+            assert_eq!(
+                s.document()
+                    .children_of(s.document().parent_of(g).unwrap())
+                    .unwrap()[0],
+                g,
+                "the wrapper is the bottom-most of its parent"
+            );
+            s.apply(Command::SetClipped {
+                id: g,
+                clipped: true,
+            })
+            .unwrap();
+            s.ungroup_node(g)
+                .expect("a clip with nothing under it does not stop a dissolve");
+        }
+    }
+
+    /// A mask does not travel with the layer's own transform, so
+    /// anything moving a layer between spaces has to bring it by hand.
+    ///
+    /// A mask is written in the space its owner is *placed* in — the
+    /// parent's — which is what lets a layer be moved behind its mask,
+    /// and is stated where a page is mapped (`Document::map_page`
+    /// carries a layer's mask, the region picked out, and every region
+    /// kept by name). Dissolving a group hands the group's transform to
+    /// each child, and so is exactly that kind of move: it left every
+    /// child's mask behind in the space the group used to occupy, where
+    /// it went on covering the part of the page it used to. A drop
+    /// shadow's offset is a vector in that same space and went the same
+    /// way — a group turned a quarter round and then dissolved lit every
+    /// layer in it from a new direction.
+    ///
+    /// So: each kind of layer, given a mask and a shadow, wrapped in a
+    /// group that is then moved, turned and scaled, and the page held
+    /// against itself across the dissolve. The three that draw by
+    /// reading what is under them are asked the same question
+    /// structurally instead, since leaving their group is what changes
+    /// what they read.
+    #[test]
+    fn a_dissolved_group_brings_its_children_masks_with_it() {
+        let f = chitrakar_doc::fixture::everything();
+        // Not just a shift: a turn and a scale, so a mask carried by the
+        // translation alone would still be wrong, and a shadow's offset
+        // has a direction to lose.
+        // A turn and an even scale as well as a shift, so a mask carried
+        // by the shift alone would still be wrong and a shadow's offset
+        // has a direction to lose. Even rather than uneven because a
+        // softness and a blur are round: one number is what they have to
+        // say, and a transform that stretches the axes differently is
+        // not a thing they can answer honestly — the renderer reads them
+        // through the same `max_scale`, so the two agree where the answer
+        // exists and nowhere claim more than that.
+        let (c, sn) = (0.4f32.cos(), 0.4f32.sin());
+        let moved = Transform::translation(9.0, 5.0).compose(Transform {
+            a: 1.25 * c,
+            b: 1.25 * sn,
+            c: -1.25 * sn,
+            d: 1.25 * c,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 26.0,
+                    height: 12.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(14.0, 12.0),
+            },
+            invert: false,
+            // Softened and blurred generously: these are lengths with no
+            // direction, carried by the scale alone, and a quarter of a
+            // pixel either way would not show.
+            feather: 4.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 4.0,
+            dy: 0.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.9,
+        };
+        // An outline has no offset at all, only a width — the other kind
+        // of length, and the other half of the same carry.
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.8,
+                b: 0.3,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        for (what, id, covers) in [
+            ("a group", f.group, true),
+            ("a shape", f.under, true),
+            ("a paint layer", f.painted, true),
+            ("a picture", f.picture, true),
+            ("a block of text", f.words, true),
+            ("a frame", f.frame, true),
+            ("a copy of another layer", f.copy, true),
+            ("an adjustment", f.lifted, false),
+            ("a filter", f.softened, false),
+            ("a clone layer", f.borrowed, false),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            s.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.clone())),
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone(), outline.clone()],
+            })
+            .unwrap();
+            let g = s.group_nodes(&[id], "wrap").unwrap();
+            s.apply(Command::SetTransform {
+                id: g,
+                transform: moved,
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g).unwrap();
+            let after = s.render().unwrap();
+            if covers {
+                // And so the page is what it was, to within the noise of
+                // composing the same transforms in a different order.
+                let (worst, x, y) = apart(&before, &after);
+                assert!(
+                    worst < 1e-4,
+                    "{what}: the page changed on being let out ({worst} at {x},{y})"
+                );
+            }
+
+            // The mask is the same coverage read one space further out.
+            let carried = s.document().node(id).unwrap().mask.clone().unwrap();
+            assert_eq!(
+                format!("{carried:?}"),
+                format!("{:?}", mask.carried_through(moved)),
+                "{what}: its mask came out into the new space"
+            );
+            let chitrakar_doc::Effect::DropShadow { dx, dy, .. } =
+                s.document().node(id).unwrap().effects[0]
+            else {
+                panic!("{what}: still a drop shadow");
+            };
+            let chitrakar_doc::Effect::DropShadow { dx: wx, dy: wy, .. } =
+                shadow.carried_through(moved)
+            else {
+                unreachable!()
+            };
+            assert!(
+                (dx - wx).abs() < 1e-4 && (dy - wy).abs() < 1e-4,
+                "{what}: its shadow still points the same way ({dx},{dy})"
+            );
+            let chitrakar_doc::Effect::Outline { width, .. } =
+                s.document().node(id).unwrap().effects[1]
+            else {
+                panic!("{what}: still an outline");
+            };
+            assert!(
+                (width - 3.0 * moved.max_scale()).abs() < 1e-4,
+                "{what}: its outline is as wide on the page as it was ({width})"
+            );
+
+            // One undo puts the whole thing back, mask and all.
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().mask),
+                format!("{:?}", Some(mask.clone())),
+                "{what}: and one undo puts the mask back where it was"
+            );
+        }
+
+        // A mask brushed by hand is the same question with more in it: a
+        // stroke's points are written in that space, its radii are
+        // lengths in it, and the region it was confined to when it was
+        // laid down is another coverage over it. All three have to come
+        // out together — points alone would leave a brush the wrong size
+        // spilling past a region that has stayed behind.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            // A band down the middle of where the picture is — (50,6) to
+            // (70,26) on this page — so the region cuts the stroke rather
+            // than missing it, and the stroke crosses the picture rather
+            // than passing beside it. A mask only shows where its layer
+            // draws, and a stroke laid down off the layer proves nothing.
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(52.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+            s.ensure_painted_mask(f.picture).unwrap();
+            s.paint_begin(
+                f.picture,
+                52.0,
+                10.0,
+                5.0,
+                AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                0.0,
+                true,
+                true,
+            )
+            .unwrap();
+            s.paint_extend(68.0, 22.0, 5.0).unwrap();
+            s.commit_preview();
+            s.pick_none().unwrap();
+            let brushed = match &s
+                .document()
+                .node(f.picture)
+                .unwrap()
+                .mask
+                .as_ref()
+                .unwrap()
+                .kind
+            {
+                chitrakar_doc::MaskKind::Painted { strokes } => strokes.clone(),
+                other => panic!("a brushed mask, not {other:?}"),
+            };
+            assert!(
+                brushed[0].clip.is_some(),
+                "the stroke was laid down inside a region and carries it"
+            );
+            let g = s.group_nodes(&[f.picture], "wrap").unwrap();
+            s.apply(Command::SetTransform {
+                id: g,
+                transform: moved,
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            s.ungroup_node(g).unwrap();
+            let (worst, x, y) = apart(&before, &s.render().unwrap());
+            assert!(
+                worst < 1e-4,
+                "a brushed mask changed on being let out ({worst} at {x},{y})"
+            );
+        }
+    }
+
+    /// And a layer dragged into a group somewhere else brings its mask.
+    ///
+    /// The same rule as a group being dissolved, in the other direction
+    /// and in the place a person meets it every day: dragging a layer
+    /// onto another row in the layers panel. `reparent` already undoes
+    /// the space change on the layer's own transform, so the layer does
+    /// not jump when it is dropped into a group that sits away from the
+    /// origin — and left the mask and the shadow behind in the space it
+    /// came from, so the layer stayed put while the hole in it moved.
+    ///
+    /// Both ways round, since a layer comes out of a group as often as it
+    /// goes in, and through a host that turns and scales as well as
+    /// shifts, so a carry that only got the shift right would still be
+    /// caught.
+    #[test]
+    fn a_layer_dragged_into_another_group_brings_its_mask() {
+        let f = chitrakar_doc::fixture::everything();
+        let (c, sn) = (0.3f32.cos(), 0.3f32.sin());
+        let placed = Transform::translation(11.0, 7.0).compose(Transform {
+            a: 1.2 * c,
+            b: 1.2 * sn,
+            c: -1.2 * sn,
+            d: 1.2 * c,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: 30.0,
+                    height: 16.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(4.0, 6.0),
+            },
+            invert: false,
+            feather: 4.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 5.0,
+            dy: 0.0,
+            blur: 3.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.9,
+        };
+        for (what, id) in [
+            ("a shape", f.under),
+            ("a paint layer", f.painted),
+            ("a picture", f.picture),
+            ("a block of text", f.words),
+            ("a group", f.group),
+        ] {
+            let mut s = Session::from_document(f.doc.clone());
+            // Somewhere to drop it: a group holding one layer, put where
+            // its space is nothing like the page's.
+            let host = s.group_nodes(&[f.frame], "host").unwrap();
+            s.apply(Command::SetTransform {
+                id: host,
+                transform: placed,
+            })
+            .unwrap();
+            s.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.clone())),
+            })
+            .unwrap();
+            s.apply(Command::SetEffects {
+                id,
+                effects: vec![shadow.clone()],
+            })
+            .unwrap();
+            // The layer on its own, where the page puts it. Reparenting
+            // is a change to the stack as well as to the space — dropped
+            // somewhere else a layer is drawn in a different order, and
+            // what a copy of the group it left holds changes too — so the
+            // claim is about the layer, not about the page: it lands
+            // exactly where it was, mask, softness and shadow and all.
+            let alone = |s: &Session| {
+                let (w, h) = (f.doc.meta.width, f.doc.meta.height);
+                let mut surface = Surface::new(w, h);
+                let clip = ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                };
+                chitrakar_render::render_showing_at(
+                    s.document(),
+                    &mut surface,
+                    clip,
+                    Transform::default(),
+                    chitrakar_render::Showing::Alone(id),
+                )
+                .unwrap();
+                surface
+            };
+            let before = alone(&s);
+            let home = (
+                s.document().parent_of(id).unwrap(),
+                s.document()
+                    .children_of(s.document().parent_of(id).unwrap())
+                    .unwrap()
+                    .iter()
+                    .position(|c| *c == id)
+                    .unwrap(),
+            );
+
+            s.reparent(id, host, 0)
+                .unwrap_or_else(|e| panic!("dropping {what} into the group: {e}"));
+            let (worst, x, y) = apart(&before, &alone(&s));
+            assert!(
+                worst < 1e-4,
+                "{what} moved when it was dropped in ({worst} at {x},{y})"
+            );
+
+            // And out again, to exactly where it was.
+            s.reparent(id, home.0, home.1)
+                .unwrap_or_else(|e| panic!("dragging {what} back out: {e}"));
+            let (worst, x, y) = apart(&before, &alone(&s));
+            assert!(
+                worst < 1e-4,
+                "{what} moved on the way back out ({worst} at {x},{y})"
+            );
+
+            // Two drags, two undos, and the mask is the one it started
+            // with rather than one carried there and back.
+            s.undo().unwrap();
+            s.undo().unwrap();
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().mask),
+                format!("{:?}", Some(mask.clone())),
+                "{what}: undone, its mask is the one it was given"
+            );
+            assert_eq!(
+                format!("{:?}", s.document().node(id).unwrap().effects),
+                format!("{:?}", vec![shadow.clone()]),
+                "{what}: and so is its shadow"
+            );
+        }
+    }
+
+    /// A layer that cannot be seen draws the same page as no layer at
+    /// all.
+    ///
+    /// There are three ways for a layer to be invisible and they are
+    /// three different pieces of arithmetic: hidden is a flag the walk
+    /// skips on, an opacity of zero is a weight at the end of it, and a
+    /// mask that covers nothing is a coverage read per pixel. For a layer
+    /// that *covers* — a shape, a picture, some text — all three come to
+    /// the same thing and nobody would get them wrong. For the four that
+    /// draw by reading what is under them they do not: an adjustment's
+    /// opacity is how far to take the adjustment and its mask is where to
+    /// take it, so both are folded into the work rather than applied to a
+    /// composite, and "none of it, nowhere" is a different line of code
+    /// from "skip this layer".
+    ///
+    /// So: each of the fixture's ten kinds, made invisible each of the
+    /// three ways, against the same document with that layer deleted.
+    /// Deleted rather than merely compared to itself, because the claim
+    /// is the strong one — that the page is what it would be if the layer
+    /// had never been added.
+    #[test]
+    fn a_layer_that_cannot_be_seen_is_the_same_as_no_layer() {
+        let f = chitrakar_doc::fixture::everything();
+        // Coverage of nothing: the whole page, inverted.
+        let covers_nothing = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: chitrakar_doc::VectorShape::Rect {
+                    width: f.doc.meta.width as f32 * 4.0,
+                    height: f.doc.meta.height as f32 * 4.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(
+                    -(f.doc.meta.width as f32),
+                    -(f.doc.meta.height as f32),
+                ),
+            },
+            invert: true,
+            feather: 0.0,
+        };
+        for (what, id) in [
+            ("a group", f.group),
+            ("a shape", f.under),
+            ("a paint layer", f.painted),
+            ("a picture", f.picture),
+            ("a block of text", f.words),
+            ("a frame", f.frame),
+            ("an adjustment", f.lifted),
+            ("a filter", f.softened),
+            ("a clone layer", f.borrowed),
+            ("a copy of another layer", f.copy),
+        ] {
+            // The page with the layer gone. A group takes its children
+            // with it, which is what deleting a group means.
+            let gone = {
+                let mut s = Session::from_document(f.doc.clone());
+                s.apply(Command::RemoveNode { id }).unwrap();
+                s.render().unwrap()
+            };
+            // …and the page with it there, which had better be a
+            // different page: a kind that draws nothing anyway would pass
+            // every question below without answering any of them.
+            let there = Session::from_document(f.doc.clone()).render().unwrap();
+            let (shows, _, _) = apart(&gone, &there);
+            assert!(
+                shows > 0.01,
+                "{what} makes a visible difference to begin with ({shows})"
+            );
+            for (how, cmd) in [
+                ("hidden", Command::SetVisible { id, visible: false }),
+                ("at no opacity", Command::SetOpacity { id, opacity: 0.0 }),
+                (
+                    "masked to nothing",
+                    Command::SetMask {
+                        id,
+                        mask: Some(Box::new(covers_nothing.clone())),
+                    },
+                ),
+            ] {
+                let mut s = Session::from_document(f.doc.clone());
+                s.apply(cmd).unwrap_or_else(|e| panic!("{what} {how}: {e}"));
+                let (worst, x, y) = apart(&gone, &s.render().unwrap());
+                assert!(
+                    worst < 1e-5,
+                    "{what} {how} still draws ({worst} at {x},{y})"
+                );
+            }
+        }
+    }
+
+    /// Combining shapes keeps the shape that was being combined.
+    ///
+    /// The result takes the bottom-most operand's fill and stroke,
+    /// because that is the shape the eye reads as the one being operated
+    /// on — and by the same reading it is that layer, with a different
+    /// outline. It used to be a fresh layer with the fill and the stroke
+    /// put back into it, so a half-transparent shape with a drop shadow
+    /// came out of a combine opaque and flat, its mask gone, unlocked,
+    /// and let out of whatever it was clipped to. It is built from a copy
+    /// of that layer now, which is also why the next field a `Node` is
+    /// given will come along without anybody remembering this code.
+    ///
+    /// The sharp end of it: the union of a shape and a shape *inside* it
+    /// is the first shape, so the page must not change at all. Everything
+    /// the layer says about how it is drawn is in that one comparison,
+    /// and nothing has to be listed for it to be checked.
+    #[test]
+    fn combining_shapes_keeps_the_shape_that_was_combined() {
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 34.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(6.0, 4.0),
+            },
+            invert: false,
+            feather: 2.0,
+        };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 3.0,
+            dy: 3.0,
+            blur: 2.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.1,
+                a: 1.0,
+            },
+            opacity: 0.8,
+        };
+        // A backdrop to blend against, then the shape being combined.
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of(
+                    "ground",
+                    80.0,
+                    60.0,
+                    AuthoredColor::Srgb {
+                        r: 0.3,
+                        g: 0.6,
+                        b: 0.8,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect_of(
+                    "big",
+                    40.0,
+                    30.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.4,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        let big = session.document().children_of(root).unwrap()[1];
+        for cmd in [
+            Command::SetTransform {
+                id: big,
+                transform: Transform::translation(12.0, 10.0),
+            },
+            Command::SetOpacity {
+                id: big,
+                opacity: 0.6,
+            },
+            Command::SetBlendMode {
+                id: big,
+                blend: chitrakar_doc::BlendMode::Multiply,
+            },
+            Command::SetMask {
+                id: big,
+                mask: Some(Box::new(mask.clone())),
+            },
+            Command::SetEffects {
+                id: big,
+                effects: vec![shadow.clone()],
+            },
+            Command::SetLocked {
+                id: big,
+                locked: true,
+            },
+            Command::SetPinning {
+                id: big,
+                pinned: chitrakar_doc::Pinning {
+                    x: chitrakar_doc::Pin::End,
+                    y: chitrakar_doc::Pin::Stretch,
+                },
+            },
+        ] {
+            session.apply(cmd).unwrap();
+        }
+        let alone = session.render().unwrap();
+
+        // A smaller shape wholly inside it, so their union is its own
+        // outline and nothing about the page should move.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: rect_of(
+                    "small",
+                    10.0,
+                    8.0,
+                    AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.9,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        let small = session.document().children_of(root).unwrap()[2];
+        session
+            .apply(Command::SetTransform {
+                id: small,
+                transform: Transform::translation(20.0, 18.0),
+            })
+            .unwrap();
+        let joined = session.boolean_nodes(&[big, small], "union").unwrap();
+        let (worst, x, y) = apart(&alone, &session.render().unwrap());
+        assert!(
+            worst < 2e-2,
+            "the combined shape is drawn as the shape it was ({worst} at {x},{y})"
+        );
+
+        // And said field by field as well, since the page cannot show a
+        // lock or a pin.
+        let now = session.document().node(joined).unwrap();
+        assert_eq!(now.opacity, 0.6, "its opacity came along");
+        assert_eq!(
+            now.blend,
+            chitrakar_doc::BlendMode::Multiply,
+            "and how it blends"
+        );
+        assert_eq!(
+            format!("{:?}", now.mask),
+            format!("{:?}", Some(mask)),
+            "and its mask"
+        );
+        assert_eq!(
+            format!("{:?}", now.effects),
+            format!("{:?}", vec![shadow]),
+            "and its shadow"
+        );
+        assert!(now.locked, "a locked shape does not come out unlocked");
+        assert_eq!(
+            now.pinned.x,
+            chitrakar_doc::Pin::End,
+            "and it answers a frame the same way it did"
+        );
+        assert!(
+            now.name.starts_with("big"),
+            "named for the shape it was: {}",
+            now.name
+        );
+        // One undo takes the whole combine back.
+        session.undo().unwrap();
+        assert!(
+            session.document().node(big).is_ok() && session.document().node(small).is_ok(),
+            "one undo puts both shapes back"
+        );
+    }
+
+    /// Giving a layer its own adjustment leaves the page where it was.
+    ///
+    /// The machinery is a group: the layer and the new adjustment go in
+    /// one together, and a group holding something that reads the
+    /// backdrop is drawn on a surface of its own, which is exactly what
+    /// confines the adjustment to that layer. The other half of that is
+    /// what nobody looked at — a wrapped layer meets the group's surface
+    /// rather than the page. A multiplying layer began multiplying against
+    /// nothing and arrived over the page plainly; a layer confined to the
+    /// one below it was let out of it altogether and covered what it had
+    /// been showing through. Both belong to the wrapper now, which sits
+    /// exactly where the layer sat.
+    ///
+    /// Asked with an adjustment that does nothing, so the whole claim is
+    /// the plain one: the page before and the page after are the same
+    /// page. Opacity is asked too and needs no moving — source-over with
+    /// a weight is associative, so it comes out the same either way —
+    /// which is why it is left where it is and why that is worth pinning
+    /// rather than assuming.
+    #[test]
+    fn a_layer_given_its_own_adjustment_is_drawn_as_it_was() {
+        let neutral = || {
+            let mut n = Node::group("no exposure");
+            n.kind = NodeKind::Adjustment(chitrakar_doc::Adjustment::Exposure { stops: 0.0 });
+            n
+        };
+        for (what, how) in [
+            (
+                "multiplying",
+                Some(
+                    (|id| Command::SetBlendMode {
+                        id,
+                        blend: chitrakar_doc::BlendMode::Multiply,
+                    }) as fn(NodeId) -> Command,
+                ),
+            ),
+            (
+                "in soft light",
+                Some(|id| Command::SetBlendMode {
+                    id,
+                    blend: chitrakar_doc::BlendMode::SoftLight,
+                }),
+            ),
+            (
+                "half-transparent",
+                Some(|id| Command::SetOpacity { id, opacity: 0.5 }),
+            ),
+            (
+                "confined to the layer below",
+                Some(|id| Command::SetClipped { id, clipped: true }),
+            ),
+            ("plain", None),
+        ] {
+            let mut s = Session::new(60, 40, ColorMode::Rgb);
+            let root = s.document().root();
+            // Something under it to blend against and be confined to,
+            // narrower than the layer above so a lost clip shows.
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of(
+                    "ground",
+                    30.0,
+                    30.0,
+                    AuthoredColor::Srgb {
+                        r: 0.25,
+                        g: 0.55,
+                        b: 0.85,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect_of(
+                    "over",
+                    40.0,
+                    26.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.55,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            let over = s.document().children_of(root).unwrap()[1];
+            s.apply(Command::SetTransform {
+                id: over,
+                transform: Transform::translation(6.0, 4.0),
+            })
+            .unwrap();
+            if let Some(make) = how {
+                s.apply(make(over)).unwrap();
+            }
+            let before = s.render().unwrap();
+            let wrapper = s
+                .adjust_node(over, neutral())
+                .unwrap_or_else(|e| panic!("a {what} layer: {e}"));
+            let (worst, x, y) = apart(&before, &s.render().unwrap());
+            assert!(
+                worst < 1e-5,
+                "a {what} layer moved when it was given an adjustment ({worst} at {x},{y})"
+            );
+            // The layer is inside the wrapper, and the wrapper is where
+            // the layer was.
+            assert_eq!(
+                s.document().children_of(wrapper).unwrap().len(),
+                2,
+                "a {what} layer and its adjustment are in there together"
+            );
+            assert_eq!(
+                s.document().children_of(root).unwrap(),
+                &[s.document().children_of(root).unwrap()[0], wrapper],
+                "a {what} layer's wrapper took its place"
+            );
+            // And one undo takes the whole thing back.
+            s.undo().unwrap();
+            let (worst, _, _) = apart(&before, &s.render().unwrap());
+            assert!(worst < 1e-5, "one undo puts a {what} layer back as it was");
+        }
+    }
+
+    /// Adding an anchor to a path leaves the path where it was.
+    ///
+    /// That is the whole of what adding one is for: somewhere new to take
+    /// hold of a curve that is already the curve somebody wants. The
+    /// arithmetic is a de Casteljau split, which is exact — on a path that
+    /// has handles.
+    ///
+    /// A *smooth* path has none. Its curve is a Catmull-Rom spline read
+    /// straight off the anchors, which is what lets a path be drawn by
+    /// clicking, and the split read those absent handles as zeroes: it
+    /// treated the segment as a straight line, wrote handles that kept it
+    /// straight, and gave the path authored handles — which win over
+    /// `smooth` — so every other bend in it went as well. One click on a
+    /// curve and the curve was a polyline. The handles are derived first
+    /// now (`chitrakar_render::smooth_handles`, where the conversion is
+    /// stated once), so the path is split as the curve it is and comes out
+    /// as a path with handles, which is what it always was underneath.
+    ///
+    /// What is left is a fraction of an alpha step at the edge: the same
+    /// curve cut into more, shorter pieces lands its antialiasing a
+    /// hair differently. Nothing moves by as much as a quarter of a step
+    /// anywhere, which is the claim.
+    #[test]
+    fn adding_an_anchor_leaves_the_path_where_it_was() {
+        let path_layer = |smooth: bool, closed: bool, handles: Vec<[f32; 4]>| {
+            let mut s = Session::new(80, 60, ColorMode::Rgb);
+            let root = s.document().root();
+            let mut node = Node::vector(
+                "curve",
+                VectorShape::Path {
+                    points: vec![[8.0, 40.0], [24.0, 10.0], [48.0, 46.0], [70.0, 14.0]],
+                    closed,
+                    smooth,
+                    handles,
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { stroke, fill, .. } = &mut node.kind {
+                *fill = None;
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.1,
+                        a: 1.0,
+                    },
+                    width: 2.0,
+                    widths: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    dash: Vec::new(),
+                    align: None,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            s
+        };
+        let own_handles = vec![
+            [0.0, 0.0, 6.0, -10.0],
+            [-6.0, 10.0, 8.0, 6.0],
+            [-8.0, -6.0, 7.0, 8.0],
+            [-7.0, -8.0, 0.0, 0.0],
+        ];
+        for (what, smooth, closed, handles) in [
+            ("a path of corners", false, false, Vec::new()),
+            (
+                "a smooth path drawn without handles",
+                true,
+                false,
+                Vec::new(),
+            ),
+            ("a smooth path closed on itself", true, true, Vec::new()),
+            (
+                "a path with handles of its own",
+                false,
+                false,
+                own_handles.clone(),
+            ),
+            ("the same, closed", false, true, own_handles),
+        ] {
+            let before = path_layer(smooth, closed, handles.clone())
+                .render()
+                .unwrap();
+            let mut inserted = 0usize;
+            for (ax, ay) in [(36.0, 30.0), (16.0, 24.0), (60.0, 30.0), (30.0, 22.0)] {
+                let mut s = path_layer(smooth, closed, handles.clone());
+                let id = s.document().children_of(s.document().root()).unwrap()[0];
+                if s.insert_anchor(id, ax, ay, 40.0).is_err() {
+                    continue;
+                }
+                inserted += 1;
+                let after = s.render().unwrap();
+                let (worst, x, y) = apart(&before, &after);
+                assert!(
+                    worst < 0.3,
+                    "{what}: an anchor at {ax},{ay} moved it by {worst} at {x},{y}"
+                );
+                let moved = (0..before.height)
+                    .flat_map(|y| (0..before.width).map(move |x| (x, y)))
+                    .filter(|(x, y)| (before.get(*x, *y).a - after.get(*x, *y).a).abs() > 0.25)
+                    .count();
+                assert_eq!(
+                    moved, 0,
+                    "{what}: an anchor at {ax},{ay} moved {moved} pixels by a visible amount"
+                );
+                // The path has one more anchor and it lies on the curve —
+                // which the page above has already said, but a path that
+                // refused to grow would pass that silently.
+                let NodeKind::Vector {
+                    shape: VectorShape::Path { points, .. },
+                    ..
+                } = &s.document().node(id).unwrap().kind
+                else {
+                    panic!("still a path")
+                };
+                assert_eq!(points.len(), 5, "{what}: it has the new anchor");
+            }
+            assert!(
+                inserted >= 3,
+                "{what}: the insertions were actually made ({inserted})"
+            );
+        }
+    }
+
+    /// A page of shapes, out through SVG and back in, is the same page.
+    ///
+    /// Five doors lead out of this editor and SVG is the only one it can
+    /// also walk back through: `place_svg` brings a file in as editable
+    /// layers, so the writer and the reader can be held against each
+    /// other rather than each being trusted on its own. The other audit
+    /// of the exports asks only that each door opens on whatever state a
+    /// command left behind; this one asks what came out the other side.
+    /// A shape whose fill-rule, handles or nested transform is written in
+    /// a way this editor's own reader cannot make sense of is a file
+    /// somebody opens in a year to find their drawing rearranged, and
+    /// nothing else would have said so.
+    ///
+    /// Shapes rather than everything, deliberately: SVG carries no
+    /// adjustment, no filter and no live raster, so a picture or a curves
+    /// layer is lost by design and has nothing to be held to. What is
+    /// asked here is what SVG *does* carry — rects, ellipses, paths with
+    /// handles, fills, strokes, opacity, groups with transforms of their
+    /// own, and a hole read by the even-odd rule.
+    ///
+    /// The one thing that cannot come back exactly is colour: a fill goes
+    /// out as eight bits a channel, so it returns quantized. That is a
+    /// twentieth of a step of linear light at its worst here, and it is
+    /// what the tolerance is for — anything structural is worth far more
+    /// than that.
+    #[test]
+    fn a_page_of_shapes_survives_being_written_as_svg_and_read_back() {
+        let mut s = Session::new(120, 90, ColorMode::Rgb);
+        let root = s.document().root();
+        // A rect, an ellipse, a path with handles, each placed and coloured.
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: rect_of(
+                "box",
+                40.0,
+                30.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.4,
+                    b: 0.2,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let boxed = s.document().children_of(root).unwrap()[0];
+        s.apply(Command::SetTransform {
+            id: boxed,
+            transform: Transform::translation(10.0, 12.0),
+        })
+        .unwrap();
+        let mut oval = Node::vector("oval", VectorShape::Ellipse { rx: 18.0, ry: 12.0 });
+        if let NodeKind::Vector { fill, .. } = &mut oval.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.5,
+                b: 0.85,
+                a: 1.0,
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(oval),
+        })
+        .unwrap();
+        let oval_id = s.document().children_of(root).unwrap()[1];
+        s.apply(Command::SetTransform {
+            id: oval_id,
+            transform: Transform::translation(60.0, 40.0),
+        })
+        .unwrap();
+
+        // A stroked path with handles, at half opacity, turned.
+        let mut curve = Node::vector(
+            "curve",
+            VectorShape::Path {
+                points: vec![[0.0, 20.0], [20.0, 0.0], [40.0, 24.0]],
+                closed: false,
+                smooth: false,
+                handles: vec![
+                    [0.0, 0.0, 8.0, -6.0],
+                    [-8.0, 6.0, 8.0, 6.0],
+                    [-8.0, -6.0, 0.0, 0.0],
+                ],
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut curve.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.6,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                width: 3.0,
+                widths: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                dash: Vec::new(),
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(curve),
+        })
+        .unwrap();
+        let curve_id = s.document().children_of(root).unwrap()[2];
+        let (c, sn) = (0.3f32.cos(), 0.3f32.sin());
+        s.apply(Command::SetTransform {
+            id: curve_id,
+            transform: Transform::translation(20.0, 50.0).compose(Transform {
+                a: c,
+                b: sn,
+                c: -sn,
+                d: c,
+                e: 0.0,
+                f: 0.0,
+            }),
+        })
+        .unwrap();
+        s.apply(Command::SetOpacity {
+            id: curve_id,
+            opacity: 0.5,
+        })
+        .unwrap();
+
+        // A group with a child, so nested transforms are asked; a shape
+        // with a hole in it, so the fill rule is; and a gradient.
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::group("nest")),
+        })
+        .unwrap();
+        let nest = s.document().children_of(root).unwrap()[3];
+        s.apply(Command::SetTransform {
+            id: nest,
+            transform: Transform::translation(70.0, 8.0),
+        })
+        .unwrap();
+        s.apply(Command::AddNode {
+            parent: nest,
+            index: 0,
+            node: rect_of(
+                "inside",
+                20.0,
+                14.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.8,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        let mut holed = Node::vector(
+            "ring",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 24.0], [0.0, 24.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: vec![vec![[8.0, 6.0], [22.0, 6.0], [22.0, 18.0], [8.0, 18.0]]],
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut holed.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.6,
+                g: 0.2,
+                b: 0.7,
+                a: 1.0,
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 4,
+            node: Box::new(holed),
+        })
+        .unwrap();
+        let ring = s.document().children_of(root).unwrap()[4];
+        s.apply(Command::SetTransform {
+            id: ring,
+            transform: Transform::translation(6.0, 58.0),
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        let svg = s.export_svg().unwrap();
+        // The reader has to be given something to read, and the writer
+        // has to have written each kind of thing.
+        for wanted in [
+            "<rect",
+            "<ellipse",
+            "<path",
+            "<g ",
+            "fill-rule=\"evenodd\"",
+            "opacity=",
+            "stroke-width=",
+        ] {
+            assert!(svg.contains(wanted), "the SVG says {wanted}: {svg}");
+        }
+
+        let mut back = Session::new(120, 90, ColorMode::Rgb);
+        back.place_svg(svg.as_bytes(), "again")
+            .unwrap_or_else(|e| panic!("reading back what was written: {e}"));
+        let (worst, x, y) = apart(&before, &back.render().unwrap());
+        assert!(
+            worst < 0.08,
+            "the page came back different ({worst} at {x},{y})"
+        );
+        // And it came back as layers rather than as one picture, which is
+        // the point of reading an SVG rather than a PNG.
+        let root = back.document().root();
+        let group = back.document().children_of(root).unwrap()[0];
+        assert_eq!(
+            back.document().children_of(group).unwrap().len(),
+            5,
+            "each shape arrived as a layer of its own"
+        );
+    }
+
+    /// A layer's mask handed out as a region picks out what that mask
+    /// let through.
+    ///
+    /// Handing a region to a layer and handing the layer's mask back out
+    /// are the same carry read in the two directions, and the way in was
+    /// already pinned. The way out is where the second copy of that carry
+    /// lived: `Session::carried_into` wrote out, a second time, what
+    /// `Mask::carried_through` says — and so it still had the gaps that
+    /// one has since had fixed. A brushed coverage's radii and the region
+    /// a stroke was confined to went through untouched, so a piece rubbed
+    /// out of a layer sitting inside a group scaled by two came back out
+    /// as a region with the brush still the size it was in there. It
+    /// delegates now; the rule is written once.
+    ///
+    /// Asking it as a round trip would have found nothing: out and back
+    /// again leaves an untouched radius untouched twice, and the two
+    /// mistakes cancel. So the question is one-directional — the mask is
+    /// handed out and given to a *plain* full-page layer at the root, and
+    /// what the two layers show has to coincide, which is the whole
+    /// meaning of handing a mask out as a region.
+    #[test]
+    fn a_mask_handed_out_as_a_region_picks_out_what_it_let_through() {
+        for (what, scale) in [
+            ("at the root", 1.0f32),
+            ("inside a group scaled by two", 2.0),
+        ] {
+            for painted in [false, true] {
+                let mut s = Session::new(80, 60, ColorMode::Rgb);
+                let root = s.document().root();
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: rect_of(
+                        "sheet",
+                        80.0,
+                        60.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.8,
+                            g: 0.4,
+                            b: 0.2,
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let sheet = s.document().children_of(root).unwrap()[0];
+                let sheet = if scale != 1.0 {
+                    let g = s.group_nodes(&[sheet], "wrap").unwrap();
+                    s.apply(Command::SetTransform {
+                        id: g,
+                        transform: Transform {
+                            a: scale,
+                            b: 0.0,
+                            c: 0.0,
+                            d: scale,
+                            e: -4.0,
+                            f: -3.0,
+                        },
+                    })
+                    .unwrap();
+                    sheet
+                } else {
+                    sheet
+                };
+                if painted {
+                    // A piece rubbed out of the layer, inside a region, so
+                    // the stroke carries a radius and a clip of its own.
+                    s.pick_region(
+                        VectorShape::Rect {
+                            width: 30.0,
+                            height: 60.0,
+                            radius: 0.0,
+                        },
+                        Transform::translation(10.0, 0.0),
+                        "replace",
+                    )
+                    .unwrap();
+                    s.ensure_painted_mask(sheet).unwrap();
+                    s.paint_begin(
+                        sheet,
+                        14.0,
+                        20.0,
+                        7.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        0.0,
+                        true,
+                        true,
+                    )
+                    .unwrap();
+                    s.paint_extend(50.0, 26.0, 7.0).unwrap();
+                    s.commit_preview();
+                    s.pick_none().unwrap();
+                } else {
+                    s.pick_region(
+                        VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+                        Transform::translation(20.0, 16.0),
+                        "replace",
+                    )
+                    .unwrap();
+                    s.mask_from_selection(sheet, false).unwrap();
+                    s.pick_none().unwrap();
+                }
+                // The mask handed out as a region, and that region given
+                // to a plain full-page layer at the root. What the two
+                // layers show has to coincide: that is what handing a
+                // mask out as a region means.
+                s.pick_layer_mask(sheet, "replace").unwrap();
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: rect_of(
+                        "twin",
+                        80.0,
+                        60.0,
+                        chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.2,
+                            g: 0.4,
+                            b: 0.9,
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let twin = s.document().children_of(root).unwrap()[1];
+                s.mask_from_selection(twin, false).unwrap();
+                let alone = |id| {
+                    let mut surface = Surface::new(80, 60);
+                    chitrakar_render::render_showing_at(
+                        s.document(),
+                        &mut surface,
+                        ClipRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: 80,
+                            y1: 60,
+                        },
+                        Transform::default(),
+                        chitrakar_render::Showing::Alone(id),
+                    )
+                    .unwrap();
+                    surface
+                };
+                let (before, after) = (alone(sheet), alone(twin));
+                let mut worst = 0.0f32;
+                for i in 0..before.pixels.len() {
+                    let (p, q) = (before.pixels[i], after.pixels[i]);
+                    worst = worst.max((p.a - q.a).abs());
+                }
+                let kind = if painted {
+                    "a brushed mask"
+                } else {
+                    "a shape mask"
+                };
+                assert!(
+                    worst < 1e-5,
+                    "{kind} {what}: the region picks out somewhere else, by {worst}"
+                );
+                // And it picks out something: a region of nothing, or of
+                // everything, would agree with anything.
+                let shown = (0..60u32)
+                    .flat_map(|y| (0..80u32).map(move |x| (x, y)))
+                    .filter(|(x, y)| after.get(*x, *y).a > 0.5)
+                    .count();
+                assert!(
+                    shown > 250 && 4800 - shown > 250,
+                    "{kind} {what}: the region is a region rather than all or \
+                     nothing of the page ({shown} of 4800 pixels shown)"
+                );
+            }
+        }
+    }
+
+    /// A copy of a layer casts the same shadow the layer does.
+    ///
+    /// A copy draws what the original draws, where the copy is — that is
+    /// the whole of what a copy is — and the renderer decides where it may
+    /// paint from the box of what it copies. That box is the one the
+    /// handles are drawn round: the layer's own outline, deliberately
+    /// without the reach of anything's effects. So a copy of a group whose
+    /// child casts a shadow had that shadow cut off at the group's
+    /// contents: a shadow on the original, none on the copy, from a layer
+    /// that is meant to be the same layer.
+    ///
+    /// Such a copy is given the whole page to paint in now, which is the
+    /// answer a copy of an adjustment or a filter already got. Working out
+    /// how far, exactly, means carrying reaches written in three spaces
+    /// through the one a copy draws in, and a copy of a subtree with
+    /// effects in it is rare enough that the page is a cheaper answer than
+    /// a wrong one.
+    ///
+    /// The claim is put as a comparison rather than as pixel positions:
+    /// the copy is placed so that what it draws is the original's picture
+    /// shifted by a whole number of pixels, so the two have to be the same
+    /// picture, shadow and all.
+    #[test]
+    fn a_copy_casts_the_same_shadow_the_layer_does() {
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 7.0,
+            dy: 5.0,
+            blur: 1.5,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        // Copy a group with the shadow on its child, and a plain layer
+        // with the shadow on itself: the first is the one that was wrong,
+        // the second is what should have caught it and did not.
+        for (what, on_the_child) in [("a group's child", true), ("the layer itself", false)] {
+            let mut s = Session::new(96, 48, ColorMode::Rgb);
+            let root = s.document().root();
+            let shaped = |name: &str| {
+                rect_of(
+                    name,
+                    16.0,
+                    12.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.4,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                )
+            };
+            let master = if on_the_child {
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(Node::group("pair")),
+                })
+                .unwrap();
+                let g = s.document().children_of(root).unwrap()[0];
+                s.apply(Command::AddNode {
+                    parent: g,
+                    index: 0,
+                    node: shaped("one"),
+                })
+                .unwrap();
+                let one = s.document().children_of(g).unwrap()[0];
+                s.apply(Command::SetTransform {
+                    id: one,
+                    transform: Transform::translation(6.0, 8.0),
+                })
+                .unwrap();
+                s.apply(Command::SetEffects {
+                    id: one,
+                    effects: vec![shadow.clone()],
+                })
+                .unwrap();
+                g
+            } else {
+                s.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: shaped("one"),
+                })
+                .unwrap();
+                let one = s.document().children_of(root).unwrap()[0];
+                s.apply(Command::SetTransform {
+                    id: one,
+                    transform: Transform::translation(6.0, 8.0),
+                })
+                .unwrap();
+                s.apply(Command::SetEffects {
+                    id: one,
+                    effects: vec![shadow.clone()],
+                })
+                .unwrap();
+                one
+            };
+            let alone = s.render().unwrap();
+            let shift = 44u32;
+            let copy = s.make_instance(master).unwrap();
+            // A copy undoes the original's own placement before applying
+            // its own — moving the original moves only the original — so
+            // the copy is put where the original stands, shifted: that is
+            // what makes the two pictures the same picture, offset.
+            let placed = s.document().node(master).unwrap().transform;
+            s.apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(shift as f32, 0.0).compose(placed),
+            })
+            .unwrap();
+            let both = s.render().unwrap();
+
+            // The original's picture, and the copy's, held against each
+            // other column for column.
+            let mut worst = (0.0f32, 0u32, 0u32);
+            let mut ink = 0.0f32;
+            for y in 0..48u32 {
+                for x in 0..(96 - shift) {
+                    let there = alone.get(x, y);
+                    let here = both.get(x + shift, y);
+                    ink += there.a;
+                    let d = (there.r - here.r)
+                        .abs()
+                        .max((there.g - here.g).abs())
+                        .max((there.b - here.b).abs())
+                        .max((there.a - here.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                ink > 200.0,
+                "{what}: there is a picture with a shadow to copy ({ink})"
+            );
+            assert!(
+                worst.0 < 1e-5,
+                "{what}: the copy draws something else ({} at {},{})",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        }
+    }
+
+    /// Every command, over the boundary the UI actually talks across.
+    ///
+    /// Nothing in the app calls `apply`: the UI is TypeScript on the far
+    /// side of a wasm boundary, so every mutation it makes is a
+    /// serde-JSON `Command` handed to [`Session::apply_json`]. That makes
+    /// the JSON shape of `Command` the editor's API, and a variant whose
+    /// serde representation cannot make the round trip is a feature that
+    /// works in every native test and does nothing in the browser —
+    /// which is the worst place to find out. A field added with
+    /// `#[serde(default)]`, a float written in a form that reads back
+    /// short, an enum with two spellings of the same value: all of them
+    /// look fine from `apply`.
+    ///
+    /// So each of the fixture's commands goes both ways at once: applied
+    /// directly to one document and, as its own JSON, to a copy of the
+    /// same document, and the two documents held against each other.
+    /// Nothing here says what a command *does* — the inverse and repaint
+    /// audits say that — only that the wire carries it whole.
+    #[test]
+    fn every_command_survives_the_boundary_the_ui_talks_over() {
+        let f = chitrakar_doc::fixture::everything();
+        let mut checked = 0usize;
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what.split_once(" {").map(|(a, _)| a).unwrap_or(&what);
+            let json = serde_json::to_string(&command)
+                .unwrap_or_else(|e| panic!("{what} cannot be written as JSON: {e}"));
+            // Read back as a command, and asked for again: a value that
+            // survives says the same thing the second time.
+            let back: Command = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{what} cannot be read back: {e}\n{json}"));
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "{what} does not come back as itself"
+            );
+
+            let mut direct = Session::from_document(f.doc.clone());
+            let mut over_the_wire = Session::from_document(f.doc.clone());
+            let here = direct.apply(command);
+            let there = over_the_wire.apply_json(&json);
+            match (here, there) {
+                (Ok(()), Ok(())) => {}
+                (Err(a), Err(b)) => assert_eq!(
+                    a.to_string(),
+                    b.to_string(),
+                    "{what} is refused for different reasons on the two sides"
+                ),
+                (a, b) => panic!("{what}: applied directly {a:?}, over the wire {b:?}"),
+            }
+            assert_eq!(
+                format!("{:?}", over_the_wire.document()),
+                format!("{:?}", direct.document()),
+                "{what} left a different document behind when it came over the wire"
+            );
+            // And the page drawn from it, since a document can hold the
+            // same values and still be read differently.
+            let (worst, x, y) = apart(&direct.render().unwrap(), &over_the_wire.render().unwrap());
+            assert!(
+                worst < 1e-6,
+                "{what} draws differently over the wire ({worst} at {x},{y})"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= chitrakar_doc::fixture::EVERY_VARIANT.len(),
+            "the whole list was reached: {checked} of at least {}",
+            chitrakar_doc::fixture::EVERY_VARIANT.len()
+        );
+    }
+
+    /// Every command there is, and then every way out of the editor.
+    ///
+    /// An exporter is where a node kind is forgotten: each writes the
+    /// document into a form of its own, and a kind added a year later
+    /// reaches them without anybody thinking of it. Nothing here says
+    /// what the picture should look like — SVG and PDF have their own
+    /// blocks for that — only that each door opens on whatever state a
+    /// command left behind, and gives back something rather than an
+    /// error or a panic. The fixture holds one of every node kind, so
+    /// "whatever state" is a wide claim.
+    #[test]
+    fn every_command_leaves_a_document_every_door_can_take() {
+        let f = chitrakar_doc::fixture::everything();
+        let mut checked = 0usize;
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            let what = format!("{command:?}");
+            let what = what
+                .split_once(" {")
+                .map_or(what.clone(), |(k, _)| k.into());
+            let mut session = Session::from_document(f.doc.clone());
+            if session.apply(command).is_err() {
+                continue;
+            }
+            let out = |name: &str, r: Result<usize, EngineError>| match r {
+                Ok(len) => assert!(len > 0, "{name} after {what} came out empty"),
+                Err(e) => panic!("{name} after {what}: {e}"),
+            };
+            out("a PNG", session.render_png_at(1.0, None).map(|b| b.len()));
+            out("a JPEG", session.export_jpeg(80).map(|b| b.len()));
+            out("an SVG", session.export_svg().map(|s| s.len()));
+
+            // The two doors that can be read back again are read back and
+            // held against the page, because "it came out non-empty" is a
+            // long way from "it came out right": a channel written in the
+            // wrong order, an alpha composited against the wrong colour or
+            // not composited at all, a picture written at the wrong size —
+            // every one of those is a file of the proper length.
+            let page = session.render().unwrap();
+            let png = chitrakar_codecs::decode(&session.render_png_at(1.0, None).unwrap())
+                .unwrap_or_else(|e| panic!("the PNG written after {what} reads back: {e}"));
+            assert_eq!(
+                (png.width, png.height),
+                (page.width, page.height),
+                "the PNG written after {what} is the size of the page"
+            );
+            // A PNG carries eight bits a channel of what a device shows,
+            // so the page is asked in the same terms rather than in light.
+            let shown = page.to_srgb8();
+            let mut worst = (0u8, 0usize);
+            for (i, (&a, &b)) in shown.iter().zip(&png.rgba8).enumerate() {
+                let d = a.abs_diff(b);
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            assert!(
+                worst.0 <= 1,
+                "the PNG written after {what} is not the page ({} at byte {})",
+                worst.0,
+                worst.1
+            );
+
+            // A JPEG is lossy and has no alpha, so it is held to being
+            // the *same picture* rather than the same bytes: over the
+            // page's opaque part, on average, within a couple of steps.
+            let jpeg = chitrakar_codecs::decode(&session.export_jpeg(92).unwrap())
+                .unwrap_or_else(|e| panic!("the JPEG written after {what} reads back: {e}"));
+            assert_eq!(
+                (jpeg.width, jpeg.height),
+                (page.width, page.height),
+                "the JPEG written after {what} is the size of the page"
+            );
+            let mut sum = 0u64;
+            let mut seen = 0u64;
+            for (i, px) in page.pixels.iter().enumerate() {
+                if px.a < 0.99 {
+                    continue;
+                }
+                for c in 0..3 {
+                    sum += shown[i * 4 + c].abs_diff(jpeg.rgba8[i * 4 + c]) as u64;
+                    seen += 1;
+                }
+            }
+            if seen > 64 {
+                let mean = sum as f64 / seen as f64;
+                assert!(
+                    mean < 3.0,
+                    "the JPEG written after {what} is a different picture (off by {mean:.2} a channel)"
+                );
+            }
+            out("a PDF", session.export_pdf().map(|b| b.len()));
+            out(
+                "a PDF of frames",
+                session.export_pdf_frames().map(|b| b.len()),
+            );
+            // And what it saved is a document that opens again.
+            let bytes = session
+                .save()
+                .unwrap_or_else(|e| panic!("saving after {what}: {e}"));
+            out("a file", Ok(bytes.len()));
+            assert!(
+                Session::load(&bytes).is_ok(),
+                "the file written after {what} opens again"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 25,
+            "only {checked} commands made it as far as a door"
+        );
+    }
+
+    #[test]
+    fn a_picture_arrives_the_size_it_should_be() {
+        let png = |w: u32, h: u32| {
+            chitrakar_codecs::encode_png(w, h, &vec![200u8; (w * h * 4) as usize]).unwrap()
+        };
+
+        // Into a document with nothing in it and nothing behind it: the
+        // page takes the picture's own size, because a picture put into
+        // an empty document is a picture being opened, and a photograph
+        // opened on somebody else's page size is the wrong answer.
+        let mut opened = Session::new(1000, 800, ColorMode::Rgb);
+        let id = opened.place_image(&png(300, 200), "photograph").unwrap();
+        assert_eq!(
+            (opened.document().meta.width, opened.document().meta.height),
+            (300, 200),
+            "the page is the picture's size"
+        );
+        assert_eq!(
+            opened.document().node(id).unwrap().transform,
+            Transform::default(),
+            "and the picture is at its own size, in the corner"
+        );
+        assert_eq!(
+            opened.history_labels().0.len(),
+            1,
+            "one entry: opening a picture is one thing"
+        );
+        opened.undo().unwrap();
+        assert_eq!(
+            (opened.document().meta.width, opened.document().meta.height),
+            (1000, 800),
+            "and one undo takes the page back with it"
+        );
+
+        // Onto a page that is already somebody's: laid down whole and in
+        // the middle, taken down to fit. At its own size it would hang
+        // off three sides and show a corner of itself.
+        let mut page = Session::new(200, 100, ColorMode::Rgb);
+        add_rect(&mut page, "something", 10.0, 10.0);
+        let big = page.place_image(&png(400, 400), "photograph").unwrap();
+        assert_eq!(
+            (page.document().meta.width, page.document().meta.height),
+            (200, 100),
+            "the page somebody made is left alone"
+        );
+        let t = page.document().node(big).unwrap().transform;
+        assert!((t.a - 0.25).abs() < 1e-4, "taken down to fit: {}", t.a);
+        assert!(
+            (t.e - 50.0).abs() < 0.5 && t.f.abs() < 0.5,
+            "and centred on it: {}, {}",
+            t.e,
+            t.f
+        );
+
+        // One smaller than the page is left at its own size, in the
+        // middle: fitting is for what does not fit.
+        let small = page.place_image(&png(40, 20), "stamp").unwrap();
+        let t = page.document().node(small).unwrap().transform;
+        assert!((t.a - 1.0).abs() < 1e-4, "no bigger and no smaller");
+        assert!(
+            (t.e - 80.0).abs() < 0.5 && (t.f - 40.0).abs() < 0.5,
+            "in the middle of the page"
+        );
+    }
+
+    #[test]
+    fn duplicating_a_raster_shares_its_pixels() {
+        // Resources are content-addressed and immutable, so a copy costs no
+        // pixels — it points at the same entry.
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let png = {
+            let pixels = vec![255u8, 0, 0, 255];
+            chitrakar_codecs::encode_png(1, 1, &pixels).unwrap()
+        };
+        session.place_image(&png, "dot.png").unwrap();
+        let root = session.document().root();
+        let img = session.document().children_of(root).unwrap()[0];
+        let before = session.document().resources().count();
+
+        session.duplicate_node(img).unwrap();
+        assert_eq!(
+            session.document().resources().count(),
+            before,
+            "duplicating a raster adds no new resource"
+        );
+    }
+
+    #[test]
+    fn the_clipboard_carries_a_subtree_into_another_document() {
+        // The point of a clipboard over duplicate: it survives the document
+        // it was copied from. Pixels travel with it, and because resource
+        // ids are content-addressed, the pasted node's reference resolves in
+        // the new document without any remapping.
+        let mut a = Session::new(64, 64, ColorMode::Rgb);
+        let png = chitrakar_codecs::encode_png(1, 1, &[0, 200, 0, 255]).unwrap();
+        a.place_image(&png, "dot.png").unwrap();
+        let root_a = a.document().root();
+        let img = a.document().children_of(root_a).unwrap()[0];
+        let rect = add_rect(&mut a, "r", 8.0, 8.0);
+        let group = a.group_nodes(&[img, rect], "pair").unwrap();
+        a.copy_node(group).unwrap();
+
+        let mut b = Session::new(64, 64, ColorMode::Rgb);
+        assert_eq!(b.document().resources().count(), 0);
+        let pasted = *b
+            .paste(None)
+            .unwrap()
+            .first()
+            .expect("clipboard had content");
+        assert_eq!(b.document().node(pasted).unwrap().name, "pair");
+        assert_eq!(
+            b.document().children_of(pasted).unwrap().len(),
+            2,
+            "the whole subtree came across"
+        );
+        assert_eq!(
+            b.document().resources().count(),
+            1,
+            "and its pixels came with it"
+        );
+        // The pasted raster resolves to real pixels, not an empty entry.
+        let kids = b.document().children_of(pasted).unwrap().to_vec();
+        let raster = kids
+            .iter()
+            .find_map(|k| match &b.document().node(*k).unwrap().kind {
+                NodeKind::Raster(r) => Some(r.resource_id.clone()),
+                _ => None,
+            })
+            .expect("a raster child");
+        assert!(!b.document().resource(&raster).unwrap().rgba8.is_empty());
+        assert_cache_matches_fresh(&mut b);
+
+        // One undo step, and the clipboard is still there to paste again.
+        b.undo().unwrap();
+        assert!(b.document().node(pasted).is_err());
+        assert!(crate::clipboard_has_content());
+        assert!(!b.paste(None).unwrap().is_empty(), "paste is repeatable");
+    }
+
+    /// A batch of one kind of edit over several layers is named after
+    /// that edit and how many it touched, since "Multiple edits" is
+    /// what a history panel says when it has nothing to say.
+    #[test]
+    fn a_batch_of_one_kind_of_edit_says_which_and_how_many() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 8.0, 8.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        let c = add_rect(&mut session, "c", 8.0, 8.0);
+        session
+            .apply(Command::Batch(vec![
+                Command::RemoveNode { id: a },
+                Command::RemoveNode { id: b },
+            ]))
+            .unwrap();
+        assert_eq!(
+            session.history_labels().0.last().unwrap(),
+            "Delete 2 layers"
+        );
+
+        // One of them is that one, named as it always was.
+        session
+            .apply(Command::Batch(vec![Command::SetVisible {
+                id: c,
+                visible: false,
+            }]))
+            .unwrap();
+        assert_eq!(session.history_labels().0.last().unwrap(), "Hide c");
+
+        // A mixture has no better name than the old one.
+        session
+            .apply(Command::Batch(vec![
+                Command::SetVisible {
+                    id: c,
+                    visible: true,
+                },
+                Command::SetOpacity {
+                    id: c,
+                    opacity: 0.5,
+                },
+            ]))
+            .unwrap();
+        assert_eq!(session.history_labels().0.last().unwrap(), "Multiple edits");
+    }
+
+    /// What is picked is what is copied: several layers go on the
+    /// clipboard together, come back in the order they were in, and a
+    /// group copied along with something inside it does not put that
+    /// thing down twice.
+    #[test]
+    fn the_clipboard_carries_everything_that_was_picked() {
+        let mut a = Session::new(64, 64, ColorMode::Rgb);
+        let lower = add_rect(&mut a, "lower", 8.0, 8.0);
+        let middle = add_rect(&mut a, "middle", 8.0, 8.0);
+        let upper = add_rect(&mut a, "upper", 8.0, 8.0);
+        // Handed over in no particular order: the document's own order is
+        // what a paste has to rebuild.
+        a.copy_nodes(&[upper, lower, middle]).unwrap();
+
+        let mut b = Session::new(64, 64, ColorMode::Rgb);
+        let pasted = b.paste(None).unwrap();
+        assert_eq!(pasted.len(), 3, "all three came across");
+        let names: Vec<String> = pasted
+            .iter()
+            .map(|id| b.document().node(*id).unwrap().name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["lower", "middle", "upper"],
+            "in the order they were in"
+        );
+        let root_b = b.document().root();
+        assert_eq!(b.document().children_of(root_b).unwrap(), pasted);
+
+        // One undo step for the lot, not three.
+        b.undo().unwrap();
+        assert!(
+            b.document().children_of(root_b).unwrap().is_empty(),
+            "one undo takes the whole paste back"
+        );
+
+        // A group and one of its own children, both picked: the child
+        // travels inside the group and is not laid down beside it.
+        let pair = a.group_nodes(&[lower, middle], "pair").unwrap();
+        let inside = a.document().children_of(pair).unwrap()[0];
+        a.copy_nodes(&[pair, inside]).unwrap();
+        let mut c = Session::new(64, 64, ColorMode::Rgb);
+        let once = c.paste(None).unwrap();
+        assert_eq!(once.len(), 1, "the group, and only the group");
+        assert_eq!(c.document().node(once[0]).unwrap().name, "pair");
+        assert_eq!(c.document().children_of(once[0]).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn aligning_lines_layers_up_and_distributing_spaces_them_evenly() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let place = |s: &mut Session, name: &str, x: f32| {
+            let id = add_rect(s, name, 10.0, 10.0);
+            s.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, 0.0),
+            })
+            .unwrap();
+            id
+        };
+        let a = place(&mut session, "a", 0.0);
+        let b = place(&mut session, "b", 30.0);
+        let c = place(&mut session, "c", 100.0);
+
+        // Left: everything to the leftmost edge, which does not move.
+        session.align_nodes(&[a, b, c], "left").unwrap();
+        for id in [a, b, c] {
+            assert!((session.bounds_of(id).unwrap()[0] - 0.0).abs() < 1e-3);
+        }
+        assert_cache_matches_fresh(&mut session);
+        session.undo().unwrap();
+
+        // Distribute: the outermost two stay, the middle one lands halfway,
+        // and running it again changes nothing.
+        session.align_nodes(&[a, b, c], "distribute-h").unwrap();
+        let mid = |s: &Session, id| {
+            let bb = s.bounds_of(id).unwrap();
+            bb[0] + bb[2] / 2.0
+        };
+        assert!((mid(&session, a) - 5.0).abs() < 1e-3, "the left one stays");
+        assert!((mid(&session, c) - 105.0).abs() < 1e-3, "so does the right");
+        assert!(
+            (mid(&session, b) - 55.0).abs() < 1e-3,
+            "and the middle lands halfway, got {}",
+            mid(&session, b)
+        );
+        let before = mid(&session, b);
+        session.align_nodes(&[a, b, c], "distribute-h").unwrap();
+        assert!(
+            (mid(&session, b) - before).abs() < 1e-3,
+            "distributing twice is a no-op"
+        );
+
+        // Spacing evenly is a statement about the gaps between layers,
+        // so it wants two of them; unknown modes are refused rather than
+        // silently doing nothing.
+        assert!(session.align_nodes(&[a], "distribute-h").is_err());
+        assert!(session.align_nodes(&[], "left").is_err());
+        assert!(session.align_nodes(&[a, b], "sideways").is_err());
+    }
+
+    /// A layer inside a picked group is already travelling with it, so
+    /// acting on it again acts on it twice.
+    ///
+    /// Ctrl-clicking a group and then something inside it is an easy
+    /// selection to end up with — the panel lists both — and what it did
+    /// was flip the inner layer twice, which is not flipping it at all,
+    /// and nudge it two pixels for every one asked. Every operation that
+    /// treats the selection as one thing now leaves the inner one out.
+    #[test]
+    fn a_layer_inside_a_picked_group_is_not_moved_twice() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        let other = add_rect(&mut session, "other", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(100.0, 10.0),
+            })
+            .unwrap();
+
+        // Flipping the group and the loose layer about their shared box
+        // puts the inner rect where the loose one was and back again.
+        let alone = {
+            let mut only = Session::from_document(session.document().clone());
+            only.flip_nodes(&[group, other], true).unwrap();
+            only.bounds_of(inner).unwrap()
+        };
+        session.flip_nodes(&[group, inner, other], true).unwrap();
+        let with_child = session.bounds_of(inner).unwrap();
+        assert!(
+            (alone[0] - with_child[0]).abs() < 1e-3,
+            "picking the child as well changed where the group's flip put it: \
+             {with_child:?} against {alone:?}"
+        );
+        assert!(
+            (with_child[0] - 100.0).abs() < 1e-3,
+            "and that is the far side of the shared box: {with_child:?}"
+        );
+
+        // The same for alignment: a group aligned left takes its contents
+        // with it, and the contents are not aligned again on their own.
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let inner = add_rect(&mut session, "inner", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        let other = add_rect(&mut session, "other", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(100.0, 60.0),
+            })
+            .unwrap();
+        session.align_nodes(&[group, inner, other], "left").unwrap();
+        let (a, b) = (
+            session.bounds_of(inner).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (a[0] - b[0]).abs() < 1e-3 && (a[0] - 10.0).abs() < 1e-3,
+            "the group went to the left edge once, not twice: {a:?} against {b:?}"
+        );
+        // A group and nothing but what is inside it is one thing, so it
+        // is aligned to the page rather than to itself.
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        session.align_nodes(&[group, inner], "left").unwrap();
+        let at = session.bounds_of(inner).unwrap();
+        assert!(
+            at[0].abs() < 1e-3,
+            "one thing aligns to the page's own left edge: {at:?}"
+        );
+    }
+
+    /// Two shapes snapped edge to edge, united.
+    ///
+    /// The outline arithmetic declines edges that overlap exactly rather
+    /// than guessing, which is the honest answer to an ambiguous
+    /// question — and the question people ask most often without
+    /// thinking it ambiguous at all. Snapping is *for* landing edges on
+    /// each other, so the editor spends its time arranging the one case
+    /// that used to come back as "these outlines cannot be combined".
+    #[test]
+    fn shapes_that_share_an_edge_still_combine() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let left = add_rect(&mut session, "left", 40.0, 40.0);
+        let right = add_rect(&mut session, "right", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: left,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        // Snapped: its left edge is exactly the other's right edge.
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(50.0, 10.0),
+            })
+            .unwrap();
+
+        let one = session.boolean_nodes(&[left, right], "union").unwrap();
+        let b = session.bounds_of(one).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.1
+                && (b[1] - 10.0).abs() < 0.1
+                && (b[2] - 80.0).abs() < 0.1
+                && (b[3] - 40.0).abs() < 0.1,
+            "the two are one shape across both: {b:?}"
+        );
+        // And it is filled all the way across, seam included.
+        let page = session.render().unwrap();
+        for x in [15, 45, 50, 55, 75] {
+            assert!(
+                page.get(x, 30).a > 0.9,
+                "solid at {x}: {:?}",
+                page.get(x, 30)
+            );
+        }
+
+        // Taking one from the other where they share an edge leaves the
+        // first alone rather than failing.
+        session.undo().unwrap();
+        let rest = session.boolean_nodes(&[left, right], "subtract").unwrap();
+        let b = session.bounds_of(rest).unwrap();
+        assert!(
+            (b[2] - 40.0).abs() < 0.6,
+            "the left one, still its own width: {b:?}"
+        );
+    }
+
+    /// A matte handed in by something that looked at the picture.
+    ///
+    /// The point of taking one rather than tracing it: what a model
+    /// gives back for hair is soft, and a region traced round it is not.
+    #[test]
+    fn a_matte_handed_in_keeps_its_soft_edge() {
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        // A matte covering the middle, fading out over a few pixels
+        // rather than stopping dead.
+        let (mw, mh) = (80u32, 60u32);
+        let matte: Vec<u8> = (0..mw * mh)
+            .map(|k| {
+                let (x, y) = ((k % mw) as f32, (k / mw) as f32);
+                let d = ((x - 40.0).abs() - 15.0).max((y - 30.0).abs() - 10.0);
+                // 1 well inside, 0 well outside, a ramp of six across the edge
+                (((0.5 - d / 6.0).clamp(0.0, 1.0)) * 255.0) as u8
+            })
+            .collect();
+        session
+            .pick_matte(&matte, mw, mh, None, 0.0, "replace")
+            .unwrap();
+
+        // It is a region: the ants have an outline to draw and a box to
+        // sit in, which a matte only has because it is looked at.
+        assert!(
+            !session.selection_outline().is_empty(),
+            "a matte came back with no outline, so nothing would be drawn \
+             round it and it could not be added to"
+        );
+        assert!(session.selection_bounds().is_some());
+        assert!(session.selection_covers(40.0, 30.0), "the middle is picked");
+        assert!(!session.selection_covers(2.0, 2.0), "the corner is not");
+
+        // And the edge is still soft. Read off the veil, which is drawn
+        // from the region's own coverage: partway across the ramp it is
+        // neither in nor out, which is the whole claim.
+        let png = session.selection_veil().unwrap();
+        let img = chitrakar_codecs::decode(&png).unwrap();
+        let alpha = |x: u32, y: u32| img.rgba8[((y * img.width + x) * 4 + 3) as usize];
+        let (inside, edge, outside) = (alpha(40, 30), alpha(25, 30), alpha(2, 2));
+        assert!(
+            inside < 40,
+            "the middle should be picked, so barely veiled: {inside}"
+        );
+        assert!(
+            outside > 100,
+            "the corner should not be picked, so veiled: {outside}"
+        );
+        assert!(
+            edge > inside + 10 && edge < outside - 10,
+            "the edge of a matte should be neither in nor out — it came \
+             back hard ({inside} / {edge} / {outside})"
+        );
+
+        // A matte that is the wrong size for what it claims is refused
+        // rather than read off the end of.
+        assert!(session
+            .pick_matte(&matte, mw, mh + 1, None, 0.0, "replace")
+            .is_err());
+        // And one that covers nothing says so.
+        assert!(session
+            .pick_matte(&vec![0u8; (mw * mh) as usize], mw, mh, None, 0.0, "replace")
+            .is_err());
+    }
+
+    /// The subject pick: what the edges of a photograph do not explain.
+    #[test]
+    fn the_subject_is_what_the_frame_s_edge_does_not_explain() {
+        // A photograph placed on a larger page, so that reading the
+        // *page's* edge instead of the picture's would call the whole
+        // picture a subject and this would catch it.
+        let (pw, ph) = (160u32, 120u32);
+        let (iw, ih) = (80u32, 60u32);
+        // Grain, so that nothing in the picture is a flat colour
+        // anywhere. A photograph has none, and a threshold sitting near
+        // a colour it has to judge comes apart into lace on real pixels
+        // while looking perfect on flat ones — which is exactly the way
+        // this went wrong once. Deterministic, so a failure is a failure
+        // and not a bad afternoon.
+        let grain = |x: u32, y: u32| {
+            let h = (x * 1973).wrapping_add(y * 9277).wrapping_mul(2654435761) >> 13;
+            (h % 13) as i32 - 6
+        };
+        let shift = |v: u8, by: i32| (v as i32 + by).clamp(0, 255) as u8;
+        let mut rgba = Vec::with_capacity((iw * ih * 4) as usize);
+        for y in 0..ih {
+            for x in 0..iw {
+                // A sky-ish background that is not one flat colour — it
+                // shades across the frame, which is the case a single
+                // averaged background colour gets wrong.
+                let shade = 200 + (x * 40 / iw) as u8;
+                let mut px = [shade, shade, 250, 255];
+                // A subject in the middle: two blocks of quite different
+                // colours, to show that a subject is not held together by
+                // having a colour of its own. The lower one stands only
+                // about a quarter of the way from the background behind
+                // it — a dark coat against dark ground — which is the
+                // margin a tolerance has to leave, and the first thing
+                // one set too wide eats.
+                let body = (24..56).contains(&x) && (16..44).contains(&y);
+                if body {
+                    px = if y < 30 {
+                        [40, 30, 30, 255]
+                    } else {
+                        [140, 150, 200, 255]
+                    };
+                    // A gap inside the subject wearing the background's
+                    // own colour — a shirt the colour of the wall. It
+                    // must come back as part of the subject.
+                    if (34..46).contains(&x) && (24..34).contains(&y) {
+                        px = [210, 210, 250, 255];
+                    }
+                }
+                // Confetti: a couple of lone pixels out in the
+                // background that look nothing like it.
+                if (x, y) == (6, 6) || (x, y) == (70, 52) {
+                    px = [0, 0, 0, 255];
+                }
+                let n = grain(x, y);
+                px = [shift(px[0], n), shift(px[1], n), shift(px[2], n), 255];
+                rgba.extend_from_slice(&px);
+            }
+        }
+        let mut session = Session::new(pw, ph, ColorMode::Rgb);
+        let resource_id = session.doc.add_resource(iw, ih, rgba);
+        let root = session.doc.root();
+        let node = Node::raster(
+            "photo",
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width: iw,
+                height: ih,
+            },
+        );
+        let photo = session.doc.peek_next_id();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        // Placed away from the page's own corner, so the picture's edge
+        // and the page's are not the same line.
+        session
+            .apply(Command::SetTransform {
+                id: photo,
+                transform: Transform::translation(40.0, 30.0),
+            })
+            .unwrap();
+
+        // The tolerance the app starts at: what ships is what is tested.
+        session.pick_subject(photo, 0.5, 0.0, "replace").unwrap();
+
+        // The body's own colours are picked; the background around it is
+        // not.
+        let subject_at = |s: &Session, x: f32, y: f32| s.selection_covers(40.0 + x, 30.0 + y);
+        assert!(
+            subject_at(&session, 30.0, 20.0),
+            "the top half of the subject was not picked"
+        );
+        assert!(
+            subject_at(&session, 30.0, 40.0),
+            "the bottom half is another colour and was not picked — a subject \
+             is not held together by having one colour"
+        );
+        assert!(
+            !subject_at(&session, 6.0, 30.0),
+            "the background was picked"
+        );
+        assert!(
+            !subject_at(&session, 74.0, 30.0),
+            "the far side of the shaded background was picked — a background \
+             read as one averaged colour would do this"
+        );
+        // The gap wearing the background's colour is inside the subject.
+        assert!(
+            subject_at(&session, 40.0, 29.0),
+            "a gap inside the subject the colour of the background was left \
+             out: a shirt the colour of the wall is still the shirt"
+        );
+        // And the lone pixels out in the background are not subjects.
+        assert!(
+            !subject_at(&session, 6.0, 6.0) && !subject_at(&session, 70.0, 52.0),
+            "a scattering of odd pixels came back as a subject"
+        );
+        // Nothing outside the photograph is picked, whatever the page
+        // around it looks like.
+        assert!(
+            !session.selection_covers(10.0, 10.0),
+            "the pick reached off the photograph and onto the page"
+        );
+
+        // It is a region like any other: the modifiers a marquee takes
+        // work, and one undo puts the whole thing back.
+        assert!(session.selection().is_some());
+        assert!(session.undo().unwrap());
+        assert!(
+            session.selection().is_none(),
+            "picking a subject took more than one undo to put back"
+        );
+
+        // A picture with nothing in it but its background has no subject,
+        // and says so rather than handing back the whole frame.
+        let flat: Vec<u8> = (0..iw * ih)
+            .flat_map(|i| {
+                let n = grain(i % iw, i / iw);
+                [shift(180, n), shift(180, n), shift(180, n), 255]
+            })
+            .collect();
+        let mut plain = Session::new(iw, ih, ColorMode::Rgb);
+        let resource_id = plain.doc.add_resource(iw, ih, flat);
+        let root = plain.doc.root();
+        let only = plain.doc.peek_next_id();
+        plain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::raster(
+                    "flat",
+                    chitrakar_doc::RasterRef {
+                        resource_id,
+                        width: iw,
+                        height: ih,
+                    },
+                )),
+            })
+            .unwrap();
+        assert!(
+            plain.pick_subject(only, 0.5, 0.0, "replace").is_err(),
+            "a photograph of a blank wall was said to have a subject in it"
+        );
+    }
+
+    /// The wand: the run of pixels round a click that look like it.
+    #[test]
+    fn the_wand_picks_out_what_looks_the_same() {
+        let hue = |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        // A page of one colour with a square of another on it, and a
+        // third square of the same colour somewhere else — so a wand
+        // that spreads too far shows up as picking both.
+        let paint = |session: &mut Session, id: NodeId, color| {
+            let NodeKind::Vector {
+                shape,
+                stroke,
+                gradient,
+                ..
+            } = session.document().node(id).unwrap().kind.clone()
+            else {
+                unreachable!("a shape")
+            };
+            session
+                .apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Vector {
+                        shape,
+                        fill: Some(color),
+                        stroke,
+                        gradient,
+                    }),
+                })
+                .unwrap();
+        };
+        let ground = add_rect(&mut session, "ground", 100.0, 60.0);
+        paint(&mut session, ground, hue(0.9, 0.9, 0.9));
+        for (name, at) in [("one", 10.0), ("two", 70.0)] {
+            let id = add_rect(&mut session, name, 20.0, 20.0);
+            paint(&mut session, id, hue(0.1, 0.3, 0.8));
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at, 20.0),
+                })
+                .unwrap();
+        }
+
+        session
+            .pick_similar(20.0, 30.0, 0.05, true, "replace")
+            .unwrap();
+        let b = session.selection_bounds().expect("something is picked");
+        assert_eq!(
+            [b[0], b[1], b[2], b[3]],
+            [10.0, 20.0, 30.0, 40.0],
+            "the square that was clicked, and not the one across the page"
+        );
+
+        // Asked about the colour rather than the run, one click takes
+        // both: two squares the same colour with the ground between them
+        // are one region of two rings, and no amount of spreading walks
+        // from one to the other.
+        session
+            .pick_similar(20.0, 30.0, 0.05, false, "replace")
+            .unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!([b[0], b[2]], [10.0, 90.0], "both squares, from one click");
+        assert!(session.selection_covers(80.0, 30.0), "the far one as well");
+        assert!(
+            !session.selection_covers(50.0, 30.0),
+            "and not the ground between them"
+        );
+        assert_eq!(
+            session.selection_outline().len(),
+            2,
+            "one region, two rings"
+        );
+
+        // Shift adds the other one, and now the region reaches both.
+        session
+            .pick_similar(20.0, 30.0, 0.05, true, "replace")
+            .unwrap();
+        session
+            .pick_similar(80.0, 30.0, 0.05, true, "union")
+            .unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!(
+            [b[0], b[2]],
+            [10.0, 90.0],
+            "with the second one added, the region reaches across"
+        );
+
+        // Wide enough to hold the ground as well, clicking it takes the
+        // whole page — the wand spreads while the colour holds, and at
+        // that tolerance it holds everywhere.
+        session
+            .pick_similar(2.0, 2.0, 1.0, true, "replace")
+            .unwrap();
+        let b = session.selection_bounds().unwrap();
+        assert_eq!([b[0], b[1], b[2], b[3]], [0.0, 0.0, 100.0, 60.0]);
+
+        // Tight, clicking the ground picks the ground and leaves both
+        // squares out of it: two holes in one ring.
+        session
+            .pick_similar(2.0, 2.0, 0.02, true, "replace")
+            .unwrap();
+        let cover = chitrakar_render::mask_plane_over(
+            session.document(),
+            session.selection().unwrap(),
+            Transform::default(),
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 100,
+                y1: 60,
+            },
+            (100, 60),
+        );
+        let at = |x: usize, y: usize| cover[y * 100 + x];
+        assert!(at(2, 2) > 0.5, "the ground is picked");
+        assert!(at(20, 30) < 0.5, "the first square is a hole in it");
+        assert!(at(80, 30) < 0.5, "and so is the second");
+
+        // Off the page is not a click on anything.
+        assert!(session
+            .pick_similar(-1.0, 10.0, 0.1, true, "replace")
+            .is_err());
+        assert!(session
+            .pick_similar(10.0, 99.0, 0.1, true, "replace")
+            .is_err());
+    }
+
+    /// A region picked out of the page, and what picking it is for.
+    ///
+    /// A selection here is a coverage over the page kept as a mask,
+    /// because this editor is non-destructive: nothing is cut out of
+    /// anything, and what a selection is *for* is being handed to a
+    /// layer as the region it works on. Which makes "mask this layer
+    /// with what I picked out" the same value moved into another space
+    /// rather than a conversion.
+    #[test]
+    fn a_region_picked_out_of_the_page_becomes_a_layer_s_mask() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        assert!(session.selection().is_none(), "nothing is picked to start");
+        assert!(
+            !session.pick_none().unwrap(),
+            "and letting go of nothing does nothing"
+        );
+        assert!(
+            !session.pick_inverse().unwrap(),
+            "so does turning it inside out"
+        );
+        assert!(
+            session.history_labels().0.is_empty(),
+            "none of which is worth an entry in history"
+        );
+
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(session.selection().is_some(), "a region is picked out");
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Select")
+        );
+        // A drag that never moved picks nothing out rather than a region
+        // of no width.
+        assert!(session
+            .pick_region(rect(0.0, 40.0), Transform::default(), "replace")
+            .is_err());
+
+        // Adding to it, taking from it and keeping the overlap are the
+        // shape combinations the editor already has: shift-dragging a
+        // second box round a selection *is* a union of outlines.
+        let area = |s: &Session| {
+            let mask = s.selection().expect("something is picked out");
+            let cover = chitrakar_render::mask_plane_over(
+                s.document(),
+                mask,
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 200,
+                    y1: 100,
+                },
+                (200, 100),
+            );
+            cover.iter().sum::<f32>()
+        };
+        let one = area(&session);
+        assert!(
+            (one - 60.0 * 40.0).abs() < 60.0,
+            "the box picks out its own area: {one}"
+        );
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(100.0, 20.0),
+                "union",
+            )
+            .unwrap();
+        let two = area(&session);
+        assert!(
+            (two - 2.0 * 60.0 * 40.0).abs() < 120.0,
+            "a second box clear of the first doubles it: {two}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Add to selection")
+        );
+        session
+            .pick_region(
+                rect(30.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "subtract",
+            )
+            .unwrap();
+        let less = area(&session);
+        assert!(
+            (less - (two - 30.0 * 40.0)).abs() < 120.0,
+            "and taking a half-box out takes its area with it: {less}"
+        );
+
+        // Inside out: what was picked is not, and what was not is.
+        session.pick_inverse().unwrap();
+        let outside = area(&session);
+        assert!(
+            (outside - (200.0 * 100.0 - less)).abs() < 200.0,
+            "the inverse is the rest of the page: {outside} against {less}"
+        );
+        session.pick_inverse().unwrap();
+        assert!(
+            (area(&session) - less).abs() < 1.0,
+            "and twice over is where it started"
+        );
+
+        // The whole page, and then nothing.
+        session.pick_all().unwrap();
+        assert!(
+            (area(&session) - 200.0 * 100.0).abs() < 1.0,
+            "the whole page is a region like any other"
+        );
+        assert!(session.pick_none().unwrap());
+        assert!(session.selection().is_none(), "and then nothing is picked");
+
+        // What it is for. A layer inside a moved group takes the region
+        // in its own space, so it covers the same part of the page.
+        session
+            .pick_region(
+                rect(60.0, 40.0),
+                Transform::translation(20.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 200.0, 100.0);
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(35.0, 15.0),
+            })
+            .unwrap();
+        session.mask_from_selection(inner, false).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Mask from selection")
+        );
+        // The layer covers the whole page and is now held to the region,
+        // so what is drawn is exactly what was picked out — wherever the
+        // group happens to sit.
+        let page = session.render().unwrap();
+        for (x, y, want) in [
+            (50u32, 40u32, true),
+            (10, 40, false),
+            (50, 10, false),
+            (150, 40, false),
+        ] {
+            assert_eq!(
+                page.get(x, y).a > 0.5,
+                want,
+                "at {x},{y} the layer is {} the region picked out",
+                if want { "inside" } else { "outside" }
+            );
+        }
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A brush confined to what is picked, and still confined after.
+    ///
+    /// Painting inside a region has to stay inside it once the region is
+    /// let go of — that is what confining means. A stroke held to
+    /// whatever happens to be picked at the moment it is drawn would
+    /// spill the instant the selection changed, so the region rides on
+    /// the stroke. It is not baked, though: nothing was cut away, and
+    /// the whole stroke is still there under the clip.
+    #[test]
+    fn a_brush_stays_inside_the_region_it_was_painted_in() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::paint("painted")),
+            })
+            .unwrap();
+        let layer = session.document().children_of(root).unwrap()[0];
+
+        // A region over the left half of the page, and a stroke drawn
+        // clear across the whole of it.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::default(),
+                "replace",
+            )
+            .unwrap();
+        session
+            .paint_begin(layer, 10.0, 30.0, 6.0, ink.clone(), 0.0, false, false)
+            .unwrap();
+        for x in [30.0, 60.0, 90.0, 110.0] {
+            session.paint_extend(x, 30.0, 6.0).unwrap();
+        }
+        assert!(session.commit_preview());
+
+        let inked = |s: &Session, x: u32| s.render().unwrap().get(x, 30).a > 0.5;
+        assert!(inked(&session, 20), "paint inside the region");
+        assert!(!inked(&session, 100), "and none outside it");
+
+        // Letting go of the region changes nothing: the stroke is held
+        // by its own clip, not by what happens to be picked.
+        assert!(session.pick_none().unwrap());
+        assert!(inked(&session, 20), "still painted inside");
+        assert!(
+            !inked(&session, 100),
+            "and still not outside, with nothing picked at all"
+        );
+
+        // Nor does picking somewhere else.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(60.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(
+            !inked(&session, 100),
+            "a region picked afterwards does not let the stroke out"
+        );
+
+        // Nothing was cut away: the whole stroke is there under the clip,
+        // and taking the clip off gives it back.
+        let whole = {
+            let mut without = Session::from_document(session.document().clone());
+            let NodeKind::Paint { strokes } = &without.document().node(layer).unwrap().kind else {
+                unreachable!("a paint layer")
+            };
+            let mut bare = strokes[0].clone();
+            bare.clip = None;
+            without
+                .apply(Command::SetStroke {
+                    id: layer,
+                    index: 0,
+                    stroke: Box::new(bare),
+                    on_mask: false,
+                })
+                .unwrap();
+            without.render().unwrap()
+        };
+        assert!(
+            whole.get(100, 30).a > 0.5,
+            "the stroke itself runs the whole way across"
+        );
+
+        // And a stroke painted with nothing picked is confined to
+        // nothing, which is what it always was.
+        session.pick_none().unwrap();
+        session
+            .paint_begin(layer, 10.0, 50.0, 5.0, ink, 0.0, false, false)
+            .unwrap();
+        session.paint_extend(110.0, 50.0, 5.0).unwrap();
+        assert!(session.commit_preview());
+        assert!(
+            session.render().unwrap().get(100, 50).a > 0.5,
+            "an unconfined stroke goes where it is drawn"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// And the same of a brush on a layer's *mask*, which is where it was
+    /// not true.
+    ///
+    /// A mask is brushed in exactly the same way a layer is — the same
+    /// tool, the same strokes, the same `PaintStroke` — so it is confined
+    /// in exactly the same way, and the engine had always written the
+    /// region onto the stroke. The drawing code read it in one of the two
+    /// places: a stroke on a layer stopped at the edge of the region and
+    /// a stroke on a mask went straight past it, so taking a piece out of
+    /// a layer *inside* a region took it out of the whole layer. The test
+    /// above had a mask-shaped hole in it of exactly the same shape,
+    /// which is why nothing said so.
+    #[test]
+    fn a_brush_on_a_mask_stays_inside_the_region_too() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("sheet", 120.0, 60.0),
+            })
+            .unwrap();
+        let layer = session.document().children_of(root).unwrap()[0];
+        let showing = |s: &Session, x: u32| s.render().unwrap().get(x, 30).a > 0.5;
+        assert!(
+            showing(&session, 20) && showing(&session, 100),
+            "the layer covers the page to begin with"
+        );
+
+        // A region over the left half, and an eraser drawn clear across
+        // the whole page on the layer's mask.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::default(),
+                "replace",
+            )
+            .unwrap();
+        session.ensure_painted_mask(layer).unwrap();
+        session
+            .paint_begin(
+                layer,
+                10.0,
+                30.0,
+                8.0,
+                AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                0.0,
+                true,
+                true,
+            )
+            .unwrap();
+        for x in [30.0, 60.0, 90.0, 110.0] {
+            session.paint_extend(x, 30.0, 8.0).unwrap();
+        }
+        assert!(session.commit_preview());
+        assert!(
+            !showing(&session, 20),
+            "inside the region the eraser took the layer out"
+        );
+        assert!(
+            showing(&session, 100),
+            "and outside it the layer is untouched"
+        );
+
+        // Letting go of the region changes nothing, and picking somewhere
+        // else does not let the stroke out either.
+        assert!(session.pick_none().unwrap());
+        assert!(
+            !showing(&session, 20) && showing(&session, 100),
+            "with nothing picked, the stroke is still where it was confined"
+        );
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                Transform::translation(60.0, 0.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(
+            showing(&session, 100),
+            "a region picked afterwards does not let it out"
+        );
+
+        // And nothing was cut away: the whole eraser is there under the
+        // clip, which is what makes the confinement a thing to change
+        // one's mind about.
+        let mut without = Session::from_document(session.document().clone());
+        let chitrakar_doc::MaskKind::Painted { strokes } = &without
+            .document()
+            .node(layer)
+            .unwrap()
+            .mask
+            .as_ref()
+            .unwrap()
+            .kind
+        else {
+            unreachable!("a brushed mask")
+        };
+        let mut bare = strokes[0].clone();
+        bare.clip = None;
+        without
+            .apply(Command::SetStroke {
+                id: layer,
+                index: 0,
+                stroke: Box::new(bare),
+                on_mask: true,
+            })
+            .unwrap();
+        assert!(
+            without.render().unwrap().get(100, 30).a <= 0.5,
+            "the eraser itself runs the whole way across"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A softened region handed to a layer in a scaled group keeps the
+    /// softness it looked like.
+    ///
+    /// Feather is a distance, and a distance carried into another space
+    /// has to be carried like one. The shape is — its transform goes
+    /// through the space — but the number saying how far the edge fades
+    /// is read against whatever space it lands in, so left alone it
+    /// means twice as much inside a group scaled by two.
+    #[test]
+    fn a_softened_region_keeps_its_softness_wherever_it_lands() {
+        let soft_edge = |scale: f32| {
+            let mut session = Session::new(120, 60, ColorMode::Rgb);
+            let inner = add_rect(&mut session, "sheet", 120.0 / scale, 60.0 / scale);
+            let group = session.group_nodes(&[inner], "g").unwrap();
+            session
+                .apply(Command::SetTransform {
+                    id: group,
+                    transform: Transform {
+                        a: scale,
+                        b: 0.0,
+                        c: 0.0,
+                        d: scale,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                })
+                .unwrap();
+            session
+                .pick_region(
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    Transform::default(),
+                    "replace",
+                )
+                .unwrap();
+            session.feather_selection(4.0).unwrap();
+            session.mask_from_selection(inner, false).unwrap();
+            // How far the fade runs, in page pixels: the columns that
+            // are neither whole nor nothing.
+            let page = session.render().unwrap();
+            (0..120)
+                .filter(|&x| {
+                    let a = page.get(x, 30).a;
+                    a > 0.05 && a < 0.95
+                })
+                .count()
+        };
+
+        let plain = soft_edge(1.0);
+        assert!(
+            plain > 4 && plain < 30,
+            "a softened edge fades over several pixels: {plain}"
+        );
+        for scale in [2.0, 0.5] {
+            let got = soft_edge(scale);
+            assert!(
+                (got as i32 - plain as i32).abs() <= 2,
+                "and over the same few wherever the layer sits: {got} at {scale} against {plain}"
+            );
+        }
+    }
+
+    /// What is picked inside out is still a region.
+    ///
+    /// "Pick out the rest instead" used to be a dead end: an inverted
+    /// region was said to have no outline, so nothing could be added to
+    /// it, taken from it, or cropped to it. It has one — the page's own
+    /// rectangle with what was picked as a hole in it — and softening
+    /// one and then adding to it used to lose the softening, which is
+    /// the other half of the same carelessness.
+    /// Everything written in the page's own space is carried the same
+    /// way when the page moves under it.
+    ///
+    /// `map_page` is the one place a page transform is stated, and
+    /// every page-space thing has to be named there or it is quietly
+    /// left behind — the kept regions were, a chunk after they were
+    /// added. Naming the transform again here would only be the same
+    /// arithmetic written twice, so the audit does not: it puts the
+    /// same region in two places at once, maps the page, and asks
+    /// whether they still agree. Anything `map_page` forgets stops
+    /// agreeing with what it remembers, whatever the transform was.
+    #[test]
+    fn changing_a_layer_repaints_every_copy_of_what_it_is_in() {
+        // A copy draws what the original draws, so changing anything
+        // inside the original changes the copy — somewhere else on the
+        // page entirely. Following copies of the layer alone missed
+        // copies of the *group* it sits in, which is how symbols are
+        // actually made, and the miss shows as stale paint left at the
+        // copy after the original has moved on.
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: filled_rect("inside", 20.0, 20.0),
+        })
+        .unwrap();
+        let inside = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("a copy", group)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(70.0, 20.0),
+        })
+        .unwrap();
+
+        // Opened whole, the way a file arrives: a session that has not
+        // been told there are copies in it will not repaint them, and
+        // nothing structural has happened to tell it.
+        let mut session = Session::from_document(doc);
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: inside,
+                transform: Transform::translation(0.0, 24.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+
+        // And the region reported as stale reaches the copy, not just
+        // the original: a cache that agreed by repainting everything
+        // would pass the line above without being right about anything.
+        session
+            .apply(Command::SetOpacity {
+                id: inside,
+                opacity: 0.4,
+            })
+            .unwrap();
+        let stale = session.stale.expect("something is stale");
+        assert!(
+            stale.x1 > 70,
+            "the region reaches the copy at x=70: {stale:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn everything_the_page_carries_is_carried_the_same_way() {
+        for command in [
+            Command::TurnCanvas { quarters: 1 },
+            Command::TurnCanvas { quarters: 2 },
+            Command::MirrorCanvas { across_x: true },
+            Command::MirrorCanvas { across_x: false },
+            Command::ResizeCanvas {
+                width: 70,
+                height: 90,
+                dx: -12.0,
+                dy: 7.0,
+            },
+            Command::StraightenCanvas {
+                degrees: 9.0,
+                width: 110,
+                height: 80,
+            },
+        ] {
+            let what = format!("{command:?}");
+            let mut session = Session::new(100, 60, ColorMode::Rgb);
+            session
+                .pick_region(
+                    VectorShape::Ellipse { rx: 18.0, ry: 12.0 },
+                    Transform::translation(14.0, 11.0),
+                    "replace",
+                )
+                .unwrap();
+            session.feather_selection(2.0).unwrap();
+            // The same region, in both of the places the page carries.
+            session.keep_selection("the same one").unwrap();
+            session.apply(command).unwrap();
+            let (w, h) = (
+                session.document().meta.width,
+                session.document().meta.height,
+            );
+            let probes: Vec<(f32, f32)> = (0..h / 3)
+                .flat_map(|y| (0..w / 3).map(move |x| (x as f32 * 3.0, y as f32 * 3.0)))
+                .collect();
+            let read = |session: &Session| -> Vec<bool> {
+                probes
+                    .iter()
+                    .map(|(x, y)| session.selection_covers(*x, *y))
+                    .collect()
+            };
+            let carried = read(&session);
+            assert!(
+                carried.iter().any(|c| *c),
+                "after {what} the selection covers nothing, so the audit \
+                 would agree about nothing"
+            );
+            session.pick_kept(0, "replace").unwrap();
+            // Counted rather than compared whole: two lists of a few
+            // hundred booleans printed side by side say nothing.
+            let apart = read(&session)
+                .iter()
+                .zip(&carried)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                apart,
+                0,
+                "after {what} a kept region and the selection disagree at \
+                 {apart} of {} places, so one of them was left behind by \
+                 map_page",
+                probes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_region_can_be_kept_and_picked_up_again() {
+        // A region is often the expensive thing on a page. Put away and
+        // picked up again it is the same mask — softness and inside-out
+        // included — rather than an outline that lost both.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        assert!(session.keep_selection("sky").is_err(), "nothing to keep");
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(4.0).unwrap();
+        session.pick_inverse().unwrap();
+        session.keep_selection("  sky  ").unwrap();
+        assert_eq!(session.kept_regions(), vec!["sky".to_string()], "trimmed");
+        assert!(session.keep_selection("").is_err(), "and it wants a name");
+
+        // Something else picked, and then the kept one back.
+        session.pick_all().unwrap();
+        assert!(session.selection_covers(50.0, 40.0));
+        session.pick_kept(0, "replace").unwrap();
+        let back = session.selection().unwrap();
+        assert!(back.invert, "inside out as it was kept");
+        assert!((back.feather - 4.0).abs() < 1e-4, "and as soft");
+        assert!(
+            !session.selection_covers(20.0, 20.0),
+            "the hole is where it was"
+        );
+
+        // Keeping the same name again replaces it rather than making a
+        // second one called the same thing.
+        session.pick_all().unwrap();
+        session.keep_selection("sky").unwrap();
+        assert_eq!(session.kept_regions().len(), 1, "one region called sky");
+        session.pick_kept(0, "replace").unwrap();
+        assert!(
+            session.selection_covers(20.0, 20.0),
+            "and it is the one kept last"
+        );
+
+        // Combining with one, and forgetting one.
+        session.pick_none().unwrap();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(80.0, 40.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("corner").unwrap();
+        session.pick_kept(0, "union").unwrap();
+        assert!(session.selection_covers(85.0, 45.0), "the corner is there");
+        assert!(session.selection_covers(20.0, 20.0), "and the page with it");
+        assert!(session.pick_kept(9, "replace").is_err(), "no ninth region");
+        session.forget_region(0).unwrap();
+        assert_eq!(session.kept_regions(), vec!["corner".to_string()]);
+        assert!(session.forget_region(4).is_err());
+
+        // One entry each in history, and undo puts the list back.
+        session.undo().unwrap();
+        assert_eq!(session.kept_regions().len(), 2, "sky came back");
+
+        // A kept region is written in the page's own space, so it
+        // travels with the page — and more plainly than the selection
+        // does, since what is picked out is on screen and would be seen
+        // to be wrong, where a kept region is not looked at again until
+        // the day it is picked up.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(5.0, 5.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("corner").unwrap();
+        session.pick_none().unwrap();
+        session.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        session.pick_kept(0, "replace").unwrap();
+        let turned = session.selection_bounds().unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        // A quarter turn right on a 100x60 page: the box at (5,5)-(25,15)
+        // lands at (45,5)-(55,25) on the 60x100 page it becomes.
+        assert!(
+            near(turned, [45.0, 5.0, 55.0, 25.0]),
+            "the kept region turned with the page: {turned:?}"
+        );
+    }
+
+    #[test]
+    fn a_wash_says_what_the_ants_cannot() {
+        // The ants draw an inverted region the same way round as an
+        // upright one, and a softened edge not at all. The wash is the
+        // coverage itself, so it says both.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let read = |session: &Session| {
+            let img = chitrakar_codecs::decode(&session.selection_veil().unwrap()).unwrap();
+            let at = move |x: u32, y: u32| img.rgba8[((y * img.width + x) * 4 + 3) as usize] as f32;
+            (img.width, img.height, at)
+        };
+        let (w, h, alpha) = read(&session);
+        assert_eq!(
+            (w, h),
+            (60, 40),
+            "a page this size is washed at its own size"
+        );
+        assert_eq!(alpha(30, 20), 0.0, "clear where the region is");
+        assert!(alpha(5, 20) > 100.0, "and tinted where it is not");
+
+        // Inside out, the wash turns over with it — which is the thing
+        // an outline cannot say.
+        session.pick_inverse().unwrap();
+        let (_, _, alpha) = read(&session);
+        assert!(alpha(30, 20) > 100.0, "the hole is what is not picked now");
+        assert_eq!(alpha(5, 20), 0.0, "and the rest of the page is");
+
+        // A softness the page cannot hold is answered rather than hung
+        // on: the box that averages a line is primed by walking it, so
+        // a radius of a few million used to be a wait nobody came back
+        // from — reachable by typing, and by opening a file.
+        session.feather_selection(1.0e7).unwrap();
+        let started = std::time::Instant::now();
+        let (_, _, alpha) = read(&session);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "a wash of it comes back"
+        );
+        let _ = alpha(1, 1);
+        session.feather_selection(0.0).unwrap();
+
+        // A softened edge is neither in nor out, and the wash is that.
+        session.pick_inverse().unwrap();
+        session.feather_selection(3.0).unwrap();
+        let (_, _, alpha) = read(&session);
+        let edge = alpha(20, 20);
+        assert!(
+            edge > 20.0 && edge < 130.0,
+            "the edge is part way through: {edge}"
+        );
+
+        // A big page is washed smaller and stretched over itself: the
+        // wash is remade on every frame of a drag, and a page's own
+        // size is not a cost anyone asked for to see what is picked.
+        let mut big = Session::new(4000, 3000, ColorMode::Rgb);
+        big.pick_all().unwrap();
+        big.pick_inverse().unwrap();
+        let (bw, bh, _) = read(&big);
+        assert!(
+            bw <= 1024 && bh <= 1024 && bw > 512,
+            "a big page is washed at a bounded size: {bw}x{bh}"
+        );
+        assert!(
+            (bw as f32 / bh as f32 - 4000.0 / 3000.0).abs() < 0.01,
+            "with the page's own proportions"
+        );
+
+        session.pick_none().unwrap();
+        assert!(session.selection_veil().is_err(), "nothing to wash over");
+    }
+
+    #[test]
+    fn what_is_picked_out_leaves_in_the_shape_it_was_picked_in() {
+        // Other applications have no idea what a region is and take a
+        // picture, so the region goes out as its own box with its
+        // coverage in the alpha — not as the rectangle round it.
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        let sheet = add_rect(&mut session, "sheet", 80.0, 60.0);
+        let _ = sheet;
+        session
+            .pick_region(
+                VectorShape::Ellipse { rx: 20.0, ry: 15.0 },
+                Transform::translation(40.0, 30.0),
+                "replace",
+            )
+            .unwrap();
+        let png = session.selection_png(1.0).unwrap();
+        let img = chitrakar_codecs::decode(&png).unwrap();
+        let (w, h, pixels) = (img.width, img.height, img.rgba8);
+        assert!(
+            (w as i32 - 40).abs() <= 2 && (h as i32 - 30).abs() <= 2,
+            "the region's own box, not the page: {w}x{h}"
+        );
+        let alpha = |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize];
+        assert_eq!(alpha(w / 2, h / 2), 255, "solid in the middle of it");
+        assert_eq!(alpha(0, 0), 0, "and nothing in the corner of the box");
+
+        // Nothing picked out is an error rather than a blank picture.
+        // At twice, the same box with twice the picture in it: what an
+        // asset picked out of a design is wanted at for a screen with
+        // two pixels to the point.
+        let big = chitrakar_codecs::decode(&session.selection_png(2.0).unwrap()).unwrap();
+        assert!(
+            (big.width as i32 - 2 * w as i32).abs() <= 2
+                && (big.height as i32 - 2 * h as i32).abs() <= 2,
+            "twice across and twice down: {}x{}",
+            big.width,
+            big.height
+        );
+        let far = |x: u32, y: u32| big.rgba8[((y * big.width + x) * 4 + 3) as usize];
+        assert_eq!(
+            far(big.width / 2, big.height / 2),
+            255,
+            "solid in the middle"
+        );
+        assert_eq!(far(0, 0), 0, "and nothing in the corner of the box");
+
+        session.pick_none().unwrap();
+        assert!(session.selection_png(1.0).is_err());
+    }
+
+    /// Sizes that arrive from outside and become allocations.
+    ///
+    /// A viewport and an export are both surfaces, and a surface too
+    /// big to hold is not a slow answer but an allocation that fails —
+    /// which ends the process rather than the request. Every one of
+    /// these numbers crosses the boundary from the app as a plain
+    /// number, so the answer has to be an answer.
+    #[test]
+    fn a_size_too_big_to_hold_is_answered_rather_than_attempted() {
+        let mut session = Session::new(40, 30, ColorMode::Rgb);
+        add_rect(&mut session, "r", 40.0, 30.0);
+
+        // A viewport is held to what a page is held to, and comes down
+        // by halves until it fits — the same rule, since it stands for a
+        // window measured in device pixels.
+        session.set_viewport(1.0, 0.0, 0.0, 3_000_000, 2_000_000);
+        let (fw, fh) = session.present_size();
+        assert!(
+            fw as u64 * fh as u64 <= chitrakar_doc::MAX_CANVAS_PIXELS,
+            "a viewport that fits: {fw}x{fh}"
+        );
+        // Not drawn here: a hundred megapixels is a real surface and a
+        // real wait, and what is being checked is that the number came
+        // down to one, not that the machine can fill it.
+        session.set_viewport(1.0, 0.0, 0.0, 200, 150);
+        assert!(session.render_cached().is_ok(), "and an ordinary one draws");
+
+        // An export says no rather than trying: at sixteen times, a
+        // region a hundred thousand across is more pixels than exist.
+        assert!(
+            session
+                .render_png_at(16.0, Some([0.0, 0.0, 100_000.0, 100_000.0]))
+                .is_err(),
+            "an export larger than can be made"
+        );
+        assert!(
+            session.render_png_at(2.0, None).is_ok(),
+            "and the ordinary one still goes"
+        );
+    }
+
+    /// Every number that crosses the boundary, given one nobody could
+    /// mean.
+    ///
+    /// The app sends sane values; the boundary is public and has only
+    /// the caller's word for them. Each of these numbers becomes an
+    /// allocation or the length of a loop somewhere, and the two ways
+    /// that goes wrong are the two ways an editor disappears rather
+    /// than complains: an allocation that fails aborts the process, and
+    /// a loop primed with a few million is a wait nobody comes back
+    /// from. So the audit is simply that it comes back — a failure here
+    /// is the test binary dying or never finishing, both of which say
+    /// what they mean. Found four the first time it was written out.
+    #[test]
+    fn a_number_nobody_could_mean_is_answered_rather_than_fallen_over() {
+        let absurd = [
+            f32::MAX,
+            1.0e9,
+            -1.0e9,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+        ];
+        let started = std::time::Instant::now();
+        for n in absurd {
+            let mut session = Session::new(40, 30, ColorMode::Rgb);
+            let shape = add_rect(&mut session, "r", 30.0, 20.0);
+            session
+                .pick_region(
+                    VectorShape::Rect {
+                        width: 10.0,
+                        height: 10.0,
+                        radius: 0.0,
+                    },
+                    Transform::translation(5.0, 5.0),
+                    "replace",
+                )
+                .unwrap();
+
+            // Sizes that become surfaces.
+            session.set_viewport(n, n, n, n.abs() as u32, n.abs() as u32);
+            let _ = session.present_size();
+            let _ = session.thumbnail(shape, n.abs() as u32);
+            let _ = session.mask_thumbnail(shape, n.abs() as u32);
+            let _ = session.render_png_at(n, None);
+            let _ = session.render_png_at(1.0, Some([0.0, 0.0, n, n]));
+            let _ = session.export_jpeg_at(n, None, 80);
+            let _ = session.artboard_png(shape, n);
+            let _ = session.selection_png(n);
+
+            // Distances that become the length of a loop.
+            let _ = session.grow_selection(n);
+            let _ = session.feather_selection(n);
+            let _ = session.selection_veil();
+            let _ = session.selection_covers(n, n);
+
+            // And the rest of the numbers the app sends.
+            let _ = session.set_dpi(n);
+            let _ = session.straighten_size(n);
+            let _ = session.pick_similar(n, n, n, true, "replace");
+            let _ = session.pick_similar(n, n, n, false, "replace");
+            let _ = session.histogram(None);
+            let _ = session.paint_begin(
+                shape,
+                n,
+                n,
+                n,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                n,
+                false,
+                false,
+            );
+            let _ = session.paint_extend(n, n, n);
+            let _ = session.cancel_preview();
+
+            // A command carries numbers too, and arrives as JSON from
+            // the app or out of a file. A transform with no thickness,
+            // a stroke wider than the world, an effect that reaches
+            // past it: each leaves a document the renderer then has to
+            // have an answer for.
+            let _ = session.apply(Command::SetTransform {
+                id: shape,
+                transform: Transform {
+                    a: n,
+                    b: n,
+                    c: n,
+                    d: n,
+                    e: n,
+                    f: n,
+                },
+            });
+            let _ = session.apply(Command::SetEffects {
+                id: shape,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: n,
+                    dy: n,
+                    blur: n.abs(),
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: n,
+                }],
+            });
+            let _ = session.apply(Command::SetMask {
+                id: shape,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: n,
+                            height: n,
+                            radius: n,
+                        },
+                        transform: Transform::translation(n, n),
+                    },
+                    invert: false,
+                    feather: n.abs(),
+                })),
+            });
+            // Whatever that left, the page still has to draw.
+            let _ = session.render();
+            let _ = session.render_cached();
+
+            // And the ones shaped like a place in a list rather than a
+            // measurement: a `usize` from the app is a number too.
+            for at in [0usize, 1, usize::MAX, usize::MAX / 2] {
+                let _ = session.reparent(shape, session.document().root(), at);
+                let _ = session.override_child(shape, at);
+                let _ = session.clear_override(shape, at);
+                let _ = session.remove_anchor(shape, at);
+                let _ = session.pick_kept(at, "replace");
+                let _ = session.forget_region(at);
+            }
+        }
+        // Not a timing assertion so much as a floor under one: the two
+        // hangs this found took minutes each, and a suite that waits
+        // that long is one nobody runs.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the whole sweep came back"
+        );
+    }
+
+    /// Every stretch of bytes that crosses the boundary, given one that
+    /// is not what it claims.
+    ///
+    /// The numbers the app sends have their own sweep; these are the
+    /// other half of what arrives from outside — a picture, a drawing,
+    /// a face, a colour profile, a document. Every one of them is a
+    /// file somebody chose, which means every one of them can be
+    /// nothing, noise, or the first half of something real. Refused is
+    /// an answer. Falling over is not, and a decoder is where a program
+    /// most often does.
+    #[test]
+    fn bytes_that_are_not_what_they_claim_are_refused() {
+        let mut real = Session::new(20, 16, ColorMode::Rgb);
+        add_rect(&mut real, "r", 10.0, 10.0);
+        let saved = real.save().unwrap();
+        let png = real.render_png_at(1.0, None).unwrap();
+
+        let mut rubbish: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0u8; 1],
+            b"<svg".to_vec(),
+            b"\x89PNG\r\n\x1a\n and then nothing".to_vec(),
+            (0u8..=255).cycle().take(4096).collect(),
+        ];
+        // The first half of something real, which is what a download
+        // that stopped looks like.
+        for whole in [&saved, &png] {
+            rubbish.push(whole[..whole.len() / 2].to_vec());
+            rubbish.push(whole[..1].to_vec());
+        }
+
+        for bytes in &rubbish {
+            let mut session = Session::new(20, 16, ColorMode::Rgb);
+            assert!(Session::load(bytes).is_err(), "not a document of ours");
+            let _ = session.place_image(bytes, "picture");
+            let _ = session.place_svg(bytes, "drawing");
+            let _ = Session::register_font("a face", bytes.clone());
+            let _ = session.set_cmyk_profile(bytes.clone());
+            let _ = session.set_display_profile(bytes);
+            let _ = session.apply_json(&String::from_utf8_lossy(bytes));
+            // Whatever any of that left, the page still has to draw.
+            let _ = session.render();
+        }
+    }
+
+    #[test]
+    fn one_layer_can_be_looked_at_on_its_own() {
+        // What a layer is by itself is a question every stack of layers
+        // eventually asks, and it is about looking rather than about
+        // the document — so nothing here goes into the history or the
+        // file, and the page comes back exactly as it was.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        let under = add_rect(&mut session, "under", 60.0, 40.0);
+        let over = add_rect(&mut session, "over", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: over,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetKind {
+                id: over,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.3,
+                        b: 0.9,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let steps = session.history_labels().0.len();
+
+        let page = session.render_cached().unwrap().0.clone();
+        assert!(page.get(40, 20).a > 0.99, "the page has both on it");
+        let blue = page.get(15, 15);
+        assert!(blue.b > blue.r, "the top one over the bottom one");
+
+        assert!(session.set_solo(Some(over)), "shown on its own");
+        assert!(!session.set_solo(Some(over)), "and asking twice is nothing");
+        let alone = session.render_cached().unwrap().0.clone();
+        assert!(alone.get(40, 20).a < 0.01, "what was under it is not drawn");
+        let still = alone.get(15, 15);
+        assert!(still.b > still.r, "and it is drawn where it was");
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps,
+            "with nothing about it in the history"
+        );
+
+        // Let go of, and the page is the page again — exactly, since a
+        // view is not an edit.
+        assert!(session.set_solo(None));
+        let back = session.render_cached().unwrap().0.clone();
+        assert_eq!(back.to_srgb8(), page.to_srgb8(), "the page comes back");
+
+        // A layer that goes takes the view with it rather than leaving
+        // it pointed at nothing — by an undo as readily as by a delete.
+        session.set_solo(Some(over));
+        session.apply(Command::RemoveNode { id: over }).unwrap();
+        assert!(session.render_cached().is_ok(), "the page still draws");
+        assert_eq!(session.solo(), None, "and it is the page again");
+        let _ = under;
+    }
+
+    #[test]
+    fn the_picture_under_the_work_can_be_looked_at() {
+        // The question a photograph asks every few minutes. The only
+        // way to ask it was to hide each adjustment by hand and undo
+        // them all again — edits the file would remember, for a glance
+        // nobody meant to keep.
+        let mut session = Session::new(40, 30, ColorMode::Rgb);
+        let sheet = add_rect(&mut session, "sheet", 40.0, 30.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 2.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter(
+                    "soften",
+                    chitrakar_doc::Filter::GaussianBlur { sigma: 2.0 },
+                )),
+            })
+            .unwrap();
+        let steps = session.history_labels().0.len();
+        let worked = session.render_cached().unwrap().0.clone();
+
+        assert!(session.set_untouched(true), "the work is set aside");
+        assert!(!session.set_untouched(true), "and asking twice is nothing");
+        let before = session.render_cached().unwrap().0.clone();
+        assert!(
+            before.get(20, 15).r < worked.get(20, 15).r,
+            "the picture is darker without two stops added to it"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps,
+            "with nothing about it in the history"
+        );
+
+        // The same picture hiding them by hand would give, since that
+        // is exactly what this is: the two answers cannot be a
+        // different arithmetic from each other.
+        let mut byhand = Session::from_document(session.document().clone());
+        for id in byhand.document().children_of(root).unwrap().to_vec() {
+            if !matches!(
+                byhand.document().node(id).unwrap().kind,
+                NodeKind::Vector { .. }
+            ) {
+                byhand
+                    .apply(Command::SetVisible { id, visible: false })
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            byhand.render().unwrap().to_srgb8(),
+            {
+                let mut alone = Session::from_document(session.document().clone());
+                alone.set_untouched(true);
+                alone.render_cached().unwrap().0.to_srgb8()
+            },
+            "the same picture as hiding each of them by hand"
+        );
+
+        // Let go of, and the page is the page again, exactly.
+        assert!(session.set_untouched(false));
+        assert_eq!(
+            session.render_cached().unwrap().0.to_srgb8(),
+            worked.to_srgb8(),
+            "the work comes back"
+        );
+        let _ = sheet;
+    }
+
+    #[test]
+    fn a_layer_added_over_a_region_is_held_to_it() {
+        // A region picked out and an adjustment put over it are one
+        // wish: the region is why the layer is being added, and the
+        // graph its numbers are set against is already the region's.
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        add_rect(&mut session, "sheet", 60.0, 40.0);
+        let root = session.document().root();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let steps = session.history_labels().0.len();
+        let lift = session
+            .add_over_selection(
+                root,
+                1,
+                Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 2.0 },
+                )),
+            )
+            .unwrap();
+        assert!(
+            session.document().node(lift).unwrap().mask.is_some(),
+            "the layer arrived holding the region"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps + 1,
+            "as one wish, so one entry"
+        );
+        let page = session.render().unwrap();
+        assert!(
+            page.get(15, 15).r > page.get(45, 30).r,
+            "and it lifts what was picked and nothing else"
+        );
+        session.undo().unwrap();
+        assert!(
+            session.document().node(lift).is_err(),
+            "and one undo takes the whole of it back"
+        );
+
+        // With nothing picked, it is the plain add it always was.
+        session.redo().unwrap();
+        session.pick_none().unwrap();
+        let plain = session
+            .add_over_selection(
+                root,
+                2,
+                Box::new(Node::adjustment(
+                    "all of it",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            )
+            .unwrap();
+        assert!(
+            session.document().node(plain).unwrap().mask.is_none(),
+            "nothing picked out is nothing to hold it to"
+        );
+    }
+
+    #[test]
+    fn a_histogram_reads_what_is_picked_out() {
+        // A histogram is read to decide where a picture's tones sit,
+        // and with a region picked the picture in question is the
+        // region — which is what makes grading one area possible, since
+        // the levels and curves graphs are drawn over this very
+        // reading.
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let dark = add_rect(&mut session, "dark", 80.0, 40.0);
+        session
+            .apply(Command::SetKind {
+                id: dark,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 80.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let light = add_rect(&mut session, "light", 20.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id: light,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: light,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+
+        // The page: mostly black with a white patch in it.
+        let whole = session.histogram(None).unwrap();
+        let luma = |bins: &[u32]| (bins[768], bins[768 + 255]);
+        let (black, white) = luma(&whole);
+        assert!(black > 0 && white > 0, "the page has both in it");
+
+        // The white patch alone: all of the light and none of the dark.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let inside = session.histogram(None).unwrap();
+        let (dark_in, light_in) = luma(&inside);
+        assert_eq!(dark_in, 0, "nothing dark inside the white patch");
+        assert!(light_in > 0, "and the light of it is there");
+        assert!(
+            light_in <= white,
+            "no more of it than the whole page had: {light_in} against {white}"
+        );
+
+        // The rest of the page instead, which is the other way round.
+        session.pick_inverse().unwrap();
+        let (dark_out, light_out) = luma(&session.histogram(None).unwrap());
+        assert!(dark_out > 0, "the dark is what is left");
+        assert_eq!(light_out, 0, "and none of the patch is");
+
+        // Let the region go and the page is read whole again.
+        session.pick_none().unwrap();
+        assert_eq!(
+            luma(&session.histogram(None).unwrap()),
+            (black, white),
+            "the page's own reading comes back"
+        );
+    }
+
+    #[test]
+    fn a_region_can_be_taken_further_out_or_further_in() {
+        // Grow and shrink are a distance, not a scaling: a long thin
+        // region grown by four gets four wider at both ends and along
+        // both sides.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(30.0, 35.0),
+                "replace",
+            )
+            .unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        assert!(session.grow_selection(4.0).unwrap());
+        let out = session.selection_bounds().unwrap();
+        assert!(
+            near(out, [26.0, 31.0, 94.0, 49.0]),
+            "four further out on every side: {out:?}"
+        );
+        assert!(session.selection_covers(28.0, 40.0), "and it covers them");
+
+        // Back in by the same, and it is where it was — the shape is
+        // traced back each time, so within a pixel.
+        assert!(session.grow_selection(-4.0).unwrap());
+        let back = session.selection_bounds().unwrap();
+        assert!(
+            near(back, [30.0, 35.0, 90.0, 45.0]),
+            "and back where it started: {back:?}"
+        );
+
+        // Softness is a separate question from reach, and survives.
+        assert!(session.feather_selection(3.0).unwrap());
+        assert!(session.grow_selection(2.0).unwrap());
+        assert!(
+            (session.selection().unwrap().feather - 3.0).abs() < 1e-4,
+            "the edge is still as soft as it was"
+        );
+
+        // Shrinking past the region says so rather than picking out
+        // nothing at all, which would look like a crash to the caller.
+        assert!(session.grow_selection(-200.0).is_err());
+        assert!(
+            session.selection().is_some(),
+            "and leaves what was picked alone"
+        );
+
+        // Nothing picked is not an error, and no distance is no edit.
+        session.pick_none().unwrap();
+        assert!(!session.grow_selection(4.0).unwrap());
+
+        // Growing an inverted region grows the region, not its hole:
+        // what is picked is everything but a box, so it reaches further
+        // in on the box, leaving a smaller hole.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                Transform::translation(40.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        session.pick_inverse().unwrap();
+        assert!(!session.selection_covers(60.0, 40.0), "the hole is a hole");
+        session.grow_selection(6.0).unwrap();
+        assert!(
+            session.selection_covers(44.0, 40.0),
+            "grown, it reaches into where the hole was"
+        );
+        assert!(
+            !session.selection_covers(60.0, 40.0),
+            "without closing it over"
+        );
+    }
+
+    #[test]
+    fn a_layer_hands_its_mask_back_as_a_region() {
+        // The way back from "mask this layer with what is picked", and
+        // what reshaping a mask is: take it out, change it, hand it
+        // back. It has to survive the round trip whole — the shape
+        // through the transforms, and the softness as the distance it
+        // is, which is the part a bare number is easiest to lose.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("twice as big")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 2.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 2.0,
+                    e: 10.0,
+                    f: 4.0,
+                },
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: filled_rect("sheet", 40.0, 20.0),
+            })
+            .unwrap();
+        let sheet = session.document().children_of(group).unwrap()[0];
+        assert!(
+            session.pick_layer_mask(sheet, "replace").is_err(),
+            "a layer with no mask has none to hand back"
+        );
+
+        // Give it one the way the editor does: pick a region and hand it
+        // over. Then take it out again and it should be the region.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 12.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(3.0).unwrap();
+        session.mask_from_selection(sheet, false).unwrap();
+        session.pick_none().unwrap();
+        session.pick_layer_mask(sheet, "replace").unwrap();
+        let back = session.selection().unwrap();
+        assert!(
+            (back.feather - 3.0).abs() < 1e-3,
+            "as soft as it went in, through a space scaled by two: {}",
+            back.feather
+        );
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        let box_ = session.selection_bounds().unwrap();
+        assert!(
+            near(box_, [20.0, 12.0, 50.0, 32.0]),
+            "and where it went in: {box_:?}"
+        );
+
+        // A region like any other from there: grow it, hand it back, and
+        // the layer is held to the bigger one.
+        session.grow_selection(4.0).unwrap();
+        session.mask_from_selection(sheet, false).unwrap();
+        session.pick_layer_mask(sheet, "replace").unwrap();
+        let grown = session.selection_bounds().unwrap();
+        assert!(
+            near(grown, [16.0, 8.0, 54.0, 36.0]),
+            "four further out on every side, still: {grown:?}"
+        );
+    }
+
+    #[test]
+    fn a_layer_says_what_it_covers() {
+        // The mirror of handing a region to a layer. A shape can be
+        // picked out of the page by pointing at the layer that draws
+        // it, which is the only way to pick out most shapes at all.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 40.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(20.0, 10.0),
+            })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        assert!(session.selection_covers(30.0, 20.0), "inside the shape");
+        assert!(!session.selection_covers(5.0, 5.0), "and not outside it");
+        let bounds = session.selection_bounds().unwrap();
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.5);
+        assert!(
+            near(bounds, [20.0, 10.0, 60.0, 30.0]),
+            "the shape's own box: {bounds:?}"
+        );
+
+        // A layer at two tenths still covers what it covers, and a
+        // shadow is not part of the drawing that casts it.
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.2 })
+            .unwrap();
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 12.0,
+                    dy: 12.0,
+                    blur: 2.0,
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        let faint = session.selection_bounds().unwrap();
+        assert!(
+            near(faint, bounds),
+            "faded, shadowed and hidden, the same shape: {faint:?}"
+        );
+        assert_eq!(
+            session.document().node(id).unwrap().opacity,
+            0.2,
+            "and the layer itself is left as it was"
+        );
+
+        // A mask is not set aside: a masked layer covers only what the
+        // mask lets through, which is the shape being asked for.
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 20.0,
+                            height: 20.0,
+                            radius: 0.0,
+                        },
+                        // A mask is written in the space the layer is
+                        // placed in, so this is the left half of it.
+                        transform: Transform::translation(20.0, 10.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        session.pick_from_layer(id, "replace").unwrap();
+        let masked = session.selection_bounds().unwrap();
+        assert!(
+            near(masked, [20.0, 10.0, 40.0, 30.0]),
+            "only what the mask lets through: {masked:?}"
+        );
+
+        // And from there it is a region like any other.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(80.0, 40.0),
+                "union",
+            )
+            .unwrap();
+        assert!(session.selection_covers(85.0, 45.0), "added to");
+        assert!(session.selection_covers(30.0, 20.0), "without losing it");
+
+        // A colour that is itself part transparent is still a shape.
+        // Against a fixed half-covered line such a layer would be said
+        // to cover nothing at all, which is a lie about a layer plainly
+        // there on the page.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let faint = add_rect(&mut session, "faint", 40.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id: faint,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 40.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.3,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: faint,
+                transform: Transform::translation(20.0, 10.0),
+            })
+            .unwrap();
+        session.pick_from_layer(faint, "replace").unwrap();
+        let ghost = session.selection_bounds().unwrap();
+        assert!(
+            near(ghost, [20.0, 10.0, 60.0, 30.0]),
+            "a third-opaque shape covers what it covers: {ghost:?}"
+        );
+
+        // An adjustment layer has no picture of its own, and its mask
+        // is often the most careful thing on the page. What it covers
+        // is what its mask lets through, which is exactly the region
+        // that made it.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            })
+            .unwrap();
+        let lift = session.document().children_of(root).unwrap()[0];
+        session.pick_from_layer(lift, "replace").unwrap();
+        let all = session.selection_bounds().unwrap();
+        assert!(
+            near(all, [0.0, 0.0, 100.0, 60.0]),
+            "unmasked, it covers the page: {all:?}"
+        );
+        session
+            .apply(Command::SetMask {
+                id: lift,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 30.0,
+                            height: 20.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(20.0, 20.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        session.pick_from_layer(lift, "replace").unwrap();
+        let through = session.selection_bounds().unwrap();
+        assert!(
+            near(through, [20.0, 20.0, 50.0, 40.0]),
+            "masked, it covers what the mask lets through: {through:?}"
+        );
+
+        // A layer covering nothing on the page says so rather than
+        // picking out an empty region.
+        let away = add_rect(&mut session, "gone", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: away,
+                transform: Transform::translation(400.0, 400.0),
+            })
+            .unwrap();
+        assert!(session.pick_from_layer(away, "replace").is_err());
+    }
+
+    #[test]
+    fn an_inverted_region_is_a_region_like_any_other() {
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let box_ = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.pick_inverse().unwrap();
+
+        // The rest of the page: the box round it is the page itself.
+        let b = session.selection_bounds().expect("it has an outline");
+        assert_eq!([b[0], b[1], b[2], b[3]], [0.0, 0.0, 100.0, 60.0]);
+
+        // And it can be taken from, which used to be an error.
+        session
+            .pick_region(
+                box_(30.0, 60.0),
+                Transform::translation(70.0, 0.0),
+                "subtract",
+            )
+            .unwrap();
+        let cover = |s: &Session| {
+            chitrakar_render::mask_plane_over(
+                s.document(),
+                s.selection().unwrap(),
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 100,
+                    y1: 60,
+                },
+                (100, 60),
+            )
+        };
+        let c = cover(&session);
+        let at = |x: usize, y: usize| c[y * 100 + x];
+        assert!(at(50, 30) > 0.5, "the rest of the page is still picked");
+        assert!(at(20, 20) < 0.5, "the hole is still a hole");
+        assert!(at(85, 30) < 0.5, "and the strip taken off is gone");
+
+        // A softened region filled comes out soft: a fill that does not
+        // look like what was picked is not a fill of it. A shape has no
+        // softness of its own, so the layer is given the region as its
+        // mask as well — the same thing a region always turns into.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                box_(40.0, 40.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(4.0).unwrap();
+        let filled = session
+            .fill_selection(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            })
+            .unwrap();
+        let page = session.render().unwrap();
+        assert!(page.get(30, 30).a > 0.95, "solid well inside the fill");
+        assert!(page.get(60, 30).a < 0.05, "and nothing well outside it");
+        let edge = page.get(50, 30).a;
+        assert!(
+            edge > 0.2 && edge < 0.8,
+            "with the edge of the fill fading, as the region did: {edge}"
+        );
+        // One entry, shape and softness together.
+        session.undo().unwrap();
+        assert!(
+            session.document().node(filled).is_err(),
+            "the fill went whole"
+        );
+
+        // Softening carries through a combine rather than being quietly
+        // lost: the second box says where, not how sharply.
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        assert!(session.feather_selection(3.0).unwrap());
+        session
+            .pick_region(
+                box_(20.0, 20.0),
+                Transform::translation(60.0, 10.0),
+                "union",
+            )
+            .unwrap();
+        assert_eq!(
+            session.selection().map(|m| m.feather),
+            Some(3.0),
+            "adding a box to a softened region leaves it softened"
+        );
+        // Which shows: the edge of the added box is soft too.
+        let c = cover(&session);
+        let at = |x: usize, y: usize| c[y * 100 + x];
+        assert!(
+            at(60, 20) > 0.2 && at(60, 20) < 0.8,
+            "the new box's edge fades as well: {}",
+            at(60, 20)
+        );
+    }
+
+    /// The three other things a picked region is good for.
+    ///
+    /// An editor that cuts pixels out would fill a selection with paint,
+    /// delete what is inside it, and crop to it. None of those needs to
+    /// destroy anything: filling makes the region into a shape layer,
+    /// deleting holds the layer to everything *but* the region, and
+    /// cropping is the resize the crop tool already does with the
+    /// region standing in for the rectangle.
+    #[test]
+    fn a_picked_region_fills_hides_and_crops() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.7,
+            b: 0.3,
+            a: 1.0,
+        };
+        let picked = |s: &mut Session| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        };
+
+        // Filling: the region becomes a shape layer, in that colour,
+        // covering exactly what was picked.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        assert!(
+            session.fill_selection(ink.clone()).is_err(),
+            "nothing picked out is nothing to fill"
+        );
+        picked(&mut session);
+        let id = session.fill_selection(ink.clone()).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Fill what is picked")
+        );
+        let page = session.render().unwrap();
+        assert!(page.get(40, 25).a > 0.9, "the region is filled");
+        assert!(page.get(5, 25).a < 0.1, "and nothing outside it is");
+        let b = session.bounds_of(id).unwrap();
+        assert!(
+            (b[0] - 20.0).abs() < 0.6 && (b[1] - 10.0).abs() < 0.6,
+            "the layer sits where the region was: {b:?}"
+        );
+
+        // Inverted, filling paints the rest of the page instead: the
+        // page's own rectangle with what was picked as a hole in it,
+        // which is what an even-odd path means by a ring inside a ring.
+        session.pick_inverse().unwrap();
+        session.fill_selection(ink).unwrap();
+        let page = session.render().unwrap();
+        assert!(page.get(5, 25).a > 0.9, "the rest of the page is filled");
+        assert!(
+            page.get(100, 70).a > 0.9,
+            "including the far corner from it"
+        );
+
+        // Hiding: the layer is held to everything but the region, which
+        // is deleting without anything being cut out — the layer is
+        // whole underneath and the region can be changed its mind about.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let cover = add_rect(&mut session, "cover", 120.0, 80.0);
+        picked(&mut session);
+        session.mask_from_selection(cover, true).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Hide what is picked")
+        );
+        let page = session.render().unwrap();
+        assert!(page.get(40, 25).a < 0.1, "what was picked is hidden");
+        assert!(page.get(5, 25).a > 0.9, "and the rest of the layer shows");
+        session.undo().unwrap();
+        assert!(
+            session.render().unwrap().get(40, 25).a > 0.9,
+            "and one undo hands it back whole"
+        );
+
+        // Cropping: the page comes in to the region, and what was inside
+        // it is where it was on the smaller page.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let mark = add_rect(&mut session, "mark", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: mark,
+                transform: Transform::translation(30.0, 20.0),
+            })
+            .unwrap();
+        picked(&mut session);
+        session.crop_to_selection().unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (40, 30),
+            "the page is the size of what was picked"
+        );
+        let b = session.bounds_of(mark).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.6 && (b[1] - 10.0).abs() < 0.6,
+            "and the mark moved with the page: {b:?}"
+        );
+        // What is picked travels with the page like everything else, so
+        // after the crop it is the whole of the new page.
+        assert_eq!(
+            session.selection_bounds().map(|b| [b[0], b[1], b[2], b[3]]),
+            Some([0.0, 0.0, 40.0, 30.0])
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// What is picked out of the page travels with the page.
+    ///
+    /// A selection is written in the page's own coordinates, so a page
+    /// that turns, mirrors or is given more room has to take it along —
+    /// left behind, it would pick out a different part of the picture
+    /// than the one it was drawn round. The same thing a guide, a mask
+    /// and a shadow's offset each need, and for the same reason.
+    #[test]
+    fn what_is_picked_out_turns_with_the_page() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        // A box in the page's top-left quarter.
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        // Where the region actually covers, as the page sees it.
+        let box_of = |s: &Session| {
+            let mask = s.selection().expect("something is picked out");
+            let (w, h) = (s.document().meta.width, s.document().meta.height);
+            let cover = chitrakar_render::mask_plane_over(
+                s.document(),
+                mask,
+                Transform::default(),
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h,
+                },
+                (w, h),
+            );
+            let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+            for y in 0..h {
+                for x in 0..w {
+                    if cover[(y * w + x) as usize] > 0.5 {
+                        x0 = x0.min(x);
+                        y0 = y0.min(y);
+                        x1 = x1.max(x + 1);
+                        y1 = y1.max(y + 1);
+                    }
+                }
+            }
+            (x0, y0, x1, y1)
+        };
+        assert_eq!(box_of(&session), (10, 10, 50, 30), "where it was drawn");
+
+        // A quarter turn stands the page on its end and the region with
+        // it: what was 10..50 across and 10..30 down on a 200x100 page is
+        // 70..90 across and 10..50 down on the 100x200 page.
+        session.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (100, 200)
+        );
+        assert_eq!(box_of(&session), (70, 10, 90, 50), "carried round the turn");
+        session.apply(Command::TurnCanvas { quarters: 3 }).unwrap();
+        assert_eq!(box_of(&session), (10, 10, 50, 30), "and back again");
+
+        // A mirror crosses it to the other side.
+        session
+            .apply(Command::MirrorCanvas { across_x: true })
+            .unwrap();
+        assert_eq!(
+            box_of(&session),
+            (150, 10, 190, 30),
+            "crossed with the page"
+        );
+        session
+            .apply(Command::MirrorCanvas { across_x: true })
+            .unwrap();
+
+        // And room added at the top left moves it along with everything
+        // else on the page.
+        session
+            .apply(Command::ResizeCanvas {
+                width: 240,
+                height: 140,
+                dx: 40.0,
+                dy: 40.0,
+            })
+            .unwrap();
+        assert_eq!(box_of(&session), (50, 50, 90, 70), "moved with the picture");
+    }
+
+    /// One layer aligns to what it sits in: its frame, or the page.
+    ///
+    /// Aligning a layer to the others it is picked with is what two or
+    /// more mean. One on its own has no others — and "centre this on the
+    /// page", which is the commonest alignment anybody asks for, was an
+    /// error message saying it needed at least two layers.
+    #[test]
+    fn one_layer_aligns_to_the_page_it_is_on() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let loose = add_rect(&mut session, "loose", 20.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: loose,
+                transform: Transform::translation(130.0, 70.0),
+            })
+            .unwrap();
+
+        session.align_nodes(&[loose], "center-h").unwrap();
+        let b = session.bounds_of(loose).unwrap();
+        assert!(
+            (b[0] - 90.0).abs() < 1e-3,
+            "centred across a 200-wide page: {b:?}"
+        );
+        assert!((b[1] - 70.0).abs() < 1e-3, "and not moved down: {b:?}");
+        session.align_nodes(&[loose], "bottom").unwrap();
+        let b = session.bounds_of(loose).unwrap();
+        assert!(
+            (b[1] + b[3] - 100.0).abs() < 1e-3,
+            "and sat on the page's own bottom: {b:?}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Align (bottom)")
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        // A layer in a frame aligns to the frame, not to the page: the
+        // frame is the page as far as anything inside it is concerned,
+        // which is what a frame is for.
+        let frame = session
+            .add_artboard("Artboard 1", 40.0, 20.0, 60.0, 50.0, None)
+            .unwrap();
+        let inside = add_rect(&mut session, "inside", 10.0, 10.0);
+        session
+            .apply(Command::MoveNode {
+                id: inside,
+                parent: frame,
+                index: 0,
+            })
+            .unwrap();
+        session.align_nodes(&[inside], "right").unwrap();
+        let b = session.bounds_of(inside).unwrap();
+        assert!(
+            (b[0] + b[2] - 100.0).abs() < 1e-3,
+            "against the frame's right edge at 40 + 60, not the page's at 200: {b:?}"
+        );
+        session.align_nodes(&[inside], "middle-v").unwrap();
+        let b = session.bounds_of(inside).unwrap();
+        assert!(
+            (b[1] + b[3] / 2.0 - 45.0).abs() < 1e-3,
+            "and the frame's own middle at 20 + 50 / 2: {b:?}"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn aligning_a_layer_inside_a_moved_group_still_lands_where_asked() {
+        // Alignment is measured in document space, but a transform is
+        // written in its parent's — so a layer inside a moved group has to
+        // have the movement carried back through the group.
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let loose = add_rect(&mut session, "loose", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: loose,
+                transform: Transform::translation(120.0, 0.0),
+            })
+            .unwrap();
+        let inner = add_rect(&mut session, "inner", 10.0, 10.0);
+        let group = session.group_nodes(&[inner], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+
+        session.align_nodes(&[loose, inner], "left").unwrap();
+        let (x1, x2) = (
+            session.bounds_of(loose).unwrap()[0],
+            session.bounds_of(inner).unwrap()[0],
+        );
+        assert!(
+            (x1 - x2).abs() < 1e-3,
+            "both should share a left edge in document space: {x1} vs {x2}"
+        );
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn history_labels_and_jump_walk_the_timeline() {
+        let mut session = Session::new(32, 32, ColorMode::Rgb);
+        let id = add_rect(&mut session, "hero", 8.0, 8.0);
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+
+        let (past, future) = session.history_labels();
+        assert_eq!(past, vec!["Add hero", "Opacity of hero", "Hide hero"]);
+        assert!(future.is_empty());
+
+        // Jump back two steps: opacity restored, visibility restored.
+        session.jump(-2).unwrap();
+        assert_eq!(session.document().node(id).unwrap().opacity, 1.0);
+        assert!(session.document().node(id).unwrap().visible);
+        let (past, future) = session.history_labels();
+        assert_eq!(past, vec!["Add hero"]);
+        assert_eq!(future, vec!["Opacity of hero", "Hide hero"]);
+
+        // Jump forward one.
+        session.jump(1).unwrap();
+        assert_eq!(session.document().node(id).unwrap().opacity, 0.5);
+        assert_cache_matches_fresh(&mut session);
+
+        // Over-jumping clamps at the ends.
+        session.jump(-99).unwrap();
+        assert_eq!(session.document().node_count(), 1);
+        session.jump(99).unwrap();
+        assert!(!session.document().node(id).unwrap().visible);
+    }
+
+    #[test]
+    fn layers_list_is_top_first_with_depth() {
+        let mut session = Session::new(8, 8, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("bottom group")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::group("nested")),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("top")),
+            })
+            .unwrap();
+
+        let layers = session.layers();
+        let names: Vec<_> = layers.iter().map(|l| (l.name.as_str(), l.depth)).collect();
+        assert_eq!(names, vec![("top", 0), ("bottom group", 0), ("nested", 1)]);
+    }
+
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn cmyk_fill_renders_through_press_profile_when_set() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+
+        let mut session = Session::new(4, 4, ColorMode::Cmyk);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "cyan",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Cmyk {
+                c: 1.0,
+                m: 0.0,
+                y: 0.0,
+                k: 0.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+
+        let naive = session.render().unwrap().get(0, 0).to_srgb8();
+        session.set_cmyk_profile(icc).unwrap();
+        let profiled = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_ne!(naive, profiled, "profile must change CMYK rendering");
+        // Real presses can't print #00FFFF; profiled cyan is darker/bluer.
+        assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A palette entry can be ink: a CMYK document's swatches are
+    /// authored like any other colour in it. So a layer that reaches for
+    /// one has to print through the press profile exactly as the ink
+    /// itself does — a name is a reference, not a fourth colour space,
+    /// and reading past it as sRGB would quietly take a colour off the
+    /// press.
+    ///
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn an_ink_reached_for_by_name_still_goes_through_the_press() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let cyan = chitrakar_color::AuthoredColor::Cmyk {
+            c: 1.0,
+            m: 0.0,
+            y: 0.0,
+            k: 0.0,
+            a: 1.0,
+        };
+        let page = |fill: chitrakar_color::AuthoredColor, press: bool| {
+            let mut session = Session::new(4, 4, ColorMode::Cmyk);
+            let root = session.document().root();
+            let mut node = Node::vector(
+                "ink",
+                chitrakar_doc::VectorShape::Rect {
+                    width: 4.0,
+                    height: 4.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill: f, .. } = &mut node.kind {
+                *f = Some(fill);
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetSwatches {
+                    swatches: vec![chitrakar_doc::Swatch {
+                        name: "spot".into(),
+                        color: cyan.clone(),
+                    }],
+                })
+                .unwrap();
+            if press {
+                session.set_cmyk_profile(icc.clone()).unwrap();
+            }
+            session.render().unwrap().get(0, 0).to_srgb8()
+        };
+        let named = page(cyan.standing_for("spot"), true);
+        assert_eq!(
+            named,
+            page(cyan.clone(), true),
+            "the ink called spot prints as that ink"
+        );
+        assert_ne!(
+            named,
+            page(cyan.standing_for("spot"), false),
+            "and the press is what it went through, not the device formula"
+        );
+    }
+
+    /// A gradient map's stops are authored ink like any other colour in a
+    /// CMYK document, so they resolve through the press profile too — the
+    /// map is what decides what the page is made of, and it would be an
+    /// odd thing for it alone to ignore the press.
+    ///
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn a_gradient_map_resolves_its_stops_through_the_press() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let cyan = chitrakar_color::AuthoredColor::Cmyk {
+            c: 1.0,
+            m: 0.0,
+            y: 0.0,
+            k: 0.0,
+            a: 1.0,
+        };
+        let mut session = Session::new(4, 4, ColorMode::Cmyk);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "grey",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        // A ramp that is that one ink from end to end, so every tone
+        // comes out it and the profile is the only thing that can change
+        // what shows.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "map",
+                    chitrakar_doc::Adjustment::GradientMap {
+                        stops: vec![
+                            chitrakar_doc::GradientStop {
+                                offset: 0.0,
+                                color: cyan.clone(),
+                            },
+                            chitrakar_doc::GradientStop {
+                                offset: 1.0,
+                                color: cyan,
+                            },
+                        ],
+                    },
+                )),
+            })
+            .unwrap();
+        let naive = session.render().unwrap().get(0, 0).to_srgb8();
+        session.set_cmyk_profile(icc).unwrap();
+        let profiled = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_ne!(
+            naive, profiled,
+            "the press has to reach the map's own stops"
+        );
+        // As for a fill: no press prints #00FFFF, so profiled cyan is the
+        // darker of the two.
+        assert!(profiled[1] < naive[1], "{naive:?} vs {profiled:?}");
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// Needs a real CMYK press profile (CHITRAKAR_TEST_CMYK_ICC).
+    #[test]
+    fn soft_proofing_changes_presented_pixels_only() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+
+        let mut session = Session::new(4, 4, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "blue",
+            chitrakar_doc::VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+
+        // Proofing without a profile is refused.
+        assert!(session.set_proofing(true, false).is_err());
+        session.set_cmyk_profile(icc).unwrap();
+
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        let mut plain = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut plain);
+        assert_eq!(&plain[0..3], &[0, 0, 255]);
+
+        session.set_proofing(true, false).unwrap();
+        let mut proofed = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut proofed);
+        assert_ne!(&proofed[0..3], &[0, 0, 255], "press can't print pure blue");
+
+        session.set_proofing(true, true).unwrap();
+        let mut marked = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut marked);
+        assert_eq!(&marked[0..3], &[128, 128, 128], "gamut warning marks it");
+
+        // Export stays unproofed: proofing is a display transform.
+        let exported = session.render().unwrap().get(0, 0).to_srgb8();
+        assert_eq!(exported, [0, 0, 255, 255]);
+    }
+
+    /// A screen with a profile of its own is shown the numbers it wants,
+    /// and nothing else in the document moves.
+    #[test]
+    fn a_monitor_profile_changes_what_is_shown_and_nothing_else() {
+        let mut session = Session::new(4, 4, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "red",
+            VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        let mut plain = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut plain);
+        assert_eq!(&plain[0..4], &[255, 0, 0, 255]);
+
+        // A wide-gamut screen: sRGB's red is well inside what it can
+        // show, so the numbers sent to it are pulled in from its own.
+        session
+            .set_display_profile(&chitrakar_color::cms::display_p3_profile_bytes())
+            .unwrap();
+        assert!(session.has_display_profile());
+        let mut shown = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut shown);
+        assert!(
+            shown[0] < 250 && shown[1] > 10,
+            "sRGB red asks a P3 screen for less than all of its red: {:?}",
+            &shown[0..4]
+        );
+        assert_eq!(shown[3], 255, "and alpha rides through");
+
+        // Nothing else moved: not the document, not an export, not a
+        // colour picked off the page.
+        assert_eq!(
+            session.render().unwrap().get(0, 0).to_srgb8(),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(session.color_at(2.0, 2.0), Some([255, 0, 0, 255]));
+
+        session.clear_display_profile();
+        let mut back = vec![0u8; 4 * 4 * 4];
+        session.render_cached().unwrap();
+        session.encode_present_region(full, &mut back);
+        assert_eq!(&back[0..4], &[255, 0, 0, 255], "and it can be taken off");
+
+        // A CMYK profile is not a monitor.
+        assert!(session.set_display_profile(b"not an icc at all").is_err());
+    }
+
+    #[test]
+    fn save_load_roundtrip_via_chitra() {
+        let mut session = Session::new(32, 32, ColorMode::Cmyk);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("kept")),
+            })
+            .unwrap();
+
+        let bytes = session.save().unwrap();
+        let mut restored = Session::load(&bytes).unwrap();
+        assert_eq!(restored.document().node_count(), 2);
+        assert_eq!(restored.layers()[0].name, "kept");
+        assert_cache_matches_fresh(&mut restored);
+    }
+
+    #[test]
+    fn a_flip_mirrors_the_selection_about_its_own_box() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "r", 20.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let other = add_rect(&mut session, "o", 10.0, 30.0);
+        session
+            .apply(Command::SetTransform {
+                id: other,
+                transform: Transform::translation(60.0, 40.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+
+        // Alone, a layer flips in place: same box, one history entry.
+        session.flip_nodes(&[rect], true).unwrap();
+        let b = session.bounds_of(rect).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 1e-3 && (b[2] - 20.0).abs() < 1e-3,
+            "{b:?}"
+        );
+        assert_eq!(session.document().node(rect).unwrap().transform.a, -1.0);
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Flip horizontal")
+        );
+
+        // Together, they mirror about the union: the rect (10..30) lands
+        // at the far side of 10..70, the tall one at the near side.
+        session.flip_nodes(&[rect, other], true).unwrap();
+        let (r, o) = (
+            session.bounds_of(rect).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (r[0] - 50.0).abs() < 1e-3 && (r[2] - 20.0).abs() < 1e-3,
+            "rect {r:?}"
+        );
+        assert!(
+            (o[0] - 10.0).abs() < 1e-3 && (o[2] - 10.0).abs() < 1e-3,
+            "other {o:?}"
+        );
+        assert!(
+            (r[1] - 10.0).abs() < 1e-3 && (o[1] - 40.0).abs() < 1e-3,
+            "rows untouched"
+        );
+        session.flip_nodes(&[rect, other], false).unwrap();
+        let (r, o) = (
+            session.bounds_of(rect).unwrap(),
+            session.bounds_of(other).unwrap(),
+        );
+        assert!(
+            (r[1] - 60.0).abs() < 1e-3 && (o[1] - 10.0).abs() < 1e-3,
+            "vertical: {r:?} {o:?}"
+        );
+
+        // Three undos put every pixel back.
+        for _ in 0..3 {
+            session.undo().unwrap();
+        }
+        assert_eq!(session.render().unwrap().pixels, before.pixels);
+
+        // Inside a moved, scaled group the mirror still lands where the
+        // document sees it: the box stays the box.
+        let group = session.group_nodes(&[rect], "g").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 2.0,
+                    d: 2.0,
+                    e: 5.0,
+                    f: 5.0,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let boxed = session.bounds_of(rect).unwrap();
+        session.flip_nodes(&[rect], false).unwrap();
+        let after = session.bounds_of(rect).unwrap();
+        assert!(
+            boxed
+                .iter()
+                .zip(after.iter())
+                .all(|(a, b)| (a - b).abs() < 1e-3),
+            "{boxed:?} -> {after:?}"
+        );
+    }
+
+    #[test]
+    fn text_goes_along_a_shape_in_the_shapes_own_place() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(text_in("")),
+            })
+            .unwrap();
+        let text = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: text,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        // A circle over on the right; the text should end up around it,
+        // wherever the block itself sits.
+        let circle = add_rect(&mut session, "c", 1.0, 1.0);
+        session
+            .apply(Command::SetKind {
+                id: circle,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+                    fill: None,
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: circle,
+                transform: Transform::translation(120.0, 100.0),
+            })
+            .unwrap();
+        let before = session.bounds_of(text).unwrap();
+        session.text_along(text, circle).unwrap();
+        let after = session.bounds_of(text).unwrap();
+        assert!(
+            after[0] > 100.0 && after[0] + after[2] < 200.0 && after[1] > 50.0,
+            "the text now sits around the circle at (120..180, 100..160): {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Text on path")
+        );
+        let NodeKind::Text(spec) = &session.document().node(text).unwrap().kind else {
+            unreachable!()
+        };
+        let Some(VectorShape::Path { points, closed, .. }) = &spec.along else {
+            panic!("a path was copied in")
+        };
+        assert!(*closed && points.len() >= 16);
+        // The ellipse's own origin is its top-left, so its centre is at
+        // (150, 130) on the page — (130, 110) in the block's own space.
+        let (cx, cy) = points.iter().fold((0.0, 0.0), |(x, y), p| {
+            (
+                x + p[0] / points.len() as f32,
+                y + p[1] / points.len() as f32,
+            )
+        });
+        assert!(
+            (cx - 130.0).abs() < 1.0 && (cy - 110.0).abs() < 1.0,
+            "{cx} {cy}"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(session.bounds_of(text).unwrap(), before);
+        assert!(
+            session.text_along(circle, text).is_err(),
+            "a shape is not text"
+        );
+    }
+
+    #[test]
+    fn an_svg_is_placed_as_a_group_of_shapes_in_one_step() {
+        let mut session = Session::new(120, 100, ColorMode::Rgb);
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+            <rect x="10" y="10" width="40" height="30" fill="#ff0000"/>
+            <circle cx="80" cy="25" r="15" fill="#0000ff"/></svg>"##;
+        let group = session.place_svg(svg, "mark.svg").unwrap();
+        let layers = session.layers();
+        assert_eq!(layers.len(), 3);
+        assert!(layers
+            .iter()
+            .any(|l| l.id == group.0 && l.kind == "group" && l.name == "mark.svg"));
+        assert_eq!(layers.iter().filter(|l| l.parent == group.0).count(), 2);
+        let b = session.bounds_of(group).unwrap();
+        assert!(
+            (b[0] - 10.0).abs() < 0.5 && (b[0] + b[2] - 95.0).abs() < 0.5,
+            "{b:?}"
+        );
+        assert_eq!(
+            session.render().unwrap().get(30, 25).to_srgb8(),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Place mark.svg")
+        );
+        assert!(session.undo().unwrap());
+        assert!(
+            session.layers().is_empty(),
+            "one undo takes the whole group"
+        );
+        assert!(session
+            .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
+            .is_err());
+    }
+
+    #[test]
+    fn opacity_and_blend_reach_every_picked_layer_at_once() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        session.set_opacity_of(&[a, b], 0.25).unwrap();
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| (l.opacity - 0.25).abs() < 1e-6));
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Opacity of 2 layers")
+        );
+        session
+            .set_blend_of(&[a, b], chitrakar_doc::BlendMode::Multiply)
+            .unwrap();
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| l.blend == chitrakar_doc::BlendMode::Multiply));
+        assert!(session.undo().unwrap());
+        assert!(session
+            .layers()
+            .iter()
+            .all(|l| l.blend == chitrakar_doc::BlendMode::Normal));
+        assert!(session.undo().unwrap());
+        assert!(
+            session.layers().iter().all(|l| l.opacity == 1.0),
+            "both back at once"
+        );
+        // One layer says so by name.
+        session.set_opacity_of(&[a], 0.5).unwrap();
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Opacity of a")
+        );
+        assert!(session.set_opacity_of(&[], 0.5).is_err());
+    }
+
+    #[test]
+    fn several_layers_duplicate_in_one_step() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 20.0, 20.0);
+        let copies = session.duplicate_nodes(&[a, b], false).unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(session.layers().len(), 4);
+        // Each copy sits directly above what it was copied from, and
+        // carries its size.
+        for (from, copy) in [a, b].iter().zip(&copies) {
+            let (f, c) = (
+                session
+                    .layers()
+                    .iter()
+                    .find(|l| l.id == from.0)
+                    .unwrap()
+                    .index,
+                session
+                    .layers()
+                    .iter()
+                    .find(|l| l.id == copy.0)
+                    .unwrap()
+                    .index,
+            );
+            assert_eq!(c, f + 1, "the copy is the layer above");
+            assert_eq!(session.bounds_of(*copy), session.bounds_of(*from));
+        }
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Duplicate 2 layers")
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(session.layers().len(), 2, "one undo takes both copies");
+        assert!(session.duplicate_nodes(&[], false).is_err());
+        // Asked to, it nudges each copy clear of its original instead.
+        let nudged = session.duplicate_nodes(&[a], true).unwrap()[0];
+        let (from, copy) = (
+            session.bounds_of(a).unwrap(),
+            session.bounds_of(nudged).unwrap(),
+        );
+        assert!(
+            copy[0] > from[0] && copy[1] > from[1],
+            "{from:?} -> {copy:?}"
+        );
+    }
+
+    #[test]
+    fn the_colour_at_a_point_is_what_the_page_shows_there() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 20.0, 20.0);
+        session
+            .apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.5,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let picked = session.color_at(10.0, 10.0).unwrap();
+        assert_eq!(picked, [255, 128, 0, 255], "the fill, as it is shown");
+        assert_eq!(
+            session.color_at(30.0, 30.0).unwrap()[3],
+            0,
+            "bare page is clear"
+        );
+        assert_eq!(session.color_at(-1.0, 5.0), None, "nothing off the page");
+        assert_eq!(session.color_at(40.0, 5.0), None);
+        // Half opacity over nothing reads as half-covered, not as the fill.
+        session
+            .apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        let faded = session.color_at(10.0, 10.0).unwrap();
+        assert!(
+            (faded[3] as i32 - 128).abs() <= 1 && faded[0] == 255,
+            "{faded:?}"
+        );
+        // And it is the document's colour, not the view's: zoomed out, the
+        // same point reads the same.
+        session.set_viewport(0.25, 0.0, 0.0, 10, 10);
+        assert_eq!(session.color_at(10.0, 10.0).unwrap(), faded);
+    }
+
+    /// A copy can stand in for one of the original's layers and follow
+    /// it everywhere else: change the original's other layer and the
+    /// copy takes it; change the stood-in one and the copy keeps its own.
+    /// A copy can differ from the original at a layer *deeper* than the
+    /// original's own children, and go on following it everywhere else.
+    ///
+    /// This is what a component is for: a card holds a button, the button
+    /// holds a label, and what one card wants to change is the label. A
+    /// stand-in used to be a deep copy of what it replaced, so standing
+    /// in for the button to reach the label detached the whole button —
+    /// its chrome stopped following the original, and changing the
+    /// original's button colour no longer reached that card. The layer
+    /// you wanted was two deep and everything above it came away with it.
+    ///
+    /// A stand-in for a *group* is a copy of that group now rather than a
+    /// copy of its contents, which is the same promise said properly: a
+    /// stand-in starts as an exact copy of what it replaces, and for a
+    /// group the exact copy that keeps its links is a copy *of* it. So
+    /// standing in composes — one call a level — and everything not stood
+    /// in for still follows.
+    #[test]
+    fn a_copy_can_differ_at_a_layer_deeper_than_the_originals_own() {
+        let mut session = Session::new(220, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let colour = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let paint = |session: &mut Session, id: NodeId, c: AuthoredColor| {
+            let NodeKind::Vector {
+                shape,
+                stroke,
+                gradient,
+                ..
+            } = session.document().node(id).unwrap().kind.clone()
+            else {
+                panic!("not a shape");
+            };
+            session
+                .apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Vector {
+                        shape,
+                        fill: Some(c),
+                        stroke,
+                        gradient,
+                    }),
+                })
+                .unwrap();
+        };
+        let at = |session: &mut Session, id: NodeId, x: f32, y: f32| {
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+        };
+        // The original: a card holding a button holding a label, with a
+        // piece of its own beside the button.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("card")),
+            })
+            .unwrap();
+        let card = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: card,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("button")),
+            })
+            .unwrap();
+        let button = session.document().children_of(card).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: card,
+                index: 1,
+                node: filled_rect("edge", 10.0, 10.0),
+            })
+            .unwrap();
+        let edge = session.document().children_of(card).unwrap()[1];
+        at(&mut session, edge, 30.0, 0.0);
+        paint(&mut session, edge, colour(0.0, 0.0, 1.0));
+        session
+            .apply(Command::AddNode {
+                parent: button,
+                index: 0,
+                node: filled_rect("label", 10.0, 10.0),
+            })
+            .unwrap();
+        let label = session.document().children_of(button).unwrap()[0];
+        paint(&mut session, label, colour(1.0, 0.0, 0.0));
+        session
+            .apply(Command::AddNode {
+                parent: button,
+                index: 1,
+                node: filled_rect("chrome", 10.0, 10.0),
+            })
+            .unwrap();
+        let chrome = session.document().children_of(button).unwrap()[1];
+        at(&mut session, chrome, 15.0, 0.0);
+        paint(&mut session, chrome, colour(0.0, 1.0, 0.0));
+
+        let copy = session.make_instance(card).unwrap();
+        at(&mut session, copy, 100.0, 0.0);
+
+        // One call a level: stand in for the button, then for its label.
+        let mine_button = session.override_child(copy, 0).unwrap();
+        let mine_label = session.override_child(mine_button, 0).unwrap();
+        paint(&mut session, mine_label, colour(1.0, 1.0, 0.0));
+
+        let page = session.render().unwrap();
+        let hue = |x: u32, y: u32| page.get(x, y).to_srgb8();
+        // The original is untouched: a red label, green chrome, blue edge.
+        assert_eq!(hue(5, 5), [255, 0, 0, 255], "the original's label");
+        assert_eq!(hue(20, 5), [0, 255, 0, 255], "the original's chrome");
+        assert_eq!(hue(35, 5), [0, 0, 255, 255], "the original's edge");
+        // The copy differs only where it was told to.
+        assert_eq!(hue(105, 5), [255, 255, 0, 255], "the copy's own label");
+        assert_eq!(
+            hue(120, 5),
+            [0, 255, 0, 255],
+            "and the chrome it still follows"
+        );
+        assert_eq!(
+            hue(135, 5),
+            [0, 0, 255, 255],
+            "and the edge it still follows"
+        );
+
+        // And the following is live, which is the whole of the point:
+        // recolour the original's chrome and the copy takes it, while its
+        // own label stays its own.
+        paint(&mut session, chrome, colour(0.0, 1.0, 1.0));
+        paint(&mut session, edge, colour(1.0, 0.0, 1.0));
+        let after = session.render().unwrap();
+        let now = |x: u32, y: u32| after.get(x, y).to_srgb8();
+        assert_eq!(
+            now(120, 5),
+            [0, 255, 255, 255],
+            "the copy follows the chrome"
+        );
+        assert_eq!(now(135, 5), [255, 0, 255, 255], "and the edge");
+        assert_eq!(now(105, 5), [255, 255, 0, 255], "and keeps its own label");
+        assert_eq!(
+            now(5, 5),
+            [255, 0, 0, 255],
+            "the original's label is its own too"
+        );
+
+        // Taking the stand-in away puts the copy back to following the
+        // original there as well.
+        session.clear_override(copy, 0).unwrap();
+        let back = session.render().unwrap();
+        assert_eq!(
+            back.get(105, 5).to_srgb8(),
+            [255, 0, 0, 255],
+            "and letting the stand-in go follows the original again"
+        );
+    }
+
+    #[test]
+    fn a_copy_can_differ_where_it_has_to() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        // A "component": a group of two rects side by side.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("button")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        for (i, x) in [0.0f32, 20.0].into_iter().enumerate() {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: filled_rect(&format!("part{i}"), 10.0, 10.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        assert_eq!(
+            session.overridable(copy),
+            vec![("part0".into(), false), ("part1".into(), false)],
+            "the panel is offered both of the original's layers"
+        );
+
+        // Stand in for the second one and move it, so the copy differs.
+        let mine = session.override_child(copy, 1).unwrap();
+        assert!(session.overridable(copy)[1].1, "and it says so");
+        session
+            .apply(Command::SetTransform {
+                id: mine,
+                transform: Transform::translation(20.0, 40.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(105, 5).a, 1.0, "the copy still follows part0");
+        assert_eq!(s.get(125, 45).a, 1.0, "and its own part1 moved down");
+        assert_eq!(s.get(125, 5).a, 0.0, "leaving where the original's is");
+        assert_eq!(
+            session.render().unwrap().get(25, 5).a,
+            1.0,
+            "the original is untouched"
+        );
+
+        // Moving the original's first layer still carries to the copy;
+        // moving the one stood in for does not.
+        session
+            .apply(Command::SetTransform {
+                id: session.document().children_of(master).unwrap()[0],
+                transform: Transform::translation(0.0, 40.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(
+            s.get(105, 45).a,
+            1.0,
+            "the copy followed the layer it shares"
+        );
+        session
+            .apply(Command::SetTransform {
+                id: session.document().children_of(master).unwrap()[1],
+                transform: Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(165, 5).a, 0.0, "and not the one it stands in for");
+        assert_eq!(s.get(125, 45).a, 1.0, "which is still its own");
+
+        // Taken away, it follows again.
+        session.clear_override(copy, 1).unwrap();
+        let s = session.render().unwrap();
+        assert_eq!(s.get(165, 5).a, 1.0, "back to the original's placement");
+        assert!(!session.overridable(copy)[1].1);
+    }
+
+    /// A copy that stands in for one of the original's layers occupies
+    /// what *it* draws: its handles are drawn round its own box and it is
+    /// picked over its own box, not the original's.
+    ///
+    /// Both were asked of the original, which is right for every copy
+    /// that draws its original entire and wrong for the one that does
+    /// not — a copy whose own layer reaches further than the layer it
+    /// replaced was outlined short and could not be picked over the part
+    /// that stuck out, which is the half of it a person would reach for
+    /// first.
+    #[test]
+    fn a_copy_is_outlined_and_picked_over_what_it_draws() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        for (i, x) in [0.0f32, 20.0].into_iter().enumerate() {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: filled_rect(&format!("mark{i}"), 10.0, 10.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        // The copy's own second mark, further out than the original's.
+        let mine = session.override_child(copy, 1).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: mine,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+
+        assert_eq!(
+            session.render().unwrap().get(145, 5).a,
+            1.0,
+            "the copy draws its own mark out there"
+        );
+        let box_ = chitrakar_render::bounds_in_parent_space(session.document(), copy).unwrap();
+        assert_eq!(
+            box_,
+            chitrakar_render::Bounds::Rect(100.0, 0.0, 150.0, 10.0),
+            "and is outlined round what it draws"
+        );
+        assert_eq!(
+            session.hit_test(145.0, 5.0),
+            Some(copy),
+            "and is picked there"
+        );
+        // And the original is unmoved by any of it.
+        assert_eq!(
+            chitrakar_render::bounds_in_parent_space(session.document(), master).unwrap(),
+            chitrakar_render::Bounds::Rect(0.0, 0.0, 30.0, 10.0),
+        );
+        assert_eq!(
+            session.hit_test(25.0, 5.0),
+            Some(session.document().children_of(master).unwrap()[1]),
+            "whose own second mark is still where it was"
+        );
+    }
+
+    /// A stand-in holds to the *layer* it stands in for, not to where
+    /// that layer sat: the original's layers can be added to, shuffled
+    /// and thinned out, and the copy goes on differing in the one place
+    /// it was asked to.
+    ///
+    /// This used to be a position among the original's children, which
+    /// is true only until those children change. Add a layer to the front
+    /// of a component and every copy's stand-in slid onto its neighbour —
+    /// the copy silently stopped drawing one of the original's layers and
+    /// started overriding another. Nothing said so; the file was written
+    /// that way too.
+    #[test]
+    fn a_stand_in_holds_to_its_layer_when_the_originals_are_shuffled() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[0];
+        let hue = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        // Two marks that overlap, so the order they are drawn in shows.
+        for (i, (name, w, x, color)) in [
+            ("mark0", 20.0f32, 0.0f32, hue(1.0, 0.0, 0.0)),
+            ("mark1", 10.0, 15.0, hue(0.0, 0.0, 1.0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: master,
+                    index: i,
+                    node: rect_of(name, w, 10.0, color),
+                })
+                .unwrap();
+            let id = session.document().children_of(master).unwrap()[i];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 0.0),
+                })
+                .unwrap();
+        }
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(100.0, 0.0),
+            })
+            .unwrap();
+        // The copy's own second mark, in green.
+        let mine = session.override_child(copy, 1).unwrap();
+        session
+            .apply(Command::SetKind {
+                id: mine,
+                kind: Box::new(NodeKind::Vector {
+                    shape: chitrakar_doc::VectorShape::Rect {
+                        width: 10.0,
+                        height: 10.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(hue(0.0, 1.0, 0.0)),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let hue_at = |session: &mut Session, x: u32| {
+            let p = session.render().unwrap().get(x, 5);
+            if p.a < 0.5 {
+                "paper"
+            } else if p.r > 0.5 && p.g > 0.5 {
+                "yellow"
+            } else if p.r > 0.5 {
+                "red"
+            } else if p.g > 0.5 {
+                "green"
+            } else if p.b > 0.5 {
+                "blue"
+            } else {
+                "something else"
+            }
+        };
+        assert_eq!(hue_at(&mut session, 105), "red", "the copy follows mark0");
+        assert_eq!(hue_at(&mut session, 122), "green", "and has its own mark1");
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "green",
+            "which is drawn where mark1 is, over mark0"
+        );
+
+        // A layer added to the *front* of the original. Every position
+        // after it has moved along; the layer the copy stands in for has
+        // not.
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 0,
+                node: rect_of("mark2", 10.0, 10.0, hue(1.0, 1.0, 0.0)),
+            })
+            .unwrap();
+        let mark2 = session.document().children_of(master).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: mark2,
+                transform: Transform::translation(40.0, 0.0),
+            })
+            .unwrap();
+        assert_eq!(
+            hue_at(&mut session, 145),
+            "yellow",
+            "the copy draws the new layer too"
+        );
+        assert_eq!(
+            hue_at(&mut session, 105),
+            "red",
+            "and still follows mark0 rather than standing in for it"
+        );
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "its own is still its own"
+        );
+
+        // The original's layers shuffled: the copy draws them in the
+        // order the original now holds them, its own among them where
+        // the layer it stands in for now sits.
+        session
+            .apply(Command::MoveNode {
+                id: session.document().children_of(master).unwrap()[1],
+                parent: master,
+                index: 2,
+            })
+            .unwrap();
+        assert_eq!(
+            session
+                .document()
+                .children_of(master)
+                .unwrap()
+                .iter()
+                .map(|&c| session
+                    .document()
+                    .node(c)
+                    .unwrap()
+                    .name
+                    .as_str()
+                    .to_string())
+                .collect::<Vec<_>>(),
+            vec!["mark2", "mark1", "mark0"],
+        );
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "red",
+            "mark0 is on top now, in the copy as in the original"
+        );
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "and its own still its own"
+        );
+
+        // The layer it stands in for taken away: its own layer is not
+        // lost with it — it is drawn after the original's contents, which
+        // is what a layer standing in for nothing has always done.
+        session
+            .apply(Command::RemoveNode {
+                id: session.document().children_of(master).unwrap()[1],
+            })
+            .unwrap();
+        assert_eq!(hue_at(&mut session, 22), "paper", "the original lost mark1");
+        assert_eq!(
+            hue_at(&mut session, 122),
+            "green",
+            "the copy kept the layer it had made its own"
+        );
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "green",
+            "drawn last, as a layer standing in for nothing is"
+        );
+
+        // And undone, it stands in for that layer again.
+        assert!(session.undo().unwrap());
+        assert_eq!(hue_at(&mut session, 22), "blue", "mark1 is back");
+        assert_eq!(
+            hue_at(&mut session, 117),
+            "red",
+            "and the copy has it back in its own place"
+        );
+        assert_eq!(
+            session.overridable(copy),
+            vec![
+                ("mark2".into(), false),
+                ("mark1".into(), true),
+                ("mark0".into(), false)
+            ],
+            "the panel says which layer the copy has one of its own for"
+        );
+    }
+
+    /// What is inside a group changes only what is inside it, and that
+    /// holds for a copy of the group with a layer of its own in it.
+    ///
+    /// A group holding an adjustment is drawn on a surface of its own, so
+    /// the adjustment reaches its neighbours in the group and nothing
+    /// under it. A copy of that group drew the group, so it inherited
+    /// that — until it stood in for one of the group's layers, and then
+    /// what it drew was a *list* of layers laid straight onto the page.
+    /// The adjustment then reached the whole page: standing in for a
+    /// layer of one copy darkened the original, the page and everything
+    /// on it.
+    #[test]
+    fn an_adjustment_in_a_copied_group_stays_inside_the_copy() {
+        let mut session = Session::new(200, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        let grey = AuthoredColor::Srgb {
+            r: 0.6,
+            g: 0.6,
+            b: 0.6,
+            a: 1.0,
+        };
+        // A page-wide ground, so anything reaching past a group shows.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect_of("ground", 200.0, 60.0, grey),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::group("badge")),
+            })
+            .unwrap();
+        let master = session.document().children_of(root).unwrap()[1];
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 0,
+                node: rect_of(
+                    "mark",
+                    20.0,
+                    20.0,
+                    AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: master,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "two stops down",
+                    chitrakar_doc::Adjustment::Exposure { stops: -2.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: master,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(110.0, 10.0),
+            })
+            .unwrap();
+        // Two stops down is a quarter of the light; the ground is 0.6
+        // authored, which is a little under a third in linear light.
+        let ground = session.render().unwrap().get(60, 30).r;
+        assert!(
+            (0.28..0.36).contains(&ground),
+            "the ground is untouched to begin with ({ground})"
+        );
+        assert!(
+            (session.render().unwrap().get(15, 15).r - 0.25).abs() < 0.01,
+            "and the mark inside the group is two stops down"
+        );
+
+        // Now one of the copy's layers is its own, in green.
+        let mine = session.override_child(copy, 0).unwrap();
+        session
+            .apply(Command::SetKind {
+                id: mine,
+                kind: Box::new(NodeKind::Vector {
+                    shape: chitrakar_doc::VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 1.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        let s = session.render().unwrap();
+        assert!(
+            (s.get(60, 30).r - ground).abs() < 1e-4 && (s.get(160, 30).r - ground).abs() < 1e-4,
+            "the ground is untouched still, under the original and under the copy ({} {})",
+            s.get(60, 30).r,
+            s.get(160, 30).r
+        );
+        assert!(
+            (s.get(15, 15).r - 0.25).abs() < 0.01,
+            "the original is as it was ({})",
+            s.get(15, 15).r
+        );
+        assert!(
+            (s.get(115, 15).g - 0.25).abs() < 0.01
+                && s.get(115, 15).r < 0.01
+                && s.get(115, 15).b < 0.01,
+            "and the copy's own layer is two stops down, as the group says ({:?})",
+            s.get(115, 15)
+        );
+    }
+
+    /// Only a plain group's layers can be stood in for: one drawn as a
+    /// whole would have to be drawn twice.
+    #[test]
+    fn a_copy_of_something_drawn_whole_is_not_stood_in_for() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 20.0, 20.0);
+        let copy = session.make_instance(rect).unwrap();
+        assert!(session.overridable(copy).is_empty());
+        assert!(session.override_child(copy, 0).is_err());
+    }
+
+    /// Changing the original repaints the copies too: they draw what it
+    /// draws, and they are somewhere else on the page.
+    #[test]
+    fn changing_the_original_repaints_its_copies() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let master = add_rect(&mut session, "master", 20.0, 20.0);
+        let copy = session.make_instance(master).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(80.0, 0.0),
+            })
+            .unwrap();
+        // Draw once so the cache holds the page as it is.
+        session.render_cached().unwrap();
+        let before = session.render().unwrap().get(85, 5).to_srgb8();
+
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 40.0, 40.0).kind),
+            })
+            .unwrap();
+        let (cached, dirty) = session.render_cached().unwrap();
+        assert!(dirty.is_some(), "something was repainted");
+        assert_eq!(
+            cached.get(85, 25).to_srgb8()[3],
+            255,
+            "the copy grew with the original in the cached frame"
+        );
+        let _ = before;
+
+        // Take the copy away and the original is on its own again; put
+        // it back and it follows once more. The dirty region asks a kept
+        // flag whether there are copies at all, and this is what keeps
+        // that flag honest.
+        session.apply(Command::RemoveNode { id: copy }).unwrap();
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 10.0, 10.0).kind),
+            })
+            .unwrap();
+        let (alone, _) = session.render_cached().unwrap();
+        assert_eq!(alone.get(85, 5).a, 0.0, "nothing is copying it now");
+        // Undo brings the copy back, and with it the flag.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session
+            .apply(Command::SetKind {
+                id: master,
+                kind: Box::new(filled_rect("master", 30.0, 30.0).kind),
+            })
+            .unwrap();
+        let (again, _) = session.render_cached().unwrap();
+        assert_eq!(
+            again.get(85, 25).to_srgb8()[3],
+            255,
+            "and with the copy back it follows again"
+        );
+    }
+
+    /// A frame given a new size moves what is in it by how each layer is
+    /// pinned: the start edge is followed, the end edge is kept away
+    /// from, the middle is held, and a stretched layer takes up the
+    /// difference.
+    #[test]
+    fn what_a_frame_holds_moves_by_how_it_is_pinned() {
+        use chitrakar_doc::{Pin, Pinning};
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let board = session
+            .add_artboard("Artboard 1", 50.0, 50.0, 200.0, 100.0, None)
+            .unwrap();
+        // Four layers across the frame, one per answer.
+        let put = |session: &mut Session, name: &str, x: f32, w: f32, pin: Pin| {
+            let index = session.child_count(board);
+            session
+                .apply(Command::AddNode {
+                    parent: board,
+                    index,
+                    node: filled_rect(name, w, 20.0),
+                })
+                .unwrap();
+            let id = session.document().children_of(board).unwrap()[index];
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 10.0),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetPinning {
+                    id,
+                    pinned: Pinning {
+                        x: pin,
+                        y: Pin::Start,
+                    },
+                })
+                .unwrap();
+            id
+        };
+        let start = put(&mut session, "start", 10.0, 20.0, Pin::Start);
+        let end = put(&mut session, "end", 170.0, 20.0, Pin::End);
+        let middle = put(&mut session, "middle", 90.0, 20.0, Pin::Middle);
+        let wide = put(&mut session, "wide", 10.0, 180.0, Pin::Stretch);
+
+        // The frame goes from 200 wide to 300, its origin staying put.
+        let cmd = session
+            .artboard_resize(board, 300.0, 100.0, 0.0, 0.0)
+            .unwrap();
+        session.apply_json(&cmd).unwrap();
+
+        let box_ = |session: &Session, id| session.bounds_of(id).unwrap();
+        assert_eq!(
+            box_(&session, start)[0],
+            60.0,
+            "the start-pinned layer did not move"
+        );
+        assert_eq!(
+            box_(&session, end)[0],
+            // The frame sits at 50 on the page, so a local 270 reads 320.
+            320.0,
+            "the end-pinned one kept 10 from the right"
+        );
+        assert_eq!(
+            box_(&session, middle)[0],
+            190.0,
+            "the middle-pinned one kept the middle"
+        );
+        assert_eq!(
+            box_(&session, wide)[0],
+            60.0,
+            "the stretched one still starts where it did"
+        );
+        assert_eq!(
+            box_(&session, wide)[2],
+            280.0,
+            "and took up the whole difference"
+        );
+        assert_eq!(
+            box_(&session, start)[2],
+            20.0,
+            "an unstretched layer is the size it was"
+        );
+
+        // Undo puts the whole resize back in one step.
+        session.undo().unwrap();
+        assert_eq!(
+            (box_(&session, end)[0], box_(&session, wide)[2]),
+            (170.0 + 50.0, 180.0)
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Pin wide"),
+            "one undo took the whole resize, so it was one entry"
+        );
+    }
+
+    /// A page the engine could not draw is never made: asked for one, it
+    /// gives back the largest there is instead, and a crop cannot grow
+    /// past it either.
+    #[test]
+    fn a_page_is_never_larger_than_can_be_drawn() {
+        let huge = Session::new(100_000, 100_000, ColorMode::Rgb);
+        let (w, h) = (huge.document().meta.width, huge.document().meta.height);
+        assert!(
+            chitrakar_doc::canvas_fits(w, h),
+            "asked for 100000 square, got {w}x{h}"
+        );
+        assert!(w > 1000 && h > 1000, "and it is still a page: {w}x{h}");
+        assert_eq!(Session::new(0, 0, ColorMode::Rgb).document().meta.width, 1);
+
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        assert!(
+            session.resize_canvas(40_000, 40_000, 0.0, 0.0).is_err(),
+            "and it cannot be grown into one either"
+        );
+        assert_eq!(session.document().meta.width, 60, "left as it was");
+    }
+
+    /// A histogram describes the picture on the page, not the hole
+    /// around it, and an adjustment layer's asks about what is under it
+    /// rather than about the finished page.
+    #[test]
+    fn a_histogram_counts_the_picture_and_an_adjustment_sees_what_is_under_it() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 30.0, 30.0);
+        // The rect covers a quarter of the page; the rest is bare.
+        let h = session.histogram(None).unwrap();
+        assert_eq!(h.len(), 1024);
+        let counted: u32 = h[768..1024].iter().sum();
+        assert!(counted > 0, "something was counted");
+        assert_eq!(
+            counted,
+            h[0..256].iter().sum::<u32>(),
+            "every channel counts the same pixels"
+        );
+        // Only the covered quarter: a transparent page is not black.
+        assert_eq!(h[768], 0, "and the bare page is not counted as black");
+
+        // Under a curve that drives everything to white, the page reads
+        // white — but the curve's own histogram is of what is beneath it,
+        // so it does not.
+        let before = session.histogram(None).unwrap();
+        let root = session.document().root();
+        let index = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "curve",
+                    chitrakar_doc::Adjustment::Curves {
+                        points: vec![[0.0, 1.0], [1.0, 1.0]],
+                        red: Vec::new(),
+                        green: Vec::new(),
+                        blue: Vec::new(),
+                    },
+                )),
+            })
+            .unwrap();
+        let white = session.document().children_of(root).unwrap()[index];
+        let after = session.histogram(None).unwrap();
+        assert_ne!(after, before, "the page changed under the curve");
+        assert_eq!(
+            session.histogram(Some(white)).unwrap(),
+            before,
+            "and the curve is shown what it is given, not what it makes"
+        );
+        let _ = rect;
+    }
+
+    /// Auto levels answers where the picture's own tones start and stop,
+    /// in the light the adjustment works in — and a speck is not a tone.
+    #[test]
+    fn auto_levels_reads_where_the_picture_starts_and_stops() {
+        let grey = |session: &mut Session, name: &str, v: f32, w: f32, h: f32| {
+            let root = session.document().root();
+            let index = session.document().children_of(root).unwrap().len();
+            let mut node = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: v,
+                    g: v,
+                    b: v,
+                    a: 1.0,
+                });
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+        };
+
+        // A page with nothing on it has no tones to stretch, and is left
+        // the range it had rather than given a nonsense one.
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        assert_eq!(session.auto_levels(None).unwrap(), [0.0, 1.0]);
+
+        // Two greys over the whole page: the picture uses the middle of
+        // the range and nothing else, which is exactly the picture that
+        // wants levelling.
+        grey(&mut session, "dark", 0.3, 60.0, 60.0);
+        grey(&mut session, "light", 0.6, 60.0, 30.0);
+        let [lo, hi] = session.auto_levels(None).unwrap();
+        let want = |v: f32| chitrakar_color::srgb_to_linear((v * 255.0).round() / 255.0);
+        assert!(
+            (lo - want(0.3)).abs() < 0.01 && (hi - want(0.6)).abs() < 0.01,
+            "the two ends of what is actually there: {lo} {hi} against {} {}",
+            want(0.3),
+            want(0.6)
+        );
+
+        // One bright speck is not the picture's white point. A single
+        // pixel of white is inside the thousandth left out at each end,
+        // so the answer does not move.
+        grey(&mut session, "speck", 1.0, 1.0, 1.0);
+        let [_, still] = session.auto_levels(None).unwrap();
+        assert!(
+            (still - hi).abs() < 1e-6,
+            "a speck did not become the white point: {still} against {hi}"
+        );
+    }
+
+    /// Straightening turns the page about its own middle and crops back
+    /// to its own proportions; undoing it puts every point back exactly.
+    #[test]
+    fn straightening_turns_the_page_and_crops_it_back_to_shape() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let id = add_rect(&mut session, "mark", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(180.0, 130.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![chitrakar_doc::Guide::Vertical(200.0)],
+            })
+            .unwrap();
+        let middle = session.document().node(id).unwrap().transform;
+
+        // Ten degrees: the page keeps its proportions and loses the room
+        // the turn takes at the corners.
+        let (w, h) = session.straighten_size(10.0);
+        assert!(
+            w < 400 && h < 300 && ((w as f32 / h as f32) - 4.0 / 3.0).abs() < 0.02,
+            "the page it leaves is smaller and the same shape: {w}x{h}"
+        );
+        session.straighten(10.0).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (w, h)
+        );
+        let turned = session.document().node(id).unwrap().transform;
+        assert!(
+            (turned.a - 10f32.to_radians().cos()).abs() < 1e-4
+                && (turned.b - 10f32.to_radians().sin()).abs() < 1e-4,
+            "the layer went round with the page: {turned:?}"
+        );
+        // A mark on the page's middle stays on it: the middle of the page
+        // it becomes lands on the middle of the page it was.
+        let mid = [
+            turned.a * 20.0 + turned.c * 20.0 + turned.e,
+            turned.b * 20.0 + turned.d * 20.0 + turned.f,
+        ];
+        assert!(
+            (mid[0] - w as f32 / 2.0).abs() < 0.5 && (mid[1] - h as f32 / 2.0).abs() < 0.5,
+            "and what was in the middle is still in the middle: {mid:?}"
+        );
+        // A guide is part of the page and goes round with it, which for a
+        // straight line means it is no longer upright — the guides are
+        // upright or level by construction, so it lands where its own
+        // axis takes it rather than being left behind.
+        assert_eq!(session.document().guides().len(), 1);
+
+        // Undo is the turn back with the old size, which is exact.
+        session.undo().unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (400, 300)
+        );
+        let back = session.document().node(id).unwrap().transform;
+        for (a, b) in [
+            (back.a, middle.a),
+            (back.b, middle.b),
+            (back.c, middle.c),
+            (back.d, middle.d),
+            (back.e, middle.e),
+            (back.f, middle.f),
+        ] {
+            assert!((a - b).abs() < 1e-3, "undone exactly: {back:?} {middle:?}");
+        }
+
+        // Straightening by nothing is a page the same size, and no turn.
+        assert_eq!(session.straighten_size(0.0), (400, 300));
+    }
+
+    /// Auto colour reads each channel's own ends, so a picture under a
+    /// coloured light has three different answers rather than one.
+    #[test]
+    fn auto_color_reads_each_channel_on_its_own() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let root = session.document().root();
+        // A picture under a blue light: two tones, and blue reaching
+        // further up the range than red at both of them.
+        let mut add = |name: &str, rgb: [f32; 3], h: f32, index: usize| {
+            let mut node = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                    a: 1.0,
+                });
+            }
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+        };
+        add("dark", [0.3, 0.4, 0.6], 40.0, 0);
+        add("light", [0.6, 0.7, 0.9], 20.0, 1);
+        let ends = session.auto_color(None).unwrap();
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        assert!(
+            near(ends[0][0], 0.3) && near(ends[1][0], 0.4) && near(ends[2][0], 0.6),
+            "each channel starts where its own tones do: {ends:?}"
+        );
+        assert!(
+            near(ends[0][1], 0.6) && near(ends[2][1], 0.9),
+            "and stops where they stop: {ends:?}"
+        );
+        assert!(
+            ends[2][0] > ends[0][0],
+            "the blue of a blue light sits above the red: {ends:?}"
+        );
+
+        // One tone is nothing to stretch: a flat page keeps its range.
+        let mut flat = Session::new(20, 20, ColorMode::Rgb);
+        let root2 = flat.document().root();
+        let mut only = Node::vector(
+            "flat",
+            VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut only.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.5,
+                g: 0.5,
+                b: 0.5,
+                a: 1.0,
+            });
+        }
+        flat.apply(Command::AddNode {
+            parent: root2,
+            index: 0,
+            node: Box::new(only),
+        })
+        .unwrap();
+        assert_eq!(flat.auto_color(None).unwrap(), [[0.0, 1.0]; 3]);
+
+        // Nothing on the page is nothing to stretch.
+        let bare = Session::new(8, 8, ColorMode::Rgb);
+        assert_eq!(bare.auto_color(None).unwrap(), [[0.0, 1.0]; 3]);
+    }
+
+    /// Told which pixel is meant to be grey, the balance that makes it
+    /// grey — and the picture it is put on comes out neutral there.
+    #[test]
+    fn a_neutral_picked_off_the_page_balances_the_light() {
+        let mut session = Session::new(40, 40, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut node = Node::vector(
+            "cast",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+        );
+        // A grey under a blue light: what a photograph taken indoors on
+        // daylight film looks like.
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.45,
+                g: 0.5,
+                b: 0.62,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let before = session.color_at(20.0, 20.0).unwrap();
+        assert!(
+            before[2] > before[0] + 20,
+            "a blue cast to take out: {before:?}"
+        );
+
+        let [temperature, tint] = session
+            .neutral_balance(None, 20.0, 20.0)
+            .unwrap()
+            .expect("a colour to balance");
+        assert!(
+            temperature > 0.0,
+            "the light was cold, so it warms: {temperature}"
+        );
+        let index = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(Node::adjustment(
+                    "balance",
+                    chitrakar_doc::Adjustment::WhiteBalance { temperature, tint },
+                )),
+            })
+            .unwrap();
+        let after = session.color_at(20.0, 20.0).unwrap();
+        assert!(
+            (after[0] as i32 - after[1] as i32).abs() <= 2
+                && (after[1] as i32 - after[2] as i32).abs() <= 2,
+            "the picked pixel came out grey: {after:?}"
+        );
+
+        // Nothing to balance is said rather than guessed at.
+        assert!(session
+            .neutral_balance(None, 100.0, 100.0)
+            .unwrap()
+            .is_none());
+        let bare = Session::new(10, 10, ColorMode::Rgb);
+        assert!(bare.neutral_balance(None, 5.0, 5.0).unwrap().is_none());
+    }
+
+    /// Dropping a layer into a frame that sits away from the origin
+    /// leaves the layer exactly where it was on the page: the new
+    /// parent's space is taken back out of the layer's own transform.
+    #[test]
+    fn a_layer_dropped_into_a_frame_stays_where_it_was() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "rect", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(120.0, 90.0),
+            })
+            .unwrap();
+        let board = session
+            .add_artboard("Artboard 1", 100.0, 80.0, 60.0, 60.0, None)
+            .unwrap();
+        let before = session.bounds_of(rect).unwrap();
+        session.reparent(rect, board, 0).unwrap();
+        let after = session.bounds_of(rect).unwrap();
+        for (a, b) in before.iter().zip(&after) {
+            assert!((a - b).abs() < 1e-3, "{before:?} -> {after:?}");
+        }
+        assert_eq!(session.child_count(board), 1);
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Move rect"),
+            "and it is one entry in history"
+        );
+        session.undo().unwrap();
+        assert_eq!(session.child_count(board), 0);
+        let back = session.bounds_of(rect).unwrap();
+        for (a, b) in before.iter().zip(&back) {
+            assert!((a - b).abs() < 1e-3, "one undo puts it back: {back:?}");
+        }
+    }
+
+    /// A frame takes what is drawn inside it and exports on its own.
+    #[test]
+    fn a_frame_takes_what_is_drawn_in_it_and_exports_at_its_own_size() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let board = session
+            .add_artboard("Artboard 1", 40.0, 30.0, 50.0, 60.0, None)
+            .unwrap();
+        assert_eq!(session.frame_at(60.0, 50.0), Some(board));
+        assert_eq!(session.frame_at(10.0, 10.0), None, "off the frame");
+        let inside = session.point_inside(board, 60.0, 50.0).unwrap();
+        assert_eq!(inside, [20.0, 20.0], "the frame's own coordinates");
+        assert!(
+            session.layers().iter().any(|l| l.kind == "artboard"),
+            "the panel calls it what it is"
+        );
+        let png = session.artboard_png(board, 1.0).unwrap();
+        // PNG's IHDR carries the size in the two big-endian words at 16.
+        let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+        assert_eq!((w, h), (50, 60));
+        assert!(
+            session.artboard_png(NodeId(0), 1.0).is_err(),
+            "and nothing else is a frame"
+        );
+    }
+
+    #[test]
+    fn a_locked_layer_is_not_picked_on_the_canvas() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let under = add_rect(&mut session, "under", 60.0, 60.0);
+        let over = add_rect(&mut session, "over", 30.0, 30.0);
+        assert_eq!(session.hit_test(10.0, 10.0), Some(over));
+        session
+            .apply(Command::SetLocked {
+                id: over,
+                locked: true,
+            })
+            .unwrap();
+        assert_eq!(
+            session.hit_test(10.0, 10.0),
+            Some(under),
+            "the pick falls through a locked layer"
+        );
+        assert!(session.layers().iter().any(|l| l.id == over.0 && l.locked));
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Lock over")
+        );
+        assert_eq!(session.render().unwrap().get(10, 10).a, 1.0, "still drawn");
+        // A locked group hides its contents from the pick too.
+        let group = session.group_nodes(&[under], "g").unwrap();
+        session
+            .apply(Command::SetLocked {
+                id: group,
+                locked: true,
+            })
+            .unwrap();
+        assert_eq!(session.hit_test(50.0, 50.0), None);
+        assert!(session.undo().unwrap() && session.undo().unwrap() && session.undo().unwrap());
+        assert_eq!(
+            session.hit_test(10.0, 10.0),
+            Some(over),
+            "undone, it is picked again"
+        );
+        let bytes = session.save().unwrap();
+        assert!(Session::load(&bytes).is_ok());
+    }
+
+    #[test]
+    fn the_resolution_is_document_setup_that_saves_with_it() {
+        let mut session = Session::new(300, 300, ColorMode::Rgb);
+        assert_eq!(session.dpi(), 72.0);
+        session.set_dpi(300.0).unwrap();
+        assert!(session.set_dpi(0.0).is_err() && session.set_dpi(f32::NAN).is_err());
+        assert_eq!(session.dpi(), 300.0, "a bad value changes nothing");
+        assert!(session.history_labels().0.is_empty(), "not an edit");
+        let bytes = session.save().unwrap();
+        assert_eq!(Session::load(&bytes).unwrap().dpi(), 300.0);
+        // A 300-dpi page is an inch across in the PDF: 72 points.
+        let pdf = String::from_utf8_lossy(&session.export_pdf().unwrap()).to_string();
+        assert!(
+            pdf.contains("/MediaBox [0 0 72.000 72.000]"),
+            "{}",
+            &pdf[..300]
+        );
+    }
+
+    fn text_in(font: &str) -> Node {
+        let mut spec = chitrakar_doc::TextSpec::new(
+            "Carried",
+            24.0,
+            AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        spec.font = font.to_string();
+        Node::text("t", spec)
+    }
+
+    #[test]
+    fn the_fonts_text_is_set_in_travel_inside_the_chitra() {
+        const BOLD: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
+        Session::register_font("Carried Face", BOLD.to_vec()).unwrap();
+        Session::register_font("Carried Face Oblique", OBLIQUE.to_vec()).unwrap();
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let root = session.document().root();
+        for (i, face) in [
+            "Carried Face",
+            "DejaVu Sans",
+            "Nobody Has This",
+            "Carried Face",
+        ]
+        .iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(text_in(face)),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            session.fonts_used(),
+            ["Carried Face", "DejaVu Sans", "Nobody Has This"]
+        );
+        // An italic block in the face draws with its oblique twin, so the
+        // twin is used — and carried — too.
+        let mut italic = text_in("Carried Face");
+        if let NodeKind::Text(spec) = &mut italic.kind {
+            spec.italic = true;
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 4,
+                node: Box::new(italic),
+            })
+            .unwrap();
+        assert_eq!(
+            session.fonts_used(),
+            [
+                "Carried Face",
+                "Carried Face Oblique",
+                "DejaVu Sans",
+                "Nobody Has This"
+            ]
+        );
+
+        let bytes = session.save().unwrap();
+        let opened = chitrakar_codecs::load_chitra_with_fonts(&bytes).unwrap();
+        let names: Vec<&str> = opened.fonts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Carried Face", "Carried Face Oblique"],
+            "only faces this process holds are carried: not the bundled one, not one it never saw"
+        );
+        assert_eq!(opened.fonts[0].1, BOLD, "and they are carried whole");
+        assert_eq!(opened.fonts[1].1, OBLIQUE);
+        let without = chitrakar_codecs::save_chitra(session.document()).unwrap();
+        assert!(
+            bytes.len() > without.len() + 100_000,
+            "the file grew by the (deflated) face: {} over {} bytes",
+            bytes.len(),
+            without.len()
+        );
+    }
+
+    #[test]
+    fn opening_a_chitra_registers_the_fonts_it_carries() {
+        const SERIF: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSerif.ttf");
+        let name = "Only In The File";
+        assert!(!Session::font_names().iter().any(|n| n == name));
+        let mut doc = chitrakar_doc::Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(text_in(name)),
+        })
+        .unwrap();
+        let bytes = chitrakar_codecs::save_chitra_with_fonts(
+            &doc,
+            &[(name, SERIF), ("Broken Face", b"not a font")],
+        )
+        .unwrap();
+
+        let session = Session::load(&bytes).unwrap();
+        assert!(
+            Session::font_names().iter().any(|n| n == name),
+            "the carried face is offered by name after the open"
+        );
+        assert!(
+            !Session::font_names().iter().any(|n| n == "Broken Face"),
+            "a face that will not parse is passed over, and the document still opened"
+        );
+        // The text now renders in the carried serif rather than the
+        // bundled sans: set the same text in the bundled face and the ink
+        // lands differently.
+        let carried = session.render().unwrap().pixels;
+        let mut plain = Session::new(64, 64, ColorMode::Rgb);
+        let root = plain.document().root();
+        plain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(text_in("")),
+            })
+            .unwrap();
+        assert_ne!(
+            carried,
+            plain.render().unwrap().pixels,
+            "the carried face is the one drawn"
+        );
+    }
+}
+
+#[cfg(test)]
+mod save_probe {
+    use super::*;
+    use chitrakar_color::ColorMode;
+
+    /// However many points a brush stroke gathers as it is drawn, the
+    /// whole of it is one entry in history — and one undo takes it off.
+    #[test]
+    fn a_brush_stroke_is_one_entry_in_history() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let before = session.history_labels().0.len();
+        let blue = r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#;
+        let color: chitrakar_color::AuthoredColor = serde_json::from_str(blue).unwrap();
+        session
+            .paint_begin(layer, 10.0, 30.0, 4.0, color.clone(), 0.3, false, false)
+            .unwrap();
+        for x in 1..=20 {
+            session.paint_extend(10.0 + x as f32, 30.0, 4.0).unwrap();
+        }
+        assert!(session.is_painting());
+        assert!(session.commit_preview());
+        assert!(!session.is_painting());
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "one entry, not twenty"
+        );
+        assert!(
+            session.render().unwrap().get(20, 30).a > 0.9,
+            "and it is painted"
+        );
+
+        session.undo().unwrap();
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 0);
+        assert_eq!(session.render().unwrap().get(20, 30).a, 0.0);
+        session.redo().unwrap();
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
+
+        // A stroke abandoned mid-gesture leaves nothing behind.
+        session
+            .paint_begin(layer, 40.0, 40.0, 4.0, color, 0.3, false, false)
+            .unwrap();
+        session.paint_extend(45.0, 40.0, 4.0).unwrap();
+        assert!(session.cancel_preview().unwrap());
+        assert_eq!(session.stroke_count(layer, false).unwrap(), 1);
+        assert!(!session.is_painting());
+    }
+
+    /// A layer's look travels to other layers without its shape: they
+    /// keep what they are and take what they are painted with.
+    #[test]
+    fn a_style_travels_without_the_shape_it_came_from() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut source = chitrakar_doc::Node::vector(
+            "source",
+            chitrakar_doc::VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut source.kind {
+            *fill = Some(red.clone());
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(source),
+            })
+            .unwrap();
+        let from = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetEffects {
+                id: from,
+                effects: vec![chitrakar_doc::Effect::Outline {
+                    width: 2.0,
+                    color: red.clone(),
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+        session
+            .apply(Command::SetOpacity {
+                id: from,
+                opacity: 0.5,
+            })
+            .unwrap();
+
+        // An ellipse and a block of text to give it to.
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::vector(
+                    "target",
+                    chitrakar_doc::VectorShape::Ellipse { rx: 10.0, ry: 6.0 },
+                )),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(chitrakar_doc::Node::text(
+                    "words",
+                    chitrakar_doc::TextSpec::new("hi", 12.0, red.clone()),
+                )),
+            })
+            .unwrap();
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        let (ellipse, text) = (kids[1], kids[2]);
+
+        let style = session.copy_style(from).unwrap();
+        let before = session.history_labels().0.len();
+        session.paste_style(&style, &[ellipse, text]).unwrap();
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "both layers in one entry"
+        );
+
+        let node = session.document().node(ellipse).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, fill, .. } = &node.kind else {
+            panic!("the ellipse stopped being a shape");
+        };
+        assert!(
+            matches!(shape, chitrakar_doc::VectorShape::Ellipse { .. }),
+            "it kept its own shape"
+        );
+        assert_eq!(*fill, Some(red.clone()), "and took the fill");
+        assert_eq!(node.effects.len(), 1, "and the effects");
+        assert_eq!(node.opacity, 0.5, "and the opacity");
+
+        let words = session.document().node(text).unwrap();
+        let chitrakar_doc::NodeKind::Text(spec) = &words.kind else {
+            panic!("the text stopped being text");
+        };
+        assert_eq!(spec.text, "hi", "the text kept its words");
+        assert_eq!(spec.fill, red, "and took the fill");
+        assert_eq!(words.effects.len(), 1);
+
+        // One undo takes the whole paste back.
+        session.undo().unwrap();
+        assert_eq!(session.document().node(ellipse).unwrap().opacity, 1.0);
+        assert!(session.document().node(text).unwrap().effects.is_empty());
+    }
+
+    /// An anchor put onto a curve keeps the curve: the two halves take
+    /// the control points the split gives them, so the path through the
+    /// new anchor is the path that was already there.
+    #[test]
+    fn an_anchor_added_to_a_curve_leaves_the_curve_where_it_was() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        // One curved segment, bowing well away from its chord.
+        let mut curve = chitrakar_doc::Node::vector(
+            "curve",
+            chitrakar_doc::VectorShape::Path {
+                points: vec![[0.0, 0.0], [100.0, 0.0]],
+                closed: false,
+                smooth: false,
+                handles: vec![[0.0, 0.0, 0.0, 60.0], [0.0, 60.0, 0.0, 0.0]],
+                subpaths: Vec::new(),
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { stroke, fill, .. } = &mut curve.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(curve),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+
+        // Halfway along, which is where the curve's own middle is.
+        let at = session.insert_anchor(id, 90.0, 85.0, 8.0).unwrap();
+        assert_eq!(at, 1, "the new anchor sits between the two it split");
+        let node = session.document().node(id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            panic!("not a shape");
+        };
+        let chitrakar_doc::VectorShape::Path { points, .. } = shape else {
+            panic!("not a path");
+        };
+        assert_eq!(points.len(), 3, "there are three anchors now");
+
+        let after = session.render().unwrap();
+        // Not pixel for pixel: one segment became two, so the curve is
+        // flattened at twice the resolution and its edge lands a
+        // fraction of a pixel differently. What matters is that the
+        // curve is where it was, which the average says and a look at
+        // the middle of it confirms.
+        let mut total = 0.0f64;
+        for (p, q) in before.pixels.iter().zip(&after.pixels) {
+            total += (p.a - q.a).abs() as f64;
+        }
+        let mean = total / before.pixels.len() as f64;
+        assert!(mean < 0.002, "the curve did not move ({mean:.5})");
+        assert!(
+            after.get(90, 85).a > 0.5,
+            "it still runs through its own middle"
+        );
+        assert_eq!(
+            after.get(90, 45).a,
+            0.0,
+            "and not through where it never did"
+        );
+
+        // And one comes off again.
+        session.remove_anchor(id, 1).unwrap();
+        let node = session.document().node(id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            panic!("not a shape");
+        };
+        let chitrakar_doc::VectorShape::Path { points, .. } = shape else {
+            panic!("not a path");
+        };
+        assert_eq!(points.len(), 2, "and the anchor comes off again");
+        // A path needs what it has left.
+        assert!(session.remove_anchor(id, 0).is_err());
+        // And an anchor goes on the outline, not merely inside the shape:
+        // a point nowhere near it is not asking for one.
+        assert!(session.insert_anchor(id, 90.0, 20.0, 8.0).is_err());
+    }
+
+    /// A clone gesture: the source is set once and the whole stroke
+    /// carries it, however many points it gathers.
+    #[test]
+    fn a_clone_stroke_carries_the_source_it_was_given() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut patch = chitrakar_doc::Node::vector(
+            "patch",
+            chitrakar_doc::VectorShape::Rect {
+                width: 24.0,
+                height: 24.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut patch.kind {
+            *fill = Some(red.clone());
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(patch),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: chitrakar_doc::Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+
+        let layer = session.add_clone_layer("clone").unwrap();
+        let before = session.history_labels().0.len();
+        session
+            .paint_begin(layer, 80.0, 80.0, 7.0, red, 0.0, false, false)
+            .unwrap();
+        // Read from the patch, which is 60 up and to the left.
+        session.paint_source(-60.0, -60.0, false).unwrap();
+        session.paint_extend(84.0, 84.0, 7.0).unwrap();
+        assert!(session.commit_preview());
+        assert_eq!(
+            session.history_labels().0.len(),
+            before + 1,
+            "one entry for the whole stroke, source and all"
+        );
+        let drawn = session.render().unwrap();
+        assert_eq!(
+            drawn.get(80, 80).to_srgb8(),
+            [255, 0, 0, 255],
+            "it laid down what its source shows"
+        );
+        assert_eq!(drawn.get(80, 40).a, 0.0, "and nothing where it did not go");
+    }
+
+    /// A look taken from a layer that has nothing to paint with says
+    /// nothing about how to paint, so it leaves the target's own paint
+    /// where it is rather than stripping it.
+    #[test]
+    fn a_style_with_no_paint_in_it_leaves_the_paint_alone() {
+        let mut session = Session::new(60, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mut shape = chitrakar_doc::Node::vector(
+            "shape",
+            chitrakar_doc::VectorShape::Rect {
+                width: 20.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+        );
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut shape.kind {
+            *fill = Some(red.clone());
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(shape),
+            })
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    "exposure",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+                )),
+            })
+            .unwrap();
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        let (shape_id, adj) = (kids[0], kids[1]);
+        session
+            .apply(Command::SetOpacity {
+                id: adj,
+                opacity: 0.25,
+            })
+            .unwrap();
+
+        let style = session.copy_style(adj).unwrap();
+        session.paste_style(&style, &[shape_id]).unwrap();
+        let node = session.document().node(shape_id).unwrap();
+        let chitrakar_doc::NodeKind::Vector { fill, .. } = &node.kind else {
+            panic!("not a shape any more");
+        };
+        assert_eq!(*fill, Some(red), "the shape kept its fill");
+        assert_eq!(node.opacity, 0.25, "and took what the style did carry");
+    }
+
+    /// Rubbing at a layer that is not a paint layer takes a piece out of
+    /// it through a mask, so the layer itself is untouched — and the
+    /// brush puts the piece back.
+    #[test]
+    fn the_brush_takes_a_piece_out_of_a_layer_it_cannot_paint_on() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut rect = chitrakar_doc::Node::vector(
+            "photo",
+            chitrakar_doc::VectorShape::Rect {
+                width: 60.0,
+                height: 60.0,
+                radius: 0.0,
+            },
+        );
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        if let chitrakar_doc::NodeKind::Vector { fill, .. } = &mut rect.kind {
+            *fill = Some(red.clone());
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(rect),
+            })
+            .unwrap();
+        let photo = session.document().children_of(root).unwrap()[0];
+        // Moved, because a mask is written in the space the layer sits
+        // in rather than the layer's own: a brush that confused the two
+        // would rub at the wrong place, and only a moved layer says so.
+        session
+            .apply(Command::SetTransform {
+                id: photo,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+
+        assert!(session.ensure_painted_mask(photo).unwrap());
+        assert!(
+            session.ensure_painted_mask(photo).unwrap(),
+            "asking twice leaves the one that is already there"
+        );
+        session
+            .paint_begin(photo, 70.0, 70.0, 8.0, red.clone(), 0.0, true, true)
+            .unwrap();
+        session.commit_preview();
+        assert_eq!(
+            session.render().unwrap().get(70, 70).a,
+            0.0,
+            "the layer shows a hole where the pointer was"
+        );
+        assert!(
+            session.render().unwrap().get(45, 45).a > 0.9,
+            "and is whole elsewhere"
+        );
+
+        // The brush, not erasing, paints the mask back.
+        session
+            .paint_begin(photo, 70.0, 70.0, 4.0, red, 0.0, false, true)
+            .unwrap();
+        session.commit_preview();
+        assert!(
+            session.render().unwrap().get(70, 70).a > 0.9,
+            "and the brush puts the piece back"
+        );
+
+        // A mask that was drawn or placed deliberately is not replaced.
+        let mut other = Session::new(120, 120, ColorMode::Rgb);
+        let root = other.document().root();
+        other
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("g")),
+            })
+            .unwrap();
+        let g = other.document().children_of(root).unwrap()[0];
+        other
+            .apply(Command::SetMask {
+                id: g,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Ellipse { rx: 10.0, ry: 10.0 },
+                        transform: chitrakar_doc::Transform::default(),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        assert!(!other.ensure_painted_mask(g).unwrap());
+    }
+
+    /// A paint layer inside a moved group takes the brush where the
+    /// pointer is, not where the layer would be without the group.
+    #[test]
+    fn a_brush_follows_the_group_its_layer_is_in() {
+        let mut session = Session::new(120, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("g")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::paint("brush")),
+            })
+            .unwrap();
+        let layer = session.document().children_of(group).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: chitrakar_doc::Transform::translation(40.0, 40.0),
+            })
+            .unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        session
+            .paint_begin(layer, 60.0, 60.0, 6.0, color, 0.0, false, false)
+            .unwrap();
+        session.commit_preview();
+        let s = session.render().unwrap();
+        assert!(s.get(60, 60).a > 0.9, "the dab landed under the pointer");
+        assert_eq!(s.get(20, 20).a, 0.0, "not where the group moved it from");
+    }
+
+    /// A stroke still being drawn repaints only what it just added, so a
+    /// long stroke does not get slower the longer it gets.
+    #[test]
+    fn extending_a_stroke_repaints_only_its_tail() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        session
+            .paint_begin(layer, 20.0, 200.0, 6.0, color, 0.0, false, false)
+            .unwrap();
+        // Draw most of the way across the page, then measure one more
+        // step of the same stroke.
+        for x in (30..340).step_by(10) {
+            session.paint_extend(x as f32, 200.0, 6.0).unwrap();
+        }
+        let _ = session.render();
+        let before = session.pixels_recomputed();
+        session.paint_extend(350.0, 200.0, 6.0).unwrap();
+        let _ = session.render();
+        let touched = session.pixels_recomputed() - before;
+        assert!(
+            touched < 2000,
+            "one more step of a page-wide stroke repainted {touched} pixels"
+        );
+        session.commit_preview();
+        assert!(
+            session.render().unwrap().get(200, 200).a > 0.9,
+            "and the whole stroke is still painted"
+        );
+    }
+
+    /// A stroke repaints where the stroke is, not where the whole
+    /// painting is: a dab in one corner leaves the other alone.
+    #[test]
+    fn a_dab_dirties_only_what_it_covers() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let color: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        // A long stroke across the page, then a dab in one corner.
+        session
+            .paint_begin(layer, 20.0, 20.0, 6.0, color.clone(), 0.0, false, false)
+            .unwrap();
+        session.paint_extend(380.0, 380.0, 6.0).unwrap();
+        session.commit_preview();
+        let _ = session.render();
+        let before = session.pixels_recomputed();
+        session
+            .paint_begin(layer, 30.0, 30.0, 5.0, color, 0.0, false, false)
+            .unwrap();
+        session.commit_preview();
+        let _ = session.render();
+        let touched = session.pixels_recomputed() - before;
+        assert!(
+            touched < 400 * 400 / 4,
+            "a dab repainted {touched} pixels of a 160000-pixel page"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
+    fn how_long_a_save_takes_with_images() {
+        let mut session = Session::new(2000, 1500, ColorMode::Rgb);
+        let pixels: Vec<u8> = (0..2000 * 1500 * 4).map(|i| (i % 251) as u8).collect();
+        let png = chitrakar_codecs::encode_png(2000, 1500, &pixels).unwrap();
+        session.place_image(&png, "big").unwrap();
+        let t = std::time::Instant::now();
+        let bytes = session.save().unwrap();
+        eprintln!("save: {:?} for {} bytes", t.elapsed(), bytes.len());
+        let t = std::time::Instant::now();
+        let _ = session.save().unwrap();
+        eprintln!("again: {:?}", t.elapsed());
+    }
+}
