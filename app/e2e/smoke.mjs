@@ -7309,9 +7309,22 @@ assert(
     Math.abs((await pageAt()) - home) < 6,
     `and middle-drag carries it back (${await pageAt()} against ${home})`,
   );
+  // What the runner sees when this goes wrong, since it goes wrong only
+  // there: the zoom it ended at, the box the point was worked out from,
+  // and what is actually under that point.
+  const how = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x, y);
+      const zoom = document.querySelector('input[aria-label="Zoom"]')?.value;
+      return `zoom ${zoom}, under the pointer <${el?.tagName?.toLowerCase()} class="${el?.getAttribute("class") ?? ""}">`;
+    },
+    [sx, sy],
+  );
   assert(
     (await layerX()) === stood,
-    `with nothing in the document moved by either (${stood} -> ${await layerX()})`,
+    `with nothing in the document moved by either (${stood} -> ${await layerX()}; ` +
+      `box ${box.width.toFixed(0)}x${box.height.toFixed(0)} at ${box.x.toFixed(0)}, ` +
+      `pressed ${sx.toFixed(0)},${sy.toFixed(0)}; ${how})`,
   );
   assert(
     (await picked()) === 1,
