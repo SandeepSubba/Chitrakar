@@ -252,10 +252,24 @@ fn vs_image(
     return out;
 }
 
+// How much of this pixel the picture's box covers along one axis, where
+// `u` runs 0..1 across it. The quad is drawn a device pixel wider than
+// the box on every side, so the fragments either side of the border run
+// too and this fades them: exactly the fraction of the pixel inside,
+// the same number the CPU renderer computes as an area. Without it the
+// border is whatever the 4-sample coverage mask happened to catch —
+// 0, a quarter, a half — against the CPU's exact 0.6 of a pixel.
+fn edge_cover(u: f32) -> f32 {
+    let w = max(fwidth(u), 1e-6);
+    return clamp(0.5 + u / w, 0.0, 1.0) * clamp(0.5 + (1.0 - u) / w, 0.0, 1.0);
+}
+
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4f {
-    return textureSample(image, image_sampler, in.uv)
+    let border = edge_cover(in.uv.x) * edge_cover(in.uv.y);
+    return textureSample(image, image_sampler, clamp(in.uv, vec2f(0.0), vec2f(1.0)))
         * in.alpha
+        * border
         * mask_cover(in.page, in.mask);
 }
 

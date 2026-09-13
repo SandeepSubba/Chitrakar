@@ -2525,10 +2525,13 @@ fn one(
                 }
             };
             let size = [res.width as f32, res.height as f32];
-            // The quad is the image's own box; its local coordinates
-            // are the texture's, so the vertex shader passes them
-            // straight through as texture coordinates.
-            let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 0.0);
+            // The quad is the image's own box, grown a device pixel on
+            // every side; its local coordinates are the texture's, so
+            // the vertex shader passes them straight through as texture
+            // coordinates. The grown skirt is what lets the fragment
+            // shader fade the border by the area the box really covers
+            // — outside 0..1 it reads as no coverage at all.
+            let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 1.0);
             for v in &mut verts {
                 v.local = [v.local[0] / size[0], v.local[1] / size[1]];
             }
@@ -10079,6 +10082,81 @@ mod tests {
         }
     }
 
+    /// A picture's border is the fraction of the pixel it covers.
+    ///
+    /// A raster is a quad, and a quad's edge on this backend is whatever
+    /// the four-sample coverage mask caught: nothing, a quarter, a half.
+    /// The renderer being matched computes the area exactly, so a picture
+    /// placed six tenths of a pixel along read 0 where the reference read
+    /// 0.18. The quad is drawn a device pixel wider than the box now and
+    /// the fragment shader fades it by the area, which is exact for a
+    /// picture square to the page — so the border is asked for the area
+    /// arithmetic says it is, not merely for agreement with the reference.
+    #[test]
+    fn a_pictures_border_is_the_area_it_covers() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let id = doc.add_resource(2, 2, vec![255; 16]);
+        // Twelve and a half times along, nine and a bit down, so that
+        // every edge falls inside a pixel rather than between two.
+        let (ox, oy, sx, sy) = (8.4f32, 6.3f32, 12.5f32, 9.75f32);
+        add(
+            &mut doc,
+            Box::new(Node::raster(
+                "a picture off the grid",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: 2,
+                    height: 2,
+                },
+            )),
+            Transform {
+                a: sx,
+                d: sy,
+                e: ox,
+                f: oy,
+                ..Default::default()
+            },
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let mine = gpu.render(&doc).unwrap();
+        let theirs = chitrakar_render::render(&doc).unwrap();
+        // How much of pixel `at` the span `lo..hi` covers.
+        let span = |lo: f32, hi: f32, at: usize| {
+            (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+        };
+        let (x1, y1) = (ox + 2.0 * sx, oy + 2.0 * sy);
+        let mut checked = 0;
+        for y in 5..27usize {
+            for x in 7..35usize {
+                let want = span(ox, x1, x) * span(oy, y1, y);
+                // Only the border: inside is a flat white either way.
+                if want > 0.999 || want == 0.0 {
+                    continue;
+                }
+                let got = mine.pixels[y * 40 + x].a;
+                let reference = theirs.pixels[y * 40 + x].a;
+                assert!(
+                    (reference - want).abs() < 0.01,
+                    "the reference draws ({x},{y}) at {reference:.3}, not the {want:.3} it covers"
+                );
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "({x},{y}) of the border: {got:.3}, not the {want:.3} it covers"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 88, "the border is 88 part-covered pixels");
+        let (mean, worst) = difference(&mine, &theirs);
+        assert!(
+            mean < 0.0005 && worst < 0.01,
+            "mean {mean:.5}, worst {worst:.3}"
+        );
+    }
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -10130,12 +10208,15 @@ mod tests {
         // being matched is exact across a row and sixteen deep down it.
         // Closing that means supersampling the whole page or handing the
         // backend the other's answer, and neither is a small change.
-        // Many hold a raster, where an enlarged picture is resampled
-        // either side of the last texel by two samplers that clamp their
-        // own way. The rest are a rectangle's corners, where the
-        // reference renderer boxes sixteen samples a side and this one
-        // takes a distance: two approximations of an arc, which do not
-        // have to land on the same number.
+        // The rest are a rectangle's corners, where the reference
+        // renderer boxes sixty-four samples and this one takes a
+        // distance: two approximations of an arc, which do not have to
+        // land on the same number. A picture's border used to be a third
+        // cause and is not any more: it was the *same* quantization, the
+        // quad's own edge caught by four samples, and it went once the
+        // quad grew a device pixel and the shader faded it by the area
+        // instead — eight of the rough pages came clean with it, 42 to
+        // 34, which is what says the cause was really that.
         //
         // The numbers go *up* when the backend learns something, because
         // learning it means more pages are compared rather than declined.
@@ -10157,7 +10238,7 @@ mod tests {
         // rise here is good news when what is drawn rises with it and bad
         // news otherwise, which is why the two are printed together.
         assert!(
-            rough.len() <= 43 && worst_seen < 0.37,
+            rough.len() <= 34 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

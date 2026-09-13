@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~431),
+- **Verify before committing:** `cargo test --workspace` (~432),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2455,9 +2455,26 @@ without reading anything else.*
      here said the backend did not antialias a path at all, which was
      wrong: `SAMPLES` has been 4 since the stencil was written. Closing
      the gap means supersampling the whole page or handing the backend the
-     other's answer, and neither is small.) Several hold a raster, where an enlarged picture is resampled
-     either side of its last texel by two samplers that clamp their own
-     way. The rest are a rectangle's *corners*, and chasing those found
+     other's answer, and neither is small.) Several hold a raster, and the
+     note here used to say that was two samplers clamping their own way
+     either side of the last texel. It was not, and the only reason to
+     think so was that it sounded like a sampler problem: measured, a
+     two-by-two picture set at (8.4, 6.3) read 0, a quarter, a quarter
+     across its border row where the reference read 0.18, 0.30, 0.12 —
+     which are exactly the areas, and 0/¼/¼ is exactly what four samples
+     can say. The same quantization as the paths, on the quad's own edge.
+     Unlike the paths it *is* closable, because a picture's border is a
+     box and a box's coverage is a product of two 1-D overlaps: the quad
+     is drawn a device pixel wider on every side now and the fragment
+     shader fades it by that product, so the border is continuous and
+     exact for a picture square to the page. Eight of the rough pages
+     came clean with it — forty-two down to thirty-four — which is what
+     says the cause was really that, and the test asks the border for
+     the area arithmetic says it covers rather than merely for agreement
+     (`a_pictures_border_is_the_area_it_covers`, eighty-eight part-covered
+     pixels checked one by one; take the skirt off and the border reads
+     0.21 where it covers 0.42, take the fade off and it reads 1.0).
+     The rest are a rectangle's *corners*, and chasing those found
      two more things in the reference renderer: a rounded rectangle is
      the same exact product away from its corners as a square one, which
      it was not taking; and the exact stroke band above had been written
