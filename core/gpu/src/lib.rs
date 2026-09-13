@@ -2199,12 +2199,20 @@ fn one(
                     b.kind,
                     NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
                 );
-                if !draws
-                    || b.opacity < 1.0
-                    || b.blend != BlendMode::Normal
-                    || b.mask.is_some()
-                    || !b.effects.is_empty()
-                {
+                // What the layer above is held to is the base's own
+                // alpha, and that reading comes from the renderer being
+                // matched — `layer_coverage_at`, the base drawn aside —
+                // so its opacity, its mask and its blend are already in
+                // the number both sides read and none of the three is a
+                // reason to hand the page back. Asked directly, a base
+                // faded, masked or blended lands within a thousandth of
+                // the reference, which is where a plain one lands.
+                //
+                // An *effect* is: the coverage then includes the shadow
+                // the base casts, and what the CPU renderer holds the
+                // layer above to does not. That one is off by a fiftieth
+                // and goes back.
+                if !draws || !b.effects.is_empty() {
                     return None;
                 }
                 Some(base)
@@ -9864,31 +9872,38 @@ mod tests {
             "the backend drew {drawn} of them and declined {declined}"
         );
         // A ratchet on three known things rather than a tolerance, all
-        // three of them a curve drawn two ways. Many of these pages hold
-        // a *path*, which this backend fills through a stencil and so
-        // does not antialias at all — the recorded difference, and the
-        // biggest of them. Many hold a raster, where an enlarged picture
-        // is resampled either side of the last texel by two samplers that
-        // clamp their own way. The rest are a rectangle's corners, where
-        // the reference renderer boxes sixteen samples a side and this
-        // one takes a distance: two approximations of an arc, which do
-        // not have to land on the same number.
+        // three of them an edge drawn two ways. Many of these pages hold
+        // a *path*, which this backend fills through a stencil and
+        // antialiases by multisampling it — four samples a pixel, which
+        // is the only count WebGPU makes every adapter offer and the only
+        // one this one accepts (eight and sixteen are refused outright).
+        // So a path's edge comes out in quarters here, where the renderer
+        // being matched is exact across a row and sixteen deep down it.
+        // Closing that means supersampling the whole page or handing the
+        // backend the other's answer, and neither is a small change.
+        // Many hold a raster, where an enlarged picture is resampled
+        // either side of the last texel by two samplers that clamp their
+        // own way. The rest are a rectangle's corners, where the
+        // reference renderer boxes sixteen samples a side and this one
+        // takes a distance: two approximations of an arc, which do not
+        // have to land on the same number.
         //
         // The numbers go *up* when the backend learns something, because
         // learning it means more pages are compared rather than declined.
         // Isolating a copy took the pages drawn from 33 to 47 and brought
         // six more rough ones; ignoring a blend on an adjustment rather
-        // than refusing the page took it to 65 and brought seven more.
-        // Every one of those thirteen carries one of the three causes
-        // above, which was checked rather than assumed — for the seven,
-        // by taking the blend back off and finding the worst pixel
-        // unchanged to three decimal places, so the roughness was already
-        // in the page and only the comparison is new. A rise here is good
+        // than refusing the page took it to 65 and brought seven more;
+        // letting a clipped layer be held to a base that is faded, masked
+        // or blended took it further again and brought three more. Every
+        // one of those sixteen carries one of the three causes above,
+        // which was checked rather than assumed: take the blend back off,
+        // or undress the base, and the worst pixel is unchanged to three
+        // decimal places — so the roughness was already in the page and
+        // only the comparison is new. A rise here is good
         // news when what is drawn rises with it and bad news otherwise,
-        // which is why the two are printed together. Antialiasing the
-        // stencilled path is what would bring it down.
+        // which is why the two are printed together.
         assert!(
-            rough.len() <= 33 && worst_seen < 0.31,
+            rough.len() <= 36 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");
@@ -10063,9 +10078,10 @@ mod tests {
         assert!(!GpuRenderer::can_render(&outlined(400.0)));
 
         // A layer held to the one under it is drawn, since that layer's
-        // own alpha is a coverage like a mask's — but only where "its
-        // alpha" is a plain question. Faded, the base's alpha depends on
-        // how it was composited, and the page goes back.
+        // own alpha is a coverage like a mask's — and that reading comes
+        // from the renderer being matched, so the base's own opacity,
+        // mask and blend are already in the number both sides read.
+        // Faded, masked or blended, the base is fine.
         let mut held = doc.clone();
         let over = add(
             &mut held,
@@ -10078,11 +10094,40 @@ mod tests {
         })
         .unwrap();
         assert!(GpuRenderer::can_render(&held), "held to a plain layer");
-        let mut faded = held.clone();
-        faded
-            .apply(Command::SetOpacity { id, opacity: 0.5 })
-            .unwrap();
-        assert!(!GpuRenderer::can_render(&faded), "held to a faded one");
+        for dress in [
+            Command::SetOpacity { id, opacity: 0.5 },
+            Command::SetBlendMode {
+                id,
+                blend: BlendMode::Multiply,
+            },
+        ] {
+            let mut dressed = held.clone();
+            let what = format!("{dress:?}");
+            dressed.apply(dress).unwrap();
+            assert!(
+                GpuRenderer::can_render(&dressed),
+                "held to a base wearing {what}"
+            );
+        }
+        // An *effect* on the base is the one that still goes back: the
+        // coverage then carries the shadow the base casts, and what the
+        // CPU renderer holds the layer above to does not.
+        let mut lit = held.clone();
+        lit.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 2.0,
+                dy: 2.0,
+                blur: 1.0,
+                color: BLUE,
+                opacity: 0.9,
+            }],
+        })
+        .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&lit),
+            "held to a base that casts a shadow"
+        );
 
         // Ink authored for a press resolves through the document's
         // profile, so a gradient with a CMYK stop goes back too.

@@ -2446,9 +2446,16 @@ without reading anything else.*
      1-D overlaps the fill already had exact, so it is exact now too.
      The pages that stayed rough were then run down, and all of it is a
      curve drawn two ways. Eleven of the nineteen hold a *path*, which
-     the backend fills through a stencil and so does not antialias at
-     all — the difference that was already recorded, and the biggest of
-     them. Several hold a raster, where an enlarged picture is resampled
+     the backend fills through a stencil and antialiases by multisampling
+     it — four samples a pixel, which is the only count WebGPU makes every
+     adapter offer and the only one this one accepts, eight and sixteen
+     being refused outright. So a path's edge comes out in quarters there
+     where the renderer being matched is exact across a row and sixteen
+     deep down it, and that is the biggest of the three. (An earlier note
+     here said the backend did not antialias a path at all, which was
+     wrong: `SAMPLES` has been 4 since the stencil was written. Closing
+     the gap means supersampling the whole page or handing the backend the
+     other's answer, and neither is small.) Several hold a raster, where an enlarged picture is resampled
      either side of its last texel by two samplers that clamp their own
      way. The rest are a rectangle's *corners*, and chasing those found
      two more things in the reference renderer: a rounded rectangle is
