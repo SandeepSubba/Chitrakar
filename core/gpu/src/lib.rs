@@ -2165,6 +2165,7 @@ fn one(
                 | NodeKind::Text(_)
                 | NodeKind::Paint { .. }
                 | NodeKind::Group
+                | NodeKind::Instance { .. }
         ) {
             return None;
         }
@@ -2253,7 +2254,16 @@ fn one(
         || (matches!(node.kind, NodeKind::Group)
             && (node.opacity < 1.0
                 || node.mask.is_some()
-                || chitrakar_render::reads_backdrop(doc, child).ok()?));
+                || chitrakar_render::reads_backdrop(doc, child).ok()?))
+        // And a copy on the same terms. What a copy draws is a whole
+        // layer, and that layer may be a group whose children overlap: a
+        // fade, a mask or the alpha it is held to, taken as each child
+        // lands, would be taken twice where two of them meet. So the
+        // three things that isolate a group isolate a copy, and the
+        // surface is what lands — which is also what the CPU renderer
+        // does with such a copy.
+        || (matches!(node.kind, NodeKind::Instance { .. })
+            && (node.opacity < 1.0 || node.mask.is_some() || held_to.is_some()));
     // Except a clone layer, never: what it paints with is what is under
     // it, and a surface of its own would have nothing under it to paint
     // with. Its blend, its opacity and its mask go on each stroke as it
@@ -2707,23 +2717,12 @@ fn one(
         // on a surface of its own there, and that is a different
         // picture from this, so it goes back.
         NodeKind::Instance { of, .. } => {
-            // A copy's draws are emitted by walking what it copies, and
-            // that walk ends this one: the coverage this layer would
-            // otherwise be held back by is set up below and never
-            // reached. Its own mask was already a reason to hand the
-            // page over; being held to the layer under it is the same
-            // reason, and was not — so a copy clipped to the layer
-            // below was drawn whole, covering what it was meant to show
-            // through.
-            if alone || node.opacity < 1.0 || node.mask.is_some() || held_to.is_some() {
-                return None;
-            }
-            // And a copy of a layer that is itself held to the one under
+            // A copy of a layer that is itself held to the one under
             // *it*: what a copy draws is the layer, not the layer's place
             // in a run of clipped ones, so the CPU renderer draws it
-            // whole. This walk reaches the original through the same
-            // path that reads `clipped`, and would hold the copy back by
-            // a layer somewhere else entirely.
+            // whole. This walk reaches the original through the same path
+            // that reads `clipped`, and would hold the copy back by a
+            // layer somewhere else entirely.
             if doc.node(*of).ok()?.clipped {
                 return None;
             }
@@ -2734,8 +2733,14 @@ fn one(
             } else {
                 Vec::new()
             };
+            // On a surface of its own the fade and the cut belong to the
+            // quad that brings the surface back, so what is drawn into it
+            // is drawn whole and unbounded — which is what the group arm
+            // above does for the same reason.
+            let inner = if alone { 1.0 } else { opacity };
+            let within = if alone { None } else { bound };
             if stand_ins.is_empty() {
-                one(doc, *of, t.compose(back), opacity, bound, out)?;
+                one(doc, *of, t.compose(back), inner, within, out)?;
             } else {
                 // What a copy with stand-ins draws is a list of layers
                 // rather than the group itself, and a group holding an
@@ -2748,10 +2753,9 @@ fn one(
                     return None;
                 }
                 for part in stand_ins {
-                    one(doc, part, t, opacity, bound, out)?;
+                    one(doc, part, t, inner, within, out)?;
                 }
             }
-            return Some(());
         } // No arm left over, and none wanted: every kind of layer is
           // drawn here now, so a new one will not compile until it says
           // how — which is the same bargain `Node::each_color_mut` makes.
@@ -4883,16 +4887,70 @@ mod tests {
             "held inside a copy: mean {mean:.5}, worst {worst:.3}"
         );
 
-        // Faded, blended or masked, the CPU draws a copy on a surface of
-        // its own, which is a different picture from this.
-        let mut faded = doc.clone();
-        faded
-            .apply(Command::SetOpacity {
-                id: copy,
-                opacity: 0.5,
-            })
-            .unwrap();
-        assert!(!GpuRenderer::can_render(&faded), "a copy composited whole");
+        // Faded, blended, masked or held to the layer under it, a copy
+        // goes on a surface of its own and that surface is what lands —
+        // the same three things that isolate a group, for the same
+        // reason: what a copy draws may be a group whose children
+        // overlap, and a coverage taken as each child lands would be
+        // taken twice where two of them meet.
+        for (what, dress) in [
+            (
+                "faded",
+                Command::SetOpacity {
+                    id: copy,
+                    opacity: 0.5,
+                },
+            ),
+            (
+                "blended",
+                Command::SetBlendMode {
+                    id: copy,
+                    blend: BlendMode::Multiply,
+                },
+            ),
+            (
+                "wearing a shadow",
+                Command::SetEffects {
+                    id: copy,
+                    effects: vec![chitrakar_doc::Effect::DropShadow {
+                        dx: 3.0,
+                        dy: 2.0,
+                        blur: 1.5,
+                        color: BLUE,
+                        opacity: 0.8,
+                    }],
+                },
+            ),
+            (
+                "masked",
+                Command::SetMask {
+                    id: copy,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Ellipse { rx: 9.0, ry: 7.0 },
+                            transform: Transform::translation(2.0, 2.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                },
+            ),
+        ] {
+            let mut dressed = doc.clone();
+            dressed.apply(dress).unwrap();
+            assert!(
+                GpuRenderer::can_render(&dressed),
+                "a copy {what} is drawn, not handed back"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&dressed).unwrap(),
+                &chitrakar_render::render(&dressed).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "a copy {what}: mean {mean:.5}, worst {worst:.3}"
+            );
+        }
     }
 
     /// A layer with effects inside a frame: the frame cuts what the
@@ -9530,6 +9588,212 @@ mod tests {
         assert!(mean < 0.001, "a ramp with no stops changes nothing: {mean}");
     }
 
+    /// What the backend will draw, said as a table rather than left in
+    /// prose scattered through the walk.
+    ///
+    /// Every kind of layer, each wearing each of the things a layer can
+    /// wear, asked whether the page is accepted. A backend that hands a
+    /// page back is doing the right thing where it cannot match the
+    /// renderer that is the reference — but "cannot" should be a decision
+    /// somebody made, not something nobody noticed, and a limit closed by
+    /// accident should show up as plainly as one opened on purpose. So
+    /// the table is asserted, and every `no` in it carries its reason:
+    ///
+    /// - An **adjustment** or a **filter** rewrites what is under it, so
+    ///   there is nothing left over for a blend to work against; the CPU
+    ///   renderer hands them their opacity and their mask and never looks
+    ///   at the blend mode. A surface of its own would be a different
+    ///   picture.
+    /// - An effect grows from a layer's silhouette, and those two have
+    ///   none: what they draw *is* what is under them. Nor has a **clone
+    ///   layer**, which is never put on a surface of its own — on one
+    ///   there would be nothing under it to paint with.
+    /// - A **copy** is drawn by walking what it copies, and that walk
+    ///   ends this one, so there is no surface of its own to fade, blend,
+    ///   mask or cast a shadow from. This is the one row here that is a
+    ///   gap rather than a decision, and it is the biggest thing left to
+    ///   do in this backend.
+    #[test]
+    fn what_it_will_draw_is_written_down() {
+        let square = VectorShape::Rect {
+            width: 16.0,
+            height: 12.0,
+            radius: 0.0,
+        };
+        const KINDS: [&str; 9] = [
+            "vector",
+            "raster",
+            "text",
+            "group",
+            "paint",
+            "clone",
+            "adjustment",
+            "filter",
+            "copy",
+        ];
+        const DRESS: [&str; 6] = ["plain", "faded", "blended", "masked", "clipped", "effects"];
+        // What each kind can wear and still be drawn. Read across DRESS.
+        const TABLE: [[bool; 6]; 9] = [
+            [true, true, true, true, true, true],   // vector
+            [true, true, true, true, true, true],   // raster
+            [true, true, true, true, true, true],   // text
+            [true, true, true, true, true, true],   // group
+            [true, true, true, true, true, true],   // paint
+            [true, true, true, true, true, false],  // clone
+            [true, true, false, true, true, false], // adjustment
+            [true, true, false, true, true, false], // filter
+            [true, true, true, true, true, true],   // copy
+        ];
+        let mut wrong = Vec::new();
+        for (k, kind) in KINDS.iter().enumerate() {
+            for (d, dress) in DRESS.iter().enumerate() {
+                let mut doc = Document::new(60, 40, ColorMode::Rgb);
+                // A layer underneath, so clipping has something to be
+                // held to and an adjustment something to change.
+                add(
+                    &mut doc,
+                    filled(
+                        "base",
+                        VectorShape::Rect {
+                            width: 60.0,
+                            height: 40.0,
+                            radius: 0.0,
+                        },
+                        RED,
+                    ),
+                    Transform::default(),
+                );
+                let node: Box<Node> = match *kind {
+                    "vector" => filled("v", square.clone(), BLUE),
+                    "raster" => {
+                        let id = doc.add_resource(
+                            2,
+                            2,
+                            vec![
+                                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+                            ],
+                        );
+                        Box::new(Node::raster(
+                            "r",
+                            chitrakar_doc::RasterRef {
+                                resource_id: id,
+                                width: 10,
+                                height: 8,
+                            },
+                        ))
+                    }
+                    "text" => Box::new(Node::text(
+                        "t",
+                        chitrakar_doc::TextSpec::new("Ab", 12.0, BLUE),
+                    )),
+                    "group" => Box::new(Node::group("g")),
+                    "paint" | "clone" => {
+                        let stroke = chitrakar_doc::PaintStroke {
+                            points: vec![[2.0, 2.0], [14.0, 10.0]],
+                            radii: vec![2.0],
+                            color: BLUE,
+                            softness: 0.0,
+                            erase: false,
+                            source: if *kind == "clone" {
+                                [8.0, 6.0]
+                            } else {
+                                [0.0, 0.0]
+                            },
+                            heal: false,
+                            clip: None,
+                        };
+                        let mut n = if *kind == "clone" {
+                            Node::clone_layer("c")
+                        } else {
+                            Node::paint("p")
+                        };
+                        match &mut n.kind {
+                            NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+                                strokes.push(stroke)
+                            }
+                            _ => unreachable!(),
+                        }
+                        Box::new(n)
+                    }
+                    "adjustment" => Box::new(Node::adjustment(
+                        "a",
+                        chitrakar_doc::Adjustment::Exposure { stops: -0.5 },
+                    )),
+                    "filter" => Box::new(Node::filter(
+                        "f",
+                        chitrakar_doc::Filter::GaussianBlur { sigma: 1.2 },
+                    )),
+                    _ => {
+                        let of = doc.children_of(doc.root()).unwrap()[0];
+                        Box::new(Node::instance("copy", of))
+                    }
+                };
+                let id = add(&mut doc, node, Transform::translation(20.0, 14.0));
+                if *kind == "group" {
+                    doc.apply(Command::AddNode {
+                        parent: id,
+                        index: 0,
+                        node: filled("in", square.clone(), BLUE),
+                    })
+                    .unwrap();
+                }
+                match *dress {
+                    "faded" => doc.apply(Command::SetOpacity { id, opacity: 0.6 }).unwrap(),
+                    "blended" => doc
+                        .apply(Command::SetBlendMode {
+                            id,
+                            blend: BlendMode::Multiply,
+                        })
+                        .unwrap(),
+                    "masked" => doc
+                        .apply(Command::SetMask {
+                            id,
+                            mask: Some(Box::new(chitrakar_doc::Mask {
+                                kind: chitrakar_doc::MaskKind::Vector {
+                                    shape: VectorShape::Ellipse { rx: 6.0, ry: 5.0 },
+                                    transform: Transform::default(),
+                                },
+                                invert: false,
+                                feather: 0.0,
+                            })),
+                        })
+                        .unwrap(),
+                    "clipped" => doc
+                        .apply(Command::SetClipped { id, clipped: true })
+                        .unwrap(),
+                    "effects" => doc
+                        .apply(Command::SetEffects {
+                            id,
+                            effects: vec![chitrakar_doc::Effect::DropShadow {
+                                dx: 2.0,
+                                dy: 2.0,
+                                blur: 1.0,
+                                color: BLUE,
+                                opacity: 0.8,
+                            }],
+                        })
+                        .unwrap(),
+                    _ => Command::SetName {
+                        id,
+                        name: "unchanged".into(),
+                    },
+                };
+                let drawn = GpuRenderer::can_render(&doc);
+                if drawn != TABLE[k][d] {
+                    wrong.push(format!(
+                        "{kind} {dress}: the table says {} and it says {drawn}",
+                        TABLE[k][d]
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "what the backend draws has changed; the table has to say so too:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -9572,22 +9836,26 @@ mod tests {
             "the backend drew {drawn} of them and declined {declined}"
         );
         // A ratchet on three known things rather than a tolerance, all
-        // three of them a curve drawn two ways. Eleven of these pages
-        // hold a *path*, which this backend fills through a stencil and
-        // so does not antialias at all — the recorded difference, and
-        // the biggest of them. Several hold a raster, where an enlarged
-        // picture is resampled either side of the last texel by two
-        // samplers that clamp their own way. The rest are a rectangle's
-        // corners, where the reference renderer boxes sixteen samples a
-        // side and this one takes a distance: two approximations of an
-        // arc, which do not have to land on the same number.
+        // three of them a curve drawn two ways. Many of these pages hold
+        // a *path*, which this backend fills through a stencil and so
+        // does not antialias at all — the recorded difference, and the
+        // biggest of them. Many hold a raster, where an enlarged picture
+        // is resampled either side of the last texel by two samplers that
+        // clamp their own way. The rest are a rectangle's corners, where
+        // the reference renderer boxes sixteen samples a side and this
+        // one takes a distance: two approximations of an arc, which do
+        // not have to land on the same number.
         //
-        // So the count wobbles by one when either of them changes, which
-        // is why it has a pixel of headroom and the worst pixel is what
-        // is really held. Antialiasing the stencilled path is what would
-        // bring this down.
+        // The numbers go *up* when the backend learns something, because
+        // learning it means more pages are compared rather than declined:
+        // teaching it to isolate a copy took the pages drawn from 33 to
+        // 47 and brought six more rough ones with it, each carrying one
+        // of the three above — checked, not assumed. So a rise here is
+        // only good news when it comes with a rise in what is drawn, and
+        // the two are printed together for that reason. Antialiasing the
+        // stencilled path is what would bring it down.
         assert!(
-            rough.len() <= 20 && worst_seen < 0.25,
+            rough.len() <= 26 && worst_seen < 0.31,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

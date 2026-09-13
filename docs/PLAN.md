@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~429),
+- **Verify before committing:** `cargo test --workspace` (~430),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2464,8 +2464,31 @@ without reading anything else.*
      just outside a corner circle is drawn as *nothing*, where it is a
      hair inside the radius and really about a hundredth covered. The
      coarse box had been missing the sliver.
-     Eighty-seven of the hundred and twenty pages the backend declines
-     outright, which is its own thing to look at.
+     Eighty-seven of the hundred and twenty pages the backend declined
+     outright, which was its own thing to look at — and looking at it paid.
+     Asking which single layer, taken away, makes a declined page drawable
+     turned the eighty-seven into a tally, and the tally said *copy*: a
+     copy was drawn only when it wore nothing at all. Faded, blended,
+     masked, held to the layer under it or casting a shadow, the page went
+     back. What a copy draws it draws by walking the layer it copies, and
+     that walk ended the one that would have laid a surface down, so there
+     was no surface of its own to fade or mask or grow a shadow from.
+     There is now, on exactly the terms a group is isolated on and for
+     exactly the same reason — what a copy draws may be a group whose
+     children overlap, and a coverage taken as each child lands is taken
+     twice where two of them meet. Seventy-three declined now instead of
+     eighty-seven, and forty-seven pages compared instead of thirty-three.
+     Which is also why what the backend will draw is a *table* now
+     (`what_it_will_draw_is_written_down`): every kind of layer wearing
+     each of the things a layer can wear, asserted, with the reason beside
+     every no. A limit closed by accident should show up as plainly as one
+     opened on purpose, and the table is what makes the copy row's six
+     `no`s impossible to leave lying there unnoticed. Three `no`s are left
+     and all three are decisions: an adjustment and a filter cannot be
+     blended (they rewrite what is under them, so a blend has nothing left
+     to work against) and cannot carry an effect (what they draw *is* what
+     is under them, so there is no silhouette), and nor can a clone layer,
+     which is never on a surface of its own.
      And the coarsest antialiasing in the renderer was found by the same
      reading and is gone: the scanline path fill is exact across a row
      and was *sampled* down it, four sub-rows deep, so a near-horizontal
