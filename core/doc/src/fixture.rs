@@ -310,6 +310,37 @@ pub fn everything() -> Fixture {
         on_mask: false,
     })
     .unwrap();
+    // And a mask brushed on by hand, which is a kind of mask the shared
+    // document had never held: the two others — a shape and a picture —
+    // were both here, and this one is the one with strokes of its own,
+    // living in the same slot a layer's strokes live in and read by the
+    // same code. It goes on the paint layer, so one layer has strokes
+    // on itself and strokes on its mask at once: anything that handles
+    // a stroke without saying which of the two it means is then wrong
+    // about this document rather than right by luck.
+    doc.apply(Command::SetMask {
+        id: painted,
+        mask: Some(Box::new(Mask {
+            kind: MaskKind::Painted {
+                strokes: vec![PaintStroke {
+                    points: vec![[8.0, 34.0], [56.0, 52.0]],
+                    radii: vec![9.0],
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    softness: 0.4,
+                    erase: true,
+                    ..stroke.clone()
+                }],
+            },
+            invert: false,
+            feather: 0.0,
+        })),
+    })
+    .unwrap();
     // A picture, a block of text and a frame: the three kinds whose
     // pixels come from somewhere other than a shape's own geometry, and
     // so the three a question about pixels is most likely to be wrong
@@ -1618,6 +1649,26 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             id: frame,
             opacity: 0.35,
         },
+        // A batch of nothing but field edits, on more than one layer:
+        // what the app sends when several layers are picked and one
+        // slider moves. Every other batch here carries something
+        // structural, which is a different question — and it left the
+        // plainest batch there is, the one a person makes every day,
+        // out of every audit that asks about batches.
+        Command::Batch(vec![
+            Command::SetOpacity {
+                id: under,
+                opacity: 0.15,
+            },
+            Command::SetOpacity {
+                id: over,
+                opacity: 0.45,
+            },
+            Command::SetTransform {
+                id: painted,
+                transform: Transform::translation(4.0, -3.0),
+            },
+        ]),
         Command::Batch(vec![
             Command::SetOpacity {
                 id: under,

@@ -23,6 +23,21 @@ pub use chitrakar_doc::{
 /// units.
 const DUPLICATE_OFFSET: f32 = 12.0;
 
+/// Carry a nudged copy's mask the same distance the copy moved.
+///
+/// A mask is authored in its owner's *parent* space — it describes the
+/// document as the layer sees it, which is why handing a layer a region
+/// picked out of the page is a carry between spaces rather than a
+/// conversion. So moving the layer's own transform moves the layer and
+/// leaves the mask where it was: a duplicate landed twelve pixels along
+/// wearing the original's mask, showing the wrong part of itself. Every
+/// kind of mask, not only a brushed one.
+fn nudge_mask(node: &mut Node) {
+    if let Some(mask) = &mut node.mask {
+        *mask = mask.carried_through(Transform::translation(DUPLICATE_OFFSET, DUPLICATE_OFFSET));
+    }
+}
+
 /// A copied subtree, held whole rather than serialized: the clipboard is
 /// in-process state, and JSON would only cost a round trip through text.
 /// Resource pixels travel with it so a paste into a *different* document
@@ -2418,6 +2433,7 @@ impl Session {
             // wants none: it starts where the pointer took hold of it.
             node.transform.e += DUPLICATE_OFFSET;
             node.transform.f += DUPLICATE_OFFSET;
+            nudge_mask(&mut node);
         }
         let new_id = NodeId(*next);
         *next += 1;
@@ -2618,6 +2634,7 @@ impl Session {
         if offset {
             node.transform.e += DUPLICATE_OFFSET;
             node.transform.f += DUPLICATE_OFFSET;
+            nudge_mask(&mut node);
         }
         // A copy of a layer that travelled with it points at the layer
         // that arrived, not the one left behind: duplicating a group
@@ -7915,6 +7932,240 @@ mod tests {
         );
     }
 
+    /// A duplicate carries its mask along with it.
+    ///
+    /// A mask is authored in its owner's *parent* space: it describes the
+    /// document as the layer sees it, which is why handing a layer a
+    /// region picked out of the page is a carry between spaces rather
+    /// than a conversion. A duplicate is nudged along so it does not hide
+    /// behind the original, and nudging a layer's own transform moves the
+    /// layer and leaves the mask where it was — so the copy landed twelve
+    /// pixels along wearing the original's mask and showing the wrong
+    /// part of itself.
+    ///
+    /// Every kind of mask, since the space is the mask's and not the
+    /// kind's: a shape, a picture, and strokes brushed by hand. Asked as
+    /// a picture, because "the mask came over" was true of the broken
+    /// version — the mask arrived intact and in the wrong place.
+    #[test]
+    fn a_duplicate_carries_its_mask_with_it() {
+        let f = chitrakar_doc::fixture::everything();
+        let brushed = chitrakar_doc::PaintStroke {
+            points: vec![[8.0, 10.0], [30.0, 26.0]],
+            radii: vec![7.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.0,
+            erase: true,
+            source: [0.0; 2],
+            heal: false,
+            clip: None,
+        };
+        // A small solid resource of its own, so that a mask read off a
+        // picture has a definite edge across the layer rather than
+        // whatever the fixture's checkerboard happens to give.
+        let mut base = f.doc.clone();
+        let white = base.add_resource(2, 2, vec![255; 16]);
+        for (what, kind) in [
+            (
+                "a shape",
+                chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 16.0,
+                        height: 11.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(10.0, 12.0),
+                },
+            ),
+            (
+                "a picture",
+                chitrakar_doc::MaskKind::Raster {
+                    resource_id: white.clone(),
+                    width: 2,
+                    height: 2,
+                    transform: Transform {
+                        a: 10.0,
+                        d: 10.0,
+                        e: 10.0,
+                        f: 12.0,
+                        ..Default::default()
+                    },
+                },
+            ),
+            (
+                "strokes brushed by hand",
+                chitrakar_doc::MaskKind::Painted {
+                    strokes: vec![brushed.clone()],
+                },
+            ),
+        ] {
+            let mut masked = Session::from_document(base.clone());
+            masked
+                .apply(Command::SetMask {
+                    id: f.under,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind,
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            // The layer as it stands, drawn on its own so nothing else on
+            // the page can account for a difference.
+            let node = masked.document().node(f.under).unwrap().clone();
+            let mut alone = chitrakar_doc::Document::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            // The bytes a mask read off a picture needs, content-
+            // addressed, so it is the same id there as here.
+            alone.add_resource(2, 2, vec![255; 16]);
+            let root = alone.root();
+            alone
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            let sent = Session::from_document(alone.clone()).render().unwrap();
+            // The mask has to show some of the layer and hide some of it,
+            // or a mask in the wrong place would draw the same picture.
+            let shown = sent.pixels.iter().filter(|p| p.a > 0.01).count();
+            let whole = {
+                let mut bare = alone;
+                let only = bare.children_of(bare.root()).unwrap()[0];
+                bare.apply(Command::SetMask {
+                    id: only,
+                    mask: None,
+                })
+                .unwrap();
+                Session::from_document(bare)
+                    .render()
+                    .unwrap()
+                    .pixels
+                    .iter()
+                    .filter(|p| p.a > 0.01)
+                    .count()
+            };
+            assert!(
+                shown > 0 && shown < whole,
+                "{what}: the mask shows {shown} of the layer's {whole} pixels"
+            );
+
+            let from = Session::from_document(masked.document().clone());
+            from.copy_node(f.under).unwrap();
+            let mut to = Session::new(
+                f.doc.meta.width,
+                f.doc.meta.height,
+                chitrakar_color::ColorMode::Rgb,
+            );
+            to.paste(None).unwrap();
+            let arrived = to.render().unwrap();
+
+            let by = DUPLICATE_OFFSET as u32;
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for y in 0..(f.doc.meta.height - by) {
+                for x in 0..(f.doc.meta.width - by) {
+                    let (p, q) = (sent.get(x, y), arrived.get(x + by, y + by));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    if d > worst.0 {
+                        worst = (d, x, y);
+                    }
+                }
+            }
+            assert!(
+                worst.0 < 1e-5,
+                "{what} as a mask: the copy draws something else ({} at {},{})",
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        }
+    }
+
+    /// A command's slots name what it writes, and nothing else's.
+    ///
+    /// The gesture drops a preview whose slots are already covered, which
+    /// is what keeps a two-hundred-sample drag to one inverse — and it
+    /// means a wrong name in `slots_of` loses an edit in silence. Give
+    /// two commands that write different things the same slot and a
+    /// gesture doing both records only the first inverse, so it undoes
+    /// half of itself. That is not a mistake a reading catches: the
+    /// strings are plausible either way round.
+    ///
+    /// So ask it of the shared list. Wherever one command's slots are
+    /// covered by another's — exactly when the gesture would drop the
+    /// second inverse — apply both and then only the first's inverse,
+    /// and the document must be back where it started. A drag passes
+    /// because the second really is a restatement; a duplicated name
+    /// does not.
+    #[test]
+    fn a_commands_slots_name_what_it_writes_and_nothing_elses() {
+        use chitrakar_doc::fixture::state;
+        let f = chitrakar_doc::fixture::everything();
+        let pool: Vec<Command> = chitrakar_doc::fixture::every_command(&f)
+            .into_iter()
+            .filter(chitrakar_doc::fixture::exact)
+            .collect();
+        let before = state(&f.doc);
+        let mut pairs = 0usize;
+        let mut across_kinds = 0usize;
+        for first in &pool {
+            let Some(covers) = slots_of(first) else {
+                continue;
+            };
+            for second in &pool {
+                let Some(wants) = slots_of(second) else {
+                    continue;
+                };
+                if !wants.iter().all(|s| covers.contains(s)) {
+                    continue;
+                }
+                let mut doc = f.doc.clone();
+                let Ok(inverse) = doc.apply(first.clone()) else {
+                    continue;
+                };
+                if doc.apply(second.clone()).is_err() {
+                    continue;
+                }
+                doc.apply(inverse)
+                    .expect("the first command's inverse applies");
+                let (a, b) = (format!("{first:?}"), format!("{second:?}"));
+                assert_eq!(
+                    state(&doc),
+                    before,
+                    "{} covers {} by its slots, but undoing only the first left the document \
+                     changed — so one of the two is named for something it does not write",
+                    &a[..a.len().min(70)],
+                    &b[..b.len().min(70)]
+                );
+                pairs += 1;
+                if std::mem::discriminant(first) != std::mem::discriminant(second) {
+                    across_kinds += 1;
+                }
+            }
+        }
+        // A list where nothing covered anything would pass without asking
+        // a thing, and one where only a command covered itself would ask
+        // only about drags. A batch covers the commands inside it, which
+        // is where the second number comes from.
+        assert!(
+            pairs > 20 && across_kinds > 0,
+            "{pairs} covered pairs, {across_kinds} of them across kinds"
+        );
+    }
+
     /// A frame resized by dragging its corner undoes whole, including the
     /// layers that only started moving partway through the drag.
     ///
@@ -8314,11 +8565,21 @@ mod tests {
                 format!("{:?}", here.kind),
                 "{what} arrived as something else"
             );
+            // A paste nudges what it pastes so the copy is not hidden
+            // behind the original, and a mask is authored in the layer's
+            // parent's space — so the mask that should arrive is the
+            // original's carried the same distance, not the original's
+            // unchanged. Which is the rule stated as an expectation: a
+            // mask that arrived unmoved is a mask over the wrong part of
+            // the layer.
+            let nudged = here.mask.as_ref().map(|m| {
+                m.carried_through(Transform::translation(DUPLICATE_OFFSET, DUPLICATE_OFFSET))
+            });
             for (field, a, b) in [
                 (
                     "its mask",
                     format!("{:?}", there.mask),
-                    format!("{:?}", here.mask),
+                    format!("{nudged:?}"),
                 ),
                 (
                     "its effects",

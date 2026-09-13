@@ -1091,6 +1091,16 @@ mod tests {
             "/document/nodes/*/kind/Vector/stroke:color",
             "/document/nodes/*/kind/Vector/stroke:width",
             "/document/nodes/*/kind/Vector:shape",
+            // A mask brushed on by hand holds strokes, and a stroke's
+            // points, radii and colour are the stroke: the same three
+            // that are required of a paint layer's own.
+            "/document/nodes/*/mask/kind/Painted/strokes/*/color/Srgb:a",
+            "/document/nodes/*/mask/kind/Painted/strokes/*/color/Srgb:b",
+            "/document/nodes/*/mask/kind/Painted/strokes/*/color/Srgb:g",
+            "/document/nodes/*/mask/kind/Painted/strokes/*/color/Srgb:r",
+            "/document/nodes/*/mask/kind/Painted/strokes/*:color",
+            "/document/nodes/*/mask/kind/Painted/strokes/*:points",
+            "/document/nodes/*/mask/kind/Painted/strokes/*:radii",
             "/document/nodes/*/mask/kind/Raster/transform:a",
             "/document/nodes/*/mask/kind/Raster/transform:b",
             "/document/nodes/*/mask/kind/Raster/transform:c",

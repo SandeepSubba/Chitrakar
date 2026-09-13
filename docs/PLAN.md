@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~437),
+- **Verify before committing:** `cargo test --workspace` (~439),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2403,6 +2403,32 @@ without reading anything else.*
      what it reads and the cross-renderer audit fails on the bare
      fixture, where before the addition it passed. A decision both
      renderers make, and neither was being asked about it.
+     The ninth was a mask *brushed by hand*. Two of the three kinds of
+     mask had stood in that document — a shape and a picture — and the
+     one with strokes of its own never had, which put a whole slot out
+     of reach: a painted mask's strokes live where a paint layer's
+     strokes live and are read by the same code, so it went on the paint
+     layer and that layer now carries strokes on itself and strokes on
+     its mask at once. Two audits stopped holding. One was the file
+     format's inventory, which grew by the seven fields a stroke cannot
+     be missing — the same three required of a paint layer's own, which
+     is the right answer rather than a missing default. The other was a
+     real defect, and a plain one: a mask is authored in its owner's
+     *parent* space, a paste nudges what it pastes so the copy is not
+     hidden behind the original, and nothing carried the mask. So a
+     duplicated masked layer landed twelve pixels along wearing the
+     original's mask and showing the wrong part of itself. Every kind of
+     mask, since the space is the mask's and not the kind's — which the
+     brushed one only *revealed*: the fixture's picture mask and shape
+     mask sat on layers where the misplacement happened to draw the same
+     picture, so the clipboard audit had been asking and getting away
+     with it. A test asks all three now, each with a mask that shows
+     some of the layer and hides some of it so that a mask in the wrong
+     place cannot draw the same thing
+     (`a_duplicate_carries_its_mask_with_it`), and the clipboard audit's
+     field-by-field half expects the mask *carried* rather than the mask
+     unchanged, since "the mask came over" was true of the broken
+     version — it arrived intact and in the wrong place.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own
@@ -2442,7 +2468,20 @@ without reading anything else.*
      Under the old rule the frame came back and that layer stayed where
      the drag left it. A test drives exactly that drag now and fails on
      demand against the old rule
-     (`a_frame_dragged_into_its_corner_undoes_every_layer_it_moved`). Undo is
+     (`a_frame_dragged_into_its_corner_undoes_every_layer_it_moved`).
+     The slot table itself is audited rather than read, because a wrong
+     name there loses an edit in silence and the strings are plausible
+     either way round: wherever one command's slots are covered by
+     another's — exactly when a gesture drops the second inverse — both
+     are applied and only the first's inverse undone, and the document
+     has to be back
+     (`a_commands_slots_name_what_it_writes_and_nothing_elses`). Give
+     `SetName` the opacity slot and that fails while the hundred and
+     twenty random gestures pass, which is what makes it worth having
+     beside them. It wanted one thing in the shared list that was not
+     there: a batch of nothing but field edits on more than one layer —
+     what the app sends when several layers are picked and a slider
+     moves — since every other batch there carries something structural. Undo is
      the invariant this whole editor rests on, and it was audited one
      command at a time against a document nothing had happened to yet.
      That is not what undo is: it is a stack, and what it has to survive
