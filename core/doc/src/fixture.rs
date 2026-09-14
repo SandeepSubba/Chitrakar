@@ -305,6 +305,27 @@ pub fn everything() -> Fixture {
                 a: 0.9,
             },
             softness: 0.0,
+            // And it was painted inside a region, which it carries: a
+            // stroke laid down while something was picked out stays
+            // confined to it after the region is let go of, and under
+            // the clip the stroke is whole. Nothing in this document
+            // had ever carried one, so every audit that asks about a
+            // stroke had been asking about the easy half of what a
+            // stroke is. The region cuts this one partway along, so a
+            // clip read in the wrong space draws a different picture
+            // rather than the same one.
+            clip: Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 18.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(10.0, 38.0),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
             ..stroke.clone()
         }),
         on_mask: false,

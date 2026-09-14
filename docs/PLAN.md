@@ -2429,6 +2429,27 @@ without reading anything else.*
      field-by-field half expects the mask *carried* rather than the mask
      unchanged, since "the mask came over" was true of the broken
      version — it arrived intact and in the wrong place.
+     The tenth was a stroke carrying the region it was painted inside.
+     `PaintStroke::clip` is how a brush stays confined after the region
+     is let go of, and no stroke in the shared document had ever carried
+     one, so every audit that asks about a stroke had been asking about
+     the easy half of what a stroke is. One audit stopped holding — the
+     file format's inventory, by the twelve fields a region cannot be
+     missing, a region being a mask and as required inside a stroke as
+     on a layer. Everything else held, so the code it exercises was
+     broken to see who would notice, and this time somebody did at every
+     turn: stop carrying a stroke's region through a transform and two
+     engine tests fail; leave the region unread on the clone path and
+     the reference renderer's own test and the cross-renderer audit both
+     fail; leave it unread on the brush path and the engine's test of
+     the whole story fails. A test written for the brush path at the
+     reference renderer's level was thrown away again on finding that
+     out: it duplicated an engine test that covers more of the story,
+     and a test kept for symmetry is a test that has to be read later.
+     What the shape is worth, then, is not a defect but reach — a
+     stroke's region now rides through the file round trip, the
+     clipboard, the dirty-region audit and the undo runs, none of which
+     had ever seen one.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own
