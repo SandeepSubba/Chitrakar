@@ -672,7 +672,32 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~443),
+- **A page-sized surface costs nothing to make.** `vec![x; n]` asks the
+  allocator for zeroed memory only when the element is a primitive the
+  standard library knows about; a struct of four zero floats loses that
+  and is written one element at a time. For an A4 at three hundred dots
+  an inch that is a hundred and forty megabytes written before anything
+  is drawn — and measured, it was the *whole* of what an empty page took
+  to render. Zeroed memory instead (`chitrakar_color::transparent_run`),
+  which is pages the system already knows are zero.
+  On its own that trades one cost for another: the pixels a drawing does
+  reach now fault in one page at a time wherever the painting wanders,
+  where a single sweep takes them in order and the kernel hands over
+  several at once. So the part about to be painted is swept first
+  (`Surface::warm` over the drawing's own box), which for a page-filling
+  drawing is all of it and for a small one almost none. Serially, three
+  runs each: an empty A4 66ms → 0.04ms, a tiny layer on one 65ms →
+  0.4ms, a tiny layer in a group 71ms → 0.4ms, one with a shadow 77ms →
+  1.6ms, and a page-filling drawing ~301ms → ~274ms. That last one is
+  the lesson as much as the number: a single reading had said 257ms and
+  made the change look like a 22% regression, which three readings of
+  each side turned into a 9% gain. Timing probes here get run more than
+  once now.
+  What makes it safe is that every field of `LinearRgba::TRANSPARENT` is
+  a zero float, which is asked of the bits *and* of the type's size —
+  a field added later would still leave those four zero while quietly
+  filling every surface in the engine with something else.
+- **Verify before committing:** `cargo test --workspace` (~444),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single

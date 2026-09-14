@@ -95,12 +95,34 @@ impl AuthoredColor {
 }
 
 /// Premultiplied, linear-light RGBA. The engine's working pixel format.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// `Zeroable` because a surface is a great many of these and the one that
+/// matters is [`LinearRgba::TRANSPARENT`], whose bits are all zero: it
+/// lets a page-sized run be asked of the allocator as zeroed memory
+/// instead of written pixel by pixel. See [`transparent_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Zeroable)]
 pub struct LinearRgba {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+
+/// A run of fully transparent pixels.
+///
+/// `vec![LinearRgba::TRANSPARENT; n]` writes every element, because the
+/// standard library only asks the allocator for zeroed memory when the
+/// element is a primitive it knows about — a struct of four zero floats
+/// loses that, however zero it is. For a surface the size of an A4 page at
+/// three hundred dots an inch that is a hundred and forty megabytes
+/// written before anything is drawn, and measured on this machine it costs
+/// sixty-five milliseconds: the whole of what an empty page took to
+/// render. Zeroed memory from the allocator is pages the system already
+/// knows are zero, so the cost falls only on the pixels something actually
+/// paints — which on a page with a small drawing on it is almost none of
+/// them.
+pub fn transparent_run(len: usize) -> Vec<LinearRgba> {
+    bytemuck::zeroed_vec(len)
 }
 
 impl LinearRgba {
@@ -230,6 +252,43 @@ mod tests {
         };
         let out = faint.to_srgb8();
         assert!(out[3] > 0 && out[0] > 100, "faint but real pixel: {out:?}");
+    }
+
+    /// A run of transparent pixels is asked of the allocator as zeroed
+    /// memory, which is only the same thing while every field of
+    /// `TRANSPARENT` is a zero float.
+    ///
+    /// It is the whole of why a page-sized surface costs nothing to make,
+    /// and it is the kind of assumption that a field added later with a
+    /// sensible non-zero default would break in silence: every surface in
+    /// the engine would start life full of something else. So it is
+    /// asked, rather than left to the derive.
+    #[test]
+    fn a_run_of_transparent_pixels_is_transparent() {
+        let run = transparent_run(1000);
+        assert_eq!(run.len(), 1000);
+        assert!(
+            run.iter().all(|p| *p == LinearRgba::TRANSPARENT),
+            "a zeroed run is not the transparent pixel"
+        );
+        // Said of the bits rather than of the values, since a negative
+        // zero is equal to a zero and is not the same memory.
+        let t = LinearRgba::TRANSPARENT;
+        assert_eq!(
+            (t.r.to_bits(), t.g.to_bits(), t.b.to_bits(), t.a.to_bits()),
+            (0, 0, 0, 0),
+            "the transparent pixel is not four zero floats"
+        );
+        // And of the size, which is what catches a field added later:
+        // the four above would still be zero and the new one would not
+        // be looked at, so every surface in the engine would quietly
+        // start life holding something else.
+        assert_eq!(
+            std::mem::size_of::<LinearRgba>(),
+            4 * std::mem::size_of::<f32>(),
+            "a pixel has gained a field; is it zero when its bits are?"
+        );
+        assert_eq!(LinearRgba::default(), LinearRgba::TRANSPARENT);
     }
 
     #[test]

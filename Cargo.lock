@@ -175,6 +175,7 @@ dependencies = [
 name = "chitrakar-color"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "moxcms 0.9.0",
  "serde",
 ]
