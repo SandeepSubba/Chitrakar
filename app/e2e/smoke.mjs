@@ -10686,6 +10686,63 @@ assert(
   );
 }
 
+// 9bg. What is picked, on the bar. A region is not chosen once and left
+// alone — it is inverted, softened, thrown away and begun again while
+// looking at the picture — and a menu is the wrong distance away for
+// that. Three of the five glyphs are new: a menu row has a name beside
+// it and a toolbar button has nothing, so the ellipse marquee that
+// stood for "the rest instead" would have been saying something else
+// entirely once the words were gone.
+{
+  await newDocument(600, 400, "rgb");
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await page.waitForTimeout(300);
+  for (const label of [
+    "Pick out the whole page",
+    "Pick out the rest instead",
+    "Pick out nothing",
+    "Pick out the subject",
+    "Feather",
+  ]) {
+    assert(
+      await page.locator(`button[aria-label="${label}"]`).isVisible(),
+      `the bar offers "${label}"`,
+    );
+  }
+  const ants = () => page.locator(".ants").count();
+  await page.click('button[aria-label="Pick out the whole page"]');
+  await page.waitForTimeout(400);
+  assert((await ants()) === 1, "the whole page is picked from the bar");
+  await page.click('button[aria-label="Pick out the rest instead"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".ants polygon").count()) === 2,
+    "inverting it leaves the page's own edge and the hole in it",
+  );
+  // The softening window is the same one the menu opens.
+  await page.click('button[aria-label="Feather"]');
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator('[role="dialog"][aria-label="Feather"]').count()) === 1,
+    "and the feather button opens the same window the menu does",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Pick out nothing"]');
+  await page.waitForTimeout(400);
+  assert((await ants()) === 0, "and letting go of it works from the bar too");
+
+  // They go with the other two groups when the window is narrow.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(400);
+  assert(
+    !(await page.locator('button[aria-label="Pick out nothing"]').isVisible()),
+    "on a phone they are put away with the rest",
+  );
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(300);
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

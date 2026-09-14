@@ -81,7 +81,10 @@ export type IconName =
   | "paint"
   | "eraser"
   | "clone"
-  | "heal";
+  | "heal"
+  | "selectNone"
+  | "selectInverse"
+  | "feather";
 
 const PATHS: Record<IconName, JSX.Element> = {
   // A pipette: the barrel down to a tip, with the bulb at the top.
@@ -173,6 +176,56 @@ const PATHS: Record<IconName, JSX.Element> = {
   marquee: <rect x="3.5" y="5.5" width="17" height="13" strokeDasharray="3 2" />,
   marqueeEllipse: (
     <ellipse cx="12" cy="12" rx="8.5" ry="6.5" strokeDasharray="3 2" />
+  ),
+  // Nothing picked: the marquee with a line through it.
+  selectNone: (
+    <>
+      <rect x="3.5" y="5.5" width="17" height="13" strokeDasharray="3 2" />
+      <path d="M5 19 19 5" />
+    </>
+  ),
+  // The rest instead: the outside is what is picked, so the outside is
+  // what is filled — which is the whole of what inverting means and is
+  // not a thing a second marquee shape could say.
+  selectInverse: (
+    <>
+      <path
+        d="M2.5 4.5h19v15h-19z M7.5 8.5h9v7h-9z"
+        fillRule="evenodd"
+        fill="currentColor"
+        opacity="0.3"
+        stroke="none"
+      />
+      <rect x="2.5" y="4.5" width="19" height="15" />
+      <rect x="7.5" y="8.5" width="9" height="7" strokeDasharray="3 2" />
+    </>
+  ),
+  // A softened edge. Drawn as coverage falling away rather than as
+  // rings around a centre: rings read as a target, which is a different
+  // idea altogether, and what feathering does is exactly this — solid,
+  // then less, then gone, across a band.
+  feather: (
+    <>
+      <path d="M3.5 5.5h7.2v13H3.5z" fill="currentColor" stroke="none" />
+      <path
+        d="M10.7 5.5h3.1v13h-3.1z"
+        fill="currentColor"
+        stroke="none"
+        opacity="0.6"
+      />
+      <path
+        d="M13.8 5.5h3.1v13h-3.1z"
+        fill="currentColor"
+        stroke="none"
+        opacity="0.34"
+      />
+      <path
+        d="M16.9 5.5h3.1v13h-3.1z"
+        fill="currentColor"
+        stroke="none"
+        opacity="0.15"
+      />
+    </>
   ),
   wand: (
     <>

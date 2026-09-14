@@ -6638,6 +6638,60 @@ export function App() {
           </button>
         </div>
 
+        {/* What is picked out of the page. These were on the Select
+            menu and nowhere else, and picking a region is not a thing
+            done once — it is adjusted, inverted, softened, thrown away
+            and begun again, several times over, while looking at the
+            picture. A menu is the wrong distance away for that.
+
+            The icons for three of them are new. The menu could lend its
+            own, but a menu row has a name beside it and a toolbar
+            button has nothing: an ellipse marquee standing for "the
+            rest instead", or a lasso for "nothing", says the wrong
+            thing outright once the words are gone. */}
+        <div className="chrome-group wide-only" role="group" aria-label="Selection">
+          <button
+            className="chrome-button icon-only"
+            onClick={pickWholePage}
+            title="Pick out the whole page"
+            aria-label="Pick out the whole page"
+          >
+            <Icon name="marquee" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={pickInverse}
+            title="Pick out the rest instead (Ctrl+Shift+I)"
+            aria-label="Pick out the rest instead"
+          >
+            <Icon name="selectInverse" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={pickNothing}
+            title="Pick out nothing (Esc)"
+            aria-label="Pick out nothing"
+          >
+            <Icon name="selectNone" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={pickSubject}
+            title="Pick out the subject of this picture"
+            aria-label="Pick out the subject"
+          >
+            <Icon name="wand" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={openFeather}
+            title="Soften the edge of what is picked…"
+            aria-label="Feather"
+          >
+            <Icon name="feather" />
+          </button>
+        </div>
+
         <div className="chrome-group wide-only" role="group" aria-label="Zoom">
           <button
             className="chrome-button icon-only"
