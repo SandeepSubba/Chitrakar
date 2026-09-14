@@ -10608,6 +10608,84 @@ assert(
   await page.waitForTimeout(200);
 }
 
+// 9bf. Softening an edge in its own window. The number was in the rail
+// and nowhere else, which meant finding it required a picking tool in
+// hand, a region already picked, and knowing an unlabelled box was the
+// one. It is on the Select menu now, and the window previews while the
+// slider moves — softness is judged by looking at it — while still
+// costing one entry in the history however far the slider travels.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+
+  // With nothing picked there is no edge to soften, and it says so
+  // rather than opening an empty window.
+  lastDialog = "";
+  await menuClick("Select", "Feather…");
+  await page.waitForTimeout(300);
+  assert(
+    lastDialog.includes("Pick something out first"),
+    `with nothing picked it says why not (${lastDialog})`,
+  );
+  assert(
+    (await page.locator('[role="dialog"][aria-label="Feather"]').count()) === 0,
+    "and does not open the window",
+  );
+
+  await page.keyboard.press("m");
+  await page.waitForTimeout(200);
+  await page.mouse.move(b.x + b.width * 0.25, b.y + b.height * 0.25);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width * 0.7, b.y + b.height * 0.7, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+  const steps = () =>
+    page.$$eval(".history button", (els) => els.map((e) => e.textContent.trim()));
+  const before = (await steps()).length;
+
+  await menuClick("Select", "Feather…");
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator('[role="dialog"][aria-label="Feather"]').count()) === 1,
+    "with a region picked the window opens",
+  );
+  // Moved several times, as a hand would, to prove the preview is not
+  // one entry per move.
+  for (const v of ["6", "14", "28"]) {
+    await page.locator('input[aria-label="Feather radius"]').fill(v);
+    await page.waitForTimeout(220);
+  }
+  await page.click('button[aria-label="Soften the edge"]');
+  await page.waitForTimeout(450);
+  assert(
+    (await steps()).length === before + 1,
+    `three moves of the slider are one thing to undo (${before} -> ${(await steps()).length})`,
+  );
+
+  // And the edge really is soft: across it the wash is neither wholly
+  // on nor wholly off, which a hard edge never is.
+  await menuClick("Select", "Feather…");
+  await page.waitForTimeout(350);
+  assert(
+    Number(await page.locator('input[aria-label="Feather radius"]').inputValue()) === 28,
+    "reopening it shows the softness that was set",
+  );
+  // Cancelling puts back what was there rather than keeping the preview.
+  await page.locator('input[aria-label="Feather radius"]').fill("90");
+  await page.waitForTimeout(250);
+  const during = (await steps()).length;
+  await page.click('button[aria-label="Leave the edge as it was"]');
+  await page.waitForTimeout(400);
+  assert(
+    (await steps()).length === during,
+    "cancelling leaves the history where it was",
+  );
+  assert(
+    (await page.locator('[role="dialog"][aria-label="Feather"]').count()) === 0,
+    "and closes the window",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

@@ -1122,6 +1122,11 @@ export function App() {
   }, []);
   const [newDocOpen, setNewDocOpen] = useState(false);
   const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
+  /** Whether the softness of what is picked is being chosen in its own
+   * window. The number is also in the rail, where a hand already on the
+   * canvas can reach it; this is the way to it for somebody who does not
+   * yet know the rail has one. */
+  const [featherOpen, setFeatherOpen] = useState(false);
   /** The sheet of keys and gestures, opened with "?" or from the View
    * menu: half of what this editor can do is a gesture nobody would
    * guess at, and a menu cannot show a gesture. */
@@ -1699,6 +1704,38 @@ export function App() {
       refresh(session);
     } catch (err) {
       alert(`Select subject: ${err}`);
+    }
+  };
+  /** Choose the softness of what is picked, in its own window.
+   *
+   * The rail has the same number, and will keep it: a hand already on
+   * the canvas should not have to cross the screen for it. What the
+   * window adds is being findable — the rail's number appears only with
+   * a region picked and a picking tool in hand, which is a lot to know
+   * before you can learn the app can do this at all.
+   *
+   * It previews as the slider moves and costs one entry in the history,
+   * which is what the preview API is for: softening is a judgement made
+   * by looking, and a slider that could only be judged after committing
+   * would be no better than typing a number. */
+  const openFeather = () => {
+    if (!session) return;
+    if (!session.selection_json() || session.selection_json() === "null") {
+      alert("Pick something out first: there is no edge to soften yet.");
+      return;
+    }
+    setFeatherOpen(true);
+  };
+  const previewFeather = (radius: number) => {
+    if (!session) return;
+    try {
+      const mask = JSON.parse(session.selection_json()) as Mask | null;
+      if (!mask) return;
+      mask.feather = Math.max(0, radius);
+      session.preview(JSON.stringify({ SetSelection: { selection: mask } }));
+      refresh(session);
+    } catch (err) {
+      console.warn("feather preview:", err);
     }
   };
   /** The way back: a layer's mask, out into the page as a region. A
@@ -6327,6 +6364,7 @@ export function App() {
         item("pick-layer-mask", "marquee", "Pick out this layer's mask", pickLayerMask),
         SEP,
         // And what a region is *for*, once there is one.
+        item("feather", "mask", "Feather…", openFeather),
         item("fill-picked", "fill", "Fill what is picked", fillSelection),
         item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
           maskFromSelection(false),
@@ -6938,6 +6976,25 @@ export function App() {
           onResize={(w, h, dx, dy) => {
             setCanvasSizeOpen(false);
             resizePage(w, h, dx, dy);
+          }}
+        />
+      )}
+      {featherOpen && (
+        <FeatherDialog
+          radius={selectionFeather}
+          onRadius={(r) => {
+            setSelectionFeather(r);
+            previewFeather(r);
+          }}
+          onCancel={() => {
+            setFeatherOpen(false);
+            session?.cancel_preview();
+            refresh(session!);
+          }}
+          onApply={() => {
+            setFeatherOpen(false);
+            session?.commit_preview();
+            refresh(session!);
           }}
         />
       )}
@@ -9353,6 +9410,102 @@ function NewDocDialog({
  * crooked horizon can be laid level against the edge of the page rather
  * than guessed at, and cropped back to the page's own proportions when it
  * is taken. */
+/** How far the edge of what is picked is softened over.
+ *
+ * A window rather than only the rail's number, because a region picked
+ * out of a photograph almost never wants the edge the marquee drew, and
+ * that is not a thing anybody finds by hunting for an unlabelled box.
+ * It previews while the slider moves and lands as one entry in the
+ * history: softness is judged by looking at it, so it has to be visible
+ * before it is committed to. */
+function FeatherDialog({
+  radius,
+  onRadius,
+  onCancel,
+  onApply,
+}: {
+  radius: number;
+  onRadius: (radius: number) => void;
+  onCancel: () => void;
+  onApply: () => void;
+}) {
+  const set = (v: number) =>
+    onRadius(Math.max(0, Math.min(200, Number.isFinite(v) ? v : 0)));
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (e.key === "Enter") onApply();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel, onApply]);
+
+  return (
+    // Over the canvas rather than in front of it, like straightening:
+    // the thing being judged is on the page, so the page has to stay
+    // visible while the number is chosen.
+    <div className="straighten-panel" role="dialog" aria-label="Feather">
+      <div>
+        <h2>Feather</h2>
+        <label className="row">
+          Softness
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.min(100, radius)}
+            onChange={(e) => set(Number(e.target.value))}
+            aria-label="Feather slider"
+          />
+        </label>
+        <label className="row">
+          Radius
+          <input
+            type="number"
+            min={0}
+            max={200}
+            step={1}
+            value={Math.round(radius)}
+            onChange={(e) => set(Number(e.target.value))}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") onApply();
+            }}
+            aria-label="Feather radius"
+          />
+          <span className="unit">px</span>
+        </label>
+        <p className="modal-note">
+          Zero is the hard edge the marquee drew. Anything else softens
+          the coverage over that many page pixels, so the region is
+          neither wholly in nor wholly out across the band — which is
+          what an edge in a photograph actually looks like. The softness
+          travels with the region: hand it to a layer as a mask and the
+          layer is let into the page rather than stamped onto it.
+        </p>
+        <div className="modal-actions">
+          <button
+            className="mask-button"
+            onClick={onCancel}
+            aria-label="Leave the edge as it was"
+          >
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={onApply}
+            aria-label="Soften the edge"
+          >
+            Feather
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StraightenDialog({
   degrees,
   onAngle,
