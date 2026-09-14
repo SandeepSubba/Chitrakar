@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~441)
+cargo test --workspace                      # engine tests (~442)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)

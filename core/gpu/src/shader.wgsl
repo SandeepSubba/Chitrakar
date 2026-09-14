@@ -101,8 +101,42 @@ fn ellipse_distance(p: vec2f, c: vec2f, r: vec2f) -> f32 {
 // the distance's own rate of change on the screen. Derivatives have to
 // be taken in uniform control flow, which is why every distance below
 // is computed and only then selected between.
+// Exactly how much of a pixel a straight edge lets through: the area of
+// a unit square on one side of a line. `d` is the signed distance to the
+// edge in pixels, negative on the inside, and `n` the edge's unit normal
+// in the same units.
+//
+// A ramp — half a pixel either side of the line, straight between — is
+// this area only for an edge standing square on the page. Turn the edge
+// and the square meets it corner-first, which the ramp cannot say: the
+// area is quadratic over the part of the crossing where a corner is cut
+// off and linear only over the part where two opposite sides are. Both
+// pieces are below, and which is which is decided by how far apart the
+// square's two corners on the line's own axis are. At forty-five degrees
+// the linear piece vanishes and the whole crossing is the two triangles;
+// square on, the quadratic piece vanishes and this is the ramp again.
+fn half_plane(d: f32, n: vec2f) -> f32 {
+    let a = min(abs(n.x), abs(n.y));
+    let b = max(abs(n.x), abs(n.y));
+    let t = abs(d);
+    let far = (a + b) * 0.5;
+    let near = (b - a) * 0.5;
+    // A corner cut off the square: half the base times the height, in
+    // units where the base and height are the distance divided by each
+    // axis's share of the normal.
+    let corner = (far - t) * (far - t) / max(2.0 * a * b, 1e-6);
+    let straight = 0.5 - t / max(b, 1e-6);
+    let outside = select(select(corner, straight, t < near), 0.0, t >= far);
+    return select(1.0 - outside, outside, d >= 0.0);
+}
+
 fn edge(d: f32) -> f32 {
-    return clamp(0.5 - d / across(d), 0.0, 1.0);
+    // The gradient says both things this needs: how fast the distance
+    // changes across a pixel, which turns it into pixels, and which way
+    // the edge faces, which says how the pixel meets it.
+    let g = vec2f(dpdx(d), dpdy(d));
+    let len = max(length(g), 1e-6);
+    return clamp(half_plane(d / len, g / len), 0.0, 1.0);
 }
 
 // How fast a quantity changes over one screen pixel, in the direction it

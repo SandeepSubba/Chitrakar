@@ -10193,12 +10193,12 @@ mod tests {
                     rx: 7.0788,
                     ry: 6.9928,
                 },
-                0.05f32,
+                0.03f32,
             ),
             (
                 "a squashed one",
                 VectorShape::Ellipse { rx: 12.0, ry: 5.0 },
-                0.08,
+                0.07,
             ),
             (
                 "a rounded rectangle",
@@ -10207,7 +10207,7 @@ mod tests {
                     height: 14.0,
                     radius: 4.0,
                 },
-                0.07,
+                0.035,
             ),
             (
                 "a square-cornered one",
@@ -10256,7 +10256,7 @@ mod tests {
         }
     }
 
-    /// A square-cornered stroke's band is the area it covers too.
+    /// A stroke's band is the area it covers too.
     ///
     /// A band is one outline less another, so measuring it by a distance
     /// is two roundings-off rather than one — and a rectangle whose
@@ -10275,8 +10275,16 @@ mod tests {
     /// arc where the arc is more than a pixel across, and as the box
     /// below that, where an arc and the corner it cuts are not
     /// distinguishable and the box is exact in every other respect.
+    ///
+    /// The two curved bands are here for the same reason a fill's rim is:
+    /// neither of their outlines is a box, so neither is exact, and what
+    /// holds them where they are is `half_plane` — the area a straight
+    /// edge really lets through, which is the whole of what a distance
+    /// can say about a curve to first order. It took a rounded rect's
+    /// band from a tenth of full scale to a twentieth and a disc's from
+    /// 0.115 to 0.088.
     #[test]
-    fn a_square_cornered_bands_edge_is_the_area_it_covers() {
+    fn a_strokes_band_is_the_area_it_covers() {
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
@@ -10285,25 +10293,52 @@ mod tests {
             height: 14.0,
             radius: 0.0,
         };
-        for (what, width, align, ceiling) in [
-            ("a hairline", 1.0f32, None, 0.03f32),
-            ("two wide", 2.0, None, 0.03),
+        for (what, shape, width, align, ceiling) in [
+            ("a hairline", square.clone(), 1.0f32, None, 0.03f32),
+            ("two wide", square.clone(), 2.0, None, 0.03),
             (
                 "inside the shape",
+                square.clone(),
                 3.0,
                 Some(chitrakar_doc::StrokeAlign::Inside),
                 0.03,
             ),
             (
                 "outside it",
+                square.clone(),
                 3.0,
                 Some(chitrakar_doc::StrokeAlign::Outside),
-                0.07,
+                0.05,
             ),
-            ("wider than the shape", 40.0, None, 0.03),
+            ("wider than the shape", square.clone(), 40.0, None, 0.03),
+            // And the two whose outlines are curves, where neither is a
+            // box and so neither is exact: what holds them where they are
+            // is the area a straight edge really lets through, which is
+            // all a distance can say about a curve to first order.
+            (
+                "round-cornered",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 14.0,
+                    radius: 4.0,
+                },
+                2.0,
+                None,
+                0.06,
+            ),
+            (
+                "round the rim of a disc",
+                VectorShape::Ellipse {
+                    rx: 7.0788,
+                    ry: 6.9928,
+                },
+                2.0,
+                None,
+                0.10,
+            ),
         ] {
             let mut doc = Document::new(40, 30, ColorMode::Rgb);
-            let mut node = Node::vector("s", square.clone());
+            let mut node = Node::vector("s", shape);
             if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
                 *fill = Some(RED);
                 *stroke = Some(chitrakar_doc::Stroke {
@@ -10408,14 +10443,25 @@ mod tests {
         // being matched is exact across a row and sixteen deep down it.
         // Closing that means supersampling the whole page or handing the
         // backend the other's answer, and neither is a small change.
-        // The rest are a *curved* band: a stroke on an ellipse, 0.115,
-        // or on a rounded rectangle, 0.102, where the two outlines a
-        // band lies between are arcs of different radii and neither is
-        // exact. A square-cornered band was the worst of the three at
-        // 0.195 and is 0.025 now, being two boxes subtracted
-        // (`a_square_cornered_bands_edge_is_the_area_it_covers`); doing
-        // the same for a curve wants a coverage model for an arc, which
-        // is a bigger piece of work than a difference of two products.
+        // The rest are a *curved* edge, which is as good as a distance
+        // can make it: a straight edge's exact area, taken at the
+        // distance and facing of the curve, which is first-order right
+        // and no more (`a_shapes_edge_is_the_area_it_covers`,
+        // `a_strokes_band_is_the_area_it_covers` hold the numbers).
+        //
+        // And the worst pixel is a poor headline for this, which was
+        // worth finding out. It sat at 0.358 through three rounds of
+        // real improvement without moving, so it was chased: one page,
+        // one layer, undressed a thing at a time. It is a stroked disc
+        // whose *blend* is Difference — take the blend off and the same
+        // layer is 0.032, put it back and it is 0.330, and its mask has
+        // nothing to do with it. A blend that is not Normal reads an
+        // unpremultiplied colour, which divides by the coverage, so a
+        // thirtieth of a pixel of disagreement at a barely-covered edge
+        // comes out a third of full scale. Both renderers do the same
+        // arithmetic; the amplification is not a defect in either. So
+        // the number to read here is how many pages are rough and the
+        // mean inside each, not the worst pixel on the worst page.
         //
         // A shape's *fill* used to be here and is not any more, and
         // neither of the two things wrong with it was what it looked
@@ -10456,7 +10502,7 @@ mod tests {
         // rise here is good news when what is drawn rises with it and bad
         // news otherwise, which is why the two are printed together.
         assert!(
-            rough.len() <= 23 && worst_seen < 0.37,
+            rough.len() <= 21 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

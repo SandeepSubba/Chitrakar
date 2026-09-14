@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~441),
+- **Verify before committing:** `cargo test --workspace` (~442),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2641,11 +2641,37 @@ without reading anything else.*
      (`a_square_cornered_bands_edge_is_the_area_it_covers`, which also
      counts the band's own pixels, since a backend that drew no stroke
      at all would pass every comparison in it).
-     What that leaves is a *curved* band — 0.115 on an ellipse, 0.102 on
-     a rounded rectangle — where the two outlines are arcs of different
-     radii and neither is exact. Doing for those what was done here
-     wants a coverage model for an arc, which is a bigger piece of work
-     than a difference of two products.
+     What that left was the *curved* edge, and it turned out not to want
+     a model of an arc at all — it wanted the thing a distance had been
+     getting wrong all along. The coverage a distance was turned into was
+     a ramp: half a pixel either side of the line, straight between. That
+     is the area a straight edge lets through only for an edge standing
+     square on the page. Turn the edge and the pixel meets it
+     corner-first, and the area is quadratic over the part of the
+     crossing where a corner is cut off and linear only over the part
+     where two opposite sides are — two pieces, both closed form, with
+     how far apart the square's corners lie on the line's own axis
+     deciding which is which. At forty-five degrees the linear piece
+     vanishes; square on, the quadratic one does and it is the ramp
+     again. So it costs nothing anywhere and is exact where the ramp was
+     not. Every curved case improved and none regressed: a disc's rim
+     0.046 to 0.026, a rounded rectangle's corners 0.062 to 0.030, its
+     band a tenth of full scale to a twentieth, a disc's band 0.115 to
+     0.088 — and two more rough pages came clean.
+     And then the worst pixel, which had sat at 0.358 through three
+     rounds of real improvement without moving. Chased properly — one
+     page, one layer, undressed a thing at a time — it is a stroked disc
+     whose *blend* is Difference. Take the blend off and that same layer
+     is 0.032; put it back and it is 0.330; its mask, which looked the
+     likelier culprit, has nothing to do with it. A blend that is not
+     Normal reads an unpremultiplied colour, which divides by the
+     coverage, so a thirtieth of a pixel of disagreement at a
+     barely-covered edge comes out a third of full scale. Both renderers
+     do the same arithmetic and the amplification is not a defect in
+     either. Which settles how to read that audit: the numbers that mean
+     something are how many pages are rough and the mean inside each, and
+     the worst pixel on the worst page is mostly a fact about blend
+     modes. It stays in the ratchet as a ceiling, not as a target.
      The rest are a rectangle's *corners*, and chasing those found
      two more things in the reference renderer: a rounded rectangle is
      the same exact product away from its corners as a square one, which
