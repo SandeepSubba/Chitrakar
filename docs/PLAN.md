@@ -782,6 +782,41 @@ without reading anything else.*
   where a cast is a conversion each way: it made a blend *twice* as slow,
   102ns against 52ns, because baseline x86-64 has no `roundss` and
   `f32::floor` is a call into libm. A cast is the fast one here.
+- **Where the floor is, and four things that did not beat it.** The
+  adjustment pass looked like the next thing to take: a full page of
+  exposure 230ms, of hue/saturation 340ms, on tools a photo editor
+  reaches for constantly. It is not, and the measurement that settles it
+  is worth having written down. The same page with *no* adjustment on it
+  is 88ms; with the cheapest adjustment there is — a white balance, three
+  clamps and three multiplies, no call into libm and no matrix — it is
+  221ms. So the pass itself costs 133ms whatever arithmetic it does, and
+  133ms is exactly one read-and-write sweep of a hundred and forty
+  megabytes: the same ~65ms that touching the page once costs, doubled.
+  The adjustment pass is at this machine's memory bandwidth and there is
+  nothing in it to win. What hue/saturation spends above the floor is a
+  real 3×3 matrix.
+  Four attempts went into finding that out, and every one of them failed
+  in a way worth knowing:
+  - *Hoisting the transfer tables* out of the per-pixel blend, on the
+    reading that an opaque call through a `OnceLock` in the hottest loop
+    stops two pointers being kept in registers. Two percent.
+  - *`x.floor()` in place of `x as usize`* in the curve lookup, on the
+    reading that flooring is one instruction where a cast is a conversion
+    each way. Twice as slow — 102ns against 52ns — because baseline
+    x86-64 has no `roundss` and `f32::floor` is a call into libm.
+  - *Hoisting each adjustment's own constants* into what `prepare`
+    already returns, since an exposure raised two to a power and a hue
+    rotation took a sine and a cosine and built nine numbers, per pixel.
+    Hue/saturation got **25% slower**: LLVM was already hoisting that
+    work out of the loop, being pure and loop-invariant, and keeping the
+    matrix in registers — where reading it from a struct behind a
+    reference is a forty-byte load a pixel. The compiler had done it
+    better than the hand.
+  - *One reciprocal in place of three divides* to unpremultiply. No
+    change; three divides of a vector are one instruction.
+  Which is the lesson to carry into the next round of this: measure the
+  floor first — a page with the thing taken out — and only then ask what
+  the thing costs above it.
 - **Verify before committing:** `cargo test --workspace` (~447),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
