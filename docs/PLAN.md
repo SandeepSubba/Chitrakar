@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~439),
+- **Verify before committing:** `cargo test --workspace` (~440),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2593,6 +2593,33 @@ without reading anything else.*
      (`a_pictures_border_is_the_area_it_covers`, eighty-eight part-covered
      pixels checked one by one; take the skirt off and the border reads
      0.21 where it covers 0.42, take the fade off and it reads 1.0).
+     A shape's *fill* was a third cause and is not any more, and neither
+     of the two things wrong with it was what it looked like. `fwidth` is
+     |dx| + |dy|, where the rate a quantity changes across a pixel is the
+     length of its gradient — the same number only when one partial is
+     zero, and root two out on an edge at forty-five degrees, so every
+     ramp scaled by it came out that much too wide. And an ellipse's
+     first-order distance is singular at its middle, where the gradient
+     goes to nothing: a number that large has no meaningful rate of
+     change across a pixel, and it left a stray pixel three-quarters
+     covered in the middle of a solid disc. That second one was the worst
+     disagreement anywhere between the two renderers and it was not on an
+     edge, which is why every way of looking for it as an edge problem
+     had missed it — it was found by measuring one plain shape at a time
+     against the reference and printing where the worst pixel fell, which
+     is a cheaper instrument than the random pages and should have been
+     reached for first. A disc's worst pixel went from 0.308 to 0.046, a
+     squashed one's from 0.313 to 0.072, a rounded rectangle's corners
+     from 0.148 to 0.062; a square-cornered fill was already exact and
+     stayed so. Nine of the rough pages came clean
+     (`a_shapes_edge_is_the_area_it_covers`, which asks each shape for
+     the area arithmetic says it covers and for its total area besides,
+     since a shape drawn systematically fat would pass the first alone).
+     What that leaves, and it is next: a shape's *band*. A stroke is one
+     outline less another and neither is the exact fill either side of
+     it, so a square-cornered rectangle whose fill is exact here has the
+     worst band of the lot — 0.195 two wide, against an ellipse's 0.115
+     and a rounded rect's 0.102. Measured, not guessed.
      The rest are a rectangle's *corners*, and chasing those found
      two more things in the reference renderer: a rounded rectangle is
      the same exact product away from its corners as a square one, which

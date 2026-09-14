@@ -10157,6 +10157,105 @@ mod tests {
         );
     }
 
+    /// A shape's edge is within a twentieth of the area it really covers.
+    ///
+    /// The reference renderer's fills are exact — a rect's by a product
+    /// of two 1-D overlaps, an ellipse's by the two roots of a quadratic
+    /// — so what this measures is this backend's analytic coverage and
+    /// nothing else. Two things were wrong and both were found by
+    /// measuring rather than reading:
+    ///
+    /// `fwidth` is |dx| + |dy|, which is the rate a quantity changes
+    /// across a pixel only when one of those is zero. On an edge at
+    /// forty-five degrees the two differ by root two, so every ramp
+    /// scaled by it came out that much too wide. It is the gradient's
+    /// length now, which took a rounded rect's corners from a seventh
+    /// out to a sixteenth and halved the average error along an
+    /// ellipse's rim.
+    ///
+    /// And an ellipse's first-order distance is singular at its middle,
+    /// where the gradient goes to nothing: a number that large has no
+    /// meaningful rate of change across a pixel, and it left a stray
+    /// pixel three-quarters covered in the middle of a solid disc. That
+    /// was the worst disagreement anywhere between the two renderers and
+    /// it was not on an edge at all, which is why looking for it as an
+    /// edge problem had not found it. The distance is held to a few
+    /// pixels either side of the rim now.
+    #[test]
+    fn a_shapes_edge_is_the_area_it_covers() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        for (what, shape, ceiling) in [
+            (
+                "a disc",
+                VectorShape::Ellipse {
+                    rx: 7.0788,
+                    ry: 6.9928,
+                },
+                0.05f32,
+            ),
+            (
+                "a squashed one",
+                VectorShape::Ellipse { rx: 12.0, ry: 5.0 },
+                0.08,
+            ),
+            (
+                "a rounded rectangle",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 14.0,
+                    radius: 4.0,
+                },
+                0.07,
+            ),
+            (
+                "a square-cornered one",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 14.0,
+                    radius: 0.0,
+                },
+                0.001,
+            ),
+        ] {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            // Off the grid on both axes, so every edge falls inside a
+            // pixel rather than between two.
+            add(
+                &mut doc,
+                filled("s", shape, RED),
+                Transform::translation(6.4, 5.3),
+            );
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn here");
+            let mine = gpu.render(&doc).unwrap();
+            let theirs = chitrakar_render::render(&doc).unwrap();
+            let (mut worst, mut at) = (0.0f32, (0usize, 0usize));
+            for (i, (a, b)) in mine.pixels.iter().zip(&theirs.pixels).enumerate() {
+                let d = (a.a - b.a).abs();
+                if d > worst {
+                    worst = d;
+                    at = (i % 40, i / 40);
+                }
+            }
+            assert!(
+                worst <= ceiling,
+                "{what}: worst pixel off by {worst:.3} at {at:?}, past {ceiling:.3}"
+            );
+            // And the areas agree, which a shape drawn systematically
+            // fat or thin would fail even with every single pixel inside
+            // the ceiling above.
+            let (ga, ca): (f64, f64) = (
+                mine.pixels.iter().map(|p| p.a as f64).sum(),
+                theirs.pixels.iter().map(|p| p.a as f64).sum(),
+            );
+            assert!(
+                (ga - ca).abs() < 0.5,
+                "{what}: {ga:.2} pixels of it against the reference's {ca:.2}"
+            );
+        }
+    }
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -10198,8 +10297,8 @@ mod tests {
             drawn > 25,
             "the backend drew {drawn} of them and declined {declined}"
         );
-        // A ratchet on three known things rather than a tolerance, all
-        // three of them an edge drawn two ways. Many of these pages hold
+        // A ratchet on what is left rather than a tolerance, and what is
+        // left is an edge drawn two ways. Many of these pages hold
         // a *path*, which this backend fills through a stencil and
         // antialiases by multisampling it — four samples a pixel, which
         // is the only count WebGPU makes every adapter offer and the only
@@ -10208,10 +10307,28 @@ mod tests {
         // being matched is exact across a row and sixteen deep down it.
         // Closing that means supersampling the whole page or handing the
         // backend the other's answer, and neither is a small change.
-        // The rest are a rectangle's corners, where the reference
-        // renderer boxes sixty-four samples and this one takes a
-        // distance: two approximations of an arc, which do not have to
-        // land on the same number. A picture's border used to be a third
+        // The rest are a shape's *band* — a stroke, which is one outline
+        // less another and neither of them the exact fill either side of
+        // it. A sharp-cornered rectangle's fill is exact here and its
+        // stroke is the worst of them, a fifth of full scale, which is
+        // what says the band is its own problem rather than the fill's
+        // seen twice. That is the next thing to take, and it is measured
+        // rather than guessed at: 0.195 on a square-cornered band two
+        // wide, 0.115 on an ellipse's, 0.102 on a rounded rect's.
+        //
+        // A shape's *fill* used to be here and is not any more, and
+        // neither of the two things wrong with it was what it looked
+        // like. `fwidth` is |dx| + |dy| where the rate of change across
+        // a pixel is the gradient's length: the same number only when
+        // one partial is zero, and root two out on an edge at forty-five
+        // degrees, so every ramp scaled by it was that much too wide.
+        // And an ellipse's first-order distance is singular at its
+        // middle, which left a stray pixel three-quarters covered in the
+        // middle of a solid disc — the worst disagreement anywhere
+        // between the two renderers, not on an edge at all, and so
+        // invisible to every way of looking for it as one. Nine of the
+        // rough pages came clean with the two of them
+        // (`a_shapes_edge_is_the_area_it_covers`). A picture's border used to be a third
         // cause and is not any more: it was the *same* quantization, the
         // quad's own edge caught by four samples, and it went once the
         // quad grew a device pixel and the shader faded it by the area
@@ -10238,7 +10355,7 @@ mod tests {
         // rise here is good news when what is drawn rises with it and bad
         // news otherwise, which is why the two are printed together.
         assert!(
-            rough.len() <= 34 && worst_seen < 0.37,
+            rough.len() <= 25 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

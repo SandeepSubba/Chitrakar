@@ -84,7 +84,16 @@ fn ellipse_distance(p: vec2f, c: vec2f, r: vec2f) -> f32 {
     let k = (p - c) / r;
     let f = dot(k, k) - 1.0;
     let g = 2.0 * vec2f(k.x / r.x, k.y / r.y);
-    return f / max(length(g), 1e-6);
+    // Held to a few pixels either side of the rim, which is the only
+    // place a distance decides anything: an edge a pixel wide reads
+    // nothing from a distance of eight. It is held because the middle is
+    // singular — the gradient goes to nothing there and this ratio to
+    // minus infinity with it, and a number that large has a meaningless
+    // rate of change across a pixel. That left a stray pixel about
+    // three-quarters covered in the middle of a solid disc, which was
+    // this backend's worst disagreement with the reference anywhere:
+    // not an edge at all, and nothing an edge-drawing fix would reach.
+    return clamp(f / max(length(g), 1e-6), -8.0, 8.0);
 }
 
 // How much of this pixel a signed distance covers. The soft band is one
@@ -93,7 +102,21 @@ fn ellipse_distance(p: vec2f, c: vec2f, r: vec2f) -> f32 {
 // be taken in uniform control flow, which is why every distance below
 // is computed and only then selected between.
 fn edge(d: f32) -> f32 {
-    return clamp(0.5 - d / max(fwidth(d), 1e-6), 0.0, 1.0);
+    return clamp(0.5 - d / across(d), 0.0, 1.0);
+}
+
+// How fast a quantity changes over one screen pixel, in the direction it
+// changes fastest: the length of its screen-space gradient.
+//
+// `fwidth` is the cheaper |dx| + |dy|, which is the same number only when
+// one of the two is zero. On an edge at forty-five degrees they differ by
+// root two, so a ramp scaled by `fwidth` comes out that much too wide —
+// and that is most of what separated this backend's ellipses from the
+// reference's, whose spans are exact: the areas agreed to a third of a
+// pixel while single pixels along the rim were out by a third of full
+// scale.
+fn across(v: f32) -> f32 {
+    return max(length(vec2f(dpdx(v), dpdy(v))), 1e-6);
 }
 
 // How much of this pixel the shape covers. `params.w` says which shape
@@ -141,8 +164,8 @@ fn coverage(in: VsOut) -> f32 {
     // it costs two clamps. Only where there is a corner to get wrong: a
     // rounded rect's corner really is an arc, and an ellipse has none.
     let q = abs(in.local - r) - r;
-    let square = clamp(0.5 - q.x / max(fwidth(q.x), 1e-6), 0.0, 1.0)
-        * clamp(0.5 - q.y / max(fwidth(q.y), 1e-6), 0.0, 1.0);
+    let square = clamp(0.5 - q.x / across(q.x), 0.0, 1.0)
+        * clamp(0.5 - q.y / across(q.y), 0.0, 1.0);
     let sharp = !band && !ellipse && in.params.z <= 0.0;
     let cov = select(edge(select(plain, outer, band)), square, sharp);
     return select(cov, clamp(cov - edge(inner), 0.0, 1.0), band);
@@ -260,7 +283,7 @@ fn vs_image(
 // border is whatever the 4-sample coverage mask happened to catch —
 // 0, a quarter, a half — against the CPU's exact 0.6 of a pixel.
 fn edge_cover(u: f32) -> f32 {
-    let w = max(fwidth(u), 1e-6);
+    let w = across(u);
     return clamp(0.5 + u / w, 0.0, 1.0) * clamp(0.5 + (1.0 - u) / w, 0.0, 1.0);
 }
 
