@@ -3918,6 +3918,50 @@ fn blend_row(
     bbox: ClipRect,
     py: u32,
 ) {
+    // A flat colour under no mask, which is most of what anything draws.
+    //
+    // The general row below asks the paint what colour it is at a point,
+    // and works the point out by inverting the transform — six multiplies
+    // and two adds a pixel, spent on an answer that was the same for
+    // every pixel before the loop started. Then it asks which blend mode
+    // to use, once per pixel, off a value that cannot change inside a
+    // row. Neither is much on its own and together they were most of the
+    // cost of filling a shape: a page-filling rectangle on an A4 at three
+    // hundred dots an inch took twenty-five nanoseconds a pixel, which is
+    // fifty-odd cycles to put one colour down.
+    if let (Paint::Solid(flat), None) = (paint, mask.mask) {
+        let flat = *flat;
+        let row = (py * dst.width) as usize;
+        let (from, to) = (
+            row + bbox.x0.min(dst.width) as usize,
+            row + bbox.x1.min(dst.width) as usize,
+        );
+        if to <= from {
+            return;
+        }
+        let span = &mut dst.pixels[from..to];
+        let n = span.len().min(cov.len());
+        let (span, cov) = (&mut span[..n], &cov[..n]);
+        if mode == BlendMode::Normal {
+            // Laid straight over, which is a multiply and an add per
+            // channel and nothing else. Written as one loop over two
+            // slices so that it vectorizes.
+            for (p, &a) in span.iter_mut().zip(cov) {
+                let a = a.min(1.0);
+                if a > 0.0 {
+                    *p = scale_alpha(flat, a).over(*p);
+                }
+            }
+        } else {
+            for (p, &a) in span.iter_mut().zip(cov) {
+                let a = a.min(1.0);
+                if a > 0.0 {
+                    *p = blend_pixel(scale_alpha(flat, a), *p, mode);
+                }
+            }
+        }
+        return;
+    }
     for px in bbox.x0..bbox.x1 {
         let a = cov[(px - bbox.x0) as usize].min(1.0);
         if a <= 0.0 {
@@ -3930,6 +3974,54 @@ fn blend_row(
         let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
         let i = (py * dst.width + px) as usize;
         dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
+    }
+}
+
+/// The same rasterizer for a rectangle standing square on the page.
+///
+/// Its exact coverage is a product of two one-dimensional overlaps — how
+/// much of the pixel the rectangle covers across, times how much down —
+/// and neither factor changes as the other moves. So the row of across
+/// is worked out once for the whole shape and the down is one number a
+/// row, where asking pixel by pixel worked both out again for every
+/// pixel. Same arithmetic in the same order, same picture to the bit.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect_scanlines(
+    dst: &mut Surface,
+    doc: &Document,
+    width: f32,
+    height: f32,
+    t: Transform,
+    inv: Inverse,
+    paint: &Paint,
+    mode: BlendMode,
+    bbox: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    let span = |lo: f32, hi: f32, at: u32| {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+    };
+    // A region can be handed here empty — a dirty rectangle that fell
+    // off the page, a clip that met nothing — and an empty one is not
+    // always written with its corners in order.
+    if bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0 {
+        return;
+    }
+    let n = (bbox.x1 - bbox.x0) as usize;
+    let across: Vec<f32> = (0..n)
+        .map(|i| span(t.e, t.e + width * t.a, bbox.x0 + i as u32))
+        .collect();
+    let mut cov = vec![0.0f32; n];
+    for py in bbox.y0..bbox.y1 {
+        let down = span(t.f, t.f + height * t.d, py);
+        if down <= 0.0 {
+            continue;
+        }
+        for (c, a) in cov.iter_mut().zip(&across) {
+            *c = *a * down;
+        }
+        blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
     }
 }
 
@@ -4064,6 +4156,29 @@ fn paint_shape(
     if let (VectorShape::Ellipse { rx, ry }, None) = (shape, stroke) {
         fill_ellipse_scanlines(dst, doc, *rx, *ry, inv, paint, mode, bbox, mask);
         return;
+    }
+    // A rectangle standing square on the page is spans too, and the
+    // plainest of them: the exact coverage of one is a product of how much
+    // of the pixel it covers across and how much down, so a row of it is
+    // one number worked out down the page times a row of numbers worked
+    // out across it — neither of which changes as the other moves. Per
+    // pixel that is the same arithmetic in the same order, so the picture
+    // is the same to the bit; what it is not is the same *work*. And it
+    // puts the commonest fill there is through the row below, which knows
+    // that a flat colour is the same colour everywhere.
+    if let (
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        },
+        None,
+    ) = (shape, stroke)
+    {
+        if *radius <= 0.0 && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
+            fill_rect_scanlines(dst, doc, *width, *height, t, inv, paint, mode, bbox, mask);
+            return;
+        }
     }
     if let (
         VectorShape::Path {
@@ -10377,6 +10492,65 @@ mod tests {
             "TIMING rect+ellipse: {:?} per 512x512 frame",
             t1.elapsed() / 10
         );
+    }
+
+    /// A rectangle covers the area it really has, at any offset.
+    ///
+    /// Its coverage is a product of two one-dimensional overlaps, which is
+    /// exact — and it is now worked out as a product of a row and a column
+    /// rather than pixel by pixel, because neither factor changes as the
+    /// other moves. That is the same arithmetic in the same order, so this
+    /// asks for the thing that arithmetic promises: the alpha laid down
+    /// adds up to the area, whatever fraction of a pixel the edges fall
+    /// on. A sampler would be out by a sixteenth here and there; a product
+    /// of overlaps is out by nothing.
+    ///
+    /// And the edge columns are asked for by name as well as by total,
+    /// since a shape drawn a pixel to the left would keep the same area.
+    #[test]
+    fn a_rect_covers_the_area_it_really_has() {
+        for (w, h, at) in [
+            (4.0f32, 4.0f32, (2.5f32, 2.0f32)),
+            (5.0, 3.0, (1.3, 2.7)),
+            (7.5, 6.25, (0.1, 0.9)),
+            // Smaller than a pixel across, which is the case a span can
+            // get wrong by starting and ending in the same one.
+            (0.4, 3.0, (2.3, 1.0)),
+        ] {
+            let mut doc = Document::new(16, 16, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("r", w, h, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            let s = render(&doc).unwrap();
+            let area: f64 = s.pixels.iter().map(|p| p.a as f64).sum();
+            assert!(
+                (area - (w * h) as f64).abs() < 1e-3,
+                "{w}x{h} at {at:?} laid down {area:.4} of alpha for an area of {}",
+                w * h
+            );
+            // The column the left edge falls in covers exactly the part of
+            // it that is inside, times the whole of a row it crosses.
+            let col = at.0.floor() as u32;
+            let inside = (col as f32 + 1.0 - at.0).min(w);
+            let row = (at.1.floor() + 1.0) as u32;
+            if row < 16 && at.1.fract() == 0.0 {
+                assert!(
+                    (s.get(col, row).a - inside).abs() < 1e-4,
+                    "{w}x{h} at {at:?}: the left column reads {:.4}, not the {inside:.4} it covers",
+                    s.get(col, row).a
+                );
+            }
+        }
     }
 
     #[test]

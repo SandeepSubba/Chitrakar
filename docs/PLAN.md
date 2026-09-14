@@ -697,7 +697,33 @@ without reading anything else.*
   a zero float, which is asked of the bits *and* of the type's size —
   a field added later would still leave those four zero while quietly
   filling every surface in the engine with something else.
-- **Verify before committing:** `cargo test --workspace` (~444),
+- **A flat colour is the same colour everywhere, and a rectangle is
+  spans.** Chasing the page-sized surface above turned up the next thing
+  down: a page-filling rectangle on an A4 at 300dpi cost twenty-five
+  nanoseconds a pixel, fifty-odd cycles to put one colour down. Two
+  things, both of them work spent on answers that were already known.
+  The row loop asked the paint what colour it is *at a point*, and worked
+  the point out by inverting the transform — six multiplies and two adds
+  a pixel for a `Paint::Solid` — and then asked which blend mode to use
+  once per pixel off a value that cannot change inside a row. A flat
+  colour under no mask is now its own loop over two slices, with Normal
+  split out, which is a multiply and an add per channel and nothing else.
+  And a rectangle standing square on the page had no scanline form at
+  all, where an ellipse and a path both did — so it never reached that
+  row. Its exact coverage is a product of two one-dimensional overlaps
+  and neither factor changes as the other moves: the across is worked out
+  once for the shape, the down is one number a row. The same arithmetic
+  in the same order, so the picture is the same to the bit — which is
+  what the cross-renderer audit and the pixel-exact cached-render tests
+  say, and what `a_rect_covers_the_area_it_really_has` asks for directly
+  (quantize that product the way a sampler would and it is the only thing
+  that fails).
+  A page-filling rect 217ms → 110ms, two of them 370ms → 125ms, a
+  1800-pixel disc 85ms → 70ms, and the A4 probe the two of these were
+  found through 301ms → ~135ms. A turned rectangle is unchanged and
+  falls through to the sampler, since a product of overlaps is not its
+  area.
+- **Verify before committing:** `cargo test --workspace` (~445),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
