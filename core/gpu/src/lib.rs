@@ -10256,6 +10256,107 @@ mod tests {
         }
     }
 
+    /// A square-cornered stroke's band is the area it covers too.
+    ///
+    /// A band is one outline less another, so measuring it by a distance
+    /// is two roundings-off rather than one — and a rectangle whose
+    /// *fill* is exact here had the worst band of any shape, a fifth of
+    /// full scale. It need not be: the outline grown and the outline
+    /// shrunk are both boxes, the shrunk one lies inside the grown one,
+    /// and a box's coverage is exact, so the area between them is the
+    /// difference of two exact answers.
+    ///
+    /// With one reservation, which is the reference renderer's too: a
+    /// band is carried round a corner by the join, and what is drawn
+    /// there is a quarter circle of the band's own reach rather than a
+    /// square. Squaring it off cost far more than the distance had on an
+    /// outside-aligned stroke, where the reach is the whole width —
+    /// two thirds of full scale, measured. So the corner is taken as an
+    /// arc where the arc is more than a pixel across, and as the box
+    /// below that, where an arc and the corner it cuts are not
+    /// distinguishable and the box is exact in every other respect.
+    #[test]
+    fn a_square_cornered_bands_edge_is_the_area_it_covers() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let square = VectorShape::Rect {
+            width: 20.0,
+            height: 14.0,
+            radius: 0.0,
+        };
+        for (what, width, align, ceiling) in [
+            ("a hairline", 1.0f32, None, 0.03f32),
+            ("two wide", 2.0, None, 0.03),
+            (
+                "inside the shape",
+                3.0,
+                Some(chitrakar_doc::StrokeAlign::Inside),
+                0.03,
+            ),
+            (
+                "outside it",
+                3.0,
+                Some(chitrakar_doc::StrokeAlign::Outside),
+                0.07,
+            ),
+            ("wider than the shape", 40.0, None, 0.03),
+        ] {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let mut node = Node::vector("s", square.clone());
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = Some(RED);
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    width,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    align,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            add(&mut doc, Box::new(node), Transform::translation(6.4, 5.3));
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn here");
+            let mine = gpu.render(&doc).unwrap();
+            let theirs = chitrakar_render::render(&doc).unwrap();
+            let (mut worst, mut at) = (0.0f32, (0usize, 0usize));
+            for (i, (a, b)) in mine.pixels.iter().zip(&theirs.pixels).enumerate() {
+                let d = (a.r - b.r)
+                    .abs()
+                    .max((a.g - b.g).abs())
+                    .max((a.b - b.b).abs())
+                    .max((a.a - b.a).abs());
+                if d > worst {
+                    worst = d;
+                    at = (i % 40, i / 40);
+                }
+            }
+            assert!(
+                worst <= ceiling,
+                "{what}: worst pixel off by {worst:.3} at {at:?}, past {ceiling:.3} \
+                 (gpu {:?} against {:?})",
+                mine.pixels[at.1 * 40 + at.0].to_srgb8(),
+                theirs.pixels[at.1 * 40 + at.0].to_srgb8()
+            );
+            // And the band is actually there, or a backend that drew no
+            // stroke at all would pass every line above.
+            let inked = mine
+                .pixels
+                .iter()
+                .filter(|p| p.b > 0.5 && p.r < 0.5)
+                .count();
+            assert!(inked > 30, "{what}: only {inked} pixels of band drawn");
+        }
+    }
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -10307,14 +10408,14 @@ mod tests {
         // being matched is exact across a row and sixteen deep down it.
         // Closing that means supersampling the whole page or handing the
         // backend the other's answer, and neither is a small change.
-        // The rest are a shape's *band* — a stroke, which is one outline
-        // less another and neither of them the exact fill either side of
-        // it. A sharp-cornered rectangle's fill is exact here and its
-        // stroke is the worst of them, a fifth of full scale, which is
-        // what says the band is its own problem rather than the fill's
-        // seen twice. That is the next thing to take, and it is measured
-        // rather than guessed at: 0.195 on a square-cornered band two
-        // wide, 0.115 on an ellipse's, 0.102 on a rounded rect's.
+        // The rest are a *curved* band: a stroke on an ellipse, 0.115,
+        // or on a rounded rectangle, 0.102, where the two outlines a
+        // band lies between are arcs of different radii and neither is
+        // exact. A square-cornered band was the worst of the three at
+        // 0.195 and is 0.025 now, being two boxes subtracted
+        // (`a_square_cornered_bands_edge_is_the_area_it_covers`); doing
+        // the same for a curve wants a coverage model for an arc, which
+        // is a bigger piece of work than a difference of two products.
         //
         // A shape's *fill* used to be here and is not any more, and
         // neither of the two things wrong with it was what it looked
@@ -10355,7 +10456,7 @@ mod tests {
         // rise here is good news when what is drawn rises with it and bad
         // news otherwise, which is why the two are printed together.
         assert!(
-            rough.len() <= 25 && worst_seen < 0.37,
+            rough.len() <= 23 && worst_seen < 0.37,
             "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
         );
         eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");

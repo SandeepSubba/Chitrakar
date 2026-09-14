@@ -119,6 +119,16 @@ fn across(v: f32) -> f32 {
     return max(length(vec2f(dpdx(v), dpdy(v))), 1e-6);
 }
 
+// How much of this pixel an axis-aligned box covers, given how far
+// outside it this point is on each axis — negative inside. Exact for a
+// box standing square on the page, since the area a box and a pixel share
+// is the product of what they share along each axis on its own, and much
+// the nearer answer for a turned one than a distance is.
+fn box_cover(q: vec2f) -> f32 {
+    return clamp(0.5 - q.x / across(q.x), 0.0, 1.0)
+        * clamp(0.5 - q.y / across(q.y), 0.0, 1.0);
+}
+
 // How much of this pixel the shape covers. `params.w` says which shape
 // it is — 0 a rounded rectangle, 1 an ellipse, and 2 or 3 the same two
 // as a stroke, whose band lies between two outlines: the shape grown by
@@ -164,11 +174,38 @@ fn coverage(in: VsOut) -> f32 {
     // it costs two clamps. Only where there is a corner to get wrong: a
     // rounded rect's corner really is an arc, and an ellipse has none.
     let q = abs(in.local - r) - r;
-    let square = clamp(0.5 - q.x / across(q.x), 0.0, 1.0)
-        * clamp(0.5 - q.y / across(q.y), 0.0, 1.0);
-    let sharp = !band && !ellipse && in.params.z <= 0.0;
-    let cov = select(edge(select(plain, outer, band)), square, sharp);
-    return select(cov, clamp(cov - edge(inner), 0.0, 1.0), band);
+    // And its *band* is one such box less another: the outline grown and
+    // the outline shrunk are both boxes, the shrunk one lies inside the
+    // grown one, so the area between them is the difference of two exact
+    // answers and is exact itself. Which mattered more than the fill did
+    // — a square-cornered fill was already exact here and its stroke was
+    // this backend's worst disagreement with the reference of any shape,
+    // a fifth of full scale, because a band measured by a distance is
+    // two roundings-off rather than one.
+    // Away from the corners, that is. A band drawn round a corner is
+    // carried round it by the join, and what the reference renderer
+    // draws there is a quarter circle of the band's own reach — so the
+    // outer outline is square along the runs and an arc at the four
+    // places a run ends, and squaring it off there was worse than the
+    // distance had been. The inner outline has no such reservation: the
+    // inside of a corner is where two runs meet, not where one is
+    // carried round.
+    let sharp = !ellipse && in.params.z <= 0.0;
+    let gone = shrunk.x <= 0.0 || shrunk.y <= 0.0;
+    let round_off = q.x > 0.0 && q.y > 0.0 && grow > 1.0;
+    let square_band = clamp(
+        select(box_cover(q - vec2f(grow, grow)), edge(plain - grow), round_off)
+            - select(box_cover(q + vec2f(shrink, shrink)), 0.0, gone),
+        0.0,
+        1.0,
+    );
+    let solid = select(edge(plain), box_cover(q), sharp);
+    let banded = select(
+        clamp(edge(outer) - edge(inner), 0.0, 1.0),
+        square_band,
+        sharp,
+    );
+    return select(solid, banded, band);
 }
 
 @fragment

@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~440),
+- **Verify before committing:** `cargo test --workspace` (~441),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2615,11 +2615,37 @@ without reading anything else.*
      (`a_shapes_edge_is_the_area_it_covers`, which asks each shape for
      the area arithmetic says it covers and for its total area besides,
      since a shape drawn systematically fat would pass the first alone).
-     What that leaves, and it is next: a shape's *band*. A stroke is one
-     outline less another and neither is the exact fill either side of
-     it, so a square-cornered rectangle whose fill is exact here has the
-     worst band of the lot — 0.195 two wide, against an ellipse's 0.115
-     and a rounded rect's 0.102. Measured, not guessed.
+     A shape's *band* went the same way next. A stroke is one outline
+     less another, so measuring it by a distance is two roundings-off
+     rather than one, and a square-cornered rectangle whose fill was
+     already exact had the worst band of any shape at 0.195. It need not
+     have: the outline grown and the outline shrunk are both boxes, the
+     shrunk one lies inside the grown one, and a box's coverage is
+     exact, so the area between them is the difference of two exact
+     answers. 0.025 now, at every width and alignment tried.
+     With one reservation, and finding it was the useful part: squaring
+     the corner off made an outside-aligned stroke *much* worse — two
+     thirds of full scale, against the fifth the distance had cost —
+     because a band is carried round a corner by the join and what is
+     drawn there is a quarter circle of the band's own reach. The
+     reference renderer has the same reservation, added when the same
+     mistake was made there; this is the second time that corner has
+     been squared off by somebody who had just proved the runs exact.
+     Taking the corner as an arc *instead* then cost the centred and
+     inside-aligned cases their 0.025, since below a pixel of reach an
+     arc and the corner it cuts are not distinguishable and the SDF is
+     the worse of the two answers. So the arc is used where the arc is
+     more than a pixel across and the box below that, which is the best
+     of both measured rather than argued: 0.025 centred, inside, and at
+     a width wider than the shape, 0.053 outside
+     (`a_square_cornered_bands_edge_is_the_area_it_covers`, which also
+     counts the band's own pixels, since a backend that drew no stroke
+     at all would pass every comparison in it).
+     What that leaves is a *curved* band — 0.115 on an ellipse, 0.102 on
+     a rounded rectangle — where the two outlines are arcs of different
+     radii and neither is exact. Doing for those what was done here
+     wants a coverage model for an arc, which is a bigger piece of work
+     than a difference of two products.
      The rest are a rectangle's *corners*, and chasing those found
      two more things in the reference renderer: a rounded rectangle is
      the same exact product away from its corners as a square one, which
