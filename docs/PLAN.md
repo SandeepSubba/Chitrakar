@@ -753,7 +753,36 @@ without reading anything else.*
   once a row instead — and it bought two percent. The cost is the
   arithmetic itself, not finding the tables, so the parameter came back
   out again. Worth the hour to know which.
-- **Verify before committing:** `cargo test --workspace` (~446),
+- **A picture at its own size is its own texels.** A survey of the layer
+  kinds that had never been timed found the biggest number in the
+  renderer and the commonest thing a photo editor does: a page-filling
+  picture on an A4 at 300dpi, 400ms. A blit takes four texels and mixes
+  them, which is right when a picture is being enlarged and pure waste
+  when it is not — laid down at its own size, square to the page and on
+  whole pixels, the sample lands on a texel's own centre and both
+  interpolations are between a value and itself. It takes the one texel
+  now: ~411ms → ~181ms, three readings each way. Bit-identical, since
+  mixing `a` and `b` by nothing is `a + (b - a) * 0`.
+  And the one division a pixel — the source byte's alpha over 255 — is a
+  256-entry table beside the sRGB one, holding what the division gives
+  entry for entry, so it is the same number rather than a near one
+  (`v * (1.0 / 255.0)` is not, in the last place). Worth ~7% on a
+  resampled blit, where there are four of them a pixel.
+  What pins it is `a_picture_at_its_own_size_is_its_own_texels`, which
+  holds every pixel of the page against the source byte it came from
+  rather than taking a tolerance over the whole picture: shift the texel
+  picked by one and it is the only thing in the workspace that fails,
+  because a photograph of smooth things survives being moved by a pixel.
+  Two things measured and thrown away with it. A rectangle's exact
+  coverage is separable and a picture's outline is a rectangle, so the
+  blit's edge coverage can be a row times a column the way a rect fill's
+  is — it bought two percent and a branch in the hot loop, and went back
+  out. And `x as usize` was replaced by `x.floor() as usize` in the
+  transfer-curve lookup on the reasoning that flooring is one instruction
+  where a cast is a conversion each way: it made a blend *twice* as slow,
+  102ns against 52ns, because baseline x86-64 has no `roundss` and
+  `f32::floor` is a call into libm. A cast is the fast one here.
+- **Verify before committing:** `cargo test --workspace` (~447),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single

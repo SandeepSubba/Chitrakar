@@ -4266,8 +4266,15 @@ fn draw_raster(
 ) {
     // 8-bit sRGB → linear lookup table, built per blit (256 entries, cheap).
     let mut lut = [0f32; 256];
+    // And the same for alpha, which is not a curve but a division — the
+    // dearest arithmetic there is, and there is one of it a pixel. The
+    // table holds what the division gives, entry for entry, so this is
+    // the same number and not a near one: `v / 255.0` against
+    // `v * (1.0 / 255.0)`, which is not the same in the last place.
+    let mut alpha_of = [0f32; 256];
     for (v, out) in lut.iter_mut().enumerate() {
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
+        alpha_of[v] = v as f32 / 255.0;
     }
     let bbox = draw_bbox(t, res.width as f32, res.height as f32, dst, clip);
     let Some(inv) = Inverse::of(t) else {
@@ -4277,7 +4284,7 @@ fn draw_raster(
     // transparent neighbour.
     let texel = |x: u32, y: u32| -> LinearRgba {
         let s = ((y * res.width + x) * 4) as usize;
-        let a = res.rgba8[s + 3] as f32 / 255.0;
+        let a = alpha_of[res.rgba8[s + 3] as usize];
         LinearRgba {
             r: lut[res.rgba8[s] as usize] * a,
             g: lut[res.rgba8[s + 1] as usize] * a,
@@ -4300,6 +4307,22 @@ fn draw_raster(
     let taps_x = (foot_x.ceil() as u32).clamp(1, 4);
     let taps_y = (foot_y.ceil() as u32).clamp(1, 4);
     let averaging = taps_x > 1 || taps_y > 1;
+    // A picture laid down at its own size, square to the page, on whole
+    // pixels — which is a photograph opened and looked at, and every
+    // export of one. There each device pixel is one texel and no more:
+    // the point it samples lands exactly on a texel centre, so both
+    // interpolations are between a value and itself. The four fetches and
+    // three interpolations below come out at the first of the four, so
+    // this takes it directly. Same value to the bit, since mixing `a` and
+    // `b` by nothing is `a + (b - a) * 0`.
+    let straight = (t.b == 0.0
+        && t.c == 0.0
+        && t.a == 1.0
+        && t.d == 1.0
+        && t.e.fract() == 0.0
+        && t.f.fract() == 0.0)
+        .then_some((t.e as i64, t.f as i64));
+
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             // The image is a rect in local space, so its outline gets the
@@ -4327,7 +4350,11 @@ fn draw_raster(
                 let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
                 lerp(top, bottom, fy)
             };
-            let sampled = if averaging {
+            let sampled = if let Some((ox, oy)) = straight {
+                let sx = (px as i64 - ox).clamp(0, res.width as i64 - 1) as u32;
+                let sy = (py as i64 - oy).clamp(0, res.height as i64 - 1) as u32;
+                texel(sx, sy)
+            } else if averaging {
                 let mut acc = LinearRgba::TRANSPARENT;
                 for j in 0..taps_y {
                     for i in 0..taps_x {
@@ -13829,6 +13856,80 @@ mod tests {
             ramp.windows(2).all(|w| w[1] >= w[0]),
             "ramp should rise monotonically, got {ramp:?}"
         );
+    }
+
+    /// A picture laid down at its own size, on whole pixels, is its own
+    /// texels — each one exactly, not nearly.
+    ///
+    /// That is what makes the fast path in the blit legitimate. A sample
+    /// taken at a texel's own centre lands with nothing either side of it
+    /// to mix in, so both interpolations are between a value and itself,
+    /// and `a + (b - a) * 0` is `a`. The four fetches and three
+    /// interpolations come out at the first fetch, so it takes that
+    /// directly — and a photograph opened and looked at, or exported, is
+    /// this case and not the general one.
+    ///
+    /// Asked of the values rather than of the arithmetic: every pixel of
+    /// the page is held against the source byte it came from, converted
+    /// the one way the engine converts. An off-by-one in the texel picked,
+    /// or a sample half a pixel out, moves the picture and fails here —
+    /// where a tolerance over the whole page would not notice a shift by
+    /// one in a photograph of smooth things.
+    #[test]
+    fn a_picture_at_its_own_size_is_its_own_texels() {
+        let (w, h) = (11u32, 7u32);
+        // Bytes with no pattern a neighbour could stand in for, so a
+        // sample taken one texel over is a different number.
+        let bytes: Vec<u8> = (0..w * h * 4)
+            .map(|i| ((i as u64 * 37 + 11) % 251) as u8)
+            .collect();
+        let mut doc = Document::new(20, 16, ColorMode::Rgb);
+        let rid = doc.add_resource(w, h, bytes.clone());
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "photo",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: w,
+                    height: h,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let (ox, oy) = (4u32, 3u32);
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(ox as f32, oy as f32),
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        for ty in 0..h {
+            for tx in 0..w {
+                let at = ((ty * w + tx) * 4) as usize;
+                let a = bytes[at + 3] as f32 / 255.0;
+                let want = LinearRgba {
+                    r: chitrakar_color::srgb_to_linear(bytes[at] as f32 / 255.0) * a,
+                    g: chitrakar_color::srgb_to_linear(bytes[at + 1] as f32 / 255.0) * a,
+                    b: chitrakar_color::srgb_to_linear(bytes[at + 2] as f32 / 255.0) * a,
+                    a,
+                };
+                let got = s.get(tx + ox, ty + oy);
+                assert_eq!(
+                    (got.r, got.g, got.b, got.a),
+                    (want.r, want.g, want.b, want.a),
+                    "texel ({tx},{ty}) came out as something else"
+                );
+            }
+        }
+        // And nothing outside it: the picture's own box and no more.
+        assert_eq!(s.get(ox - 1, oy).a, 0.0, "nothing to the left of it");
+        assert_eq!(s.get(ox + w, oy).a, 0.0, "nor to the right");
+        assert_eq!(s.get(ox, oy - 1).a, 0.0, "nor above");
+        assert_eq!(s.get(ox, oy + h).a, 0.0, "nor below");
     }
 
     #[test]
