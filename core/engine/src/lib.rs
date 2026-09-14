@@ -16417,6 +16417,111 @@ mod save_probe {
         );
     }
 
+    /// A dab on a layer's *mask* repaints where the dab is, and the dab is
+    /// where the mask says rather than where the layer says.
+    ///
+    /// A brush has two spaces in it and this is the only thing that turns
+    /// on which: a paint layer's own strokes are written in its own space,
+    /// and its painted mask's are written in its parent's, because a mask
+    /// describes the document as the layer sees it. Confuse the two and a
+    /// mask dab's dirty region is offset by the layer's whole transform —
+    /// the engine repaints somewhere the dab is not, so the dab stays on
+    /// screen as it was however correctly it was drawn into the buffer.
+    ///
+    /// It wants a test of its own, which is the interesting part. The
+    /// shared fixture has all three mask-stroke commands in its list now,
+    /// and the audit that holds every command's dirty region to what
+    /// actually moved cannot see this at all: that document carries a
+    /// *filter*, and a filter's reach grows every dirty region in the
+    /// document by its radius on every side, which here swells a stroke's
+    /// box to the whole page. Conservative and correct, and it swallows
+    /// the error whole. So: no filter, and a transform far larger than any
+    /// rounding, so that the wrong space misses by a mile.
+    #[test]
+    fn a_dab_on_a_mask_dirties_where_the_mask_says() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let layer = session.add_paint_layer("brush").unwrap();
+        let ink: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        // Something for the mask to hide: a stroke clear across the page.
+        session
+            .paint_begin(layer, 20.0, 20.0, 40.0, ink.clone(), 0.0, false, false)
+            .unwrap();
+        session.paint_extend(380.0, 380.0, 40.0).unwrap();
+        assert!(session.commit_preview());
+        // And the layer well away from the origin, which is what makes the
+        // layer's space and its parent's tell apart.
+        session
+            .apply(Command::SetTransform {
+                id: layer,
+                transform: Transform::translation(-90.0, 70.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetMask {
+                id: layer,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Painted { strokes: vec![] },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        let before = session.render_cached().unwrap().0.clone();
+
+        // An eraser dab on the mask, in page coordinates, where the layer
+        // draws.
+        // The stroke runs from (20,20) to (380,380) in the layer's own
+        // space, so on the page it runs along y = x + 160: this is a
+        // point on it.
+        let (dab_x, dab_y) = (100.0f32, 260.0f32);
+        session
+            .paint_begin(layer, dab_x, dab_y, 25.0, ink, 0.0, true, true)
+            .unwrap();
+        assert!(session.commit_preview());
+        let (after, dirty) = session.render_cached().unwrap();
+        let after = after.clone();
+
+        // What actually moved, and where the engine said it would.
+        let mut moved: Option<(u32, u32, u32, u32)> = None;
+        for y in 0..after.height {
+            for x in 0..after.width {
+                let (a, b) = (before.get(x, y), after.get(x, y));
+                if (a.a - b.a).abs() > 0.002 {
+                    moved = Some(match moved {
+                        None => (x, y, x + 1, y + 1),
+                        Some((x0, y0, x1, y1)) => {
+                            (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1))
+                        }
+                    });
+                }
+            }
+        }
+        let moved = moved.expect("the dab took a piece out of the layer");
+        let named = dirty.expect("the engine named a region");
+        assert!(
+            named.x0 <= moved.0
+                && named.y0 <= moved.1
+                && named.x1 >= moved.2
+                && named.y1 >= moved.3,
+            "the engine repainted {named:?}, and {moved:?} is what moved"
+        );
+        // And it is the dab rather than the page: a region grown by the
+        // layer's transform would still contain the dab and prove nothing,
+        // so the region has to be about the size of the dab.
+        assert!(
+            (named.x1 - named.x0) < 120 && (named.y1 - named.y0) < 120,
+            "a dab fifty across repainted {named:?}"
+        );
+        // The piece really came out where the dab was put, which is what
+        // says the stroke itself went into the mask's space too.
+        assert!(
+            before.get(dab_x as u32, dab_y as u32).a > 0.9
+                && after.get(dab_x as u32, dab_y as u32).a < 0.1,
+            "the dab is where it was aimed"
+        );
+    }
+
     /// A stroke repaints where the stroke is, not where the whole
     /// painting is: a dab in one corner leaves the other alone.
     #[test]

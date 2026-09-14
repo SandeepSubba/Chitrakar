@@ -672,7 +672,7 @@ without reading anything else.*
   that no other block covers: both ways of carrying the view, letting go
   of a selection and picking all of it, and adding to one with a band.
   Add the test with the line when the sheet grows.
-- **Verify before committing:** `cargo test --workspace` (~442),
+- **Verify before committing:** `cargo test --workspace` (~443),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2450,6 +2450,36 @@ without reading anything else.*
      stroke's region now rides through the file round trip, the
      clipboard, the dirty-region audit and the undo runs, none of which
      had ever seen one.
+     The eleventh was the other half of three commands rather than a new
+     shape: `AddStroke`, `RemoveStroke` and `SetStroke` each say with a
+     flag whether they mean the layer's strokes or its *mask's*, and the
+     list only ever said the layer. A list like that looks complete —
+     every variant is named, and the audit that checks the names is
+     satisfied — while asking half the question of three of them. Now
+     that the paint layer carries a brushed mask, all three are in the
+     list both ways.
+     Every audit held, so the code was broken to see who would notice,
+     and the answer was exact: give the gesture's slot table a
+     `Slot::Stroke` that forgets the flag, so a gesture rewriting a
+     layer's stroke and its mask's records only the first inverse, and
+     two audits fail. With the same sabotage and the list as it was, both
+     pass. That is the addition earning its place rather than holding.
+     And the paint layer no longer sits at the origin, which is a smaller
+     thing with a sharper edge. A brush has two spaces in it — a layer's
+     own strokes are in its own space, a painted mask's are in its
+     parent's — and with the layer at the origin those two spaces are the
+     same transform, so nothing could tell them apart. Compute a mask
+     stroke's dirty region in the wrong one of the two and *still* every
+     audit passed, which sent the question to why: the shared document
+     carries a filter, and a filter's reach grows every dirty region in
+     the document by its radius on every side, which swells a stroke's
+     tight box to the whole page. Conservative, correct, and it swallows
+     the error whole — a blind spot of that audit worth knowing about
+     rather than fixing, since the conservatism is the right call. So the
+     space has a test of its own on a page with no filter and a transform
+     far larger than any rounding
+     (`a_dab_on_a_mask_dirties_where_the_mask_says`), and it is the only
+     thing in the workspace that fails when the two spaces are confused.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own

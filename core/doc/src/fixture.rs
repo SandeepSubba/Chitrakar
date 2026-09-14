@@ -257,6 +257,18 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
     let painted = doc.children_of(root).unwrap()[1];
+    // And it does not sit at the origin. A paint layer's own strokes are
+    // written in its own space and its painted mask's are written in its
+    // parent's, which is the one thing about a brush that has two spaces
+    // in it — and with the layer at the origin those two spaces are the
+    // same transform, so nothing here could tell them apart. Compute a
+    // mask stroke's dirty region in the layer's space instead of the
+    // parent's and, until this moved, every audit passed.
+    doc.apply(Command::SetTransform {
+        id: painted,
+        transform: Transform::translation(-3.0, 5.0),
+    })
+    .unwrap();
     let stroke = PaintStroke {
         points: vec![[10.0, 40.0], [52.0, 30.0]],
         radii: vec![5.0],
@@ -1515,6 +1527,38 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 ..stroke.clone()
             }),
             on_mask: false,
+        },
+        // And the same three said of the layer's *mask* rather than the
+        // layer. A mask brushed by hand is brushed with the same tool and
+        // the same strokes, and the commands say which of the two they
+        // mean with a flag — so a list that only ever said `false` was
+        // asking half the question of three commands while looking like
+        // it asked all of it. Every audit over this list now says both.
+        Command::AddStroke {
+            id: painted,
+            index: 1,
+            stroke: Box::new(PaintStroke {
+                points: vec![[18.0, 30.0], [44.0, 48.0]],
+                radii: vec![5.0],
+                erase: false,
+                ..stroke.clone()
+            }),
+            on_mask: true,
+        },
+        Command::RemoveStroke {
+            id: painted,
+            index: 0,
+            on_mask: true,
+        },
+        Command::SetStroke {
+            id: painted,
+            index: 0,
+            stroke: Box::new(PaintStroke {
+                softness: 0.0,
+                erase: false,
+                ..stroke.clone()
+            }),
+            on_mask: true,
         },
         Command::SetName {
             id: over,
