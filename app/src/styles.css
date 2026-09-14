@@ -1426,7 +1426,11 @@ body {
      than the window makes the whole page slide sideways. Wrapping is the
      backstop for a window narrower still. */
   .brand,
-  .doc-chip {
+  .doc-chip,
+  /* The document and zoom buttons go the same way and for the same
+     reason: everything they do is still on the menus, and the bar has
+     to stay short enough to leave a canvas under it. */
+  .wide-only {
     display: none;
   }
 

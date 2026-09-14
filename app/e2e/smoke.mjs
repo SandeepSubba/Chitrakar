@@ -10438,6 +10438,67 @@ assert(
   );
 }
 
+// 9bd. The things a hand reaches for, on the bar rather than only in the
+// menus. New, open, place, save and export; out, fit, actual size, in.
+// Every one of them was two presses and a read away, and the icons for
+// all of them already existed — they are the ones the menu rows draw.
+{
+  await newDocument(800, 600, "rgb");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(300);
+  for (const label of [
+    "New document", "Open", "Place image", "Save", "Export PNG",
+    "Zoom out", "Fit to window", "Actual size", "Zoom in",
+  ]) {
+    assert(
+      await page.locator(`button[aria-label="${label}"]`).isVisible(),
+      `the bar offers "${label}"`,
+    );
+  }
+  // And they do the thing, rather than merely being there.
+  const zoom = () => page.locator('input[aria-label="Zoom"]').inputValue();
+  await page.click('button[aria-label="Actual size"]');
+  await page.waitForTimeout(300);
+  assert(Math.abs(Number(await zoom()) - 100) < 2, `actual size is 100 (${await zoom()})`);
+  await page.click('button[aria-label="Zoom in"]');
+  await page.waitForTimeout(300);
+  const bigger = Number(await zoom());
+  assert(bigger > 110, `zooming in takes the view further in (${bigger})`);
+  await page.click('button[aria-label="Zoom out"]');
+  await page.waitForTimeout(300);
+  assert(Number(await zoom()) < bigger, `and out again (${await zoom()})`);
+  await page.click('button[aria-label="Fit to window"]');
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs(Number(await zoom()) - bigger) > 1,
+    `and fitting is its own answer (${await zoom()})`,
+  );
+
+  // On a narrow window they go, with the wordmark and the document
+  // chip and for the same reason: the bar has to leave a canvas under
+  // it, and the menus still hold every one of them.
+  const wideBar = (await page.locator(".topbar").boundingBox()).height;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForTimeout(400);
+  assert(
+    !(await page.locator('button[aria-label="Zoom in"]').isVisible()),
+    "on a phone the bar puts them away again",
+  );
+  const phoneBar = (await page.locator(".topbar").boundingBox()).height;
+  assert(
+    phoneBar < wideBar * 2.4,
+    `and the bar is no taller for them having existed (${wideBar} -> ${phoneBar})`,
+  );
+  await menuClick("View", "Actual size");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs(Number(await zoom()) - 100) < 2,
+    "and what they did is still on the menus",
+  );
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(300);
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

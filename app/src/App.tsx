@@ -6430,6 +6430,100 @@ export function App() {
           </nav>
         )}
 
+        {/* The handful of things reached for constantly. All of them
+            were in the menus and nowhere else, which is two presses and
+            a read for something like zooming out — and the icons for
+            every one of them already existed, drawn for the menu rows
+            they sit in. Left of the spacer, where a document's own
+            actions belong; the view's are next to them because zoom is
+            the other thing a hand returns to without thinking.
+
+            Both groups go when the window is narrow, alongside the
+            wordmark and the document chip and for the same reason: the
+            bar has to stay short enough to leave a canvas, and the
+            menus still hold all of it. */}
+        <div className="chrome-group wide-only" role="group" aria-label="Document">
+          <button
+            className="chrome-button icon-only"
+            onClick={() => {
+              if (mayDiscard()) setNewDocOpen(true);
+            }}
+            title="New document…"
+            aria-label="New document"
+          >
+            <Icon name="newDoc" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => {
+              if (mayDiscard()) pick(openInputRef);
+            }}
+            title="Open…"
+            aria-label="Open"
+          >
+            <Icon name="open" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => pick(placeInputRef)}
+            title="Place image…"
+            aria-label="Place image"
+          >
+            <Icon name="image" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={saveFile}
+            title="Save (Ctrl+S)"
+            aria-label="Save"
+          >
+            <Icon name="save" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={exportPng}
+            title="Export PNG"
+            aria-label="Export PNG"
+          >
+            <Icon name="export" />
+          </button>
+        </div>
+
+        <div className="chrome-group wide-only" role="group" aria-label="Zoom">
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomBy(0.8)}
+            title="Zoom out (Ctrl+-)"
+            aria-label="Zoom out"
+          >
+            <Icon name="zoomOut" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={fitView}
+            title="Fit document to window (Ctrl+0)"
+            aria-label="Fit to window"
+          >
+            <Icon name="fit" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomTo(1)}
+            title="Actual size (Ctrl+1)"
+            aria-label="Actual size"
+          >
+            <Icon name="actualSize" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomBy(1.25)}
+            title="Zoom in (Ctrl++)"
+            aria-label="Zoom in"
+          >
+            <Icon name="zoomIn" />
+          </button>
+        </div>
+
         <span className="spacer" />
 
         {/* The picture as it was before the work. The question a
