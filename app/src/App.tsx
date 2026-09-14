@@ -4361,6 +4361,42 @@ export function App() {
           }, 80);
         }
       }
+      // The file keys, and grouping. All six are what every application
+      // of this kind uses, and all six were reachable only down a menu.
+      //
+      // Ctrl+G has to come after the Ctrl+Alt+G above and check that alt
+      // is *not* held, or grouping would swallow clipping — they differ
+      // by one modifier and the more specific one has to win.
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !typing) {
+        const k = e.key.toLowerCase();
+        if (k === "g") {
+          e.preventDefault();
+          if (e.shiftKey) ungroupSelection();
+          else groupSelection();
+        }
+        if (k === "s") {
+          e.preventDefault();
+          saveFile();
+        }
+        if (k === "e") {
+          e.preventDefault();
+          exportPng();
+        }
+        // A browser keeps Ctrl+N and Ctrl+O for itself and will not give
+        // them up to preventDefault, so these two only ever fire in the
+        // desktop shell. They are bound all the same — the cost is
+        // nothing where they never arrive — and the menu only *claims*
+        // them where they work, which is what `isTauri()` is doing on
+        // those two rows.
+        if (k === "n") {
+          e.preventDefault();
+          if (mayDiscard()) setNewDocOpen(true);
+        }
+        if (k === "o") {
+          e.preventDefault();
+          if (mayDiscard()) pick(openInputRef);
+        }
+      }
       // The brackets carry the brush's size on their own; with ctrl and
       // shift they carry a layer to the front or the back, which is the
       // pairing every editor uses.
@@ -6159,14 +6195,30 @@ export function App() {
       id: "file",
       label: "File",
       entries: [
-        item("new-doc", "newDoc", "New document…", () => {
-          if (mayDiscard()) setNewDocOpen(true);
-        }),
+        // The hint only where the key can actually arrive: a browser
+        // keeps Ctrl+N and Ctrl+O and never passes them on, and a menu
+        // that names a key the app will not answer to is worse than one
+        // that names none.
+        item(
+          "new-doc",
+          "newDoc",
+          "New document…",
+          () => {
+            if (mayDiscard()) setNewDocOpen(true);
+          },
+          isTauri() ? "Ctrl+N" : undefined,
+        ),
         SEP,
-        item("open", "open", "Open…", () => {
-          if (mayDiscard()) pick(openInputRef);
-        }),
-        item("save", "save", "Save", saveFile),
+        item(
+          "open",
+          "open",
+          "Open…",
+          () => {
+            if (mayDiscard()) pick(openInputRef);
+          },
+          isTauri() ? "Ctrl+O" : undefined,
+        ),
+        item("save", "save", "Save", saveFile, "Ctrl+S"),
         SEP,
         // Bringing something in is its own kind of act — neither opening
         // a document nor saving one — so it sits between them rather
@@ -6174,7 +6226,7 @@ export function App() {
         item("place-image", "image", "Place image…", () => pick(placeInputRef)),
         item("load-font", "text", "Load font…", () => pick(fontInputRef)),
         SEP,
-        item("export-png", "export", "Export PNG", exportPng),
+        item("export-png", "export", "Export PNG", exportPng, "Ctrl+E"),
         item("export-png-2x", "export", "Export PNG at 2×", () => exportPngAt(2), "@2x"),
         item("export-png-3x", "export", "Export PNG at 3×", () => exportPngAt(3), "@3x"),
         ...(selectionSet.length > 0 || antRings.length > 0
@@ -6296,8 +6348,8 @@ export function App() {
         item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
         item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
         SEP,
-        item("group", "group", "Group", groupSelection),
-        item("ungroup", "ungroup", "Ungroup", ungroupSelection),
+        item("group", "group", "Group", groupSelection, "Ctrl+G"),
+        item("ungroup", "ungroup", "Ungroup", ungroupSelection, "Ctrl+Shift+G"),
         SEP,
         // The hint here is a shortcut that already exists and was
         // advertised nowhere. Group and ungroup get none, because they
@@ -9080,6 +9132,9 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"],
       ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
       ["Ctrl+D", "Duplicate"],
+      ["Ctrl+G, Ctrl+Shift+G", "Group, ungroup"],
+      ["Ctrl+S", "Save"],
+      ["Ctrl+E", "Export a PNG"],
       ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
       ["Ctrl+Alt+G", "Clip to the layer below"],
       ["Ctrl+Shift+], Ctrl+Shift+[", "Bring to the front, send to the back"],
@@ -9103,6 +9158,12 @@ const KEY_HELP: [string, [string, string][]][] = [
       ],
       ["Alt-click a swatch", "Take that colour out of the palette"],
       ["Delete", "Delete the picked layers"],
+      // Named only where they arrive: a browser keeps these two and
+      // never passes them on, so in a tab this sheet would be promising
+      // something that does not happen.
+      ...(isTauri()
+        ? ([["Ctrl+N, Ctrl+O", "New document, open one"]] as [string, string][])
+        : []),
       ["?", "This sheet"],
     ],
   ],

@@ -10483,17 +10483,31 @@ assert(
   // On a narrow window they go, with the wordmark and the document
   // chip and for the same reason: the bar has to leave a canvas under
   // it, and the menus still hold every one of them.
-  const wideBar = (await page.locator(".topbar").boundingBox()).height;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(400);
   assert(
     !(await page.locator('button[aria-label="Zoom in"]').isVisible()),
     "on a phone the bar puts them away again",
   );
+  // Height itself is not the claim, and the first version of this said
+  // it was: it compared the phone bar against the wide one by a ratio
+  // measured on the machine that wrote it. Six menu labels wrap
+  // differently depending on how wide a machine draws text — two rows
+  // here, three on the runner — so that number was a fact about a
+  // laptop rather than about the app, and it failed there while passing
+  // here.
+  //
+  // What must hold is what the bar is *for*: the one way to the layers
+  // has to stay in it, and the bar has to leave the window to the
+  // canvas. Both are true at two rows and at three.
+  assert(
+    await page.locator(".panel-toggle").isVisible(),
+    "the way to the layers is still in the bar",
+  );
   const phoneBar = (await page.locator(".topbar").boundingBox()).height;
   assert(
-    phoneBar < wideBar * 2.4,
-    `and the bar is no taller for them having existed (${wideBar} -> ${phoneBar})`,
+    phoneBar < 844 * 0.25,
+    `and the bar still leaves the window to the canvas (${phoneBar.toFixed(0)}px of 844)`,
   );
   await menuClick("View", "Actual size");
   await page.waitForTimeout(300);
@@ -10503,6 +10517,95 @@ assert(
   );
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.waitForTimeout(300);
+}
+
+// 9be. The keys that were missing. Grouping had none at all — it was
+// five unlabelled icons on the panel — and saving and exporting were
+// down a menu, which is a long way round for the two things done most
+// often. All six are what every application of this kind uses.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  for (const [x0, y0, x1, y1] of [[60, 60, 200, 200], [340, 200, 480, 340]]) {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(220);
+  }
+  const rows = () =>
+    page.$$eval(".panel ul li", (els) =>
+      els.map((e) => (e.querySelector(".layer-name")?.textContent ?? "?").trim()),
+    );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+a");
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Control+g");
+  await page.waitForTimeout(400);
+  assert(
+    (await rows()).length === 3 && (await rows())[0].startsWith("Group"),
+    `Ctrl+G groups what is picked (${JSON.stringify(await rows())})`,
+  );
+  await page.keyboard.press("Control+Shift+g");
+  await page.waitForTimeout(400);
+  assert(
+    (await rows()).length === 2,
+    `and Ctrl+Shift+G takes the group apart again (${JSON.stringify(await rows())})`,
+  );
+
+  // Clipping is the same letter with one more modifier, and the more
+  // specific one has to win: if grouping swallowed it, this would come
+  // back with a group in it.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+Alt+g");
+  await page.waitForTimeout(400);
+  assert(
+    !(await rows()).some((r) => r.startsWith("Group")),
+    `Ctrl+Alt+G still clips rather than grouping (${JSON.stringify(await rows())})`,
+  );
+
+  // The two that reach for a file.
+  const [saved] = await Promise.all([
+    page.waitForEvent("download"),
+    page.keyboard.press("Control+s"),
+  ]);
+  assert(
+    saved.suggestedFilename().endsWith(".chitra"),
+    `Ctrl+S saves the document (${saved.suggestedFilename()})`,
+  );
+  const [shot] = await Promise.all([
+    page.waitForEvent("download"),
+    page.keyboard.press("Control+e"),
+  ]);
+  assert(
+    shot.suggestedFilename().endsWith(".png"),
+    `Ctrl+E exports a PNG (${shot.suggestedFilename()})`,
+  );
+
+  // And the sheet says so, because a key nobody can find is a key
+  // nobody has.
+  await menuClick("View", "Keys and gestures");
+  await page.waitForTimeout(250);
+  const sheet = await page
+    .locator('[aria-label="Keys and gestures"]')
+    .textContent();
+  for (const named of ["Ctrl+G, Ctrl+Shift+G", "Ctrl+S", "Ctrl+E"]) {
+    assert(sheet.includes(named), `the sheet names ${named}`);
+  }
+  // Ctrl+N and Ctrl+O are bound but a browser keeps them, so the sheet
+  // must not promise them here.
+  assert(
+    !sheet.includes("Ctrl+N"),
+    "and does not promise the two a browser never passes on",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });
