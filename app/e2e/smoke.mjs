@@ -240,8 +240,8 @@ assert(
 );
 assert(
   (await page.locator(".topbar .menu-label").allTextContents()).join(",") ===
-    "File,Edit,Page,View",
-  "menu bar carries File, Edit, Page and View",
+    "File,Edit,Select,Layer,Page,View",
+  "menu bar carries File, Edit, Select, Layer, Page and View",
 );
 await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
@@ -2764,12 +2764,18 @@ assert(
   }
   await pickTool("Move");
   await page.waitForTimeout(150);
-  for (const item of ["Cut", "Copy", "Paste", "Duplicate", "Delete", "Select all"]) {
+  for (const item of ["Cut", "Copy", "Paste", "Duplicate", "Delete"]) {
     const found = await menuItem("Edit", item);
     assert((await found.count()) >= 1, `the Edit menu offers ${item}`);
     await page.keyboard.press("Escape");
   }
-  await menuClick("Edit", "Select all");
+  // Picking things is its own menu now, so that is where this lives.
+  for (const item of ["Select all layers", "Deselect", "Pick out the whole page"]) {
+    const found = await menuItem("Select", item);
+    assert((await found.count()) >= 1, `the Select menu offers ${item}`);
+    await page.keyboard.press("Escape");
+  }
+  await menuClick("Select", "Select all layers");
   await page.waitForTimeout(250);
   assert(
     (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
@@ -3689,7 +3695,7 @@ assert(
   await box(40, 40, 100, 100);
   await box(120, 40, 180, 100);
   await pickTool("Move");
-  await menuClick("Edit", "Select all");
+  await menuClick("Select", "Select all layers");
   await page.waitForTimeout(150);
   await page.click('button[aria-label="Group selected layers (ctrl-click to select several)"]');
   await page.waitForTimeout(250);
@@ -3771,7 +3777,7 @@ assert(
   };
   const group = async () => {
     await pickTool("Move");
-    await menuClick("Edit", "Select all");
+    await menuClick("Select", "Select all layers");
     await page.waitForTimeout(150);
     await page.click(
       'button[aria-label="Group selected layers (ctrl-click to select several)"]',
@@ -3991,17 +3997,17 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(250);
   await pickTool("Move");
-  await menuClick("Edit", "Select all");
+  await menuClick("Select", "Select all layers");
   await page.waitForTimeout(150);
   const filled = async (x, y) => (await canvasPixel(x, y))[3] === 255;
   assert((await filled(150, 175)) && !(await filled(150, 340)), "the rect is left, the ellipse right");
-  await menuClick("Edit", "Flip horizontal");
+  await menuClick("Layer", "Flip horizontal");
   await page.waitForTimeout(250);
   assert(
     !(await filled(150, 175)) && (await filled(150, 340)) && (await filled(450, 175)),
     "flipped horizontally, they trade sides",
   );
-  await menuClick("Edit", "Flip vertical");
+  await menuClick("Layer", "Flip vertical");
   await page.waitForTimeout(250);
   assert(
     (await filled(150, 140)) && !(await filled(150, 340)) && (await filled(450, 300)),
@@ -6999,7 +7005,7 @@ assert(
     `pure red on a screen taken for sRGB (${plain})`,
   );
 
-  await menuClick("File", "Show as Display P3");
+  await menuClick("View", "Show as Display P3");
   await page.waitForTimeout(400);
   const shown = await canvasPixel(200, 150);
   assert(
@@ -7032,7 +7038,7 @@ assert(
     `the export is the picture, not the screen (${exported})`,
   );
 
-  await menuClick("File", "Show sRGB as it is");
+  await menuClick("View", "Show sRGB as it is");
   await page.waitForTimeout(400);
   const back = await canvasPixel(200, 150);
   assert(
@@ -7836,7 +7842,7 @@ assert(
   await page.mouse.click(...at(60, 90));
   await shiftClick(190, 90);
   const moving = [before[2], before[1]]; // the lower two, topmost first
-  await menuClick("Edit", "Bring to front");
+  await menuClick("Layer", "Bring to front");
   await page.waitForTimeout(400);
   const after = await names();
   assert(
@@ -7846,7 +7852,7 @@ assert(
   // Asked again with them already there, nothing is recorded: the undo
   // below is the move itself rather than a move to where they already
   // were.
-  await menuClick("Edit", "Bring to front");
+  await menuClick("Layer", "Bring to front");
   await page.waitForTimeout(300);
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
@@ -8277,7 +8283,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(250);
-  await menuClick("Edit", "Mask this layer with what is picked");
+  await menuClick("Select", "Mask this layer with what is picked");
   await page.waitForTimeout(450);
   assert(await isRed(120, 130), "the layer still shows inside the region");
   assert(!(await isRed(300, 250)), "and is held back everywhere outside it");
@@ -8286,11 +8292,11 @@ assert(
   assert(await isRed(300, 250), "one undo hands the layer back");
 
   // Picking out the rest instead swaps the two.
-  await menuClick("Edit", "Pick out the rest instead");
+  await menuClick("Select", "Pick out the rest instead");
   await page.waitForTimeout(300);
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(200);
-  await menuClick("Edit", "Mask this layer with what is picked");
+  await menuClick("Select", "Mask this layer with what is picked");
   await page.waitForTimeout(450);
   assert(
     !(await isRed(120, 130)),
@@ -8312,7 +8318,7 @@ assert(
   // and let go of the one above before drawing it, since that one was
   // left inside out and so covers very nearly the whole page: a drag
   // starting inside what is picked moves it rather than picking again.
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(250);
   await page.keyboard.press("m");
   await page.waitForTimeout(150);
@@ -8320,7 +8326,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(200);
-  await menuClick("Edit", "Hide what is picked, from this layer");
+  await menuClick("Select", "Hide what is picked, from this layer");
   await page.waitForTimeout(450);
   assert(!(await isRed(120, 130)), "what is picked is hidden");
   assert(await isRed(300, 250), "and the rest of the layer shows");
@@ -8331,7 +8337,7 @@ assert(
   // a lasso is the only way to draw that shape at all.
   const rows = await page.locator(".panel ul li .layer-name").count();
   await setColor("Fill colour", "#2244dd");
-  await menuClick("Edit", "Fill what is picked");
+  await menuClick("Select", "Fill what is picked");
   await page.waitForTimeout(450);
   assert(
     (await page.locator(".panel ul li .layer-name").count()) === rows + 1,
@@ -8351,7 +8357,7 @@ assert(
   };
   const wasShape = await shape();
   assert(wasShape > 1, `the page starts wider than it is tall (${wasShape})`);
-  await menuClick("Edit", "Crop the page to what is picked");
+  await menuClick("Select", "Crop the page to what is picked");
   await page.waitForTimeout(500);
   const nowShape = await shape();
   assert(nowShape < 1, `and the crop leaves it taller than wide (${nowShape})`);
@@ -8362,7 +8368,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(400);
 
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(300);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -8463,7 +8469,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...fat(150, 100));
   await page.waitForTimeout(250);
-  await menuClick("Edit", "Mask this layer with what is picked");
+  await menuClick("Select", "Mask this layer with what is picked");
   await page.waitForTimeout(450);
   // Across the region's own edge at x=60: whole well inside, nothing
   // well outside, and part way through in between — which a hard edge
@@ -8629,7 +8635,7 @@ assert(
   assert(!(await painted(320)), "and stopped at its edge");
 
   // Letting go of the region changes nothing about the stroke.
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(350);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -8751,7 +8757,7 @@ assert(
   await page.keyboard.press("Escape");
   await page.locator(".panel ul li", { hasText: "Rect 1" }).first().click();
   await page.waitForTimeout(200);
-  await menuClick("Edit", "Pick out the subject of this picture");
+  await menuClick("Select", "Pick out the subject of this picture");
   await page.waitForTimeout(700);
   assert(
     (await page.locator(".ants").count()) === 1,
@@ -8833,7 +8839,7 @@ assert(
   );
   await page.waitForTimeout(400);
 
-  await menuClick("Edit", "Pick out what this layer covers");
+  await menuClick("Select", "Pick out what this layer covers");
   await page.waitForTimeout(400);
   const rings = await page.locator(".ants polygon").count();
   assert(rings === 2, `two boxes clear of each other are two rings (${rings})`);
@@ -8857,7 +8863,7 @@ assert(
   // It is a region like any other from there: fill it, and the paint
   // lands on both boxes and nowhere between them.
   await setColor("Fill colour", "#3366cc");
-  await menuClick("Edit", "Fill what is picked");
+  await menuClick("Select", "Fill what is picked");
   await page.waitForTimeout(450);
   const isBlue = async (x, y) => {
     const [r, g, bl] = await canvasPixel(x, y);
@@ -9178,7 +9184,7 @@ assert(
     await pickTool("Move");
     await page.mouse.click(...at(100, 100));
     await page.waitForTimeout(250);
-    await menuClick("Edit", "Mask this layer with what is picked");
+    await menuClick("Select", "Mask this layer with what is picked");
     await page.waitForTimeout(450);
   };
   await holdTheLayer();
@@ -9186,7 +9192,7 @@ assert(
   assert(!(await isRed(220, 100)), "and not outside it");
   // Let the region go — with a select tool in hand, since Escape means
   // whichever of the two the tool is about — and pick the layer again.
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(350);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -9198,7 +9204,7 @@ assert(
 
   // Take the mask back out as a region, grow it, and hand it back: the
   // layer shows further than it did, which no handle on a mask can do.
-  await menuClick("Edit", "Pick out this layer's mask");
+  await menuClick("Select", "Pick out this layer's mask");
   await page.waitForTimeout(400);
   assert((await page.locator(".ants").count()) === 1, "the mask came out");
   await page.keyboard.press("m");
@@ -9465,7 +9471,7 @@ assert(
   );
 
   // Let it go, and the page is read whole again.
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(500);
   assert((await drawn()) === whole, "the page's own reading comes back");
 
@@ -10000,9 +10006,9 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(80, 70));
   await page.waitForTimeout(250);
-  await menuClick("Edit", "Mask this layer with what is picked");
+  await menuClick("Select", "Mask this layer with what is picked");
   await page.waitForTimeout(400);
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(250);
 
   // Where the mask's edge is: inside it the layer shows, outside it does
@@ -10129,7 +10135,7 @@ assert(
   );
 
   // Letting go of the region changes nothing: the stroke carries it.
-  await menuClick("Edit", "Pick out nothing");
+  await menuClick("Select", "Pick out nothing");
   await page.waitForTimeout(300);
   assert(
     !(await covered(80, 150)) && (await covered(320, 150)),

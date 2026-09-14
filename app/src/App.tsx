@@ -924,7 +924,7 @@ const item = (
   hint?: string,
 ): MenuEntry => ({ kind: "item", id, icon, label, run, hint });
 /** Which menu is open, and what the four of them are called. */
-type MenuId = "file" | "edit" | "page" | "view";
+type MenuId = "file" | "edit" | "select" | "layer" | "page" | "view";
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
@@ -1130,7 +1130,7 @@ export function App() {
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [cmyk, setCmyk] = useState(false);
   /** Which top-level menu is open, if any. */
-  const [openMenu, setOpenMenu] = useState<"file" | "edit" | "page" | "view" | null>(
+  const [openMenu, setOpenMenu] = useState<MenuId | null>(
     null,
   );
   const openInputRef = useRef<HTMLInputElement>(null);
@@ -6159,34 +6159,36 @@ export function App() {
       id: "file",
       label: "File",
       entries: [
-        item("new-doc", "newDoc", "New document\u2026", () => {
+        item("new-doc", "newDoc", "New document…", () => {
           if (mayDiscard()) setNewDocOpen(true);
         }),
         SEP,
-        item("open", "open", "Open\u2026", () => {
+        item("open", "open", "Open…", () => {
           if (mayDiscard()) pick(openInputRef);
         }),
-        item("place-image", "image", "Place image\u2026", () => pick(placeInputRef)),
-        item("load-font", "text", "Load font\u2026", () => pick(fontInputRef)),
         item("save", "save", "Save", saveFile),
         SEP,
+        // Bringing something in is its own kind of act — neither opening
+        // a document nor saving one — so it sits between them rather
+        // than in the middle of them, which is where it was.
+        item("place-image", "image", "Place image…", () => pick(placeInputRef)),
+        item("load-font", "text", "Load font…", () => pick(fontInputRef)),
+        SEP,
         item("export-png", "export", "Export PNG", exportPng),
-        item("export-png-2x", "export", "Export PNG at 2\u00d7", () => exportPngAt(2), "@2x"),
-        item("export-png-3x", "export", "Export PNG at 3\u00d7", () => exportPngAt(3), "@3x"),
+        item("export-png-2x", "export", "Export PNG at 2×", () => exportPngAt(2), "@2x"),
+        item("export-png-3x", "export", "Export PNG at 3×", () => exportPngAt(3), "@3x"),
         ...(selectionSet.length > 0 || antRings.length > 0
           ? [
               item("export-selection", "export", "Export selection as PNG", () =>
                 exportSelectionPng(1),
               ),
               // The same asset at the size a screen with two or three
-              // pixels to the point wants it, which is what the page's
-              // own exports offer and what a picked-out asset is
-              // usually for.
-              item("export-selection-2x", "export", "Export selection at 2\u00d7", () =>
-                exportSelectionPng(2), "@2x",
+              // pixels to the point wants it.
+              item("export-selection-2x", "export", "Export selection at 2×", () =>
+                exportSelectionPng(2),
               ),
-              item("export-selection-3x", "export", "Export selection at 3\u00d7", () =>
-                exportSelectionPng(3), "@3x",
+              item("export-selection-3x", "export", "Export selection at 3×", () =>
+                exportSelectionPng(3),
               ),
             ]
           : []),
@@ -6212,69 +6214,71 @@ export function App() {
           : []),
         ...(hasIcc ? [item("export-tiff", "export", "Export TIFF", exportTiff, "CMYK")] : []),
         SEP,
+        // The press profile is the document's own — what it will be
+        // printed through — so it belongs with the document. How this
+        // screen shows colour is not about the document at all, and has
+        // gone to View with the other things that are only about
+        // looking.
         item(
           "press-profile",
           hasIcc ? "check" : "profile",
-          hasIcc ? "Replace press profile\u2026" : "Load press profile\u2026",
+          hasIcc ? "Replace press profile…" : "Load press profile…",
           () => pick(iccInputRef),
         ),
-        item(
-          "monitor-profile",
-          hasScreenIcc ? "check" : "proof",
-          hasScreenIcc ? "Replace monitor profile\u2026" : "Load monitor profile\u2026",
-          () => pick(screenIccInputRef),
-        ),
-        item("display-p3", "proof", "Show as Display P3", () => {
-          if (!session) return;
-          try {
-            session.set_display_profile(display_p3_profile());
-            setHasScreenIcc(true);
-            refresh(session);
-          } catch (err) {
-            alert(`Could not use monitor profile: ${err}`);
-          }
-        }),
-        ...(hasScreenIcc
-          ? [item("clear-screen-profile", "profile", "Show sRGB as it is", clearScreenProfile)]
-          : []),
       ],
     },
     {
       id: "edit",
       label: "Edit",
       entries: [
+        // Only the verbs every application has, in the order every
+        // application has them. What used to be here as well — arranging
+        // layers, picking regions out of the page — was neither, and is
+        // now in the two menus named after those things.
         item("undo", "undo", "Undo", undo, "Ctrl+Z"),
         item("redo", "redo", "Redo", redo, "Ctrl+Shift+Z"),
+        SEP,
         item("cut", "cut", "Cut", cutSelected, "Ctrl+X"),
         item("copy", "copy", "Copy", copySelected, "Ctrl+C"),
         ...(selectionSet.length > 0 || antRings.length > 0
           ? [item("copy-as-image", "copy", "Copy as image", copyAsImage)]
           : []),
         item("paste", "paste", "Paste", pasteClipboard, "Ctrl+V"),
+        SEP,
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, "Ctrl+D"),
+        item("delete", "trash", "Delete", deleteSelected, "Del"),
+        SEP,
         item("copy-style", "copy", "Copy style", copyStyle, "Ctrl+Alt+C"),
         item("paste-style", "paste", "Paste style", pasteStyle, "Ctrl+Alt+V"),
-        item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
-        item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
-        item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
-        item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
-        item("delete", "trash", "Delete", deleteSelected, "Del"),
-        item("select-all", "selectAll", "Select all", selectAll, "Ctrl+A"),
+      ],
+    },
+    {
+      id: "select",
+      label: "Select",
+      entries: [
+        // Two different things live here, and the separators are what
+        // says so. Picking *layers* in the panel is one; picking a
+        // *region* out of the page is the other. They used to sit in
+        // Edit with a single rule between them, which said they were
+        // the same kind of thing as cut and paste. They are not.
+        item("select-all", "selectAll", "Select all layers", selectAll, "Ctrl+A"),
         item("deselect", "check", "Deselect", deselect, "Esc"),
         SEP,
-        // A region picked out of the page, rather than the layers picked
-        // in the panel. The two are different things and the menu says
-        // so by keeping them apart.
         item("pick-page", "marquee", "Pick out the whole page", pickWholePage),
         item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, "Ctrl+Shift+I"),
         item("pick-nothing", "lasso", "Pick out nothing", pickNothing),
-        item("pick-from-layer", "wand", "Pick out what this layer covers", pickFromLayer),
+        SEP,
+        // The three that work the region out from the picture rather
+        // than from a drag.
         item("pick-subject", "wand", "Pick out the subject of this picture", pickSubject),
+        item("pick-from-layer", "wand", "Pick out what this layer covers", pickFromLayer),
+        item("pick-layer-mask", "marquee", "Pick out this layer's mask", pickLayerMask),
+        SEP,
+        // And what a region is *for*, once there is one.
         item("fill-picked", "fill", "Fill what is picked", fillSelection),
         item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
           maskFromSelection(false),
         ),
-        item("pick-layer-mask", "marquee", "Pick out this layer's mask", pickLayerMask),
         item("hide-picked", "trash", "Hide what is picked, from this layer", () =>
           maskFromSelection(true),
         ),
@@ -6282,15 +6286,40 @@ export function App() {
       ],
     },
     {
+      id: "layer",
+      label: "Layer",
+      entries: [
+        // Grouping, clipping and making a live copy were on the panel's
+        // own buttons and nowhere else — five unlabelled icons, and no
+        // way to find out what they did but to press one. They have
+        // names here.
+        item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
+        item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
+        SEP,
+        item("group", "group", "Group", groupSelection),
+        item("ungroup", "ungroup", "Ungroup", ungroupSelection),
+        SEP,
+        // The hint here is a shortcut that already exists and was
+        // advertised nowhere. Group and ungroup get none, because they
+        // have none: a menu that names a key the app does not answer to
+        // is worse than a menu that names no key at all.
+        item("clip", "clip", "Clip to the layer below", clipSelection, "Ctrl+Alt+G"),
+        item("instance", "instance", "Make a live copy", instanceSelected),
+        SEP,
+        item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
+        item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
+      ],
+    },
+    {
       id: "page",
       label: "Page",
       entries: [
-        item("canvas-size", "crop", "Canvas size\u2026", () => setCanvasSizeOpen(true)),
+        item("canvas-size", "crop", "Canvas size…", () => setCanvasSizeOpen(true)),
         SEP,
         item("turn-right", "turnRight", "Turn right", () => turnPage(1)),
         item("turn-left", "turnLeft", "Turn left", () => turnPage(3)),
         item("turn-over", "turnRight", "Turn upside down", () => turnPage(2)),
-        item("straighten", "turnLeft", "Straighten\u2026", () => {
+        item("straighten", "turnLeft", "Straighten…", () => {
           setStraightenBy(0);
           setLevelling(false);
           setStraightenOpen(true);
@@ -6304,16 +6333,21 @@ export function App() {
       id: "view",
       label: "View",
       entries: [
-        ...(["px", "mm", "in"] as Units[]).map((u) =>
-          item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "\u2713" : undefined),
-        ),
-        SEP,
-        item("fit", "fit", "Fit document to window", fitView, "Ctrl+0"),
-        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
+        // Zoom first, together and in the order a hand thinks of them.
+        // "Keys and gestures" used to sit between Fit and Zoom in, which
+        // is nobody's idea of where it belongs; it is at the end now,
+        // with the other thing that is about the app rather than the
+        // picture.
         item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), "Ctrl++"),
         item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), "Ctrl+-"),
         item("actual-size", "actualSize", "Actual size", () => zoomTo(1), "Ctrl+1"),
+        item("fit", "fit", "Fit document to window", fitView, "Ctrl+0"),
         item("zoom-selection", "selectAll", "Zoom to selection", zoomToSelection),
+        SEP,
+        ...(["px", "mm", "in"] as Units[]).map((u) =>
+          item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "✓" : undefined),
+        ),
+        SEP,
         item(
           "guides",
           showGuides ? "check" : "fit",
@@ -6334,6 +6368,31 @@ export function App() {
             () => setGrid(size),
           ),
         ),
+        SEP,
+        // How this screen shows colour: nothing to do with the document,
+        // everything to do with looking at it. These were in File,
+        // under the exports, where nobody would think to look.
+        item(
+          "monitor-profile",
+          hasScreenIcc ? "check" : "proof",
+          hasScreenIcc ? "Replace monitor profile…" : "Load monitor profile…",
+          () => pick(screenIccInputRef),
+        ),
+        item("display-p3", "proof", "Show as Display P3", () => {
+          if (!session) return;
+          try {
+            session.set_display_profile(display_p3_profile());
+            setHasScreenIcc(true);
+            refresh(session);
+          } catch (err) {
+            alert(`Could not use monitor profile: ${err}`);
+          }
+        }),
+        ...(hasScreenIcc
+          ? [item("clear-screen-profile", "profile", "Show sRGB as it is", clearScreenProfile)]
+          : []),
+        SEP,
+        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
       ],
     },
   ];
