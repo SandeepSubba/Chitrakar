@@ -723,7 +723,37 @@ without reading anything else.*
   found through 301ms → ~135ms. A turned rectangle is unchanged and
   falls through to the sampler, since a product of overlaps is not its
   area.
-- **Verify before committing:** `cargo test --workspace` (~445),
+- **A blend over an opaque backdrop is the blended value and nothing
+  else.** The dearest thing this renderer does per pixel is a blend that
+  is not Normal — a full-page Multiply on an A4 at 300dpi took 840ms —
+  and most of a page is an opaque layer over an opaque one. There every
+  step of the W3C compositing reduces: one over one is one, the two
+  weights are zero, the third is one. Said out loud, Multiply went 85ns a
+  pixel to 53ns and a full page 840ms to ~560ms; the four that read all
+  three channels at once got the same reservation, Color 77ns to 70ns and
+  a full page to ~610ms. The condition is written as *equality* rather
+  than as nearly, because at exactly one every step of that reduction is
+  exact in floating point — so it is the same bits as the general form
+  and not a hair off it, and an alpha that has somehow come out above one
+  goes the long way round as it always did.
+  What guards the two paths against coming apart is that the fast one
+  runs for every pixel anybody looks at, so a mistake in it would go
+  unnoticed by anything comparing pictures. They are held against each
+  other by walking up to opacity from just below: at an alpha of 0.999
+  the general path is what runs, and its answer must be the opaque one to
+  within the thousandth the alpha is off by, for every mode and every
+  pair of colours (`an_opaque_blend_is_the_limit_of_a_nearly_opaque_one`
+  — swap source and backdrop in the fast path alone and it is one of only
+  two things that fail).
+  One thing tried and thrown away first, which is the more useful half of
+  the story: those nine table lookups a pixel are found behind a
+  `OnceLock`, consulted once per pixel, and the obvious reading is that
+  an opaque call in the hottest loop in the renderer stops the two table
+  pointers being kept in registers. It was threaded through to be found
+  once a row instead — and it bought two percent. The cost is the
+  arithmetic itself, not finding the tables, so the parameter came back
+  out again. Worth the hour to know which.
+- **Verify before committing:** `cargo test --workspace` (~446),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
