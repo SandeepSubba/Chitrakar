@@ -2493,7 +2493,7 @@ without reading anything else.*
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth. Five methods have been paying, and all of them are cheap
+  3. Depth. Six methods have been paying, and all of them are cheap
      enough to keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
      off an image, a group two deep — and see which audits stop holding.
@@ -2847,6 +2847,48 @@ without reading anything else.*
      number rather than because neither had to. Asked of the markup
      rather than the picture, which is method Two and is the only way
      this one can be asked.
+     Six, and new: **move a number and see who complains**. The vacuous
+     miter check above was found by accident, which raised the obvious
+     question — how many more are there? — and that question is
+     mechanical. Take each tunable constant in `core/doc` and
+     `core/render`, change it by enough to matter, run the workspace, put
+     it back. Eight of them, a minute each. Five were caught at once
+     (both marker numbers, the synthetic slant and weight, the tile
+     size). Three survived, and the three are worth separating because
+     only one of them was a gap.
+     `MITER_LIMIT` at 2.5 instead of 4 survived, and that *was* a gap:
+     the repaired check asks what happens to a corner past the limit, so
+     loosening the limit fires it and tightening it does not, though a
+     mitre lost is as wrong as a mitre kept. A corner of 35 degrees —
+     between the limit as it stands and any plausible tightening — now
+     says the near side: its point must reach past where a bevel would
+     stop. That one mutant is caught now.
+     `MAX_DEPTH` at 64 instead of 256 survived, and that is a **false
+     positive of the method**, worth naming so the next sweep does not
+     chase it. Its test builds `MAX_DEPTH` groups and expects the next to
+     be refused, so it moves with the constant on purpose: what it pins
+     is that the guard fires where the number says, and the number itself
+     is policy rather than correctness. A mutant that survives because
+     the test reads the same constant is a test doing its job. (The same
+     shape caught me writing one: the new `stroke-miterlimit` assertion
+     formats `MITER_LIMIT` into the string it looks for, so changing the
+     constant cannot fail it — correctly, since the point is that the
+     exporter says whatever the engine says. What makes it non-vacuous is
+     that deleting the attribute fails it, and that is what was checked.)
+     `WELD` survived at 1e-1, at 1.0 and at 5.0 — five thousand times
+     looser, five whole document pixels, on a page where the shapes in
+     those tests are ten across — and that is a real blind spot with no
+     test written for it, deliberately. Welding rounds each fragment end
+     onto a grid and matches the keys, so a coarse weld can only do harm
+     where three or more ends share a cell *and* the right pairing is not
+     the one it picks. Two convex shapes give two intersection points and
+     an unambiguous pairing, which is why every attempt to break it from
+     the outside came back green: a sliver three hundredths of a pixel
+     wide survives a weld a hundred times too coarse, because the keys
+     are only used for matching and the coordinates are kept. Pinning it
+     properly wants a self-intersecting outline or many fragments, and a
+     weak test that only rules out absurd values would be the same sin as
+     the one this whole entry is about. Written down instead.
      Five, and new: **ask the document what it has never said**. The
      four above all start from a person deciding what to look at, which
      is the thing they have in common and the limit they share. This one

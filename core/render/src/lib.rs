@@ -8064,6 +8064,52 @@ mod tests {
             "past the limit the corner is cut off, not carried out \
              (ink out to {furthest}, allowed {allowed})"
         );
+
+        // And the near side of the same rule, which is the half that was
+        // missing: a corner *inside* the limit keeps its point. Only
+        // asking the far side leaves the limit testable in one direction
+        // — loosen it and the check above fires, tighten it and nothing
+        // does, though a mitre lost is as wrong as a mitre kept.
+        //
+        // This corner is 35 degrees, which sits between the limit as it
+        // stands and any plausible tightening of it: at four half-widths
+        // a corner mitres down to about twenty-nine degrees, so this one
+        // carries its point out to `h / sin(17.5)`, near thirteen. A
+        // bevel would stop about one half-width past the corner, so ink
+        // anywhere past eight says the point is there.
+        let mut kind = spiked
+            .node(spiked.children_of(sroot).unwrap()[0])
+            .unwrap()
+            .kind
+            .clone();
+        if let NodeKind::Vector { shape, .. } = &mut kind {
+            *shape = VectorShape::Path {
+                points: vec![[11.15, 32.48], [35.0, 40.0], [11.15, 47.52]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            };
+        }
+        let sid = spiked.children_of(sroot).unwrap()[0];
+        spiked
+            .apply(Command::SetKind {
+                id: sid,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        let kept = render(&spiked).unwrap();
+        let point = (0..100)
+            .rfind(|x| (0..70).any(|y| kept.get(*x, y).a > 0.02))
+            .expect("the line drew something");
+        assert!(
+            point > 35 + 2 * half as u32,
+            "inside the limit the corner keeps its point (ink only out to {point})"
+        );
+        assert!(
+            point <= 35 + (chitrakar_doc::MITER_LIMIT * half) as u32 + 1,
+            "and no further than the limit allows ({point})"
+        );
     }
 
     /// A dashed stroke is the line with pieces missing: on where the
