@@ -2688,13 +2688,27 @@ without reading anything else.*
      width with it (`an_anchor_on_a_brushed_line_keeps_the_widths_lined_up`
      asks the widths rather than the picture, since the picture only says
      the line got fatter and not why).
-     One threshold moved rather than an audit: the JPEG round trip's mean
-     went 3.0 to 4.0, because a thin high-contrast diagonal is what JPEG
-     rings worst on. Measured: 2.65 a channel away from the drawn line and
-     3.57 in the rows holding it — and 2.65 was already most of the old
-     ceiling, which is that instrument eroding as the page gains edges,
-     the same weakness recorded above for the SVG audit before it was
-     given a better question to ask.
+     One threshold moved rather than an audit, and then the audit moved
+     too. The JPEG round trip's mean went 3.0 to 4.0, a thin
+     high-contrast diagonal being what JPEG rings worst on — measured at
+     2.65 a channel away from the drawn line and 3.57 in the rows holding
+     it. 2.65 was already most of the old ceiling, which is that
+     instrument eroding as the page gains edges.
+     It is a *worst block* now rather than a page mean. What JPEG loses is
+     high frequency, and it rings inside the eight-by-eight blocks it
+     works in, so averaging over one of those cancels most of the loss and
+     leaves anything structural where it was — and a block's error is
+     bounded by the contrast inside that block and by nothing else, so it
+     does not drift when the page gains a line somewhere else.
+     What is worth recording is that the change was nearly not worth
+     making, and the measurement said so before the work did. Against a
+     JPEG that is actually wrong — red and blue swapped, the channel-order
+     defect the audit exists for — the page mean goes from about 3 to
+     about 60 and the worst block from about 2 to 153. Sixteen times the
+     room against forty: the old instrument was never close to failing,
+     and the worry about erosion was right in principle and small in
+     practice. The new one is kept because it is free, stronger, and
+     cannot drift, not because the old one was failing.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own

@@ -10740,37 +10740,59 @@ mod tests {
                 (page.width, page.height),
                 "the JPEG written after {what} is the size of the page"
             );
-            let mut sum = 0u64;
-            let mut seen = 0u64;
-            for (i, px) in page.pixels.iter().enumerate() {
-                if px.a < 0.99 {
-                    continue;
-                }
-                for c in 0..3 {
-                    sum += shown[i * 4 + c].abs_diff(jpeg.rgba8[i * 4 + c]) as u64;
-                    seen += 1;
+            // Block by block, not over the page as a whole. What JPEG
+            // loses is high frequency — it rings either side of an edge,
+            // inside the eight-by-eight blocks it works in — so averaging
+            // over one of those blocks cancels most of the loss while
+            // leaving anything structural exactly where it was. A mean
+            // over the *page* cannot tell the two apart, and worse, it
+            // drifts: every edge costs it a little, so it rises as the
+            // page gains elements and the threshold has to be loosened to
+            // let innocent additions through. A block's error is bounded
+            // by the contrast inside that block and by nothing else, so
+            // this one does not move when the page gains a line somewhere
+            // else. It already had to be loosened once, when a drawn line
+            // went into the shared document.
+            //
+            // Measured both ways, against a JPEG that is actually wrong —
+            // red and blue swapped, the channel-order defect this exists
+            // to catch: the page mean goes from about 3 to about 60, and
+            // the worst block from about 2 to 153. Forty times the room,
+            // against sixteen.
+            let (w, h) = (page.width as usize, page.height as usize);
+            let (mut worst_block, mut blocks) = (0.0f64, 0u32);
+            for by in (0..h).step_by(8) {
+                for bx in (0..w).step_by(8) {
+                    let (mut acc, mut n) = ([0i64; 3], 0i64);
+                    for y in by..(by + 8).min(h) {
+                        for x in bx..(bx + 8).min(w) {
+                            let i = y * w + x;
+                            if page.pixels[i].a < 0.99 {
+                                continue;
+                            }
+                            for (c, a) in acc.iter_mut().enumerate() {
+                                *a += shown[i * 4 + c] as i64 - jpeg.rgba8[i * 4 + c] as i64;
+                            }
+                            n += 1;
+                        }
+                    }
+                    // Half a block of opaque page, or the average is of
+                    // too little to mean anything.
+                    if n < 32 {
+                        continue;
+                    }
+                    blocks += 1;
+                    for a in acc {
+                        worst_block = worst_block.max((a as f64 / n as f64).abs());
+                    }
                 }
             }
-            if seen > 64 {
-                let mean = sum as f64 / seen as f64;
-                // JPEG is lossy everywhere, so this is a mean and not a
-                // count — and a mean over a page is a weakening instrument,
-                // since every edge costs it a little and a page gains
-                // edges. Measured when a drawn line went into the shared
-                // document: 2.65 a channel away from the line and 3.57 in
-                // the rows holding it, a thin high-contrast diagonal being
-                // the case JPEG rings worst on. That is the loss, not a
-                // defect: an export that was actually wrong — the wrong
-                // colours, the wrong way up, the wrong size — is off by
-                // tens, which is what this still catches at either
-                // threshold. It went 3.0 to 4.0 for the line rather than
-                // the line being kept out of the fixture, and what it
-                // really wants is the treatment the SVG audit got: compare
-                // where the picture must not differ rather than averaging
-                // over where it may.
+            if blocks > 0 {
+                let mean = worst_block;
                 assert!(
-                    mean < 4.0,
-                    "the JPEG written after {what} is a different picture (off by {mean:.2} a channel)"
+                    mean < 6.0,
+                    "the JPEG written after {what} is a different picture \
+                     (a block of it off by {mean:.2} a channel, over {blocks} blocks)"
                 );
             }
             out("a PDF", session.export_pdf().map(|b| b.len()));
