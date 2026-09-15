@@ -693,7 +693,21 @@ fn stroke_attrs(
         chitrakar_doc::StrokeCap::Square => s.push_str(r#" stroke-linecap="square""#),
     }
     match stroke.join {
-        chitrakar_doc::StrokeJoin::Miter => {}
+        // Miter is SVG's own default, so the join itself needs no
+        // attribute — but the *limit* does. SVG's default
+        // `stroke-miterlimit` is 4, and so is `MITER_LIMIT`, which is
+        // why writing nothing has drawn the right picture so far. That
+        // is a coincidence holding two numbers together across a file
+        // format, and nothing was watching it: change the constant and
+        // every mitred corner in every exported SVG quietly disagrees
+        // with the engine, with no audit able to say so — the export
+        // comparisons read layer interiors, and a join is all edge.
+        // The PDF exporter has always written its own limit out (`M`).
+        // This one says it too, so the two agree because they both say
+        // the same number rather than because neither had to.
+        chitrakar_doc::StrokeJoin::Miter => {
+            let _ = write!(s, r#" stroke-miterlimit="{}""#, chitrakar_doc::MITER_LIMIT);
+        }
         chitrakar_doc::StrokeJoin::Round => s.push_str(r#" stroke-linejoin="round""#),
         chitrakar_doc::StrokeJoin::Bevel => s.push_str(r#" stroke-linejoin="bevel""#),
     }
@@ -1104,6 +1118,20 @@ mod tests {
         assert!(
             !svg.contains("linecap") && !svg.contains("linejoin"),
             "what SVG assumes goes without saying: {svg}"
+        );
+        // The limit is the exception, and it is said out loud because a
+        // silent agreement between two numbers is not an agreement. SVG
+        // defaults `stroke-miterlimit` to 4 and so does the engine, so
+        // for as long as both stay 4 the export is right either way —
+        // which is exactly why nothing would notice one of them moving.
+        // No picture comparison can stand in for this: the export
+        // witnesses read layer interiors, and a corner is all edge.
+        assert!(
+            svg.contains(&format!(
+                r#"stroke-miterlimit="{}""#,
+                chitrakar_doc::MITER_LIMIT
+            )),
+            "a mitred join carries the engine's own limit: {svg}"
         );
 
         let svg = exported(

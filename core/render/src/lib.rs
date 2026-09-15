@@ -7983,30 +7983,86 @@ mod tests {
         assert!(the_point(&miter), "a miter carries the corner to a point");
 
         // A corner sharp enough to send the miter running is cut off
-        // instead: the limit is four half-widths, and this doubles back
-        // to about ten degrees.
-        let mut kind = doc.node(id).unwrap().kind.clone();
-        if let NodeKind::Vector { shape, .. } = &mut kind {
-            *shape = VectorShape::Path {
-                points: vec![[10.0, 40.0], [60.0, 40.0], [12.0, 32.0]],
+        // instead. The rule is exact: the point is at `h / sin(t/2)` for
+        // a corner of `t`, so holding it to `MITER_LIMIT` half-widths is
+        // the same as refusing any corner under about twenty-nine
+        // degrees. This one doubles back to about ten.
+        //
+        // It gets a page and a width of its own, and that is the whole
+        // point of the arrangement rather than tidiness. Asked on the
+        // elbow's own 24-wide stroke the limit is 48 units past a corner
+        // at x=60, which is off the right-hand edge of a 100-wide page —
+        // so *every* answer, cut off or carried out to nothing, looks the
+        // same and the assertion cannot fail. It was written that way and
+        // passed for as long as it existed: it counted inked columns in
+        // `60..100`, at most forty of them, against a bound of
+        // `MITER_LIMIT * 12.0`, which is forty-eight. Undo the limit
+        // entirely and it still passed. What is asked now is the furthest
+        // ink rather than a count of columns, at a width whose limit lands
+        // well inside the page, so the two answers are different pictures.
+        let mut spiked = Document::new(100, 70, ColorMode::Rgb);
+        let sroot = spiked.root();
+        let mut node = Node::vector(
+            "spike",
+            VectorShape::Path {
+                points: vec![[10.0, 40.0], [35.0, 40.0], [11.5, 31.5]],
                 closed: false,
                 smooth: false,
                 handles: Vec::new(),
                 subpaths: Vec::new(),
-            };
+            },
+        );
+        let half = 4.0f32;
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: half * 2.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: StrokeCap::Butt,
+                join: StrokeJoin::Miter,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
         }
-        doc.apply(Command::SetKind {
-            id,
-            kind: Box::new(kind),
-        })
-        .unwrap();
-        let spike = render(&doc).unwrap();
-        let reach = (60..100)
-            .filter(|x| (0..70).any(|y| spike.get(*x, y).a > 0.5))
-            .count();
+        spiked
+            .apply(Command::AddNode {
+                parent: sroot,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let spike = render(&spiked).unwrap();
+        // Any ink at all, not half-covered ink: a miter at a sharp corner
+        // is a taper, and its far end never covers half a pixel, so a
+        // threshold of a half stops short of where the point actually
+        // reaches and reads a runaway one as well behaved.
+        let furthest = (0..100)
+            .rfind(|x| (0..70).any(|y| spike.get(*x, y).a > 0.02))
+            .expect("the line drew something");
+        // Cut off means the corner ends where a bevel ends: the rim
+        // points are a half-width from it, so a pixel or two past
+        // `35 + half` is everything a bevelled corner can reach.
+        //
+        // What it must not reach is the layer's own box, and that is the
+        // thing worth knowing about a runaway miter: `stroke_pad` grows
+        // the box by `MITER_LIMIT` half-widths and the renderer cuts to
+        // it, so a point let out past the limit is not unbounded ink —
+        // it is a spike sliced off square at 35 + 16. Which is why this
+        // reads as 36 with the limit in force and 52 without it, and why
+        // the old form of this check could not tell them apart: it
+        // counted inked columns in `60..100` on the elbow's own page,
+        // where the corner is at 60 and the spike points the other way,
+        // so the count was of a region nothing ever drew in — against a
+        // bound of `MITER_LIMIT * 12.0`, forty-eight, over a range only
+        // forty wide. Undo the limit altogether and it still passed.
+        let allowed = 35 + half as u32 + 2;
         assert!(
-            reach <= (chitrakar_doc::MITER_LIMIT * 12.0) as usize,
-            "past the limit the corner is cut off, not carried out ({reach})"
+            furthest <= allowed,
+            "past the limit the corner is cut off, not carried out \
+             (ink out to {furthest}, allowed {allowed})"
         );
     }
 

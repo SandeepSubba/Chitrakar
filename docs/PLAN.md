@@ -2800,6 +2800,53 @@ without reading anything else.*
      at all for a layer sitting clear of the edges; a paste that lands
      half a unit off is still caught, in the middle of the page, at
      0.46 of a channel.
+     A fifteenth shape was tried and thrown away, and what it turned up
+     on the way out was worth more than the shape. The list from the
+     method below named `StrokeJoin::Miter` and `StrokeCap::Square`, so a
+     polyline with real corners went into the fixture — the only path
+     there is `smooth: true`, flattened into so many nearly-straight
+     segments that the join between two of them is barely a join. Three
+     sabotages later it came back out. No audit over the shared document
+     can use a corner: the export witnesses compare layer *interiors*,
+     which is a pixel opaque with eight opaque neighbours of its own
+     colour, and a join is all edge and taper; the GPU backend hands a
+     mitred path back rather than drawing it; and a runaway point is cut
+     to the layer's own box by `stroke_pad` before it can reach anywhere
+     a page-wide comparison would find it. The shape held, and holding is
+     not earning.
+     What it turned up is that **the miter limit had no test at all**,
+     though there appeared to be one. `a_join_says_how_the_line_turns`
+     ended with a check that a corner past the limit is cut off rather
+     than carried out — and that check could not fail. Three things were
+     wrong with it at once and any one would have been enough: it counted
+     inked columns in `60..100` while the corner was at 60 and the spike
+     points the other way, so it counted a region nothing ever drew in;
+     its bound was `MITER_LIMIT * 12.0`, forty-eight, over a range only
+     forty wide, so the count could not reach it; and it asked for ink at
+     more than half coverage, which a mitre's taper never has at its far
+     end. Undo the limit entirely — let a corner of ten degrees keep a
+     point it should lose — and the whole workspace passed.
+     It asks the furthest ink now, at any coverage, on a page and a width
+     of its own chosen so the limit lands well inside the page: 36 with
+     the limit in force and 52 without it. Which is also where the
+     `stroke_pad` fact came from, and it is worth keeping: a point let
+     out past the limit is not unbounded ink, because the pad grows the
+     box by `MITER_LIMIT` half-widths and the renderer cuts to it — so
+     the wrongness is a spike sliced off square rather than a spike
+     running away. That is why it has to be measured against where a
+     *bevel* would end rather than against the page.
+     And a second, in the SVG exporter: it wrote no `stroke-miterlimit`
+     at all. Miter is SVG's own default so the join needed no attribute,
+     and SVG's default limit is 4 and `MITER_LIMIT` is 4, so the picture
+     came out right — by a coincidence holding two numbers together
+     across a file format with nothing watching it. Change the constant
+     and every mitred corner in every exported SVG disagrees with the
+     engine, silently, and no witness can say so for the reason above.
+     The PDF exporter had always written its own limit (`M`); this one
+     says it now too, so the two agree because they both say the same
+     number rather than because neither had to. Asked of the markup
+     rather than the picture, which is method Two and is the only way
+     this one can be asked.
      Five, and new: **ask the document what it has never said**. The
      four above all start from a person deciding what to look at, which
      is the thing they have in common and the limit they share. This one
@@ -2818,6 +2865,15 @@ without reading anything else.*
      beyond a blur, which are variations on arithmetic that already has
      audits of its own; the interesting ones are where a variant changes
      *geometry* rather than a number, and that is how to read the list.
+     With one correction, learned from the shape that came out again: a
+     variant that changes geometry is worth *looking at*, not worth
+     adding on sight. The joins and the caps change geometry and the
+     shared document still cannot hold them usefully, because no audit
+     over it can see a corner. The method names candidates; whether one
+     earns its place is still settled by breaking the code it was meant
+     to exercise. Reading the list is worth doing anyway — the two
+     defects above came out of looking at `StrokeJoin` and neither is
+     in the fixture.
      Four, and new: **ask the stack rather than the command**, which
      found a real defect one floor up as well. A gesture — the drag API
      the whole editor's live editing runs through — kept the *first*
