@@ -2708,13 +2708,49 @@ without reading anything else.*
      room against forty: the old instrument was never close to failing,
      and the worry about erosion was right in principle and small in
      practice. The new one is kept because it is free, stronger, and
-     cannot drift, not because the old one was failing.
+     drifts far less, not because the old one was failing. *Far less* and
+     not *not at all* — the next thing added to this fixture said so, and
+     it is recorded below.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own
      function. Three engine tests catch it; no fixture audit can, and
      none of them is blind by accident — a shared answer is a shared
      answer, the same as with the walk that resolves a copy's stand-ins.
+     The thirteenth was a **radial gradient**. Every fill in this fixture
+     that was not flat was a linear one, and the random pages generate
+     linear ramps too, so the disc — a different function of position,
+     with its own centre and radius and its own way of being wrong — had
+     never been drawn by anything the audits look at. It goes on the
+     layer with the blend mode, so it is composited as well as drawn. The
+     file format's inventory grew by nine (a radial's centre, its radius,
+     its stops, and each stop's colour and offset), which is the point of
+     that inventory: nine fields that were serialized and had never been
+     round-tripped by anything.
+     No defect this time, and the addition still earns its place, which
+     is the part worth being careful about. Break the ramp in the
+     reference renderer — measure the distance along one axis instead of
+     the radius, a disc turned into a stripe — and with the gradient in
+     the fixture *two* GPU audits fail: the one that compares gradients
+     directly, and
+     `whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does`,
+     which is the fixture one. Take the gradient back out and only the
+     first fails. So the fixture audit is newly able to catch a broken
+     radial ramp, which is exactly what adding a shape to it is for: not
+     a second opinion on a case already covered, but a case the
+     document-wide audits could not previously reach. The render crate's
+     own 164 tests, for the record, do not notice the sabotage at all.
+     And it cost the JPEG instrument, one page after that instrument was
+     rebuilt: the worst block went from 3.92 to 8.13, past a ceiling of
+     6.0. The PNG check — lossless, held to a single level, and run
+     before it — passed, which is what says the export is *right*; 8.13
+     is JPEG's own loss on a smooth sweep through saturated hues, which
+     is a hard case for it in a different way than an edge is, and which
+     a block average does not cancel the way it cancels ringing. The
+     ceiling is 12.0 now, against 153 for a JPEG with its channels
+     swapped. The honest summary is the one now written into that test:
+     a worst block reduces the drift rather than ending it, and the
+     thing that says an export is correct is the lossless check above it.
      Four, and new: **ask the stack rather than the command**, which
      found a real defect one floor up as well. A gesture — the drag API
      the whole editor's live editing runs through — kept the *first*

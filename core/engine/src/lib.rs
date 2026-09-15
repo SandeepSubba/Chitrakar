@@ -10759,6 +10759,19 @@ mod tests {
             // to catch: the page mean goes from about 3 to about 60, and
             // the worst block from about 2 to 153. Forty times the room,
             // against sixteen.
+            //
+            // It reduces the drift rather than ending it, which is worth
+            // being straight about: a block average cancels the ringing
+            // JPEG puts either side of an edge, and does not cancel
+            // everything. A radial gradient going into this document took
+            // the worst block from 3.92 to 8.13 — a smooth sweep through
+            // saturated hues, which is its own hard case and not an
+            // edge's. So the ceiling still has to be set with room for
+            // the hardest thing on the page. What says an export is
+            // *right* rather than merely close is the PNG above, which is
+            // lossless and held to a single level; this one is here to
+            // catch a JPEG that is a different picture, and a hundred and
+            // fifty against twelve is the room it has for that.
             let (w, h) = (page.width as usize, page.height as usize);
             let (mut worst_block, mut blocks) = (0.0f64, 0u32);
             for by in (0..h).step_by(8) {
@@ -10790,7 +10803,7 @@ mod tests {
             if blocks > 0 {
                 let mean = worst_block;
                 assert!(
-                    mean < 6.0,
+                    mean < 12.0,
                     "the JPEG written after {what} is a different picture \
                      (a block of it off by {mean:.2} a channel, over {blocks} blocks)"
                 );

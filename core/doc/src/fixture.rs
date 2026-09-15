@@ -143,6 +143,55 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // A *radial* gradient, which this document had only ever had a linear
+    // one of — and so had the pages drawn from a seed. It is its own
+    // geometry in the renderer, its own element in SVG, and its own
+    // arithmetic on the GPU: a distance from a centre in units of a
+    // radius rather than a projection onto a line. Everything that reads
+    // a gradient had been reading the same one.
+    {
+        let mut kind = doc.node(over).unwrap().kind.clone();
+        if let NodeKind::Vector { gradient, .. } = &mut kind {
+            *gradient = Some(Gradient::Radial {
+                center: [0.35, 0.4],
+                radius: 0.7,
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.95,
+                            g: 0.75,
+                            b: 0.2,
+                            a: 1.0,
+                        },
+                    },
+                    GradientStop {
+                        offset: 0.6,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.6,
+                            g: 0.2,
+                            b: 0.5,
+                            a: 0.85,
+                        },
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.05,
+                            g: 0.1,
+                            b: 0.35,
+                            a: 1.0,
+                        },
+                    },
+                ],
+            });
+        }
+        doc.apply(Command::SetKind {
+            id: over,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+    }
     // And a shadow on the *group*, not on a layer in it. A group's
     // opacity belongs to its composite rather than to each child, so the
     // silhouette an effect grows from is the pair of them as one shape —

@@ -1065,6 +1065,17 @@ mod tests {
             // A path is its points and whether it closes; the rest of what
             // one can hold — its smoothing, its handles, its subpaths —
             // is additive and reads as absent.
+            // A radial gradient's own three, and the stops every gradient
+            // needs — required the same way a linear one's are.
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*/color/Srgb:a",
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*/color/Srgb:b",
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*/color/Srgb:g",
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*/color/Srgb:r",
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*:color",
+            "/document/nodes/*/kind/Vector/gradient/Radial/stops/*:offset",
+            "/document/nodes/*/kind/Vector/gradient/Radial:center",
+            "/document/nodes/*/kind/Vector/gradient/Radial:radius",
+            "/document/nodes/*/kind/Vector/gradient/Radial:stops",
             "/document/nodes/*/kind/Vector/shape/Path:closed",
             "/document/nodes/*/kind/Vector/shape/Path:points",
             "/document/nodes/*/kind/Raster:height",
