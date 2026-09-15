@@ -945,6 +945,64 @@ pub fn everything() -> Fixture {
     // when the canvas turns, and they go into a file and onto a
     // clipboard like anything else. Deliberately not the ones the
     // command list sets, so that setting those still changes something.
+    // A *path*, which this document has never held: every shape in it
+    // until now was a rectangle or an ellipse, and a path is what the pen
+    // draws and what a brush stroke becomes. It is its own rasterizer —
+    // spans from an edge table rather than a formula — its own stroke,
+    // which is a skeleton walked with caps and joins rather than a band
+    // lying inside a closed outline, and its own path data in both
+    // exporters. None of that had ever been asked of by the audits over
+    // this document.
+    //
+    // And its stroke *swells and tapers*, which is the other half of the
+    // same gap: `Stroke::widths` is a width per anchor, what a pressure
+    // pen leaves behind, and it only means anything on a path. Not
+    // dashed, since a dashed stroke is drawn at one width by rule — the
+    // two are different ideas about the same line and the dashes win —
+    // so a dash here would have hidden the widths entirely.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector(
+                "a drawn line",
+                VectorShape::Path {
+                    points: vec![[4.0, 6.0], [16.0, 2.0], [26.0, 12.0], [38.0, 4.0]],
+                    closed: false,
+                    smooth: true,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                *stroke = Some(Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.35,
+                        b: 0.75,
+                        a: 1.0,
+                    },
+                    width: 4.0,
+                    widths: vec![0.25, 1.0, 0.4, 0.1],
+                    dash: Vec::new(),
+                    cap: crate::StrokeCap::Round,
+                    join: crate::StrokeJoin::Round,
+                    align: None,
+                    start_marker: Marker::None,
+                    end_marker: Marker::None,
+                });
+            }
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let drawn = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: drawn,
+        transform: Transform::translation(20.0, 40.0),
+    })
+    .unwrap();
+
     doc.apply(Command::SetSelection {
         selection: Some(Box::new(Mask {
             kind: MaskKind::Vector {

@@ -1454,7 +1454,20 @@ fn render_child(
                 }
                 if let Some(stroke) = stroke {
                     let color = scale_alpha(resolve_color(doc, &stroke.color), node.opacity);
-                    let pieces = stroke_pieces(&flatten_shape(shape), stroke);
+                    // The shape as it was authored, not flattened first:
+                    // `stroke_pieces` flattens for itself, and what it
+                    // needs the curves for is the *widths*. A stroke's
+                    // per-anchor widths are indexed by the shape's own
+                    // anchors, so `flatten_widths` resamples them onto the
+                    // flattened polyline — and it can only tell which
+                    // anchor is which while the anchors are still there.
+                    // Handed a polyline it found more points than widths,
+                    // read that as "this stroke does not vary", and drew
+                    // the whole line at full width. Which is what a
+                    // pressure pen's taper came out as on any curve: gone.
+                    // Every other caller — the hit test, the PDF exporter,
+                    // the GPU backend — passed the shape itself already.
+                    let pieces = stroke_pieces(shape, stroke);
                     paint_shape(
                         dst,
                         doc,
@@ -13395,6 +13408,89 @@ mod tests {
         let id = doc.children_of(root).unwrap()[0];
         assert_eq!(hit_test(&doc, 8.0, 21.0).unwrap(), Some(id));
         assert_eq!(hit_test(&doc, 56.0, 21.0).unwrap(), None);
+    }
+
+    /// And it swells and tapers along a *curve* too.
+    ///
+    /// Which is not the same test as the one above, and the difference is
+    /// the whole of a defect that lived here. Per-anchor widths are
+    /// indexed by the shape's own anchors, so a curved path — whose
+    /// drawing is a polyline of many more points than it has anchors —
+    /// needs them resampled onto that polyline, and `flatten_widths` does
+    /// exactly that. It can only do it while the anchors are still there.
+    /// The draw path handed it a shape it had flattened first; it found
+    /// more points than widths, read that as "this stroke does not vary",
+    /// and drew the whole line at full width. A pressure pen's taper on
+    /// any curve: gone.
+    ///
+    /// The test above did not see it because a straight two-point line
+    /// flattens to itself, so the anchors and the polyline are the same
+    /// points and the count still matches. The curve is the case.
+    #[test]
+    fn a_stroke_swells_and_tapers_along_a_curve() {
+        let draw = |widths: Vec<f32>| {
+            let mut doc = Document::new(64, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "s",
+                VectorShape::Path {
+                    // Smooth, so the drawing is a polyline of far more
+                    // points than the four anchors the widths index.
+                    points: vec![[6.0, 20.0], [22.0, 8.0], [40.0, 30.0], [58.0, 20.0]],
+                    closed: false,
+                    smooth: true,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 10.0,
+                    widths,
+                    dash: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: None,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // How many rows of a column the stroke covers: its thickness there.
+        let thickness =
+            |s: &Surface, x: u32| (0..s.height).filter(|&y| s.get(x, y).a > 0.5).count();
+
+        let even = draw(Vec::new());
+        let tapered = draw(vec![1.0, 1.0, 1.0, 0.2]);
+        // Near the first anchor both are full width, since the widths ask
+        // for full there — which is what says the two pictures are
+        // comparable at all.
+        let (a_even, a_tapered) = (thickness(&even, 10), thickness(&tapered, 10));
+        assert!(
+            a_even > 6 && a_tapered.abs_diff(a_even) <= 1,
+            "at the fat end: {a_tapered} against the even stroke's {a_even}"
+        );
+        // Near the last it is asked for a fifth, and a fifth is what it
+        // has to be: drawn at full width — which is what the flattened
+        // shape produced — this is the same number as the even stroke.
+        let (z_even, z_tapered) = (thickness(&even, 54), thickness(&tapered, 54));
+        assert!(
+            z_even > 6,
+            "the even stroke is thick at the thin end too ({z_even})"
+        );
+        assert!(
+            (z_tapered as f32) < z_even as f32 * 0.5,
+            "at the thin end: {z_tapered} against the even stroke's {z_even}, \
+             which is a taper the drawing has lost"
+        );
     }
 
     #[test]

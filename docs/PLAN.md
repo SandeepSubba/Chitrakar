@@ -845,7 +845,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~448),
+- **Verify before committing:** `cargo test --workspace` (~450),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2653,6 +2653,48 @@ without reading anything else.*
      far larger than any rounding
      (`a_dab_on_a_mask_dirties_where_the_mask_says`), and it is the only
      thing in the workspace that fails when the two spaces are confused.
+     The twelfth was a **path**, which is the largest thing this document
+     had never held: every shape in it was a rectangle or an ellipse, and
+     a path is what the pen draws and what a brush stroke becomes. Its own
+     rasterizer, its own stroke — a skeleton walked with caps and joins
+     rather than a band inside a closed outline — its own path data in
+     both exporters, and none of it had ever been asked about here. Its
+     stroke swells and tapers with it, since `Stroke::widths` is a width
+     per anchor and only means anything on a path.
+     Two defects, both of them the kind nobody files. The file format's
+     inventory grew by two (a path's points and whether it closes; its
+     smoothing, handles and subpaths are additive and read as absent),
+     and then:
+     The reference renderer **drew a swelling stroke at full width on any
+     curve**. Per-anchor widths are indexed by the shape's own anchors, so
+     a curved path — drawn as a polyline of far more points than it has
+     anchors — needs them resampled onto that polyline, and
+     `flatten_widths` does exactly that, while the anchors are still
+     there. The draw path handed it a shape it had flattened first: more
+     points than widths, read as "this stroke does not vary", full width.
+     Every other caller — the hit test, the PDF exporter, the GPU backend
+     — passed the shape itself already, which is why the GPU audit is what
+     caught it. The test that existed used a straight two-point line,
+     which flattens to itself and keeps the count
+     (`a_stroke_swells_and_tapers_along_a_curve` is the case).
+     And fixing that uncovered the second, in the browser suite: **adding
+     an anchor to a brushed line fattened it**. The widths are indexed by
+     the anchors and `insert_anchor` left the old list behind, so the list
+     stopped lining up and the whole line went to full width in one
+     double-click. It was invisible before because the line was being
+     drawn at full width anyway. An anchor now takes the width the line
+     had where it sits — between the two it was cut between, at the place
+     along the segment the cut was made — and one taken off takes its
+     width with it (`an_anchor_on_a_brushed_line_keeps_the_widths_lined_up`
+     asks the widths rather than the picture, since the picture only says
+     the line got fatter and not why).
+     One threshold moved rather than an audit: the JPEG round trip's mean
+     went 3.0 to 4.0, because a thin high-contrast diagonal is what JPEG
+     rings worst on. Measured: 2.65 a channel away from the drawn line and
+     3.57 in the rows holding it — and 2.65 was already most of the old
+     ceiling, which is that instrument eroding as the page gains edges,
+     the same weakness recorded above for the SVG audit before it was
+     given a better question to ask.
      What it does not catch, and this is worth writing down beside the
      method: the same sabotage made to `reads_backdrop` itself is
      invisible to that audit, because the GPU backend asks the CPU's own

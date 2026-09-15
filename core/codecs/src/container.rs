@@ -1062,6 +1062,11 @@ mod tests {
             "/document/nodes/*/kind/Paint/strokes/*:color",
             "/document/nodes/*/kind/Paint/strokes/*:points",
             "/document/nodes/*/kind/Paint/strokes/*:radii",
+            // A path is its points and whether it closes; the rest of what
+            // one can hold — its smoothing, its handles, its subpaths —
+            // is additive and reads as absent.
+            "/document/nodes/*/kind/Vector/shape/Path:closed",
+            "/document/nodes/*/kind/Vector/shape/Path:points",
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
             "/document/nodes/*/kind/Raster:width",
