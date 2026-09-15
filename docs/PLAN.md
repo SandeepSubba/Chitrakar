@@ -2493,8 +2493,8 @@ without reading anything else.*
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth. Two methods have been paying, and both are cheap enough to
-     keep reaching for. One: **put something in the shared fixture that
+  3. Depth. Five methods have been paying, and all of them are cheap
+     enough to keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
      off an image, a group two deep — and see which audits stop holding.
      That found a copy drawing its shadow clipped, turned up the
@@ -2751,6 +2751,73 @@ without reading anything else.*
      swapped. The honest summary is the one now written into that test:
      a worst block reduces the drift rather than ending it, and the
      thing that says an export is correct is the lossless check above it.
+     The fourteenth was a stroke lying **outside** its outline, and it
+     came out of a different way of choosing what to add: ask the
+     document which of its own vocabulary it has never used. Serialize
+     the fixture, collect every key and every string in it, and hold that
+     against what the crate declares. Every *field* was there — which is
+     itself worth knowing, and says the previous thirteen did their job.
+     Every *enum variant* was not. `StrokeAlign` has three and the shared
+     document held none of them: not by choice but because `align: None`
+     means whatever a shape has always been stroked as, and for a rect
+     that is inside. A gap of that shape is easy to miss, since nothing
+     is unset — the fallback is a real answer and every audit had been
+     given it.
+     Outside is the variant that changes more than colour: `stroke_pad`
+     grows the layer's box by it, so the dirty region, the hit test and
+     any effect's silhouette move with it, and it is the band SVG and PDF
+     have no way to ask for — both draw it as a centred stroke on a shape
+     pushed half a width outwards.
+     No defect in the drawing of it, and the addition earns its place
+     anyway. Take `stroke_pad` down to nothing for an outside band — the
+     box that no longer grows, while the band still draws — and with the
+     stroke in the fixture two audits fail that do not fail without it:
+     the cross-renderer one, and `a_layer_dragged_into_another_group_
+     brings_its_mask`. The dedicated stroke tests catch the drawing;
+     nothing but the fixture caught the box.
+     Worth recording alongside: the first sabotage tried was the wrong
+     one, and saying so is the point. `stroke_pad` for an outside band
+     was taken from twice a width to once — and the whole workspace
+     passed. That looked like a gap for a minute. It is not: the pad is
+     deliberately generous (a centred band reaches half a width and is
+     padded a whole one), so once a width is still correct for an outside
+     one, just exact. A sabotage that leaves the code right proves
+     nothing, and the way to tell is to read what the thing is *for*
+     rather than to trust that a changed number is a changed meaning.
+     And it found an unstated precondition in an audit one half-pixel
+     from being violated. The clipboard audit draws a layer and its
+     pasted copy and holds them against each other with the nudge allowed
+     for — "the copy draws what the original draws, moved". That is only
+     true where the page did not cut the original short. An effect is
+     built from the layer's silhouette over a window and the page's edge
+     is where that silhouette stops, deliberately, so a layer whose
+     effect window runs off the page is genuinely a different picture
+     from the same layer moved inwards. The fixture's lower shape already
+     reached half a pixel past the left edge — under the threshold, and
+     so the assumption held by luck. An outside band pushed it to two and
+     a half. The comparison now excludes a band as wide as the effect
+     reaches on the sides the window actually crossed, which is nothing
+     at all for a layer sitting clear of the edges; a paste that lands
+     half a unit off is still caught, in the middle of the page, at
+     0.46 of a channel.
+     Five, and new: **ask the document what it has never said**. The
+     four above all start from a person deciding what to look at, which
+     is the thing they have in common and the limit they share. This one
+     does not: serialize the shared fixture, collect every key and every
+     string value in it, and hold that against what the crate declares —
+     every field of every struct, every variant of every enum. What comes
+     back is the vocabulary the document owns and has never used, which
+     is a list nobody has to think of. It costs one throwaway test and it
+     is worth re-running whenever a kind of layer or a setting is added,
+     since the gap it finds is the one that does not look like a gap:
+     a field nobody set is obvious, and an enum whose fallback is a real
+     answer is not. The first run said every field was covered and named
+     `StrokeAlign` — three variants, none of them ever held — which is
+     the fourteenth shape above. It also named the blend modes that are
+     not separable, the adjustments beyond exposure and the filters
+     beyond a blur, which are variations on arithmetic that already has
+     audits of its own; the interesting ones are where a variant changes
+     *geometry* rather than a number, and that is how to read the list.
      Four, and new: **ask the stack rather than the command**, which
      found a real defect one floor up as well. A gesture — the drag API
      the whole editor's live editing runs through — kept the *first*

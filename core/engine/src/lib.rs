@@ -8795,10 +8795,58 @@ mod tests {
             // rather than hiding exactly behind the original — so the two
             // pictures are held against each other with that nudge
             // allowed for, and nothing else.
+            //
+            // Nothing else *except* where the page cut the original short
+            // and did not cut the copy, which is a precondition this
+            // comparison used to leave unsaid. An effect is built from
+            // the layer's silhouette over a window, and the page's own
+            // edge is where that silhouette stops — deliberately, since
+            // reading past it would repeat an edge out of a silhouette
+            // neither renderer has. So a layer whose effect window runs
+            // off the page is genuinely a different picture from the same
+            // layer moved inwards, and "the copy draws what the original
+            // draws, moved" is only true away from the sides it ran off.
+            // This held for years by luck: the shape in this fixture
+            // reached half a pixel past the left edge, which is under the
+            // threshold, and a stroke laid *outside* its outline pushed
+            // that to two and a half and made the assumption fail. What
+            // is excluded is a band as wide as the effect reaches, on the
+            // sides the window actually crossed — nothing at all for a
+            // layer that sits clear of the edges, which is most of them.
             let by = DUPLICATE_OFFSET as u32;
+            let reach = from
+                .document()
+                .node(id)
+                .map(|n| {
+                    n.effects
+                        .iter()
+                        .map(chitrakar_doc::Effect::reach)
+                        .fold(0.0f32, f32::max)
+                })
+                .unwrap_or(0.0);
+            let cut = match chitrakar_render::node_bounds(from.document(), id) {
+                Ok(chitrakar_render::Bounds::Rect(x0, y0, x1, y1)) if reach > 0.0 => (
+                    x0 < 0.0,
+                    y0 < 0.0,
+                    x1 > f.doc.meta.width as f32,
+                    y1 > f.doc.meta.height as f32,
+                ),
+                _ => (false, false, false, false),
+            };
+            let band = reach.ceil() as u32;
+            let (w, h) = (f.doc.meta.width, f.doc.meta.height);
+            let cut_here = |x: u32, y: u32| {
+                (cut.0 && x < band)
+                    || (cut.1 && y < band)
+                    || (cut.2 && x + band >= w)
+                    || (cut.3 && y + band >= h)
+            };
             let mut worst = (0.0f32, 0u32, 0u32);
             for y in 0..(f.doc.meta.height - by) {
                 for x in 0..(f.doc.meta.width - by) {
+                    if cut_here(x, y) {
+                        continue;
+                    }
                     let (p, q) = (sent.get(x, y), arrived.get(x + by, y + by));
                     let d = (p.r - q.r)
                         .abs()

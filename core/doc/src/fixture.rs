@@ -11,8 +11,8 @@
 use crate::{Adjustment, Filter};
 use crate::{
     BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
-    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StyleRun, Swatch,
-    TextSpec, Transform, VectorShape,
+    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StrokeAlign, StyleRun,
+    Swatch, TextSpec, Transform, VectorShape,
 };
 use chitrakar_color::{AuthoredColor, ColorMode};
 
@@ -143,6 +143,49 @@ pub fn everything() -> Fixture {
         let kids = doc.children_of(group).unwrap();
         (kids[0], kids[1])
     };
+    // A stroke lying *outside* the outline, which is the one thing about
+    // a stroke this document had never said. Every band in it was inside
+    // one — not by choice but by default, since `align: None` means
+    // whatever a shape has always been stroked as and for a rect that is
+    // inside. So `StrokeAlign` had three variants and the shared document
+    // held none of them, which is a different sort of gap from a field
+    // nobody set: the code reads the enum everywhere and no audit had
+    // ever handed it anything but the fallback.
+    //
+    // Outside is the variant that changes more than colour. The band
+    // reaches a whole width past the outline where an inside one reaches
+    // nothing, so it grows the layer's box — `stroke_pad` is what says by
+    // how much, generously — and the dirty region, the hit test and any
+    // effect's silhouette all move with it; and it is the band SVG and PDF have
+    // no way to ask for, both of them drawing it as a centred stroke on
+    // a shape pushed half a width outwards. A sharp corner is where that
+    // substitution is worth testing, so this rect keeps its square ones.
+    {
+        let mut kind = doc.node(under).unwrap().kind.clone();
+        if let NodeKind::Vector { stroke, .. } = &mut kind {
+            *stroke = Some(Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.15,
+                    b: 0.3,
+                    a: 1.0,
+                },
+                width: 2.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                align: Some(StrokeAlign::Outside),
+                start_marker: Marker::None,
+                end_marker: Marker::None,
+            });
+        }
+        doc.apply(Command::SetKind {
+            id: under,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+    }
     // A *radial* gradient, which this document had only ever had a linear
     // one of — and so had the pages drawn from a seed. It is its own
     // geometry in the renderer, its own element in SVG, and its own
