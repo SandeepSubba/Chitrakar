@@ -4302,10 +4302,30 @@ fn draw_raster(
     // sums — how far in the source a step of one device pixel goes.
     let foot_x = (inv.a.abs() + inv.c.abs()).max(1.0);
     let foot_y = (inv.b.abs() + inv.d.abs()).max(1.0);
-    // Capped: past four samples an axis the picture is already settled and
-    // the cost is not.
-    let taps_x = (foot_x.ceil() as u32).clamp(1, 4);
-    let taps_y = (foot_y.ceil() as u32).clamp(1, 4);
+    // One sample every *two* texels, not every one: a bilinear tap is
+    // already the average of the two texels either side of it on each
+    // axis, weighted to sum to one, so taps two texels apart cover the
+    // footprint with nothing between them missed. Asking for one a texel
+    // samples the picture twice over.
+    //
+    // `ceil` of the footprint jumped to two the moment a picture shrank at
+    // all: at nine tenths of its size, where an average over 1.1 texels is
+    // barely an average, it was paying four bilinear taps and sixteen
+    // texel reads a pixel. A window of a photograph at that scale
+    // repainted in 203ms against 22ms at its own size — slower for less
+    // picture. It is 59ms now; at a half 162ms became 54ms, at a quarter
+    // 290ms became 98ms, and dragging an adjustment's opacity over a
+    // zoomed-out photograph went from three frames a second to six.
+    //
+    // The answer is the same answer, which was checked rather than
+    // assumed: at a half, one tap is exactly the average of each two
+    // texels by two, and the old count is too
+    // (`a_picture_at_half_its_size_is_each_two_texels_averaged` passes
+    // either way). What the old count bought for its four taps was
+    // nothing. Past four an axis it is still capped, which is where the
+    // shrink is so deep the picture has settled.
+    let taps_x = ((foot_x * 0.5).ceil() as u32).clamp(1, 4);
+    let taps_y = ((foot_y * 0.5).ceil() as u32).clamp(1, 4);
     let averaging = taps_x > 1 || taps_y > 1;
     // A picture laid down at its own size, square to the page, on whole
     // pixels — which is a photograph opened and looked at, and every
@@ -13739,6 +13759,113 @@ mod tests {
             inside.r,
             outside.r
         );
+    }
+
+    /// A picture at half its size is the average of each two texels by
+    /// two, exactly.
+    ///
+    /// That is the claim that earns the sample count: a bilinear tap is
+    /// already the average of the two texels either side of it on each
+    /// axis, weighted to sum to one, so one tap at the middle of a
+    /// two-texel footprint *is* the box average over it — and taps two
+    /// texels apart cover any footprint with nothing missed between them.
+    /// Asking for one a texel, which is what taking the footprint's
+    /// ceiling did, samples the picture twice over and costs four bilinear
+    /// taps where one will do.
+    ///
+    /// Held against the average worked out here rather than against a
+    /// tolerance, because the interesting failure is the sample count
+    /// dropping *too* far: a single tap over a footprint of four texels
+    /// reads two of them and misses two, which is the crawl a shrunk
+    /// photograph gets when it moves, and an average that is merely close
+    /// would not say which two it read.
+    ///
+    /// It does not tell the two sample counts apart, and that is worth
+    /// saying: the older rule of one tap a texel passes this too. Four
+    /// taps spread evenly over a two-texel footprint average to the same
+    /// place one at its middle does. So what this pins is the *answer* at
+    /// half size, and what pins the count from below is
+    /// `a_minified_raster_averages_the_texels_it_skips_over` — hold the
+    /// taps at one and that one fails. Between them the count is bracketed
+    /// on both sides.
+    #[test]
+    fn a_picture_at_half_its_size_is_each_two_texels_averaged() {
+        const N: u32 = 32;
+        // Values with no pattern two neighbours could stand in for, so an
+        // average over the wrong pair is a different number.
+        let bytes: Vec<u8> = (0..N * N * 4)
+            .map(|i| ((i as u64 * 53 + 7) % 251) as u8)
+            .collect();
+        let mut doc = Document::new(N / 2, N / 2, ColorMode::Rgb);
+        let rid = doc.add_resource(N, N, bytes.clone());
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: N,
+                    height: N,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: 0.5,
+                d: 0.5,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+
+        // The source, premultiplied in linear light, which is the space the
+        // average is taken in.
+        let texel = |x: u32, y: u32| {
+            let at = ((y * N + x) * 4) as usize;
+            let a = bytes[at + 3] as f32 / 255.0;
+            [
+                chitrakar_color::srgb_to_linear(bytes[at] as f32 / 255.0) * a,
+                chitrakar_color::srgb_to_linear(bytes[at + 1] as f32 / 255.0) * a,
+                chitrakar_color::srgb_to_linear(bytes[at + 2] as f32 / 255.0) * a,
+                a,
+            ]
+        };
+        // The edges of the picture are where the sampler clamps, so the
+        // inside is what the claim is about.
+        for y in 1..(N / 2 - 1) {
+            for x in 1..(N / 2 - 1) {
+                let mut want = [0.0f32; 4];
+                for j in 0..2 {
+                    for i in 0..2 {
+                        let t = texel(x * 2 + i, y * 2 + j);
+                        for k in 0..4 {
+                            want[k] += t[k] / 4.0;
+                        }
+                    }
+                }
+                let got = s.get(x, y);
+                for (k, (a, b)) in [
+                    (got.r, want[0]),
+                    (got.g, want[1]),
+                    (got.b, want[2]),
+                    (got.a, want[3]),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    assert!(
+                        (a - b).abs() < 1e-5,
+                        "({x},{y}) channel {k}: {a:.6} against the {b:.6} its four texels average to"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

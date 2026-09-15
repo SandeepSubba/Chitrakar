@@ -6736,6 +6736,126 @@ mod tests {
 
     #[test]
     #[ignore = "timing probe, not an assertion"]
+    fn live_editing_probe() {
+        // What a hand feels, which none of the other probes measured: they
+        // all render a whole page from nothing, and the app repaints a
+        // window of a document a dirty rectangle at a time. A drag and a
+        // brush stroke turned out to be fast, and a slider over a
+        // zoomed-out photograph turned out to be three frames a second,
+        // which is not something a full-page probe can tell you.
+        //
+        // An A4 at 300dpi with a photograph filling it, seen through the
+        // sort of window the app actually shows.
+        let mut session = Session::new(2480, 3508, ColorMode::Rgb);
+        let px: Vec<u8> = (0..2480u32 * 3508 * 4).map(|i| (i % 251) as u8).collect();
+        let png = chitrakar_codecs::encode_png(2480, 3508, &px).unwrap();
+        session.place_image(&png, "photo").unwrap();
+        let small = add_rect(&mut session, "handle", 200.0, 150.0);
+        session.set_viewport(0.4, 0.0, 0.0, 1400, 900);
+        session.render_cached().unwrap();
+
+        let time = |session: &mut Session, what: &str, mut step: Box<dyn FnMut(&mut Session)>| {
+            step(session);
+            session.render_cached().unwrap();
+            let before = session.pixels_recomputed();
+            let t0 = std::time::Instant::now();
+            for _ in 0..10 {
+                step(session);
+                session.render_cached().unwrap();
+            }
+            let per = t0.elapsed() / 10;
+            let px = (session.pixels_recomputed() - before) / 10;
+            eprintln!("LIVE {what}: {per:?} ({px} pixels a frame)");
+        };
+
+        // A drag of the small layer: one preview a pointer sample, which
+        // is what the app sends.
+        let mut n = 0.0f32;
+        time(
+            &mut session,
+            "dragging a small layer",
+            Box::new(move |s: &mut Session| {
+                n += 1.0;
+                s.preview(Command::SetTransform {
+                    id: small,
+                    transform: Transform::translation(400.0 + n, 500.0),
+                })
+                .unwrap();
+            }),
+        );
+        session.cancel_preview().unwrap();
+        session.render_cached().unwrap();
+
+        // A brush stroke growing a sample at a time, on a paint layer.
+        let layer = session.add_paint_layer("brush").unwrap();
+        let ink: chitrakar_color::AuthoredColor =
+            serde_json::from_str(r#"{"Srgb":{"r":0.0,"g":0.0,"b":1.0,"a":1.0}}"#).unwrap();
+        session
+            .paint_begin(layer, 100.0, 100.0, 20.0, ink, 0.0, false, false)
+            .unwrap();
+        let mut k = 0.0f32;
+        time(
+            &mut session,
+            "one more sample of a brush stroke",
+            Box::new(move |s: &mut Session| {
+                k += 8.0;
+                s.paint_extend(100.0 + k, 100.0 + k * 0.5, 20.0).unwrap();
+            }),
+        );
+        session.commit_preview();
+
+        // And the worst interactive case there is: a slider that changes
+        // the whole page, which is what an adjustment layer's opacity is.
+        let adj = {
+            let root = session.document().root();
+            let i = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(Node::adjustment(
+                        "exposure",
+                        chitrakar_doc::Adjustment::Exposure { stops: 0.5 },
+                    )),
+                })
+                .unwrap();
+            session.document().children_of(root).unwrap()[i]
+        };
+        session.render_cached().unwrap();
+        let mut o = 0.5f32;
+        time(
+            &mut session,
+            "dragging an adjustment's opacity",
+            Box::new(move |s: &mut Session| {
+                o = if o > 0.9 { 0.5 } else { o + 0.01 };
+                s.preview(Command::SetOpacity {
+                    id: adj,
+                    opacity: o,
+                })
+                .unwrap();
+            }),
+        );
+        // And the same viewport repainted whole, at a few scales, which is
+        // what the number above is really made of.
+        let mut plain = Session::new(2480, 3508, ColorMode::Rgb);
+        plain.place_image(&png, "photo").unwrap();
+        for scale in [1.0f32, 0.9, 0.5, 0.4, 0.25] {
+            plain.set_viewport(scale, 0.0, 0.0, 1400, 900);
+            plain.render_cached().unwrap();
+            let t0 = std::time::Instant::now();
+            for _ in 0..5 {
+                plain.invalidate();
+                plain.render_cached().unwrap();
+            }
+            eprintln!(
+                "LIVE a 1400x900 window of the photo at {scale}: {:?}",
+                t0.elapsed() / 5
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "timing probe, not an assertion"]
     fn a4_viewport_probe() {
         let mut session = Session::new(2480, 3508, ColorMode::Rgb);
         add_rect(&mut session, "bg", 2480.0, 3508.0);

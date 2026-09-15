@@ -817,7 +817,35 @@ without reading anything else.*
   Which is the lesson to carry into the next round of this: measure the
   floor first — a page with the thing taken out — and only then ask what
   the thing costs above it.
-- **Verify before committing:** `cargo test --workspace` (~447),
+- **A shrunk picture was sampled twice over, and a probe for what a hand
+  feels.** Every timing above renders a whole page from nothing, and the
+  app repaints a window of a document a dirty rectangle at a time — so the
+  lesson about measuring the floor was applied to the thing a user
+  actually waits for. A drag of a small layer on an A4 with a photograph
+  filling it: 0.9ms. One more sample of a brush stroke: 0.1ms. Dragging
+  an *adjustment layer's opacity* over that page, zoomed out: **330ms**,
+  three frames a second, and no full-page probe could have said so.
+  It is not the adjustment. A window of the photograph at nine tenths of
+  its size repainted in 203ms where the same window at its own size took
+  22ms — slower for less picture — because the sample count was the
+  *ceiling of the footprint*, which jumps to two the moment a picture
+  shrinks at all: four bilinear taps and sixteen texel reads a pixel to
+  average over 1.1 texels. A bilinear tap is already the average of the
+  two texels either side of it, weighted to sum to one, so taps two
+  texels apart cover the footprint with nothing missed between them. One
+  every two texels, then: 203ms → 58ms at nine tenths, 162ms → 51ms at a
+  half, 290ms → 91ms at a quarter, and the opacity drag 330ms → 160ms.
+  The answer is the same answer, and that was checked rather than assumed:
+  at half size one tap is exactly the average of each two texels by two —
+  and so is the old count, which passes the same test
+  (`a_picture_at_half_its_size_is_each_two_texels_averaged`). What its
+  four taps bought was nothing. The count is bracketed from below by the
+  test that was already there: hold the taps at one and
+  `a_minified_raster_averages_the_texels_it_skips_over` fails, which is
+  the crawl a shrunk photograph gets when it moves.
+  `live_editing_probe` in `core/engine` keeps all of those numbers, since
+  the drag was the only way to find this and nothing else measured one.
+- **Verify before committing:** `cargo test --workspace` (~448),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
