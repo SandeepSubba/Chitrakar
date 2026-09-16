@@ -2847,6 +2847,35 @@ without reading anything else.*
      number rather than because neither had to. Asked of the markup
      rather than the picture, which is method Two and is the only way
      this one can be asked.
+     Six and a half, which is the same method pointed at a *function*
+     rather than a constant: **weaken the whole of something and see who
+     complains**. `apply_adjustment` was wrapped so that every adjustment
+     came out at a fifth of its strength — the sense of every change
+     unaltered, only its size — and then one variant at a time. Twelve of
+     the thirteen were caught by a test named after them. The
+     thirteenth, **vibrance**, was caught by exactly one test in the
+     workspace: the GPU backend disagreeing with the CPU. That test
+     self-skips where there is no adapter, so on a machine with no GPU the
+     strength of vibrance was pinned by nothing at all, and the three
+     things its own test asserted — a dull colour comes up, a vivid one
+     moves less, grey stays grey — are all true of a vibrance five times
+     too weak.
+     It has anchors now, and two of the three are definitional rather
+     than a regression pin, which is worth separating. At full chroma the
+     weight is nought, so the colour must come back *exactly* as it went
+     in: that is what makes this vibrance rather than saturation and it
+     holds whatever weighting curve is used. Asked for nothing, likewise.
+     The third is this definition's own arithmetic worked through by hand
+     — sRGB (0.6,0.5,0.4) is linear (0.318547, 0.214041, 0.132868),
+     saturation 0.582892, so the stretch about the luminance is 1.417108
+     — and it is labelled a regression pin, because vibrance has no
+     outside standard to be right against. What it buys is that changing
+     the strength becomes a deliberate act rather than a drift. The
+     fifth-strength mutant now fails in the render crate alone.
+     Worth keeping in mind for the next sweep: **a test that self-skips
+     is not a test on a machine that skips it.** Twelve adjustments
+     happened to have a second, local pin; one did not, and nothing said
+     so until the mutant was tried with the GPU excluded.
      Seven, and new: **for a one-way path, borrow an oracle**. Almost
      every audit here leans on a round trip — write it and read it back,
      draw it both ways, apply it and undo it — and *importing* has no

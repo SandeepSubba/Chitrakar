@@ -9721,9 +9721,91 @@ mod tests {
     }
 
     /// Vibrance lifts what is dull and leaves what is already vivid, so
-    /// a near-grey moves further than a saturated colour does.
+    /// a near-grey moves further than a saturated colour does — and it
+    /// lifts it by *this much*, which is the half that was missing.
+    ///
+    /// Everything below the anchors is directional: a dull colour comes
+    /// up, a vivid one moves less, grey stays grey. All three hold for a
+    /// vibrance a fifth of the strength it should be, and for a while
+    /// that was the whole of it — weaken every adjustment in turn and
+    /// this was the only one whose strength nothing in this crate
+    /// noticed. What did notice was the GPU backend disagreeing with the
+    /// CPU, and that test self-skips where there is no adapter, so on a
+    /// machine with no GPU the number was pinned by nothing at all.
+    ///
+    /// Two of the three anchors are definitional rather than a
+    /// regression pin. At full chroma the weight is nought, so the colour
+    /// must come back *exactly* as it went in — that is what makes this
+    /// vibrance rather than saturation, and it holds whatever curve the
+    /// weighting uses. Asked for nothing, likewise. The middle one is a
+    /// regression pin and says so: it is this definition's own arithmetic
+    /// worked through by hand, so that changing the strength is a
+    /// deliberate act rather than something that drifts.
     #[test]
     fn vibrance_lifts_the_dull_and_spares_the_vivid() {
+        // A colour at full chroma has a channel at nothing, so its
+        // saturation is one and its weight is nought.
+        let vivid = to_working(&AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 1.0,
+        });
+        let held = apply_adjustment(
+            &chitrakar_doc::Adjustment::Vibrance { amount: 1.0 },
+            None,
+            vivid,
+        );
+        for (got, want, name) in [
+            (held.r, vivid.r, "red"),
+            (held.g, vivid.g, "green"),
+            (held.b, vivid.b, "blue"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "at full chroma vibrance holds the {name} exactly ({got} against {want})"
+            );
+        }
+        // Asked for nothing, nothing happens.
+        let none = apply_adjustment(
+            &chitrakar_doc::Adjustment::Vibrance { amount: 0.0 },
+            None,
+            vivid,
+        );
+        assert!(
+            (none.r - vivid.r).abs() < 1e-6 && (none.g - vivid.g).abs() < 1e-6,
+            "no amount is no change: {none:?}"
+        );
+        // And the strength itself. sRGB (0.6, 0.5, 0.4) is linear
+        // (0.318547, 0.214041, 0.132868); its luminance is the usual
+        // weighted sum, its saturation (top - bottom) / top is 0.582892,
+        // so the stretch is 1 + 1 × (1 - that) = 1.417108, applied about
+        // the luminance.
+        let dull_in = to_working(&AuthoredColor::Srgb {
+            r: 0.6,
+            g: 0.5,
+            b: 0.4,
+            a: 1.0,
+        });
+        let lifted = apply_adjustment(
+            &chitrakar_doc::Adjustment::Vibrance { amount: 1.0 },
+            None,
+            dull_in,
+        );
+        for (got, want, name) in [
+            (lifted.r, 0.355314f32, "red"),
+            (lifted.g, 0.207218, "green"),
+            (lifted.b, 0.092188, "blue"),
+        ] {
+            assert!(
+                (got - want).abs() < 1e-4,
+                "the {name} is lifted to {want}, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn vibrance_lifts_the_dull_more_than_the_vivid() {
         let lift = chitrakar_doc::Adjustment::Vibrance { amount: 1.0 };
         let moved = |c: AuthoredColor| {
             let before = to_working(&c);
