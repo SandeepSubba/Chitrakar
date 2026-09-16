@@ -847,7 +847,7 @@ without reading anything else.*
   the drag was the only way to find this and nothing else measured one.
 - **Verify before committing:** `cargo test --workspace` (~450),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1072 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1122 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -3778,6 +3778,66 @@ without reading anything else.*
   (`boolean::combine_or_nudge`), since snapping is *for* landing edges
   on each other and two rectangles snapped edge to edge is the union
   people ask for most.
+- **Two windows, and one place the app's own settings live** ✅.
+  Getting a picture out was thirteen rows on the File menu — PNG, PNG at
+  2×, at 3×, the same three again for what is picked, this artboard,
+  every artboard, JPEG, SVG, PDF, the frames as pages, TIFF — which is
+  every combination somebody might want, guessed in advance and frozen
+  into a row, and still no way to ask for a JPEG at 80 or a PNG at half
+  size. `app/src/ExportDialog.tsx` asks the three questions that
+  actually decide an export instead: what form it takes, how much of the
+  page goes, and how big. What a format cannot do is disabled rather
+  than hidden — an SVG has no pixels to be a multiple of, and saying so
+  is worth more than the control's absence — and a CMYK TIFF names the
+  press profile it is waiting for rather than failing when the button is
+  pressed.
+  The part worth keeping is the number at the foot of it. Affinity and
+  Photoshop both estimate the file's size; this encodes it, because the
+  encoder is in-process and the bytes are already being made — so the
+  figure shown *is* the file, which is what makes a quality slider worth
+  dragging. The same encode is then what gets written, so the window
+  cannot promise one thing and save another
+  (`and weighs what the window said`). Above four megapixels it waits to
+  be asked rather than re-encoding a print-sized page on every drag of a
+  slider, which would freeze the very control being dragged.
+  Two exports stayed rows on the menu, and the reason is worth writing
+  down: a frame carries the multiple it wants to come out at as a
+  property of the *document* (`export_scale`, saved with the file), and
+  its name comes from the frame. The window offers a multiple of its
+  own, and the two multiplied together is not a thing anybody means — so
+  "Export this artboard" and "Export every artboard" (one file each, and
+  the frames as PDF pages) are still rows. A dialog replacing a menu is
+  right up to the point where the menu row was answering a different
+  question.
+  `app/src/prefs.ts` is the other half. Units, the grid, guides and the
+  monitor profile were three separate stretches of the View menu; how
+  far an arrow key moves a layer and how near a thing has to come before
+  it catches were constants in the source (`SNAP_PX`, a literal `10`)
+  reachable from nowhere at all — a setting you cannot find is a setting
+  you do not have. They were also four `localStorage` keys under two
+  spellings (`chitrakar:grid`, `chitrakar.units`), which is how a fifth
+  convention gets invented. One object under one key now, read back
+  field by field against the defaults' own types — this is JSON another
+  version of the app wrote, and a string where a number belongs would
+  otherwise reach the engine — and clamped on the way in, so a grid of
+  −4 or a quality of 900 stops at the boundary rather than downstream.
+  The old keys are read once so a grid and a unit chosen before any of
+  this existed survive it; a preferences window that silently resets
+  what you had is worse than none.
+  `PreferencesDialog.tsx` is a rail of six groups, which is Photoshop's
+  shape and Affinity's both, and earns the furniture at six — a flat
+  list of eighteen controls is a search problem. What is deliberately
+  not in it: anything the document owns. Its size, its press profile and
+  its guides travel with the file; a preference is about the person and
+  stays on this machine. The one place they touch is "New documents",
+  which is not the document's size but the size the next one starts at.
+  `Ctrl+Shift+E` opens the export window and `Ctrl+,` the preferences —
+  both the key every application on this machine already answers to, and
+  the Mac shell puts Settings on the application menu where a Mac looks
+  for it. The panel's width and the toolbar's position stay on their own
+  keys and out of all this: they are written on every frame of a drag,
+  and a JSON blob rewritten sixty times a second to remember a drag is
+  not a preference, it is a leak.
 
 ---
 
@@ -4195,6 +4255,20 @@ chitrakar/
   PDF was already right by the route it takes, since a copy holding
   anything not live goes over as pixels, and SVG omits adjustments
   wherever they are and says so in the markup.
+- **What the two windows do not do yet.** The export window writes
+  through the browser's download, so the desktop shell gets no native
+  save panel and no choice of folder — Tauri's dialog plugin is already
+  a dependency, so this is plumbing rather than a decision. There is no
+  export *preview* (Affinity and Photoshop both show the picture beside
+  the settings, and a JPEG at quality 5 is a thing you want to see
+  before you take it), no batch or slice export (several sizes in one
+  press, the `@1x/@2x/@3x` set an asset pipeline wants), and no
+  remembering more than one export setup. The preferences window has no
+  keyboard-shortcut editor — the keys are still literals in the keydown
+  handler — and no theme: the stylesheet is `color-scheme: dark` and
+  single-palette throughout, so a light mode is a token pass over
+  ~2,000 lines of CSS rather than a switch, and worth doing as its own
+  piece of work.
 - Live effects (drop shadow, outline), styles.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).

@@ -223,6 +223,38 @@ const pickTool = async (name) => {
   await page.waitForTimeout(60);
 };
 
+/** Export through the window, which is where every format now lives.
+ * Thirteen File rows became one dialog, so a test that used to click a
+ * row picks a format here instead — the same engine call at the end of
+ * it, reached the way a person reaches it.
+ *
+ * `area` is "page" | "selection" | "artboard"; `scale` is the
+ * multiplier, and only PNG and JPEG have either. Returns the download,
+ * so what lands on the disk is still what is asserted on. */
+const exportAs = async (format, { area, scale } = {}) => {
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click(`.export-formats .preset:text-is("${format}")`);
+  // Both are set every time, never only when asked for: the window
+  // remembers what it was last used for, so a test that left it at 2x
+  // would silently hand the next one a doubled picture.
+  const wantArea = area ?? "page";
+  if (!(await page.isDisabled('select[aria-label="Area"]'))) {
+    await page.selectOption('select[aria-label="Area"]', wantArea);
+  }
+  const wantScale = scale ?? 1;
+  const scaleButton = page.locator(
+    `.export-scales .preset:text-is("${wantScale}\u00d7")`,
+  );
+  if (!(await scaleButton.isDisabled())) await scaleButton.click();
+  await page.waitForTimeout(120);
+  const [dl] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click(".modal-actions .primary"),
+  ]);
+  return dl;
+};
+
 const menuClick = async (menu, item) => {
   (await menuItem(menu, item)).click();
   await page.waitForTimeout(200);
@@ -245,7 +277,7 @@ assert(
 );
 await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
-assert(await page.isVisible("text=Export PNG"), "File menu holds the exports");
+assert(await page.isVisible("text=Export\u2026"), "File menu holds the export window");
 assert(
   await page.isVisible("text=New document…"),
   "and the document actions that used to crowd the bar",
@@ -2462,10 +2494,7 @@ assert(
 await page.screenshot({ path: join(OUT, "editor5.png") });
 
 // 8w. Export SVG: the download carries live vector markup.
-const [svgDl] = await Promise.all([
-  page.waitForEvent("download"),
-  (await menuItem("File", "Export SVG")).click(),
-]);
+const svgDl = await exportAs("SVG");
 const svgPath = await svgDl.path();
 const svgText = await readFile(svgPath, "utf8");
 assert(svgText.startsWith("<svg "), "SVG root element");
@@ -2474,10 +2503,7 @@ assert(svgText.includes("<text") && svgText.includes("Hello!"), "text exported l
 console.log("ok: SVG export contains live vector markup");
 
 // 8w2. Export JPEG: a real JPEG, with the canvas flattened onto white.
-const [jpegDl] = await Promise.all([
-  page.waitForEvent("download"),
-  (await menuItem("File", "Export JPEG")).click(),
-]);
+const jpegDl = await exportAs("JPEG");
 const jpegBytes = await readFile(await jpegDl.path());
 assert(
   jpegBytes[0] === 0xff && jpegBytes[1] === 0xd8,
@@ -3926,10 +3952,7 @@ assert(
     const bytes = await readFile(await dl.path());
     return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
   };
-  const [twoX] = await Promise.all([
-    page.waitForEvent("download"),
-    (await menuItem("File", "Export PNG at 2×")).click(),
-  ]);
+  const twoX = await exportAs("PNG", { scale: 2 });
   assert((await pngSize(twoX)).join("x") === "1200x800", "2x export is twice the page");
   await pickTool("Move");
   await page.locator(".panel ul li").first().click();
@@ -3960,10 +3983,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   await page.waitForTimeout(200);
-  const [sel] = await Promise.all([
-    page.waitForEvent("download"),
-    (await menuItem("File", "Export selection as PNG")).click(),
-  ]);
+  const sel = await exportAs("PNG", { area: "selection" });
   const size = await pngSize(sel);
   assert(
     Math.abs(size[0] - 200) <= 1 && Math.abs(size[1] - 150) <= 1,
@@ -4537,10 +4557,7 @@ px = await canvasPixel(100, 100);
 assert(px[2] === 255, "proof off restores true pixels");
 
 // 9e. Print handoff: CMYK TIFF export separated through the profile.
-const [tiffDl] = await Promise.all([
-  page.waitForEvent("download"),
-  (await menuItem("File", "Export TIFF")).click(),
-]);
+const tiffDl = await exportAs("TIFF");
 const tiffBytes = await readFile(await tiffDl.path());
 const marker = tiffBytes.subarray(0, 2).toString("latin1");
 assert(marker === "II" || marker === "MM", `TIFF byte-order marker (${marker})`);
@@ -4548,10 +4565,7 @@ assert(tiffBytes.includes(iccBytes.subarray(0, 256)), "press profile embedded in
 assert(tiffBytes.length > 10000, `TIFF carries pixel data (${tiffBytes.length} bytes)`);
 
 // 9f. PDF export, CMYK-separated because a press profile is loaded.
-const [pdfDl] = await Promise.all([
-  page.waitForEvent("download"),
-  (await menuItem("File", "Export PDF")).click(),
-]);
+const pdfDl = await exportAs("PDF");
 const pdfBytes = await readFile(await pdfDl.path());
 assert(pdfBytes.subarray(0, 8).toString("latin1") === "%PDF-1.7", "PDF header");
 assert(pdfBytes.subarray(-6).toString("latin1") === "%%EOF\n", "PDF trailer");
@@ -4576,10 +4590,7 @@ assert(
   await page.mouse.move(b.x + b.width * 0.6, b.y + b.height * 0.6, { steps: 5 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  const [dl] = await Promise.all([
-    page.waitForEvent("download"),
-    (await menuItem("File", "Export PDF")).click(),
-  ]);
+  const dl = await exportAs("PDF");
   const text = (await readFile(await dl.path())).toString("latin1");
   assert(
     text.includes("/MediaBox [0 0 144.000 96.000]") && text.includes(" re\n"),
@@ -8963,10 +8974,7 @@ assert(
   );
 
   // And out to a file by the other door, which goes by the same rule.
-  const [saved] = await Promise.all([
-    page.waitForEvent("download"),
-    (await menuItem("File", "Export selection as PNG")).click(),
-  ]);
+  const saved = await exportAs("PNG", { area: "selection" });
   const bytes = await readFile(await saved.path());
   const size = [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
   assert(
@@ -8975,10 +8983,7 @@ assert(
   );
   // And at the size a screen with two pixels to the point wants it,
   // which is what a picked-out asset is usually for.
-  const [twice] = await Promise.all([
-    page.waitForEvent("download"),
-    (await menuItem("File", "Export selection at 2×")).click(),
-  ]);
+  const twice = await exportAs("PNG", { area: "selection", scale: 2 });
   const twiceBytes = await readFile(await twice.path());
   const twiceSize = [
     twiceBytes.readUInt32BE(16),
@@ -10741,6 +10746,221 @@ assert(
   );
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.waitForTimeout(300);
+}
+
+// 9bh. Getting the picture out, in one window. Thirteen rows on the
+// File menu were every combination somebody might want, guessed in
+// advance and frozen — and still no way to ask for a JPEG at 80. The
+// window asks the three questions that actually decide an export and
+// says what the file will weigh before anything is written.
+{
+  await newDocument(640, 480, "rgb");
+  await pickTool("Rect");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 640) * b.width, b.y + (y / 480) * b.height];
+  // Something with detail in it, so that quality has something to throw
+  // away — a flat page compresses to the same size at every setting,
+  // which is correct and tells you nothing.
+  for (const [x0, y0, x1, y1] of [
+    [40, 40, 300, 240],
+    [160, 120, 520, 400],
+    [360, 60, 600, 300],
+  ]) {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  }
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  assert(
+    (await page.locator(".export-formats .preset").allTextContents()).join(",") ===
+      "PNG,JPEG,PDF,SVG,TIFF",
+    "every format the engine can write is offered",
+  );
+  // The window opens on whatever it was last used for — which is the
+  // point of remembering, and the reason a test has to say what it
+  // wants rather than assume a fresh one.
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.waitForTimeout(150);
+
+  /** What the window says the file will weigh, in kB, once it has
+   * settled on an answer.
+   *
+   * `was` is what it last read: the number is worked out a breath after
+   * the last change, so asking straight after moving a control would
+   * otherwise catch the previous answer still on screen and call it
+   * this one. Waiting for it to *differ* is what makes the reading
+   * belong to the question just asked. */
+  let lastWeight = null;
+  const weight = async () => {
+    await page.waitForFunction(
+      (was) => {
+        const el = document.querySelector(".export-size strong");
+        const now = el && el.textContent.trim();
+        return !!now && now !== "\u2026" && now !== was;
+      },
+      lastWeight,
+      { timeout: 20000 },
+    );
+    const text = (await page.textContent(".export-size strong")).trim();
+    lastWeight = text;
+    const n = parseFloat(text);
+    return text.endsWith("MB") ? n * 1024 : text.endsWith("kB") ? n : n / 1024;
+  };
+
+  const onePng = await weight();
+  assert(onePng > 0, `the size of the file is shown before it is written (${onePng} kB)`);
+  assert(
+    (await page.textContent(".export-size span")).endsWith(".png"),
+    "and so is what it will be called",
+  );
+
+  // A scale is a real re-render, not an upsample, and the window says
+  // what it comes to in pixels.
+  await page.click('.export-scales .preset:text-is("2\u00d7")');
+  assert(
+    (await page.textContent('[aria-label="Scale"] .hint')).includes("1280"),
+    "twice across is said in pixels before it is made",
+  );
+  const twoPng = await weight();
+  assert(twoPng > onePng, `and weighs more than one to one (${twoPng} vs ${onePng} kB)`);
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+
+  // The number is the real encode, not a guess from the pixel count:
+  // move the quality and it moves with it. This is the whole reason the
+  // window is worth having over a menu row.
+  await page.click('.export-formats .preset:text-is("JPEG")');
+  const atQuality = async (q) => {
+    await page.locator('input[aria-label="Quality"]').evaluate((node, v) => {
+      Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      ).set.call(node, String(v));
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+    }, q);
+    return weight();
+  };
+  const low = await atQuality(5);
+  const high = await atQuality(100);
+  assert(
+    high > low,
+    `the size shown is the real encode — quality moves it (${low} \u2192 ${high} kB)`,
+  );
+
+  // A format that carries shapes has nothing to say about a scale, and
+  // says so rather than offering a control that does nothing.
+  await page.click('.export-formats .preset:text-is("SVG")');
+  assert(
+    await page.isDisabled('select[aria-label="Area"]'),
+    "an SVG carries the whole page, so the area is not a question",
+  );
+  assert(
+    await page.locator(".export-scales .preset").first().isDisabled(),
+    "and neither is a multiple of a pixel it does not have",
+  );
+
+  // TIFF needs a press profile; without one the window says why rather
+  // than failing when the button is pressed.
+  await page.click('.export-formats .preset:text-is("TIFF")');
+  await page.waitForTimeout(250);
+  assert(
+    (await page.textContent(".export-size")).includes("press profile"),
+    "a CMYK TIFF says what it is waiting for",
+  );
+  assert(
+    await page.locator(".modal-actions .primary").isDisabled(),
+    "and cannot be asked for until it has it",
+  );
+
+  // And it writes the file it promised.
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await weight();
+  const [written] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click(".modal-actions .primary"),
+  ]);
+  const wrote = await readFile(await written.path());
+  assert(
+    wrote.readUInt32BE(16) === 640 && wrote.readUInt32BE(20) === 480,
+    `the file that lands is the page (${wrote.readUInt32BE(16)}x${wrote.readUInt32BE(20)})`,
+  );
+  assert(
+    Math.abs(wrote.length / 1024 - onePng) < Math.max(2, onePng * 0.05),
+    `and weighs what the window said (${(wrote.length / 1024).toFixed(1)} vs ${onePng} kB)`,
+  );
+  assert(
+    !(await page.isVisible('[role=dialog][aria-label="Export"]')),
+    "the window closes once it has done what it was opened for",
+  );
+}
+
+// 9bi. How you like to work, in one window. These settings existed
+// before it did — they were scattered across whichever menu happened to
+// use them, and two of them (how far an arrow key moves a layer, how
+// near a thing has to come before it catches) were constants in the
+// source reachable from nowhere at all.
+{
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  assert(
+    (await page.locator(".prefs-tab").allTextContents()).join(",") ===
+      "General,Guides & grid,Selection,Colour,New documents,Export",
+    "the settings are grouped rather than listed",
+  );
+
+  // A preference is one value in one place: setting it here is the same
+  // setting the menu reads.
+  await page.selectOption('select[aria-label="Units"]', "mm");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".topbar").innerText()).includes("mm"),
+    "units set here are the units the rest of the app reads",
+  );
+
+  // And it survives being closed and the page being reloaded, which is
+  // the difference between a preference and a mood.
+  await page.click('.prefs-tab:has-text("Guides")');
+  await page.selectOption('select[aria-label="Grid"]', "16");
+  await page.waitForTimeout(200);
+  const stored = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("chitrakar:prefs") || "{}"),
+  );
+  assert(
+    stored.units === "mm" && stored.grid === 16,
+    `both are written down (${JSON.stringify({ u: stored.units, g: stored.grid })})`,
+  );
+
+  // A number past what the engine will take is stopped here rather than
+  // sent on: the field keeps what was typed, the value does not.
+  await page.click('.prefs-tab:has-text("General")');
+  await page.locator('input[aria-label="Arrow key moves"]').fill("9999");
+  await page.waitForTimeout(200);
+  const nudge = await page.evaluate(
+    () => JSON.parse(localStorage.getItem("chitrakar:prefs") || "{}").nudge,
+  );
+  assert(nudge <= 100, `a number past the ceiling is held at it (${nudge})`);
+
+  // Putting everything back is one press, and it puts back everything.
+  await page.click('.mask-button:has-text("Put everything back")');
+  await page.waitForTimeout(250);
+  const after = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("chitrakar:prefs") || "{}"),
+  );
+  assert(
+    after.units === "px" && after.grid === 0 && after.nudge === 1,
+    `and putting them back puts back all of them (${JSON.stringify({ u: after.units, g: after.grid })})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    !(await page.isVisible('[role=dialog][aria-label="Preferences"]')),
+    "escape closes it",
+  );
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

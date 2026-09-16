@@ -65,6 +65,15 @@ export async function setNativeMenu(
     items: await Promise.all([
       PredefinedMenuItem.new({ item: { About: null } }),
       sep(),
+      // A Mac looks for its settings here and nowhere else. It is the
+      // same row the in-window View menu carries, dispatched by the
+      // same id, so there is one handler and not two.
+      MenuItem.new({
+        id: "prefs",
+        text: "Settings…",
+        action: () => dispatch("prefs"),
+      }),
+      sep(),
       PredefinedMenuItem.new({ item: "Services" }),
       sep(),
       PredefinedMenuItem.new({ item: "Hide" }),

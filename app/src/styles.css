@@ -2154,3 +2154,191 @@ button.fold:hover {
     height: 28px;
   }
 }
+
+/* The export window and the preferences window.
+   Both are wider than the 20rem a `.modal` is by default: one lays
+   format buttons out in a row, the other has a rail of categories
+   beside its controls, and neither fits in a column meant for New
+   document's three fields. They stay inside the window all the same —
+   the width is a `min()` against the viewport, so a phone gets the
+   whole screen and nothing hangs off the ends. */
+.export-modal {
+  width: min(26rem, calc(100vw - 2rem));
+}
+
+/* The formats, as a row rather than a column: five of them, each a
+   word, and which one is picked has to read at a glance. */
+.export-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.export-formats .preset,
+.export-scales .preset {
+  text-align: center;
+  padding: 0.3rem 0.6rem;
+}
+
+.export-scales {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.export-scales .preset:disabled,
+.export-formats .preset:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* What the file will be called and how big it comes out, on one line at
+   the foot of the window — the thing the whole dialog exists to tell
+   you before you commit to it. */
+.export-size {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.2rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-height: 2.1rem;
+}
+
+.export-size span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-size strong {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-size .mask-button {
+  margin-left: auto;
+  flex: none;
+}
+
+.export-refusal {
+  color: var(--muted);
+  white-space: normal !important;
+}
+
+.prefs-modal {
+  width: min(34rem, calc(100vw - 2rem));
+}
+
+.prefs-body {
+  display: flex;
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+/* The rail of categories. Six groups is where a flat list stops being
+   readable and a rail starts earning its keep, which is the count every
+   application of this kind arrives at one way or another. */
+.prefs-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: none;
+  width: 9.5rem;
+  border-right: 1px solid var(--border);
+  padding-right: 0.5rem;
+}
+
+.prefs-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  cursor: pointer;
+}
+
+.prefs-tab:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.prefs-tab.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.prefs-tab svg {
+  flex: none;
+}
+
+/* The settings themselves. A fixed least-height so that moving between
+   a group of four and a group of one does not resize the window under
+   the pointer. */
+.prefs-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 11rem;
+}
+
+/* A checkbox reads left to right — the box, then what it means — which
+   is the other way round from every other row in a dialog, where the
+   label leads and the control is pushed to the right. */
+.prefs-pane .row.prefs-check {
+  gap: 0.45rem;
+}
+
+.prefs-pane .row.prefs-check input {
+  margin-left: 0;
+  width: auto;
+}
+
+.prefs-pane .row.prefs-check .hint {
+  margin-left: auto;
+}
+
+/* A phone has no room for a rail beside the settings, so it goes above
+   them and scrolls sideways. */
+@media (max-width: 560px) {
+  .prefs-body {
+    flex-direction: column;
+  }
+
+  .prefs-rail {
+    flex-direction: row;
+    width: auto;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0 0 0.5rem;
+  }
+
+  .prefs-tab span {
+    display: none;
+  }
+}
+
+/* A plain remark inside a dialog — what a format does, what a setting
+   is for. Distinct from `.modal-note`, which is amber because it says
+   the dialog is about to do something other than what was asked; a
+   sentence explaining that a JPEG is lossy has nothing to caution
+   about, and reading as a warning is the wrong note entirely. */
+.modal-aside {
+  margin: 0.1rem 0 0.3rem;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--muted);
+}

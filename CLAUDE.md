@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1119 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1122 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -122,6 +122,29 @@ as good as `Node::each_color_mut` is complete, which is why that walk
 matches every `NodeKind` and `Effect` exhaustively rather than falling
 through — a new kind of layer will not compile until it says whether it
 holds a colour.
+
+## Settings, and getting a picture out
+
+`app/src/prefs.ts` is the one place the app remembers how you like to
+work: a single `chitrakar:prefs` object, read back field by field
+against the defaults' own types and clamped on the way in, so a number
+typed into a window cannot reach the engine as something it will not
+take. It replaced four `localStorage` keys under two spellings, and it
+reads the old two once so nothing anybody had chosen is lost. A
+preference is about the *person* — units, grid, snap distance, what
+export you reach for. Anything the file should still say on another
+machine belongs in the document and goes through a `Command`. The
+panel's width and the toolbar's position deliberately stay on their own
+keys: they are written on every frame of a drag.
+
+`PreferencesDialog.tsx` (Ctrl+,) is a rail of six groups over that
+object. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
+rows with format × area × scale, and shows the file's real size — it
+encodes the bytes rather than estimating, and the same encode is what
+gets written. Above four megapixels it waits to be asked. Two exports
+are still menu rows and should stay that way: a frame's export multiple
+and its name are the *document's* (`export_scale`), which the window's
+own scale cannot express.
 
 ## Claude Code plugin
 

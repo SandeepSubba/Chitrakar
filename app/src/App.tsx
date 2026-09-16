@@ -8,6 +8,9 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
+import { usePrefs } from "./prefs";
+import { ExportDialog } from "./ExportDialog";
+import { PreferencesDialog } from "./PreferencesDialog";
 import {
   Adjustment,
   BlendMode,
@@ -757,7 +760,6 @@ const COLOUR_BANDS: [string, string][] = [
   ["Magentas", "#d071e0"],
 ];
 
-const SNAP_PX = 6;
 
 /** Where the layout stops having room for the panel beside the canvas.
  * The stylesheet asks the same question, in the same words. */
@@ -1121,6 +1123,9 @@ export function App() {
     setDocSize([w, h]);
   }, []);
   const [newDocOpen, setNewDocOpen] = useState(false);
+  /** The export window, and the preferences window. */
+  const [exportOpen, setExportOpen] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
   const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
   /** Whether the softness of what is picked is being chosen in its own
    * window. The number is also in the rail, where a hand already on the
@@ -1148,22 +1153,12 @@ export function App() {
   /** The open document's resolution, and the units the rulers and the
    * geometry fields read in — the latter remembered across visits. */
   const [docDpi, setDocDpi] = useState(72);
-  const [units, setUnitsState] = useState<Units>(() => {
-    try {
-      const saved = localStorage.getItem("chitrakar.units");
-      return saved === "mm" || saved === "in" ? saved : "px";
-    } catch {
-      return "px";
-    }
-  });
-  const setUnits = (u: Units) => {
-    setUnitsState(u);
-    try {
-      localStorage.setItem("chitrakar.units", u);
-    } catch {
-      // Not remembered, then.
-    }
-  };
+  /** How you like to work, all of it, in one place — see `prefs.ts`.
+   * The names below are bound so the call sites that used to hold their
+   * own state read exactly as they did. */
+  const { prefs, set: setPrefs, reset: resetPrefs } = usePrefs();
+  const units = prefs.units;
+  const setUnits = (u: Units) => setPrefs({ units: u });
   /** The viewport's size in CSS pixels. The canvas covers it, and the
    * engine composites only what fits — so a print-sized page costs a
    * screenful of pixels to show, not nine megapixels. */
@@ -1211,6 +1206,13 @@ export function App() {
     // document every visit starts with must not overwrite a draft that
     // has not been taken back yet.
     if (!session || saveTick === 0 || layers.length === 0) return;
+    // Turned off in Preferences: nothing is kept, and whatever was kept
+    // before goes — a setting that stops writing but leaves the last
+    // draft behind is not the setting it says it is.
+    if (!prefs.keepDraft) {
+      clearDraft();
+      return;
+    }
     const t = setTimeout(() => {
       try {
         putDraft(session.save());
@@ -1220,7 +1222,7 @@ export function App() {
       }
     }, 1500);
     return () => clearTimeout(t);
-  }, [session, saveTick, layers.length, docName]);
+  }, [session, saveTick, layers.length, docName, prefs.keepDraft]);
 
   /** Faces a text block can be set in. The bundled one is always there;
    * the rest are fetched from /fonts once per page load and registered
@@ -1258,22 +1260,15 @@ export function App() {
   const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
   /** The guides the user has placed, read back from the document. */
   const [docGuides, setDocGuides] = useState<DocGuide[]>([]);
-  const [showGuides, setShowGuides] = useState(true);
+  const showGuides = prefs.showGuides;
+  const setShowGuides = (v: boolean | ((was: boolean) => boolean)) =>
+    setPrefs({ showGuides: typeof v === "function" ? v(prefs.showGuides) : v });
   /** How far apart the grid's lines are, in document pixels; 0 for no
    * grid at all. A view setting like the guides' own visibility — it
    * says how you are working rather than what the document is — so it is
    * remembered here rather than saved with the file. */
-  const [grid, setGrid] = useState(() => {
-    const kept = Number(localStorage.getItem("chitrakar:grid"));
-    return Number.isFinite(kept) && kept > 0 ? kept : 0;
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("chitrakar:grid", String(grid));
-    } catch {
-      /* a browser with no room for it still draws the grid */
-    }
-  }, [grid]);
+  const grid = prefs.grid;
+  const setGrid = (g: number) => setPrefs({ grid: g });
   /** A guide being dragged: out of a ruler (index null) or an existing one
    * being moved. `at` is where it currently sits, in document units. */
   const [guideDrag, setGuideDrag] = useState<{
@@ -1305,7 +1300,8 @@ export function App() {
    * photographs whose answers were known, not because a half is a
    * pleasing place to start. Either way from there it gives ground
    * gently rather than falling over. */
-  const [subjectTolerance, setSubjectTolerance] = useState(0.5);
+  const subjectTolerance = prefs.subjectTolerance;
+  const setSubjectTolerance = (v: number) => setPrefs({ subjectTolerance: v });
   /** How far the next grow or shrink of the region reaches. */
   const [growBy, setGrowBy] = useState(2);
   /** Whether the view is showing the picture as it was before the work
@@ -1335,7 +1331,8 @@ export function App() {
   /** How far the edge of the next region picked is softened over. Kept
    * here rather than read off the document so it carries from one
    * region to the next, the way a brush size does. */
-  const [selectionFeather, setSelectionFeather] = useState(0);
+  const selectionFeather = prefs.feather;
+  const setSelectionFeather = (v: number) => setPrefs({ feather: v });
   /** The outline of what is picked out, in page coordinates, as the
    * engine flattens it — asked for rather than worked out again here,
    * since a rounded box, an ellipse and a freehand path each flatten
@@ -2203,7 +2200,7 @@ export function App() {
     ys: number[],
     free: boolean,
   ): [number, number] => {
-    const tol = SNAP_PX / view.zoom;
+    const tol = prefs.snap / view.zoom;
     const sx = free ? NO_SNAP : snapAxis([x], xs, tol);
     const sy = free ? NO_SNAP : snapAxis([y], ys, tol);
     const next: Guides = { x: [], y: [] };
@@ -3059,7 +3056,7 @@ export function App() {
         let [mx, my] = [x - drag.startX, y - drag.startY];
         const next: Guides = { x: [], y: [] };
         if (drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
-          const tol = SNAP_PX / view.zoom;
+          const tol = prefs.snap / view.zoom;
           const b = drag.b0;
           const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX, tol);
           const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY, tol);
@@ -3227,7 +3224,7 @@ export function App() {
         drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
       const next: Guides = { x: [], y: [] };
       if (snapping) {
-        const tol = SNAP_PX / view.zoom;
+        const tol = prefs.snap / view.zoom;
         const b = drag.b0!;
         const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX!, tol);
         const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY!, tol);
@@ -3653,7 +3650,7 @@ export function App() {
     // follows from the shape rather than from the cursor.
     const caught = [false, false];
     if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
-      const tol = SNAP_PX / view.zoom;
+      const tol = prefs.snap / view.zoom;
       const sx = snapAxis([px], drag.snapX, tol);
       const sy = snapAxis([py], drag.snapY, tol);
       px += sx.delta;
@@ -4417,7 +4414,16 @@ export function App() {
         }
         if (k === "e") {
           e.preventDefault();
-          exportPng();
+          // Shift asks the window; bare is the one-press export. The
+          // pairing Affinity and Photoshop both use.
+          if (e.shiftKey) setExportOpen(true);
+          else exportPng();
+        }
+        // The settings key every application on this machine answers
+        // to. `e.key` is the comma itself, so it needs no code lookup.
+        if (e.key === ",") {
+          e.preventDefault();
+          setPrefsOpen(true);
         }
         // A browser keeps Ctrl+N and Ctrl+O for itself and will not give
         // them up to preventDefault, so these two only ever fire in the
@@ -4525,7 +4531,7 @@ export function App() {
         return;
       }
       e.preventDefault();
-      const k = e.shiftKey ? 10 : 1;
+      const k = e.shiftKey ? prefs.nudgeBig : prefs.nudge;
       const moving = movableSelection.map((id) => ({
         id,
         t0: toTransform(session.transform_of(id)),
@@ -5836,39 +5842,6 @@ export function App() {
     );
   };
 
-  /** PNG at a multiple of the document's size — the @2x/@3x a screen
-   * asset wants, re-solved rather than upsampled. */
-  const exportPngAt = (scale: number) => {
-    if (!session) return;
-    saveAs("PNG export", `${fileName()}@${scale}x.png`, "image/png", () =>
-      session.export_png_at(scale, 0, 0, 0, 0),
-    );
-  };
-
-  /** PNG of just what is picked, at document resolution: a region
-   * picked out of the page when there is one — in the shape it was
-   * picked in — and otherwise the picked layers' box. The same rule
-   * Copy as image goes by, since the two are the same picture leaving
-   * by different doors. */
-  const exportSelectionPng = (scale: number) => {
-    if (!session) return;
-    const at = scale === 1 ? "" : `@${scale}x`;
-    const name = `${fileName()}-selection${at}.png`;
-    if (antRings.length > 0) {
-      saveAs("PNG export", name, "image/png", () =>
-        session.selection_png(scale),
-      );
-      return;
-    }
-    if (selectionSet.length === 0) return;
-    const box = unionBounds(selectionSet);
-    if (!box) return;
-    const [x, y, w, h] = [box[0], box[1], box[2] - box[0], box[3] - box[1]];
-    saveAs("PNG export", name, "image/png", () =>
-      session.export_png_at(scale, x, y, w, h),
-    );
-  };
-
   /** Every frame on the page, each as its own PNG at its own size —
    * what having frames is for. Named after the frame, so a page of them
    * comes out as a set of named pictures. */
@@ -5891,6 +5864,24 @@ export function App() {
   const frameFile = (name: string, at: number) =>
     `${fileName()} - ${name}${at > 1 ? `@${at}x` : ""}.png`;
 
+  /** The picked frame on its own, at its own size — one screen out of a
+   * page of them.
+   *
+   * This is a row on the menu and not a choice in the export window,
+   * because the multiple it comes out at is the *frame's* own
+   * (`export_scale`, saved with the document and carried to whoever
+   * opens it) and so is the name. The window offers a scale of its own,
+   * and the two multiplied together is not a thing anybody means. */
+  const exportArtboard = () => {
+    if (!session || selected === null) return;
+    const board = layers.find((l) => l.id === selected);
+    if (!board || board.kind !== "artboard") return;
+    const at = frameScale(board.id as NodeId);
+    saveAs("PNG export", frameFile(board.name, at), "image/png", () =>
+      session.export_artboard_png(board.id, at),
+    );
+  };
+
   const exportArtboards = () => {
     if (!session) return;
     const boards = layers.filter((l) => l.kind === "artboard");
@@ -5909,52 +5900,12 @@ export function App() {
     }
   };
 
-  /** The picked frame on its own, at its own size — one screen out of a
-   * page of them. */
-  const exportArtboard = () => {
-    if (!session || selected === null) return;
-    const board = layers.find((l) => l.id === selected);
-    if (!board || board.kind !== "artboard") return;
-    const at = frameScale(board.id as NodeId);
-    saveAs("PNG export", frameFile(board.name, at), "image/png", () =>
-      session.export_artboard_png(board.id, at),
-    );
-  };
-
-  const exportJpeg = () => {
-    if (!session) return;
-    saveAs("JPEG export", `${fileName()}.jpg`, "image/jpeg", () =>
-      session.export_jpeg(92),
-    );
-  };
-
-  const exportPdf = () => {
-    if (!session) return;
-    saveAs("PDF export", `${fileName()}.pdf`, "application/pdf", () =>
-      session.export_pdf(),
-    );
-  };
-
   /** Every frame as a page of one PDF, in the order they sit on the
    * document — a brochure laid out as artboards comes out a brochure. */
   const exportPdfFrames = () => {
     if (!session) return;
     saveAs("PDF export", `${fileName()}-pages.pdf`, "application/pdf", () =>
       session.export_pdf_frames(),
-    );
-  };
-
-  const exportTiff = () => {
-    if (!session) return;
-    saveAs("CMYK TIFF export", `${fileName()}.tif`, "image/tiff", () =>
-      session.export_cmyk_tiff(),
-    );
-  };
-
-  const exportSvg = () => {
-    if (!session) return;
-    saveAs("SVG export", `${fileName()}.svg`, "image/svg+xml", () =>
-      new TextEncoder().encode(session.export_svg()),
     );
   };
 
@@ -6263,24 +6214,19 @@ export function App() {
         item("place-image", "image", "Place image…", () => pick(placeInputRef)),
         item("load-font", "text", "Load font…", () => pick(fontInputRef)),
         SEP,
+        // Thirteen rows lived here: PNG, PNG at 2×, at 3×, the same
+        // three for what is picked, this artboard, every artboard,
+        // JPEG, SVG, PDF, the frames as pages, TIFF. Every combination
+        // anybody might want, guessed in advance and frozen into a row
+        // — and still no way to ask for JPEG at 80, or a PNG at half
+        // size. That is a dialog's job, and it is one now.
+        item("export", "export", "Export…", () => setExportOpen(true), "Ctrl+Shift+E"),
+        // Kept beside it because it is the one people press without
+        // looking: the whole page, as it is, right now.
         item("export-png", "export", "Export PNG", exportPng, "Ctrl+E"),
-        item("export-png-2x", "export", "Export PNG at 2×", () => exportPngAt(2), "@2x"),
-        item("export-png-3x", "export", "Export PNG at 3×", () => exportPngAt(3), "@3x"),
-        ...(selectionSet.length > 0 || antRings.length > 0
-          ? [
-              item("export-selection", "export", "Export selection as PNG", () =>
-                exportSelectionPng(1),
-              ),
-              // The same asset at the size a screen with two or three
-              // pixels to the point wants it.
-              item("export-selection-2x", "export", "Export selection at 2×", () =>
-                exportSelectionPng(2),
-              ),
-              item("export-selection-3x", "export", "Export selection at 3×", () =>
-                exportSelectionPng(3),
-              ),
-            ]
-          : []),
+        // These two stay rows because they are not one file. The window
+        // exports a picture; these write a file per artboard and a page
+        // per frame, which is a different act with a different result.
         ...(selectedLayer?.kind === "artboard"
           ? [item("export-artboard", "frame", "Export this artboard", exportArtboard)]
           : []),
@@ -6289,19 +6235,11 @@ export function App() {
               item("export-artboards", "frame", "Export every artboard", exportArtboards,
                 "one each",
               ),
-            ]
-          : []),
-        item("export-jpeg", "export", "Export JPEG", exportJpeg, "flattened"),
-        item("export-svg", "export", "Export SVG", exportSvg),
-        item("export-pdf", "export", "Export PDF", exportPdf, hasIcc ? "CMYK" : "sRGB"),
-        ...(layers.some((l) => l.kind === "artboard")
-          ? [
               item("export-pdf-frames", "frame", "Export PDF of the frames", exportPdfFrames,
                 "a page each",
               ),
             ]
           : []),
-        ...(hasIcc ? [item("export-tiff", "export", "Export TIFF", exportTiff, "CMYK")] : []),
         SEP,
         // The press profile is the document's own — what it will be
         // printed through — so it belongs with the document. How this
@@ -6483,6 +6421,11 @@ export function App() {
           : []),
         SEP,
         item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
+        SEP,
+        // Last on the last menu, which is where an application's own
+        // settings sit when they are not on a Mac's application menu —
+        // and the desktop shell puts them there as well.
+        item("prefs", "units", "Preferences…", () => setPrefsOpen(true), "Ctrl+,"),
       ],
     },
   ];
@@ -7073,8 +7016,62 @@ export function App() {
           }}
         />
       )}
+      {exportOpen && session && (
+        <ExportDialog
+          session={session}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          fileName={fileName}
+          hasRegion={antRings.length > 0}
+          selectionBounds={() => {
+            // A region is what leaves when there is one, so its own box
+            // is what the window should be sizing — the picked layers'
+            // box only answers when no region is up.
+            if (antRings.length > 0) {
+              const pts = antRings.flat();
+              if (pts.length > 0) {
+                const xs = pts.map((q) => q[0]);
+                const ys = pts.map((q) => q[1]);
+                return [
+                  Math.min(...xs),
+                  Math.min(...ys),
+                  Math.max(...xs),
+                  Math.max(...ys),
+                ];
+              }
+            }
+            return unionBounds(selectionSet);
+          }}
+          hasIcc={hasIcc}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+      {prefsOpen && (
+        <PreferencesDialog
+          prefs={prefs}
+          setPrefs={setPrefs}
+          resetPrefs={resetPrefs}
+          hasScreenIcc={hasScreenIcc}
+          onLoadScreenIcc={() => pick(screenIccInputRef)}
+          onDisplayP3={() => {
+            if (!session) return;
+            try {
+              session.set_display_profile(display_p3_profile());
+              setHasScreenIcc(true);
+              refresh(session);
+            } catch (err) {
+              alert(`Could not use monitor profile: ${err}`);
+            }
+          }}
+          onClearScreenIcc={clearScreenProfile}
+          onClose={() => setPrefsOpen(false)}
+        />
+      )}
       {newDocOpen && (
         <NewDocDialog
+          startW={prefs.newWidth}
+          startH={prefs.newHeight}
+          startDpi={prefs.newDpi}
           onCancel={() => setNewDocOpen(false)}
           onCreate={(w, h, useCmyk, dpi) => {
             setNewDocOpen(false);
@@ -9246,6 +9243,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Ctrl+G, Ctrl+Shift+G", "Group, ungroup"],
       ["Ctrl+S", "Save"],
       ["Ctrl+E", "Export a PNG"],
+      ["Ctrl+Shift+E", "Export window — any format, any size"],
+      ["Ctrl+,", "Preferences"],
       ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
       ["Ctrl+Alt+G", "Clip to the layer below"],
       ["Ctrl+Shift+], Ctrl+Shift+[", "Bring to the front, send to the back"],
@@ -9327,15 +9326,22 @@ const MAX_SIDE = 8192;
  * here because it decides how every fill in the document is authored, and
  * changing it afterwards would mean reinterpreting them all. */
 function NewDocDialog({
+  startW,
+  startH,
+  startDpi,
   onCreate,
   onCancel,
 }: {
+  /** What the fields open on, from Preferences. */
+  startW: number;
+  startH: number;
+  startDpi: number;
   onCreate: (w: number, h: number, cmyk: boolean, dpi: number) => void;
   onCancel: () => void;
 }) {
-  const [w, setW] = useState(DOC_WIDTH);
-  const [h, setH] = useState(DOC_HEIGHT);
-  const [dpi, setDpi] = useState(72);
+  const [w, setW] = useState(startW);
+  const [h, setH] = useState(startH);
+  const [dpi, setDpi] = useState(startDpi);
   const [mode, setMode] = useState("rgb");
 
   // What will actually be made. A side larger than the ceiling used to
