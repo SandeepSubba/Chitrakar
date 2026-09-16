@@ -5550,13 +5550,41 @@ impl Session {
 
     /// Bring an SVG in as a group of shape layers named after the file,
     /// on top of the stack, as one undo step. Returns the group's id.
+    ///
+    /// A picture the file carries comes in as a raster layer among them,
+    /// in the place the file drew it. That wants both halves of what a
+    /// raster is: the pixels go into the pool here, since the importer
+    /// has no document to pool them in, and the layer that refers to
+    /// them goes into the same batch as the shapes so the whole import
+    /// is still one undo step.
     pub fn place_svg(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
         let imported = chitrakar_codecs::import_svg(bytes).map_err(EngineError::BadCommand)?;
-        if imported.shapes.is_empty() {
+        if imported.shapes.is_empty() && imported.images.is_empty() {
             return Err(EngineError::BadCommand(
                 "the SVG holds nothing to draw".into(),
             ));
         }
+        // The pictures first, so each has a resource id before any layer
+        // names it. Pooling is content-addressed, so the same picture
+        // used twice in one file is pooled once.
+        let pictures: Vec<(usize, Node)> = imported
+            .images
+            .into_iter()
+            .map(|pic| {
+                let resource_id = self.doc.add_resource(pic.width, pic.height, pic.rgba);
+                let mut node = Node::raster(
+                    &pic.name,
+                    chitrakar_doc::RasterRef {
+                        resource_id,
+                        width: pic.width,
+                        height: pic.height,
+                    },
+                );
+                node.transform = pic.transform;
+                node.opacity = pic.opacity;
+                (pic.below, node)
+            })
+            .collect();
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let group = self.doc.peek_next_id();
@@ -5565,12 +5593,28 @@ impl Session {
             index,
             node: Box::new(Node::group(name)),
         }];
-        for (i, shape) in imported.shapes.into_iter().enumerate() {
+        // Back into one painter's order: a picture sits above the shapes
+        // that were emitted before it and below the rest, which is what
+        // `below` counted as the file was walked.
+        let mut pictures = pictures.into_iter().peekable();
+        let mut at = 0usize;
+        let push = |cmds: &mut Vec<Command>, at: &mut usize, node: Node| {
             cmds.push(Command::AddNode {
                 parent: group,
-                index: i,
-                node: Box::new(shape),
+                index: *at,
+                node: Box::new(node),
             });
+            *at += 1;
+        };
+        for (i, shape) in imported.shapes.into_iter().enumerate() {
+            while pictures.peek().is_some_and(|(below, _)| *below <= i) {
+                let (_, pic) = pictures.next().expect("peeked");
+                push(&mut cmds, &mut at, pic);
+            }
+            push(&mut cmds, &mut at, shape);
+        }
+        for (_, pic) in pictures {
+            push(&mut cmds, &mut at, pic);
         }
         self.apply_labeled(Command::Batch(cmds), Some(format!("Place {name}")))?;
         Ok(group)
@@ -14623,6 +14667,55 @@ mod tests {
         assert!(session
             .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
             .is_err());
+    }
+
+    /// A picture inside an SVG comes in with the shapes, in its place.
+    ///
+    /// The importer cannot finish this one on its own: a raster layer is
+    /// a reference to pooled pixels and that crate has no document to
+    /// pool them in, so it hands the picture over separately, saying how
+    /// many shapes go below it. Putting the order back together is this
+    /// side's job, and getting it wrong is invisible in a file where the
+    /// picture happens to be on top — so the file here has one shape
+    /// under it and one over, and the one over is what it would hide.
+    #[test]
+    fn a_picture_inside_an_svg_arrives_among_the_shapes() {
+        let mut session = Session::new(100, 80, ColorMode::Rgb);
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="80">
+                 <rect x="0" y="0" width="100" height="80" fill="#202020"/>
+                 <image x="20" y="10" width="40" height="40" xlink:href="data:image/png;base64,{png}"/>
+                 <rect x="30" y="20" width="10" height="10" fill="#00ffff"/>
+               </svg>"##,
+            png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC"
+        );
+        let group = session.place_svg(svg.as_bytes(), "mark.svg").unwrap();
+        let kinds: Vec<&str> = session
+            .layers()
+            .iter()
+            .filter(|l| l.parent == group.0)
+            .map(|l| l.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["vector", "raster", "vector"],
+            "the picture sits where the file drew it"
+        );
+        let page = session.render().unwrap();
+        // The picture is over the ground.
+        assert_eq!(page.get(50, 40).to_srgb8(), [255, 255, 255, 255]);
+        // And the mark is over the picture, which is the half an order
+        // that only appended would get wrong.
+        assert_eq!(page.get(35, 25).to_srgb8(), [0, 255, 255, 255]);
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Place mark.svg")
+        );
+        assert!(session.undo().unwrap());
+        assert!(
+            session.layers().is_empty(),
+            "one undo takes the picture with the rest"
+        );
     }
 
     #[test]

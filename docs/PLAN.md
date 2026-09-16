@@ -3334,6 +3334,39 @@ without reading anything else.*
      bias constant — and it is also what makes every placement mistake
      identical at both, so the check could not fail. The two things
      wanted of it were the same thing pointing opposite ways.
+     One of those has gone in. **A picture inside an SVG used to be
+     dropped on the floor**: `usvg::Node::Image` was matched and ignored,
+     so a file with a photograph in it imported as the shapes around the
+     photograph and nothing where it was, silently — the import still
+     succeeded and the page still drew, and only somebody who knew what
+     the file held would know. It comes in now, in its place.
+     It wants both halves of what a raster is, and that is why it was
+     left: a raster layer is a *reference* to pooled pixels, and the
+     importer has no document to pool them in. So the file's pictures
+     come back beside its shapes, each saying how many shapes go below
+     it, and the engine adds the resources and puts the one order back
+     together. Being in the same batch, the whole import is still one
+     undo step, picture and all. A nested `<svg>` is not a picture at
+     all and comes in as more shapes; GIF and WebP arrive as bytes this
+     build has no decoder for and are still passed over, which is the
+     same answer as before for those two.
+     What is worth recording is how nearly the test was useless, twice.
+     The picture is a two-by-two of known colours rather than a
+     photograph, so a flip or a swapped channel order says so plainly —
+     and a two-by-two in a *square* box makes the two scale factors
+     equal, so the first version passed with the axes swapped. Making
+     the box oblong was not enough either: SVG's default preserves the
+     aspect and letterboxes, which usvg resolves before handing it over,
+     so the scales were equal again. It takes `preserveAspectRatio="none"`
+     to get a genuine stretch, and only then does the placement have two
+     numbers a test can tell apart.
+     And that was what showed the code was carrying a no-op. It had been
+     scaling the picture's own grid into the size usvg reports — but
+     usvg reports the image's *intrinsic* size and puts the whole
+     placement, stretch included, into the absolute transform. The ratio
+     was always one. Four sabotages say the placement is now watched for
+     real: an identity transform, a transposed scale, a dropped
+     translate and pixel rows reversed are each caught.
      Then whatever the next user of the editor misses first — a brush
      that paints pixels rather than laying down live strokes. This line
      used to ask for text shaping worth the name as well, and that has

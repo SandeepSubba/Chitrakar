@@ -10,12 +10,33 @@ use usvg::tiny_skia_path::PathSegment;
 
 const FACE: &[u8] = include_bytes!("../../render/assets/DejaVuSans.ttf");
 
-/// What an SVG file holds for the document: its page size, and its
-/// shapes as nodes, bottom first.
+/// What an SVG file holds for the document: its page size, its shapes as
+/// nodes, bottom first, and the pictures embedded in it.
 pub struct ImportedSvg {
     pub width: f32,
     pub height: f32,
     pub shapes: Vec<Node>,
+    /// Rasters the file carries, each saying how many shapes go below it
+    /// so painter's order survives being split in two. They are kept
+    /// apart from the shapes because a raster layer is a *reference* to
+    /// pooled pixels and this crate has no document to pool them in —
+    /// the caller adds the resource and gets the id back.
+    pub images: Vec<ImportedImage>,
+}
+
+/// A picture the file had inside it, decoded, with where it goes.
+pub struct ImportedImage {
+    pub name: String,
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Document space: the picture's own pixels carried to where the
+    /// file puts them, its scale included.
+    pub transform: chitrakar_doc::Transform,
+    pub opacity: f32,
+    /// How many of `shapes` are below it, which is its place in
+    /// painter's order.
+    pub below: usize,
 }
 
 /// Bring an SVG in as shape layers.
@@ -26,19 +47,21 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     opt.font_family = "DejaVu Sans".to_string();
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let mut shapes = Vec::new();
-    walk(tree.root(), 1.0, &mut shapes);
+    let mut images = Vec::new();
+    walk(tree.root(), 1.0, &mut shapes, &mut images);
     Ok(ImportedSvg {
         width: tree.size().width(),
         height: tree.size().height(),
         shapes,
+        images,
     })
 }
 
-fn walk(group: &usvg::Group, opacity: f32, out: &mut Vec<Node>) {
+fn walk(group: &usvg::Group, opacity: f32, out: &mut Vec<Node>, pics: &mut Vec<ImportedImage>) {
     let opacity = opacity * group.opacity().get();
     for child in group.children() {
         match child {
-            usvg::Node::Group(g) => walk(g, opacity, out),
+            usvg::Node::Group(g) => walk(g, opacity, out, pics),
             usvg::Node::Path(p) => {
                 if p.is_visible() {
                     if let Some(node) = shape_of(p, opacity) {
@@ -47,11 +70,82 @@ fn walk(group: &usvg::Group, opacity: f32, out: &mut Vec<Node>) {
                 }
             }
             // Text arrives as the outlines usvg set it in.
-            usvg::Node::Text(t) => walk(t.flattened(), opacity, out),
-            // Raster images inside an SVG are left out for now.
-            usvg::Node::Image(_) => {}
+            usvg::Node::Text(t) => walk(t.flattened(), opacity, out, pics),
+            // A picture the file carries, which used to be dropped on the
+            // floor: an SVG with a photograph in it came in as the shapes
+            // around the photograph and nothing where it was, silently.
+            usvg::Node::Image(img) => {
+                if !img.is_visible() {
+                    continue;
+                }
+                match img.kind() {
+                    // A nested SVG is not a picture at all — it is more
+                    // of the same file, and it comes in as shapes.
+                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, out, pics),
+                    kind => {
+                        if let Some(pic) = picture_of(img, kind, opacity, out.len()) {
+                            pics.push(pic);
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+/// One embedded picture, decoded and placed.
+///
+/// usvg hands the bytes over as the file stored them and says what
+/// rectangle they are drawn into; the picture's own pixel grid is
+/// whatever the bytes turn out to be, so the scale between the two is
+/// part of where it goes. GIF and WebP arrive here as bytes this crate
+/// has no decoder for — they are passed over rather than guessed at,
+/// which is the same answer as before for those two and a picture for
+/// the two that matter.
+fn picture_of(
+    img: &usvg::Image,
+    kind: &usvg::ImageKind,
+    opacity: f32,
+    below: usize,
+) -> Option<ImportedImage> {
+    let bytes: &[u8] = match kind {
+        usvg::ImageKind::PNG(data) | usvg::ImageKind::JPEG(data) => data,
+        _ => return None,
+    };
+    let decoded = crate::decode(bytes).ok()?;
+    if decoded.width == 0 || decoded.height == 0 {
+        return None;
+    }
+    // Where the file draws it. usvg has already done all of the work
+    // that is about the *file* — the x, y, width and height, the
+    // viewport, preserveAspectRatio and whatever transforms it sits
+    // under — and left the answer as one absolute transform against the
+    // picture's own pixel grid, which it reports as the image's size.
+    // So there is nothing to scale here: the transform is the placement,
+    // and a stretch asked for with preserveAspectRatio="none" arrives in
+    // it as two different scales rather than as a size to divide by.
+    let placed = img.abs_transform();
+    let name = if img.id().is_empty() {
+        "Image".to_string()
+    } else {
+        img.id().to_string()
+    };
+    Some(ImportedImage {
+        name,
+        rgba: decoded.rgba8,
+        width: decoded.width,
+        height: decoded.height,
+        transform: chitrakar_doc::Transform {
+            a: placed.sx,
+            b: placed.ky,
+            c: placed.kx,
+            d: placed.sy,
+            e: placed.tx,
+            f: placed.ty,
+        },
+        opacity,
+        below,
+    })
 }
 
 /// One subpath as anchors with bezier handles, and whether it closes.
@@ -559,5 +653,120 @@ mod tests {
             );
         }
         assert!(import_svg(b"<not svg").is_err());
+    }
+
+    /// A picture inside the file comes in as a picture.
+    ///
+    /// It used to be dropped where it stood: an SVG with a photograph in
+    /// it imported as the shapes around the photograph and nothing where
+    /// it was, with nothing said. What makes that easy to miss is that
+    /// the import still succeeds and still draws — it is just missing a
+    /// layer, and only somebody who knew what the file held would know.
+    ///
+    /// Two halves are worth asking separately. That the pixels arrive at
+    /// all, unmuddled — the four corners of a two-by-two are four known
+    /// colours, so a picture flipped, rotated or read in the wrong order
+    /// says so plainly where a photograph would not. And that it lands
+    /// where the file put it, which is the part the importer computes:
+    /// usvg gives the rectangle and the picture's own grid is whatever
+    /// the bytes were, so the scale between them is the importer's to
+    /// get right.
+    #[test]
+    fn a_picture_inside_the_file_comes_in_as_a_picture() {
+        // Two by two: red, green over blue, white. Drawn into a box
+        // forty across and twenty down at (20,10), so a texel is twenty
+        // by ten. The stretch is asked for, and both halves of that
+        // matter: a square box makes the two scale factors equal, and so
+        // does an oblong one under SVG's default, which letterboxes and
+        // keeps the aspect — usvg resolves that into the size it reports,
+        // which is why the importer can treat the two as a plain ratio.
+        // Either way a test written on them could not tell the axes
+        // apart, and would pass with the scale swapped.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEklEQVR4nGP4z8DwHwyBNBgAAEnICff5q7YNAAAAAElFTkSuQmCC";
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="80">
+                 <rect x="0" y="0" width="100" height="80" fill="#202020"/>
+                 <image x="20" y="10" width="40" height="20" preserveAspectRatio="none" xlink:href="data:image/png;base64,{png}"/>
+                 <rect x="0" y="70" width="10" height="10" fill="#00ffff"/>
+               </svg>"##
+        );
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        assert_eq!(imported.images.len(), 1, "the picture came in");
+        let pic = &imported.images[0];
+        assert_eq!((pic.width, pic.height), (2, 2), "its own grid, not the box");
+        // Its own pixels, in reading order, undisturbed.
+        assert_eq!(&pic.rgba[..4], &[255, 0, 0, 255], "top left is red");
+        assert_eq!(&pic.rgba[4..8], &[0, 255, 0, 255], "top right is green");
+        assert_eq!(&pic.rgba[8..12], &[0, 0, 255, 255], "bottom left is blue");
+        // Carried to where the file drew it: a texel is twenty across
+        // and ten down, each axis its own.
+        let t = pic.transform;
+        assert!(
+            (t.a - 20.0).abs() < 1e-3 && (t.d - 10.0).abs() < 1e-3,
+            "scaled into its box, each axis its own: {t:?}"
+        );
+        assert!(
+            (t.e - 20.0).abs() < 1e-3 && (t.f - 10.0).abs() < 1e-3,
+            "at the corner the file names: {t:?}"
+        );
+        // And it sits above the ground and below the mark, which is the
+        // order the file wrote and the reason `below` is counted at all.
+        assert_eq!(pic.below, 1, "one shape under it, one over");
+        assert_eq!(imported.shapes.len(), 2);
+
+        // Placed, it draws where it says. Putting the two halves back
+        // together is the caller's job — the pixels into the pool, the
+        // layer that names them into the tree — so this does it the way
+        // the engine does and then asks the page.
+        let mut doc = Document::new(100, 80, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, shape) in imported.shapes.iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(shape.clone()),
+            })
+            .unwrap();
+        }
+        let resource_id = doc.add_resource(pic.width, pic.height, pic.rgba.clone());
+        let mut raster = Node::raster(
+            &pic.name,
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width: pic.width,
+                height: pic.height,
+            },
+        );
+        raster.transform = pic.transform;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: pic.below,
+            node: Box::new(raster),
+        })
+        .unwrap();
+        let page = chitrakar_render::render(&doc).unwrap();
+        let at = |x: u32, y: u32| {
+            let p = page.get(x, y);
+            [
+                (p.r.max(0.0).powf(1.0 / 2.2) * 255.0).round() as u8,
+                (p.g.max(0.0).powf(1.0 / 2.2) * 255.0).round() as u8,
+                (p.b.max(0.0).powf(1.0 / 2.2) * 255.0).round() as u8,
+            ]
+        };
+        // The four quarters of the box, sampled well inside each.
+        let (tl, tr, bl, br) = (at(28, 14), at(50, 14), at(28, 25), at(50, 25));
+        assert!(tl[0] > 200 && tl[1] < 60, "top left draws red: {tl:?}");
+        assert!(tr[1] > 200 && tr[0] < 60, "top right draws green: {tr:?}");
+        assert!(bl[2] > 200 && bl[0] < 60, "bottom left draws blue: {bl:?}");
+        assert!(
+            br[0] > 200 && br[1] > 200 && br[2] > 200,
+            "bottom right draws white: {br:?}"
+        );
+        // And nothing of it outside the box the file gave it.
+        let outside = at(10, 25);
+        assert!(
+            outside[0] < 60 && outside[1] < 60 && outside[2] < 60,
+            "the ground beside it is still the ground: {outside:?}"
+        );
     }
 }
