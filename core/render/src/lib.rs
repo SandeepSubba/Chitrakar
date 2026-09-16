@@ -15270,4 +15270,186 @@ mod tests {
         .unwrap();
         assert_eq!(hit_test(&doc, 7.0, 7.0).unwrap(), Some(bottom));
     }
+
+    /// Sharpening is an unsharp mask, by exactly the amount asked for.
+    ///
+    /// What sharpen had was the GPU backend drawing the same page, and
+    /// that test self-skips where there is no adapter — so on a machine
+    /// with no GPU a sharpen at a fifth of its strength went unnoticed.
+    ///
+    /// The strength cannot be hand-computed here without hand-computing
+    /// the blur under it, which is three iterated box passes and not
+    /// worth writing out. It does not have to be: the blur can be
+    /// *measured*, by asking for it on its own page, and then the
+    /// identity is exact — sharpened equals original plus amount times
+    /// what the blur took away. That pins the composition and the amount
+    /// together while leaving the blur to its own test, and it fails for
+    /// any strength but the one asked for.
+    ///
+    /// Linearity in the amount would not do, which is worth saying: the
+    /// overshoot at two is twice the overshoot at one whatever constant
+    /// the whole thing is multiplied by, so a weakened sharpen satisfies
+    /// it perfectly.
+    #[test]
+    fn sharpening_is_the_unsharp_mask_it_says_it_is() {
+        let sigma = 2.0f32;
+        let amount = 0.75f32;
+        // An edge to sharpen: half the page dark, half light.
+        let page = |f: Option<Filter>| {
+            let mut doc = Document::new(40, 20, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            for (i, (w, x, v)) in [(40.0f32, 0.0f32, 0.25f32), (20.0, 20.0, 0.8)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut node = Node::vector(
+                    "band",
+                    VectorShape::Rect {
+                        width: w,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                );
+                if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                    *fill = Some(AuthoredColor::Srgb {
+                        r: v,
+                        g: v,
+                        b: v,
+                        a: 1.0,
+                    });
+                }
+                node.transform = Transform::translation(x, 0.0);
+                doc.apply(chitrakar_doc::Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            }
+            if let Some(filter) = f {
+                doc.apply(chitrakar_doc::Command::AddNode {
+                    parent: root,
+                    index: 2,
+                    node: Box::new(Node::filter("f", filter)),
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+        let plain = page(None);
+        let blurred = page(Some(Filter::GaussianBlur { sigma }));
+        let sharp = page(Some(Filter::Sharpen { sigma, amount }));
+
+        // Along the row through the edge, every pixel: o + amount*(o - b).
+        let mut checked = 0;
+        for x in 0..40u32 {
+            let (o, b, s) = (plain.get(x, 10), blurred.get(x, 10), sharp.get(x, 10));
+            let want = (o.r + amount * (o.r - b.r)).clamp(0.0, o.a.max(0.0));
+            assert!(
+                (s.r - want).abs() < 1e-4,
+                "at {x}: sharpened {} against {want} (plain {}, blurred {})",
+                s.r,
+                o.r,
+                b.r
+            );
+            if (o.r - b.r).abs() > 1e-3 {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 4,
+            "the edge actually gave the blur something to take away ({checked} pixels)"
+        );
+        // Where there is nothing to sharpen there is nothing to do: a
+        // flat stretch comes back exactly as it was, whatever the amount.
+        assert!(
+            (sharp.get(2, 10).r - plain.get(2, 10).r).abs() < 1e-6,
+            "flat stays flat"
+        );
+    }
+
+    /// Grain is bounded by the amount asked for, and reaches it.
+    ///
+    /// Noise had the same single pin sharpen did — the GPU drawing the
+    /// same page — and the same hole behind it. Being random, it has no
+    /// value to assert; what it has is a *range*. Each speck shifts a
+    /// cell by `(speck - 0.5) * amount`, and speck lies in nought to one,
+    /// so no pixel may move more than half the amount and, over enough
+    /// cells, some pixel very nearly does. Both halves are needed: the
+    /// ceiling alone passes for grain that does nothing, and the floor
+    /// alone passes for grain ten times too strong.
+    #[test]
+    fn grain_is_bounded_by_the_amount_and_reaches_it() {
+        let amount = 0.4f32;
+        let page = |amount: f32| {
+            let mut doc = Document::new(60, 60, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "flat",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                });
+            }
+            doc.apply(chitrakar_doc::Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc.apply(chitrakar_doc::Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter(
+                    "grain",
+                    Filter::Noise {
+                        amount,
+                        grain: 2.0,
+                        mono: true,
+                        seed: 11,
+                    },
+                )),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let plain = page(0.0);
+        let grainy = page(amount);
+        let mut worst = 0.0f32;
+        for y in 0..60u32 {
+            for x in 0..60u32 {
+                let (p, g) = (plain.get(x, y), grainy.get(x, y));
+                // Mono grain moves the three channels together.
+                assert!(
+                    ((g.r - p.r) - (g.g - p.g)).abs() < 1e-5
+                        && ((g.g - p.g) - (g.b - p.b)).abs() < 1e-5,
+                    "mono grain shifts the channels alike at {x},{y}"
+                );
+                worst = worst.max((g.r - p.r).abs());
+            }
+        }
+        let half = amount / 2.0;
+        assert!(
+            worst <= half + 1e-4,
+            "no speck moves further than half the amount ({worst} against {half})"
+        );
+        assert!(
+            worst > half * 0.8,
+            "and over nine hundred cells one very nearly does ({worst} against {half})"
+        );
+        // Asked for nothing, nothing happens.
+        assert_eq!(
+            page(0.0).get(30, 30).to_srgb8(),
+            plain.get(30, 30).to_srgb8()
+        );
+    }
 }

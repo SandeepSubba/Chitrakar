@@ -2876,6 +2876,32 @@ without reading anything else.*
      is not a test on a machine that skips it.** Twelve adjustments
      happened to have a second, local pin; one did not, and nothing said
      so until the mutant was tried with the GPU excluded.
+     The same sweep over the six *filters*, run twice — once with the
+     whole workspace and once with the GPU crate excluded — found two
+     more of exactly that shape. A blur, a smear, a grid of squares and
+     a vignette each keep a pin of their own. **Sharpen** and **noise**
+     had one pin apiece and it was the GPU drawing the same page, so
+     without an adapter either could run at a fifth strength unnoticed.
+     Running the sweep the second way is what makes it say so, and it
+     costs one more flag.
+     Neither wanted a hand-computed number, which is the interesting
+     part. Sharpen is an unsharp mask, and its strength cannot be written
+     out without writing out the blur under it — three iterated box
+     passes. It does not have to be: the blur is *measured*, by asking
+     for it on its own page, and then the identity is exact — sharpened
+     is the original plus the amount times what the blur took away. That
+     pins the composition and the amount together and leaves the blur to
+     its own test. Linearity in the amount would not have done, and it is
+     worth knowing why: the overshoot at two is twice the overshoot at
+     one whatever constant the whole is multiplied by, so a weakened
+     sharpen satisfies it perfectly.
+     Noise is random and has no value to assert, but it has a *range*:
+     each speck shifts a cell by `(speck - 0.5) × amount` with speck in
+     nought to one, so no pixel may move more than half the amount and,
+     over nine hundred cells, one very nearly does. Both halves are
+     needed and each catches what the other cannot — the ceiling alone
+     passes for grain that does nothing, the floor alone for grain three
+     times too strong, and both were tried.
      Seven, and new: **for a one-way path, borrow an oracle**. Almost
      every audit here leans on a round trip — write it and read it back,
      draw it both ways, apply it and undo it — and *importing* has no
