@@ -2895,6 +2895,33 @@ without reading anything else.*
      worth knowing why: the overshoot at two is twice the overshoot at
      one whatever constant the whole is multiplied by, so a weakened
      sharpen satisfies it perfectly.
+     The third sweep, over the sixteen **blend modes**, found the same
+     shape again — *overlay* and *hue* survive weakening without the GPU,
+     and six more are down to a single pin — and then a real defect
+     behind it, because this time the fix was not two tests but an
+     oracle. Blending has a published definition (W3C Compositing and
+     Blending Level 1), so all sixteen are held to formulas written from
+     the spec rather than from the code under test, over seven backdrop
+     and source pairs including the corners. Soft light is the one where
+     that is visibly not a copy: the spec's piecewise `D(cb)` is folded
+     differently in the engine and the two agree anyway.
+     Fifteen agreed. **Colour burn did not**, and it was not the blend's
+     fault: the spec asks `is the backdrop one` before anything else, and
+     white was arriving a rounding short of one. `1.055 × 1 − 0.055` is
+     0.999_999_94 in f32, so `linear_to_srgb(1.0)` was not 1.0, the
+     branch was missed, and the next one — `is the source nought` —
+     answered instead. **White paper under a black layer set to colour
+     burn came out black.** Fixed where it belongs, in the curve, since
+     every reader that branches on the top of the range would otherwise
+     have to know; the curve is now exact at both ends, still monotone,
+     and unchanged in between.
+     Worth noticing how it was found. Nothing about that defect is
+     visible from inside: the blend is right, the branch is right, the
+     table is built right, and each of the three is checkable on its own
+     without the bug appearing. It took comparing the whole against an
+     outside definition at a corner nobody would think to probe by hand —
+     which is method seven doing exactly what it is for, on a path that
+     is not even one-way.
      Noise is random and has no value to assert, but it has a *range*:
      each speck shifts a cell by `(speck - 0.5) × amount` with speck in
      nought to one, so no pixel may move more than half the amount and,

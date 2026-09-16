@@ -15452,4 +15452,191 @@ mod tests {
             plain.get(30, 30).to_srgb8()
         );
     }
+
+    /// Every blend mode is the one the compositing spec names.
+    ///
+    /// Sixteen modes, and what held them was mostly the GPU backend
+    /// drawing the same page — which self-skips where there is no
+    /// adapter. Weaken each in turn and run the workspace without that
+    /// crate: *overlay* and *hue* survive outright, and six more are down
+    /// to a single pin. Patching the two would leave the shape of the
+    /// problem in place, so all sixteen are held to the definition
+    /// instead.
+    ///
+    /// The definition is W3C Compositing and Blending Level 1, whose
+    /// formulas are written below from the spec rather than from the code
+    /// under test — that is the whole point of them, and where the two
+    /// happen to be spelled the same way it is because there is one
+    /// obvious way to write `min(b, s)`. Soft light is deliberately not:
+    /// the spec's D(cb) is a piecewise thing and the engine folds it
+    /// differently, so agreeing there says something.
+    ///
+    /// Blending is defined on the values a display shows, not on linear
+    /// light, which is why the engine converts out and back around it —
+    /// so the comparison is made in that space too, on opaque pixels
+    /// where the composite is the blend and nothing else.
+    #[test]
+    fn every_blend_mode_is_the_one_the_spec_names() {
+        use chitrakar_doc::BlendMode as B;
+        fn screen_(b: f32, s: f32) -> f32 {
+            b + s - b * s
+        }
+        fn hard_light_(b: f32, s: f32) -> f32 {
+            if s <= 0.5 {
+                b * (2.0 * s)
+            } else {
+                screen_(b, 2.0 * s - 1.0)
+            }
+        }
+        fn lum_(c: [f32; 3]) -> f32 {
+            0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+        }
+        fn clip_(c: [f32; 3]) -> [f32; 3] {
+            let l = lum_(c);
+            let n = c[0].min(c[1]).min(c[2]);
+            let x = c[0].max(c[1]).max(c[2]);
+            let mut c = c;
+            if n < 0.0 {
+                for v in &mut c {
+                    *v = l + (*v - l) * l / (l - n);
+                }
+            }
+            if x > 1.0 {
+                for v in &mut c {
+                    *v = l + (*v - l) * (1.0 - l) / (x - l);
+                }
+            }
+            c
+        }
+        fn set_lum_(c: [f32; 3], l: f32) -> [f32; 3] {
+            let d = l - lum_(c);
+            clip_([c[0] + d, c[1] + d, c[2] + d])
+        }
+        fn sat_(c: [f32; 3]) -> f32 {
+            c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+        }
+        fn set_sat_(c: [f32; 3], s: f32) -> [f32; 3] {
+            // Spec: order the three, stretch the middle into the range,
+            // put the top at s and the bottom at nought.
+            let mut i = [0usize, 1, 2];
+            i.sort_by(|a, b| c[*a].partial_cmp(&c[*b]).unwrap());
+            let (lo, mid, hi) = (i[0], i[1], i[2]);
+            let mut out = [0.0f32; 3];
+            if c[hi] > c[lo] {
+                out[mid] = (c[mid] - c[lo]) * s / (c[hi] - c[lo]);
+                out[hi] = s;
+            }
+            out[lo] = 0.0;
+            out
+        }
+        let spec = |mode: B, b: [f32; 3], s: [f32; 3]| -> [f32; 3] {
+            let sep = |f: &dyn Fn(f32, f32) -> f32| [f(b[0], s[0]), f(b[1], s[1]), f(b[2], s[2])];
+            match mode {
+                B::Normal => s,
+                B::Multiply => sep(&|b, s| b * s),
+                B::Screen => sep(&screen_),
+                B::Overlay => sep(&|b, s| hard_light_(s, b)),
+                B::Darken => sep(&|b: f32, s: f32| b.min(s)),
+                B::Lighten => sep(&|b: f32, s: f32| b.max(s)),
+                B::ColorDodge => sep(&|b: f32, s: f32| {
+                    if b <= 0.0 {
+                        0.0
+                    } else if s >= 1.0 {
+                        1.0
+                    } else {
+                        (b / (1.0 - s)).min(1.0)
+                    }
+                }),
+                B::ColorBurn => sep(&|b: f32, s: f32| {
+                    if b >= 1.0 {
+                        1.0
+                    } else if s <= 0.0 {
+                        0.0
+                    } else {
+                        1.0 - ((1.0 - b) / s).min(1.0)
+                    }
+                }),
+                B::HardLight => sep(&hard_light_),
+                B::SoftLight => sep(&|b: f32, s: f32| {
+                    let d = if b <= 0.25 {
+                        ((16.0 * b - 12.0) * b + 4.0) * b
+                    } else {
+                        b.sqrt()
+                    };
+                    if s <= 0.5 {
+                        b - (1.0 - 2.0 * s) * b * (1.0 - b)
+                    } else {
+                        b + (2.0 * s - 1.0) * (d - b)
+                    }
+                }),
+                B::Difference => sep(&|b: f32, s: f32| (b - s).abs()),
+                B::Exclusion => sep(&|b, s| b + s - 2.0 * b * s),
+                B::Hue => set_lum_(set_sat_(s, sat_(b)), lum_(b)),
+                B::Saturation => set_lum_(set_sat_(b, sat_(s)), lum_(b)),
+                B::Color => set_lum_(s, lum_(b)),
+                B::Luminosity => set_lum_(b, lum_(s)),
+            }
+        };
+
+        let shown = |v: f32| chitrakar_color::linear_to_srgb(v);
+        let linear = |v: f32| chitrakar_color::srgb_to_linear(v);
+        let pairs = [
+            ([0.20f32, 0.45, 0.80], [0.90f32, 0.30, 0.10]),
+            ([0.05, 0.05, 0.05], [0.95, 0.95, 0.95]),
+            ([0.60, 0.60, 0.60], [0.50, 0.50, 0.50]),
+            ([1.00, 0.00, 0.50], [0.00, 1.00, 0.25]),
+            ([0.33, 0.66, 0.99], [0.99, 0.66, 0.33]),
+            ([0.00, 0.00, 0.00], [0.40, 0.70, 0.20]),
+            ([1.00, 1.00, 1.00], [0.40, 0.70, 0.20]),
+        ];
+        for mode in [
+            B::Normal,
+            B::Multiply,
+            B::Screen,
+            B::Overlay,
+            B::Darken,
+            B::Lighten,
+            B::ColorDodge,
+            B::ColorBurn,
+            B::HardLight,
+            B::SoftLight,
+            B::Difference,
+            B::Exclusion,
+            B::Hue,
+            B::Saturation,
+            B::Color,
+            B::Luminosity,
+        ] {
+            for (bs, ss) in pairs {
+                // Opaque either side, so the composite is the blend.
+                let dst = LinearRgba {
+                    r: linear(bs[0]),
+                    g: linear(bs[1]),
+                    b: linear(bs[2]),
+                    a: 1.0,
+                };
+                let src = LinearRgba {
+                    r: linear(ss[0]),
+                    g: linear(ss[1]),
+                    b: linear(ss[2]),
+                    a: 1.0,
+                };
+                let got = blend_pixel(src, dst, mode);
+                let want = spec(mode, bs, ss);
+                for (c, (g, w)) in [
+                    (shown(got.r), want[0]),
+                    (shown(got.g), want[1]),
+                    (shown(got.b), want[2]),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    assert!(
+                        (g - w).abs() < 3e-3,
+                        "{mode:?} channel {c} over {bs:?} with {ss:?}: {g} against the spec's {w}"
+                    );
+                }
+            }
+        }
+    }
 }

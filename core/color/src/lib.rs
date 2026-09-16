@@ -189,6 +189,17 @@ pub fn srgb_to_linear(v: f32) -> f32 {
 pub fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 {
         v * 12.92
+    } else if v >= 1.0 {
+        // The curve's own arithmetic misses the top of the range: at one,
+        // `1.055 * 1 - 0.055` is 0.999_999_94 in f32 rather than one, and
+        // white that is not quite white is a different thing to anything
+        // asking `is this the top`. Colour burn is where it showed —
+        // white under a black source is white by the compositing spec and
+        // came out black, because the branch that says so is `backdrop
+        // == 1` and the backdrop arrived a rounding short of it. Said
+        // here rather than guarded at each reader, since every one of
+        // them would have to know.
+        1.0
     } else {
         1.055 * v.powf(1.0 / 2.4) - 0.055
     }
@@ -360,5 +371,37 @@ mod tests {
             a: 1.0,
         });
         assert_eq!(px.to_srgb8(), [0, 0, 0, 255]);
+    }
+
+    /// White comes back white, and black black.
+    ///
+    /// The curve is continuous and its ends are exact, which sounds like
+    /// nothing until something branches on them. `1.055 * 1 - 0.055` is
+    /// 0.999_999_94 in f32, so white encoded and read back was a rounding
+    /// short of white — and colour burn asks `is the backdrop one` before
+    /// it asks anything else. White paper under a black layer set to
+    /// colour burn is white by the compositing spec and came out black.
+    #[test]
+    fn the_transfer_curve_is_exact_at_both_ends() {
+        assert_eq!(linear_to_srgb(0.0), 0.0);
+        assert_eq!(linear_to_srgb(1.0), 1.0, "white encodes to white");
+        assert_eq!(srgb_to_linear(0.0), 0.0);
+        assert_eq!(srgb_to_linear(1.0), 1.0, "and reads back as white");
+        // And round trips at both ends, which is the thing a reader
+        // branching on "is this the top" actually depends on.
+        assert_eq!(srgb_to_linear(linear_to_srgb(1.0)), 1.0);
+        assert_eq!(linear_to_srgb(srgb_to_linear(1.0)), 1.0);
+        // Still the curve it was in between: a middling value is
+        // unchanged to the last place it had before.
+        assert!((linear_to_srgb(0.5) - 0.735_356_9).abs() < 1e-6);
+        assert!((linear_to_srgb(0.2) - 0.484_529_2).abs() < 1e-6);
+        // And monotone up to the end, so nothing was flattened to get
+        // the last point right.
+        let mut last = -1.0f32;
+        for i in 0..=2048 {
+            let v = linear_to_srgb(i as f32 / 2048.0);
+            assert!(v > last, "the curve still climbs at {i}");
+            last = v;
+        }
     }
 }
