@@ -420,10 +420,26 @@ without reading anything else.*
   the composite, effects and opacity included — as the colour to draw
   with, and gives it to the picked shape or block of text.
   An SVG placed, dropped or pasted comes in as a group of editable shape
-  layers — paths with their curves, solid and gradient fills, strokes,
-  group opacity, text as outlines — in document space, one undo step
-  (raster images inside an SVG are left out; a nonzero fill rule reads
-  as even-odd).
+  layers — paths with their curves, solid and gradient fills, strokes
+  with their dashes, caps and joins, group opacity, text as outlines —
+  in document space, one undo step. A picture the file carries comes in
+  with them, in the place the file drew it, as a raster layer referring
+  to pooled pixels; a nested `<svg>` comes in as more shapes. A path SVG
+  fills by winding is converted rather than read as even-odd, which is
+  the engine's only rule — exactly, where its rings are wound the same
+  way, since nonzero is their union there. And what a `clip-path` hides
+  stays hidden, a mask that is only a region with it: nesting
+  intersects, several outlines union, and the region rides down to each
+  shape as an ordinary vector mask.
+  What is still left out, each for a stated reason: a `filter`, so a
+  blurred element comes in sharp — there is no way yet to say "blur this
+  one layer", a filter layer here reaching everything below it and a
+  clip to the shape cutting the very spread that makes it a blur; a mask
+  with real grey in it, which wants a raster mask and the pixels pooled
+  for it; a pattern fill, which wants a tile rasterized; and
+  `stroke-dashoffset`, which has no field to land in, so a broken line
+  starts its pattern at the beginning. Every one of those is a layer
+  that arrives plainer than the file, never one that arrives missing.
   Documents carry a resolution (presets and the New dialog set it, with
   the page's size on paper shown), and View › Pixels/Millimetres/Inches
   reads the rulers, the geometry fields and the status line in that
@@ -845,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~450),
+- **Verify before committing:** `cargo test --workspace` (~463),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1122 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2933,10 +2949,14 @@ without reading anything else.*
      every reader that branches on the top of the range would otherwise
      have to know; the curve is now exact at both ends, still monotone,
      and unchanged in between.
-     A fourth sweep over the three **effects** found nothing: a drop
-     shadow, an inner shadow and an outline each keep pins of their own
-     without the GPU. Worth recording as a negative — that part of the
-     renderer is covered, and the next search need not start there.
+     Two sweeps found nothing, and both are worth recording as negatives
+     so the next search does not start there. The three **effects** — a
+     drop shadow, an inner shadow, an outline — each keep pins of their
+     own without the GPU. So do **text advances**: narrow every glyph's
+     advance by a tenth and `the_shaper_and_the_rasterizer_agree_on_the_
+     scale` fails, with no adapter needed. A sweep that comes back empty
+     is the cheapest result there is and the only one that tells you
+     where to stop.
      A fifth, over the **blur**, found the largest hole of the series.
      Its tests said a blur *blurs*: the peak flattens, neighbours light
      up, the total is conserved, nothing happens at zero, a flat field is
