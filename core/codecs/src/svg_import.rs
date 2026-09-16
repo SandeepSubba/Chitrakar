@@ -349,11 +349,99 @@ fn solid_of(paint: &usvg::Paint, alpha: f32) -> Option<AuthoredColor> {
     }
 }
 
+/// A path SVG fills by winding, said in the only rule this engine has.
+///
+/// Subpaths here are filled even-odd: a point inside two of them is
+/// outside the shape. SVG's default is *nonzero* — inside two is still
+/// inside — and the two only part company where subpaths overlap. For a
+/// letter with a counter, or any outline drawn with its holes wound the
+/// other way, they agree and there is nothing to do; where they disagree
+/// the file draws solid and this drew a hole, which is a shape coming in
+/// wrong rather than a shade being off.
+///
+/// Where every ring is wound the same way, nonzero is *exactly* the
+/// union of them: a point inside `k` of them has winding `±k`, which is
+/// non-zero for every `k ≥ 1`, and that is what a union covers. So that
+/// case is converted rather than approximated, through the same shape
+/// booleans a selection is built with.
+///
+/// Rings wound both ways are left alone. They are the ordinary
+/// outline-with-holes, where the two rules already agree, and the cases
+/// where they do not — a hole inside two overlapping outlines still
+/// being filled — cannot be said as a union and are not worth guessing
+/// at. Nothing is done unless two same-wound rings actually overlap,
+/// since the union flattens curves and a path that needs no correction
+/// should not pay for one.
+fn as_even_odd(path: &usvg::Path, rings: Vec<Ring>) -> Vec<Ring> {
+    let nonzero = path
+        .fill()
+        .is_some_and(|f| f.rule() == usvg::FillRule::NonZero);
+    if !nonzero || rings.len() < 2 {
+        return rings;
+    }
+    let flat: Vec<Vec<[f32; 2]>> = rings.iter().map(Ring::flattened).collect();
+    let area = |r: &[[f32; 2]]| -> f32 {
+        let mut a = 0.0;
+        for i in 0..r.len() {
+            let (p, q) = (r[i], r[(i + 1) % r.len()]);
+            a += p[0] * q[1] - q[0] * p[1];
+        }
+        a / 2.0
+    };
+    let signs: Vec<f32> = flat.iter().map(|r| area(r).signum()).collect();
+    if signs.windows(2).any(|w| w[0] != w[1]) {
+        return rings;
+    }
+    let box_of = |r: &[[f32; 2]]| {
+        r.iter()
+            .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
+                [
+                    b[0].min(p[0]),
+                    b[1].min(p[1]),
+                    b[2].max(p[0]),
+                    b[3].max(p[1]),
+                ]
+            })
+    };
+    let boxes: Vec<[f32; 4]> = flat.iter().map(|r| box_of(r)).collect();
+    let touching = (0..boxes.len()).any(|i| {
+        (i + 1..boxes.len()).any(|j| {
+            let (a, b) = (boxes[i], boxes[j]);
+            a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+        })
+    });
+    if !touching {
+        return rings;
+    }
+    let mut acc: Vec<Vec<[f32; 2]>> = vec![flat[0].clone()];
+    for next in &flat[1..] {
+        match chitrakar_render::boolean::combine_or_nudge(
+            &acc,
+            std::slice::from_ref(next),
+            chitrakar_render::boolean::BoolOp::Union,
+        ) {
+            Some(joined) => acc = joined,
+            // Outlines that only touch, or share an edge exactly, are
+            // what `combine` declines. The shape as it stands is the
+            // honest answer there rather than a guess.
+            None => return rings,
+        }
+    }
+    acc.into_iter()
+        .map(|points| Ring {
+            handles: vec![[0.0; 4]; points.len()],
+            points,
+            closed: true,
+        })
+        .collect()
+}
+
 fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
     let mut rings = rings_of(path);
     if rings.is_empty() {
         return None;
     }
+    rings = as_even_odd(path, rings);
     // The main ring keeps its curves; the rest, straight-sided, cut holes
     // or add islands. The first subpath is taken as the main one, which
     // is how outlines are usually drawn.
@@ -398,11 +486,31 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
         }
         *stroke = path.stroke().and_then(|s| {
             let (sx, sy) = path.abs_transform().get_scale();
+            let scale = (sx.abs() + sy.abs()) / 2.0;
             Some(Stroke {
                 color: solid_of(s.paint(), s.opacity().get() * opacity)?,
-                width: s.width().get() * ((sx.abs() + sy.abs()) / 2.0),
+                width: s.width().get() * scale,
                 widths: Vec::new(),
-                dash: Vec::new(),
+                // A broken line came in solid, which is a plain loss: the
+                // engine has had dashes of its own all along and the
+                // importer was writing an empty pattern over the file's.
+                // They mean the same thing — lengths along the outline,
+                // on and off in turn and repeating — and they are in the
+                // same units as the width, so they take the same scale.
+                //
+                // An odd-length pattern needs no special handling: SVG
+                // repeats it to make the runs alternate, and a pattern
+                // walked round and round does that by itself. What is
+                // *not* carried is `stroke-dashoffset`, which shifts
+                // where the pattern starts along the line and has no
+                // field here to land in. A line whose dashes begin a
+                // little further along is much nearer the file than a
+                // line with no dashes at all, so it comes in unshifted
+                // rather than being refused.
+                dash: s
+                    .dasharray()
+                    .map(|d| d.iter().map(|v| v * scale).collect())
+                    .unwrap_or_default(),
                 // What the file says, not what this engine happens to
                 // default to: SVG's own default is a flat end and a
                 // mitred corner, and a line imported round when it was
@@ -767,6 +875,223 @@ mod tests {
         assert!(
             outside[0] < 60 && outside[1] < 60 && outside[2] < 60,
             "the ground beside it is still the ground: {outside:?}"
+        );
+    }
+
+    /// A broken line comes in broken.
+    ///
+    /// The importer wrote an empty dash pattern over whatever the file
+    /// said, so every dashed rule, every cut line and every selection
+    /// border in an imported drawing arrived solid. It reads as a
+    /// slightly wrong line rather than as a missing one, which is why it
+    /// sat there: nothing is absent from the layer list and nothing
+    /// fails.
+    ///
+    /// Asked of the page rather than the field, because the field only
+    /// says the numbers were copied. What says the line is broken is ink
+    /// where the pattern is on and paper where it is off, and the two
+    /// read at the same place on the same line — so a line that came in
+    /// solid fails on the gap and a line that came in missing fails on
+    /// the dash.
+    #[test]
+    fn a_dashed_line_comes_in_dashed() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="20">
+             <path d="M 5 10 H 55" stroke="#000000" stroke-width="6"
+                   stroke-dasharray="10 10" fill="none"/>
+           </svg>"##;
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        assert_eq!(imported.shapes.len(), 1);
+        let NodeKind::Vector { stroke, .. } = &imported.shapes[0].kind else {
+            panic!("a stroked path")
+        };
+        let dash = &stroke.as_ref().expect("it is stroked").dash;
+        assert_eq!(dash.len(), 2, "the pattern came over: {dash:?}");
+        assert!(
+            (dash[0] - 10.0).abs() < 1e-3 && (dash[1] - 10.0).abs() < 1e-3,
+            "in the file's own units: {dash:?}"
+        );
+
+        let mut doc = Document::new(60, 20, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(imported.shapes[0].clone()),
+        })
+        .unwrap();
+        let page = chitrakar_render::render(&doc).unwrap();
+        // The line runs from x=5 to x=55 at y=10, ten on and ten off: ink
+        // at 5..15, bare at 15..25, ink again at 25..35.
+        let ink = |x: u32| page.get(x, 10).a;
+        assert!(ink(9) > 0.9, "the first dash is drawn ({})", ink(9));
+        assert!(ink(20) < 0.1, "the gap after it is bare ({})", ink(20));
+        assert!(ink(30) > 0.9, "and the next dash is drawn ({})", ink(30));
+
+        // And under a transform, which is the half the first case cannot
+        // ask: a dash pattern is in the same units as the width and has
+        // to take the same scale, but at scale one that is a no-op and a
+        // test written on it passes with the scaling taken out. The same
+        // line inside a doubling, where the pattern has to double too.
+        let scaled = r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40">
+             <g transform="scale(2)">
+               <path d="M 5 10 H 55" stroke="#000000" stroke-width="6"
+                     stroke-dasharray="10 10" fill="none"/>
+             </g>
+           </svg>"##;
+        let imported = import_svg(scaled.as_bytes()).unwrap();
+        let NodeKind::Vector { stroke, .. } = &imported.shapes[0].kind else {
+            panic!("a stroked path")
+        };
+        let st = stroke.as_ref().expect("it is stroked");
+        assert!(
+            (st.width - 12.0).abs() < 1e-3,
+            "the width doubled: {}",
+            st.width
+        );
+        assert!(
+            (st.dash[0] - 20.0).abs() < 1e-3 && (st.dash[1] - 20.0).abs() < 1e-3,
+            "and so did the pattern: {:?}",
+            st.dash
+        );
+        let mut doc = Document::new(120, 40, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(imported.shapes[0].clone()),
+        })
+        .unwrap();
+        let page = chitrakar_render::render(&doc).unwrap();
+        let ink = |x: u32| page.get(x, 20).a;
+        assert!(ink(18) > 0.9, "the first dash is drawn ({})", ink(18));
+        assert!(ink(40) < 0.1, "the gap is twice as long ({})", ink(40));
+        assert!(ink(60) > 0.9, "and the next dash is drawn ({})", ink(60));
+    }
+
+    /// A path SVG fills by winding comes in filled the same way.
+    ///
+    /// Subpaths here are even-odd and SVG's default is nonzero. They part
+    /// company exactly where subpaths overlap, and there the file draws
+    /// solid while this drew a hole — the shape itself wrong, not a shade
+    /// off. Two rectangles in one path, wound the same way and overlapping
+    /// in the middle, is the smallest thing that says so.
+    ///
+    /// Held against resvg rather than against a number picked by hand, so
+    /// what it asserts is the file's own meaning rather than this
+    /// importer's idea of it.
+    #[test]
+    fn a_path_filled_by_winding_comes_in_filled_by_winding() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <path d="M 5 5 H 35 V 35 H 5 Z M 20 10 H 50 V 30 H 20 Z"
+                   fill="#cc0000"/>
+           </svg>"##;
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, n) in imported.shapes.iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(n.clone()),
+            })
+            .unwrap();
+        }
+        let ours = chitrakar_render::render(&doc).unwrap();
+        // What resvg makes of the same file, which is the answer.
+        let tree = {
+            let mut opt = usvg::Options::default();
+            opt.fontdb_mut().load_font_data(FACE.to_vec());
+            usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap()
+        };
+        let mut pix = resvg::tiny_skia::Pixmap::new(60, 40).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pix.as_mut(),
+        );
+        let theirs = |x: u32, y: u32| pix.pixel(x, y).unwrap().alpha();
+
+        for (x, y, what) in [
+            (10u32, 20u32, "the first rectangle alone"),
+            (
+                27,
+                20,
+                "the overlap, which winding fills and even-odd would not",
+            ),
+            (45, 20, "the second rectangle alone"),
+            (50, 5, "the paper outside both"),
+        ] {
+            let mine = ours.get(x, y).a > 0.5;
+            let want = theirs(x, y) > 128;
+            assert_eq!(mine, want, "{what} at {x},{y}");
+        }
+
+        // The other half, and the reason the winding sign is looked at
+        // rather than every nonzero path being unioned: an outline with a
+        // counter wound the other way is a hole under *both* rules, and
+        // a union would fill it in. This is the ordinary case — every
+        // letter with a hole in it — so getting it wrong would be worse
+        // than the bug being fixed.
+        let holed = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <path d="M 5 5 H 55 V 35 H 5 Z M 20 15 V 25 H 40 V 15 Z"
+                   fill="#cc0000"/>
+           </svg>"##;
+        let imported = import_svg(holed.as_bytes()).unwrap();
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, n) in imported.shapes.iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(n.clone()),
+            })
+            .unwrap();
+        }
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let tree = {
+            let mut opt = usvg::Options::default();
+            opt.fontdb_mut().load_font_data(FACE.to_vec());
+            usvg::Tree::from_data(holed.as_bytes(), &opt).unwrap()
+        };
+        let mut pix = resvg::tiny_skia::Pixmap::new(60, 40).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pix.as_mut(),
+        );
+        let theirs = |x: u32, y: u32| pix.pixel(x, y).unwrap().alpha();
+        for (x, y, what) in [
+            (10u32, 20u32, "the outline itself"),
+            (30, 20, "the counter, which stays a hole"),
+            (30, 8, "the outline above it"),
+        ] {
+            let mine = ours.get(x, y).a > 0.5;
+            let want = theirs(x, y) > 128;
+            assert_eq!(mine, want, "{what} at {x},{y}");
+        }
+
+        // And a third thing, which is what the overlap test is for rather
+        // than the picture: the union goes through flattened outlines, so
+        // a path that needs no correction must not be put through it and
+        // come back a polygon. Two circles in one nonzero path, wound the
+        // same way and nowhere near each other — the two rules already
+        // agree, and the curves have to survive.
+        let apart = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40">
+             <path fill="#cc0000"
+                   d="M 5 20 A 10 10 0 1 0 25 20 A 10 10 0 1 0 5 20 Z
+                      M 55 20 A 8 8 0 1 0 71 20 A 8 8 0 1 0 55 20 Z"/>
+           </svg>"##;
+        let imported = import_svg(apart.as_bytes()).unwrap();
+        let NodeKind::Vector {
+            shape: VectorShape::Path { handles, .. },
+            ..
+        } = &imported.shapes[0].kind
+        else {
+            panic!("a path")
+        };
+        assert!(
+            handles.iter().any(|h| h.iter().any(|v| v.abs() > 1.0)),
+            "circles nowhere near each other keep their curves"
         );
     }
 }

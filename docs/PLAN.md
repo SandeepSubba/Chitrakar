@@ -3367,6 +3367,59 @@ without reading anything else.*
      was always one. Four sabotages say the placement is now watched for
      real: an identity transform, a transposed scale, a dropped
      translate and pixel rows reversed are each caught.
+     And a second thing the importer was writing over: **a broken line
+     came in solid**. `dash: Vec::new()` was put where the file's
+     `stroke-dasharray` belonged, so every dashed rule, cut line and
+     border in an imported drawing arrived unbroken. That one is easier
+     to sit on than the missing picture, because nothing is absent from
+     the layer list and nothing fails — it reads as a slightly wrong
+     line rather than as a loss. The two mean the same thing (lengths
+     along the outline, on and off in turn and repeating) and are in the
+     same units as the width, so they take the same scale; an odd-length
+     pattern needs no special case, since SVG repeats it to make the runs
+     alternate and a pattern walked round and round does that by itself.
+     What is still not carried is `stroke-dashoffset`, which shifts where
+     the pattern begins and has no field here to land in — a line whose
+     dashes start a little further along is much nearer the file than a
+     line with no dashes, so it comes in unshifted rather than refused.
+     The same lesson as the picture, on the same afternoon: the first
+     version of the test was written on a path with no transform, where
+     the scale is one and scaling is a no-op, so it passed with the
+     scaling taken out. A second case puts the same line inside a
+     doubling. Three sabotages are caught now — the pattern dropped, the
+     pattern unscaled, and the pattern halved — where before only the
+     first two of those three were.
+     And a third, which was a shape coming in *wrong* rather than a
+     shade being off: **a path SVG fills by winding came in filled
+     even-odd**. Subpaths here are even-odd — a point inside two of them
+     is outside the shape — and SVG's default is nonzero, where inside
+     two is still inside. The two part company exactly where subpaths
+     overlap, so two rectangles in one path, wound the same way and
+     overlapping, drew solid in the file and drew a hole here. `fill-rule`
+     was never read at all.
+     Where every ring is wound the same way, nonzero is *exactly* the
+     union of them — a point inside `k` of them has winding `±k`, which is
+     non-zero for every `k ≥ 1` — so that case is converted rather than
+     approximated, through the same shape booleans a selection is built
+     with. Rings wound both ways are left alone on purpose: that is the
+     ordinary outline-with-a-counter, where the two rules already agree,
+     and the cases where they do not — a hole inside two overlapping
+     outlines, still filled — cannot be said as a union at all. Guessing
+     there would break every letter with a hole in it to fix something
+     nobody draws. And nothing is converted unless two same-wound rings
+     actually overlap, since the union goes through flattened outlines and
+     a path needing no correction should not come back a polygon.
+     Four sabotages, one for each branch of that rule, and getting all
+     four watched took three rounds. The conversion skipped, and never
+     converting, were caught by the overlapping case. The winding sign
+     ignored was not, until the outline-with-a-counter case went in
+     beside it — without that, unioning everything looked free. And the
+     overlap test was not watched by either, because unioning two rings
+     that do not overlap draws the same picture; what it costs is the
+     curves, so what watches it is two circles nowhere near each other
+     keeping their handles. Each of the three cases is held against resvg
+     rather than against a number picked by hand, so what is asserted is
+     the file's meaning rather than this importer's idea of it.
      Then whatever the next user of the editor misses first — a brush
      that paints pixels rather than laying down live strokes. This line
      used to ask for text shaping worth the name as well, and that has
