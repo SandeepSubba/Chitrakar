@@ -3420,6 +3420,32 @@ without reading anything else.*
      keeping their handles. Each of the three cases is held against resvg
      rather than against a number picked by hand, so what is asserted is
      the file's meaning rather than this importer's idea of it.
+     And a fourth, the loudest: **what a clip path hid did not stay
+     hidden**. `clip-path` was never read, so a clipped group came in
+     with everything showing — the others made a line or a corner
+     slightly wrong, this one puts artwork on the page the file says is
+     not there. Outside the band, resvg drew nothing and this drew solid.
+     A clip is the one thing about a group that survives the group being
+     flattened away, which is what makes it carryable at all: it
+     multiplies coverage by nought or one, and that distributes over the
+     children exactly — each child seen only inside the region is the
+     same picture as the group seen only inside it. Opacity and blending
+     do not distribute that way, which is why they are still folded into
+     the colours instead. So the region rides down the walk and lands on
+     each shape as an ordinary vector mask, and on an embedded picture
+     too. A clip inside a clip is the intersection; a clip of several
+     outlines is their union, not the even-odd of one compound shape;
+     a clip on the clip path itself narrows it again.
+     Four sabotages, and the fourth needed a case of its own — the same
+     shape of gap as the winding rule the commit before. The mask not
+     attached, the clip not read, and the outer clip dropped when nested
+     were all caught. Union turned into intersect was not, because the
+     two outlines in that case were *disjoint*: intersecting them fails,
+     the fallback keeps both rings, and even-odd over two disjoint rings
+     is their union anyway. It takes two outlines that **cross** to tell
+     the two apart, where a union shows the overlap and even-odd would
+     punch it out. Every case is held against resvg rather than a number
+     picked by hand.
      Then whatever the next user of the editor misses first — a brush
      that paints pixels rather than laying down live strokes. This line
      used to ask for text shaping worth the name as well, and that has

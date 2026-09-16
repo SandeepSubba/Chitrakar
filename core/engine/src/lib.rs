@@ -5582,6 +5582,7 @@ impl Session {
                 );
                 node.transform = pic.transform;
                 node.opacity = pic.opacity;
+                node.mask = pic.clip;
                 (pic.below, node)
             })
             .collect();

@@ -37,6 +37,8 @@ pub struct ImportedImage {
     /// How many of `shapes` are below it, which is its place in
     /// painter's order.
     pub below: usize,
+    /// What it is seen through, where the file put it inside a clip.
+    pub clip: Option<chitrakar_doc::Mask>,
 }
 
 /// Bring an SVG in as shape layers.
@@ -48,7 +50,7 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let mut shapes = Vec::new();
     let mut images = Vec::new();
-    walk(tree.root(), 1.0, &mut shapes, &mut images);
+    walk(tree.root(), 1.0, None, &mut shapes, &mut images);
     Ok(ImportedSvg {
         width: tree.size().width(),
         height: tree.size().height(),
@@ -57,20 +59,131 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     })
 }
 
-fn walk(group: &usvg::Group, opacity: f32, out: &mut Vec<Node>, pics: &mut Vec<ImportedImage>) {
-    let opacity = opacity * group.opacity().get();
+/// The region a group is seen through, in document space, or nothing.
+///
+/// A clip path is a set of outlines and the content shows where they
+/// cover — usvg has already resolved which outlines and put the whole
+/// placement into their absolute transforms, so what comes back here is
+/// polygons in the same space the shapes are in. `clipPathUnits`,
+/// nesting on the clip itself and a clip referring to another clip are
+/// all resolved by then as well; a clip *on* the clip path narrows it,
+/// which is an intersection like any other.
+fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
+    let cp = group.clip_path()?;
+    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+    collect_clip(cp.root(), &mut rings);
+    if rings.is_empty() {
+        return None;
+    }
+    // The outlines of a clip path show where *any* of them covers, which
+    // is their union — not the even-odd of one compound shape.
+    let mut acc = vec![rings.remove(0)];
+    for next in rings {
+        match chitrakar_render::boolean::combine_or_nudge(
+            &acc,
+            std::slice::from_ref(&next),
+            chitrakar_render::boolean::BoolOp::Union,
+        ) {
+            Some(joined) => acc = joined,
+            None => acc.push(next),
+        }
+    }
+    // And a clip on the clip path narrows what it lets through.
+    if let Some(inner) = clip_rings(cp.root()) {
+        if let Some(both) = chitrakar_render::boolean::combine_or_nudge(
+            &acc,
+            &inner,
+            chitrakar_render::boolean::BoolOp::Intersect,
+        ) {
+            acc = both;
+        }
+    }
+    Some(acc)
+}
+
+fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<[f32; 2]>>) {
     for child in group.children() {
         match child {
-            usvg::Node::Group(g) => walk(g, opacity, out, pics),
+            usvg::Node::Group(g) => collect_clip(g, out),
+            usvg::Node::Path(p) => {
+                for ring in rings_of(p) {
+                    let flat = ring.flattened();
+                    if flat.len() >= 3 {
+                        out.push(flat);
+                    }
+                }
+            }
+            // A clip path holds outlines; usvg has already dropped
+            // anything else, and text in one arrives as outlines.
+            usvg::Node::Text(t) => collect_clip(t.flattened(), out),
+            usvg::Node::Image(_) => {}
+        }
+    }
+}
+
+/// A region as the mask a layer wears. The rings are already in document
+/// space, so the mask carries no transform of its own.
+fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
+    let mut rings = rings.to_vec();
+    let main = rings.remove(0);
+    chitrakar_doc::Mask {
+        kind: chitrakar_doc::MaskKind::Vector {
+            shape: VectorShape::Path {
+                handles: vec![[0.0; 4]; main.len()],
+                points: main,
+                closed: true,
+                smooth: false,
+                subpaths: rings,
+            },
+            transform: chitrakar_doc::Transform::default(),
+        },
+        invert: false,
+        feather: 0.0,
+    }
+}
+
+fn walk(
+    group: &usvg::Group,
+    opacity: f32,
+    clip: Option<&Vec<Vec<[f32; 2]>>>,
+    out: &mut Vec<Node>,
+    pics: &mut Vec<ImportedImage>,
+) {
+    let opacity = opacity * group.opacity().get();
+    // What this group is seen through, and everything under it with it. A
+    // clip is the one thing about a group that survives the group being
+    // flattened away: it multiplies coverage by nought or one, and that
+    // distributes over the children exactly — each child shown only
+    // inside the region is the same picture as the group shown only
+    // inside it. Opacity and blending do not distribute that way, which
+    // is why they are still folded into the colours instead.
+    let here = clip_rings(group);
+    let clip = match (clip, here.as_ref()) {
+        (None, None) => None,
+        (Some(outer), None) => Some(outer.clone()),
+        (None, Some(inner)) => Some(inner.clone()),
+        // A clip inside a clip shows only what both show.
+        (Some(outer), Some(inner)) => chitrakar_render::boolean::combine_or_nudge(
+            outer,
+            inner,
+            chitrakar_render::boolean::BoolOp::Intersect,
+        )
+        .or_else(|| Some(inner.clone())),
+    };
+    let clip = clip.as_ref();
+    for child in group.children() {
+        match child {
+            usvg::Node::Group(g) => walk(g, opacity, clip, out, pics),
             usvg::Node::Path(p) => {
                 if p.is_visible() {
-                    if let Some(node) = shape_of(p, opacity) {
+                    if let Some(mut node) = shape_of(p, opacity) {
+                        node.mask = clip.map(|c| mask_of(c));
                         out.push(node);
                     }
                 }
             }
             // Text arrives as the outlines usvg set it in.
-            usvg::Node::Text(t) => walk(t.flattened(), opacity, out, pics),
+            usvg::Node::Text(t) => walk(t.flattened(), opacity, clip, out, pics),
             // A picture the file carries, which used to be dropped on the
             // floor: an SVG with a photograph in it came in as the shapes
             // around the photograph and nothing where it was, silently.
@@ -81,9 +194,10 @@ fn walk(group: &usvg::Group, opacity: f32, out: &mut Vec<Node>, pics: &mut Vec<I
                 match img.kind() {
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
-                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, out, pics),
+                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, clip, out, pics),
                     kind => {
-                        if let Some(pic) = picture_of(img, kind, opacity, out.len()) {
+                        if let Some(mut pic) = picture_of(img, kind, opacity, out.len()) {
+                            pic.clip = clip.map(|c| mask_of(c));
                             pics.push(pic);
                         }
                     }
@@ -145,6 +259,7 @@ fn picture_of(
         },
         opacity,
         below,
+        clip: None,
     })
 }
 
@@ -1093,5 +1208,133 @@ mod tests {
             handles.iter().any(|h| h.iter().any(|v| v.abs() > 1.0)),
             "circles nowhere near each other keep their curves"
         );
+    }
+
+    /// What a clip path hides stays hidden.
+    ///
+    /// The importer never read `clip-path`, so a clipped group came in
+    /// with everything showing — the loudest of the losses in this file,
+    /// since the others made a line or a corner slightly wrong and this
+    /// one puts artwork on the page that the file says is not there.
+    ///
+    /// A clip survives the group being flattened away, which is why it
+    /// can be carried at all: it multiplies coverage by nought or one and
+    /// that distributes over the children exactly, so each child seen
+    /// only inside the region is the same picture as the group seen only
+    /// inside it. Opacity and blending do not distribute that way and are
+    /// still folded into the colours instead.
+    #[test]
+    fn what_a_clip_path_hides_stays_hidden() {
+        let drawn = |svg: &str, w: u32, h: u32| {
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            let mut doc = Document::new(w, h, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, n) in imported.shapes.iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(n.clone()),
+                })
+                .unwrap();
+            }
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let tree = {
+                let mut opt = usvg::Options::default();
+                opt.fontdb_mut().load_font_data(FACE.to_vec());
+                usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap()
+            };
+            let mut pix = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pix.as_mut(),
+            );
+            (ours, pix)
+        };
+
+        // A band twenty wide clipping a rectangle fifty wide: what is
+        // outside the band is what used to come in anyway.
+        let one = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><clipPath id="c"><rect x="5" y="5" width="20" height="30"/></clipPath></defs>
+             <g clip-path="url(#c)">
+               <rect x="5" y="10" width="50" height="20" fill="#cc0000"/>
+             </g>
+           </svg>"##;
+        // Two clips, one inside the other: only what both let through.
+        let nested = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs>
+               <clipPath id="a"><rect x="5" y="5" width="30" height="30"/></clipPath>
+               <clipPath id="b"><rect x="20" y="5" width="30" height="30"/></clipPath>
+             </defs>
+             <g clip-path="url(#a)"><g clip-path="url(#b)">
+               <rect x="0" y="10" width="60" height="20" fill="#0044cc"/>
+             </g></g>
+           </svg>"##;
+        // A clip of two outlines shows where *either* covers, which is a
+        // union rather than the even-odd of one compound shape.
+        let two = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><clipPath id="c">
+               <rect x="5" y="5" width="15" height="30"/>
+               <rect x="35" y="5" width="15" height="30"/>
+             </clipPath></defs>
+             <g clip-path="url(#c)">
+               <rect x="0" y="10" width="60" height="20" fill="#118833"/>
+             </g>
+           </svg>"##;
+        // And two that *overlap*, which is the case that says union
+        // rather than even-odd. Where they cross, one compound shape
+        // filled even-odd would punch a hole; a clip shows it.
+        let crossing = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><clipPath id="c">
+               <rect x="5" y="5" width="25" height="30"/>
+               <rect x="20" y="5" width="30" height="30"/>
+             </clipPath></defs>
+             <g clip-path="url(#c)">
+               <rect x="0" y="10" width="60" height="20" fill="#884499"/>
+             </g>
+           </svg>"##;
+
+        for (svg, what, spots) in [
+            (
+                one,
+                "one clip",
+                vec![(12u32, 20u32, "inside the band"), (40, 20, "outside it")],
+            ),
+            (
+                nested,
+                "a clip inside a clip",
+                vec![
+                    (27, 20, "where both let it through"),
+                    (10, 20, "where only the outer does"),
+                    (45, 20, "where only the inner does"),
+                ],
+            ),
+            (
+                two,
+                "a clip of two outlines",
+                vec![
+                    (12, 20, "inside the first"),
+                    (27, 20, "between them, which neither covers"),
+                    (42, 20, "inside the second"),
+                ],
+            ),
+            (
+                crossing,
+                "a clip of two outlines that cross",
+                vec![
+                    (12, 20, "inside the first alone"),
+                    (25, 20, "where they cross, which a union shows"),
+                    (45, 20, "inside the second alone"),
+                    (55, 20, "beyond both"),
+                ],
+            ),
+        ] {
+            let (ours, pix) = drawn(svg, 60, 40);
+            for (x, y, where_) in spots {
+                let mine = ours.get(x, y).a > 0.5;
+                let want = pix.pixel(x, y).unwrap().alpha() > 128;
+                assert_eq!(mine, want, "{what}: {where_} at {x},{y}");
+            }
+        }
     }
 }
