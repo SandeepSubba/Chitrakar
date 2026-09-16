@@ -59,6 +59,110 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     })
 }
 
+/// The region a `mask` lets through, where the mask is only a region.
+///
+/// An SVG mask is greyscale: coverage is the luminance (or the alpha) of
+/// whatever is drawn in it, so a mask painted in grey fades what it
+/// covers and a mask with a gradient in it fades it unevenly. Nothing
+/// here can hold that as a mask without pooling pixels for it, which is
+/// the picture problem again and a raster mask besides — so a mask with
+/// real grey in it is still passed over, and content it should have
+/// faded still arrives whole.
+///
+/// What *is* carried is the common case, and the loud one: a mask drawn
+/// as opaque white shapes, which is a region and nothing more. Used that
+/// way a mask is a clip with a different spelling, and leaving it out put
+/// artwork on the page the file says is not there.
+///
+/// Every condition below is a guard rather than a nicety: fail any of
+/// them and the answer is `None`, which is exactly what happened before
+/// this existed. A fill that is not white, not opaque, or a gradient; a
+/// group or shape that is faded; anything with an effect or a stroke on
+/// it — each of those is grey somewhere, and a region would be wrong
+/// about it in the direction of showing too much.
+fn mask_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
+    let m = group.mask()?;
+    if !region_only(m.root(), m.kind()) {
+        return None;
+    }
+    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+    collect_clip(m.root(), &mut rings);
+    if rings.is_empty() {
+        return None;
+    }
+    let mut acc = vec![rings.remove(0)];
+    for next in rings {
+        match chitrakar_render::boolean::combine_or_nudge(
+            &acc,
+            std::slice::from_ref(&next),
+            chitrakar_render::boolean::BoolOp::Union,
+        ) {
+            Some(joined) => acc = joined,
+            None => acc.push(next),
+        }
+    }
+    // A mask has a region of its own outside which it lets nothing
+    // through, whatever is drawn in it.
+    let r = m.rect();
+    let bounds = vec![vec![
+        [r.left(), r.top()],
+        [r.right(), r.top()],
+        [r.right(), r.bottom()],
+        [r.left(), r.bottom()],
+    ]];
+    if let Some(cut) = chitrakar_render::boolean::combine_or_nudge(
+        &acc,
+        &bounds,
+        chitrakar_render::boolean::BoolOp::Intersect,
+    ) {
+        acc = cut;
+    }
+    // And a mask on the mask narrows it again.
+    if let Some(inner) = mask_rings(m.root()) {
+        if let Some(both) = chitrakar_render::boolean::combine_or_nudge(
+            &acc,
+            &inner,
+            chitrakar_render::boolean::BoolOp::Intersect,
+        ) {
+            acc = both;
+        }
+    }
+    Some(acc)
+}
+
+/// Whether everything in a mask is fully showing, so its coverage is a
+/// yes or a no rather than a shade.
+fn region_only(group: &usvg::Group, kind: usvg::MaskType) -> bool {
+    if group.opacity().get() < 1.0 || !group.filters().is_empty() {
+        return false;
+    }
+    group.children().iter().all(|child| match child {
+        usvg::Node::Group(g) => region_only(g, kind),
+        usvg::Node::Path(p) => {
+            if !p.is_visible() || p.stroke().is_some() {
+                return false;
+            }
+            let Some(f) = p.fill() else { return false };
+            if f.opacity().get() < 1.0 {
+                return false;
+            }
+            match f.paint() {
+                // A luminance mask reads how light the paint is, so only
+                // white shows everything; an alpha mask does not care
+                // what colour it is, only that it is opaque.
+                usvg::Paint::Color(c) => {
+                    kind == usvg::MaskType::Alpha || (c.red, c.green, c.blue) == (255, 255, 255)
+                }
+                _ => false,
+            }
+        }
+        // Text and pictures in a mask are shades as far as this is
+        // concerned: an outline is antialiased and a photograph is grey
+        // nearly everywhere.
+        usvg::Node::Text(_) | usvg::Node::Image(_) => false,
+    })
+}
+
 /// The region a group is seen through, in document space, or nothing.
 ///
 /// A clip path is a set of outlines and the content shows where they
@@ -157,7 +261,19 @@ fn walk(
     // inside the region is the same picture as the group shown only
     // inside it. Opacity and blending do not distribute that way, which
     // is why they are still folded into the colours instead.
-    let here = clip_rings(group);
+    // A clip path and a mask are both "show only here", so they meet as
+    // one region — and a mask only joins in when it *is* a region. See
+    // `mask_rings`.
+    let here = match (clip_rings(group), mask_rings(group)) {
+        (None, None) => None,
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (Some(a), Some(b)) => chitrakar_render::boolean::combine_or_nudge(
+            &a,
+            &b,
+            chitrakar_render::boolean::BoolOp::Intersect,
+        )
+        .or(Some(b)),
+    };
     let clip = match (clip, here.as_ref()) {
         (None, None) => None,
         (Some(outer), None) => Some(outer.clone()),
@@ -1336,5 +1452,126 @@ mod tests {
                 assert_eq!(mine, want, "{what}: {where_} at {x},{y}");
             }
         }
+    }
+
+    /// A mask that is only a region is carried as one.
+    ///
+    /// An SVG mask is greyscale — coverage is the luminance of whatever is
+    /// drawn in it — and nothing here can hold that without pooling
+    /// pixels for a raster mask. But a mask drawn as opaque white shapes
+    /// is a region and nothing more, which is how most masks in most
+    /// files are used, and leaving it out put artwork on the page the
+    /// file says is not there: outside the mask, resvg drew nothing and
+    /// this drew solid.
+    ///
+    /// The second half is the guard, and it is the half worth testing.
+    /// Every condition in `region_only` fails towards `None`, which is
+    /// what happened before any of this existed — so a mask painted grey
+    /// must *not* be read as a region, because a region would show what
+    /// the file only half shows. That it still arrives whole is a known
+    /// loss, written down; being confidently wrong about it would be a
+    /// new one.
+    #[test]
+    fn a_mask_that_is_only_a_region_is_carried_as_one() {
+        let drawn = |svg: &str| {
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, n) in imported.shapes.iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(n.clone()),
+                })
+                .unwrap();
+            }
+            chitrakar_render::render(&doc).unwrap()
+        };
+        let theirs = |svg: &str| {
+            let mut opt = usvg::Options::default();
+            opt.fontdb_mut().load_font_data(FACE.to_vec());
+            let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap();
+            let mut pix = resvg::tiny_skia::Pixmap::new(60, 40).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pix.as_mut(),
+            );
+            pix
+        };
+
+        // White and opaque: a region, and it agrees with resvg.
+        let hard = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><mask id="m">
+               <rect x="5" y="5" width="20" height="30" fill="#ffffff"/>
+             </mask></defs>
+             <g mask="url(#m)">
+               <rect x="5" y="10" width="50" height="20" fill="#cc0000"/>
+             </g>
+           </svg>"##;
+        let (ours, pix) = (drawn(hard), theirs(hard));
+        for (x, y, what) in [
+            (12u32, 20u32, "inside the mask"),
+            (30, 20, "outside it, where the file shows nothing"),
+            (45, 20, "well outside it"),
+        ] {
+            assert_eq!(
+                ours.get(x, y).a > 0.5,
+                pix.pixel(x, y).unwrap().alpha() > 128,
+                "{what} at {x},{y}"
+            );
+        }
+
+        // A mask has a region of its own, and what is drawn outside it
+        // does not show however white it is. The content here reaches to
+        // x=45 and the region stops at x=20, so the difference between
+        // reading the region and not reading it is twenty-five columns of
+        // artwork.
+        let bounded = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><mask id="m" maskUnits="userSpaceOnUse" x="5" y="5" width="15" height="30">
+               <rect x="5" y="5" width="40" height="30" fill="#ffffff"/>
+             </mask></defs>
+             <g mask="url(#m)">
+               <rect x="5" y="10" width="50" height="20" fill="#2266cc"/>
+             </g>
+           </svg>"##;
+        let (ours, pix) = (drawn(bounded), theirs(bounded));
+        for (x, y, what) in [
+            (12u32, 20u32, "inside the mask's own region"),
+            (30, 20, "past it, though the mask is painted white there"),
+            (45, 20, "well past it"),
+        ] {
+            assert_eq!(
+                ours.get(x, y).a > 0.5,
+                pix.pixel(x, y).unwrap().alpha() > 128,
+                "{what} at {x},{y}"
+            );
+        }
+
+        // Painted grey rather than white: a real shade, so it must not be
+        // read as a region. resvg fades the content to about half; this
+        // leaves it whole, which is the loss being kept rather than a
+        // region being invented.
+        let soft = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
+             <defs><mask id="m">
+               <rect x="5" y="5" width="20" height="30" fill="#808080"/>
+             </mask></defs>
+             <g mask="url(#m)">
+               <rect x="5" y="10" width="50" height="20" fill="#cc0000"/>
+             </g>
+           </svg>"##;
+        let imported = import_svg(soft.as_bytes()).unwrap();
+        assert!(
+            imported.shapes.iter().all(|n| n.mask.is_none()),
+            "a mask painted grey is not a region"
+        );
+        // Which is to say: outside it, this still shows what the file
+        // fades — the known loss, asserted so that carrying it later is
+        // a change somebody notices.
+        let ours = drawn(soft);
+        assert!(
+            ours.get(45, 20).a > 0.5,
+            "still whole outside a grey mask, which is the loss kept"
+        );
     }
 }

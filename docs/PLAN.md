@@ -3486,6 +3486,42 @@ without reading anything else.*
      the two apart, where a union shows the overlap and even-odd would
      punch it out. Every case is held against resvg rather than a number
      picked by hand.
+     A fifth, found by the same oracle and half fixed on purpose: **a
+     `mask` was ignored**, so content the file only half shows, or does
+     not show at all, arrived whole. An SVG mask is greyscale — coverage
+     is the luminance of whatever is drawn in it — and nothing here can
+     hold that without pooling pixels for a raster mask, which is the
+     picture problem again. But a mask drawn as opaque white shapes is a
+     *region* and nothing more, which is how most masks in most files are
+     used, and that is carried now through the clip machinery: a clip and
+     a mask are both "show only here", so they meet as one region.
+     The guard is the part worth having. Every condition fails towards
+     doing nothing, which is exactly what happened before: a fill that is
+     not white (on a luminance mask), not opaque, or a gradient; a faded
+     group; a stroke, an effect, text or a picture — each of those is
+     grey somewhere, and a region would be wrong about it in the
+     direction of showing too much. A mask painted grey is asserted *not*
+     to become a region, and the content it should fade is asserted to
+     still arrive whole, which keeps the known loss visible instead of
+     quietly turning it into a confident wrong answer.
+     And the same tie-breaking lesson for the fourth time in a row: three
+     sabotages were caught by the first two cases and the fourth was not.
+     A mask has a region of its own, outside which nothing shows however
+     white it is painted — and the test's mask content sat entirely
+     inside its own default region, so ignoring the region changed
+     nothing. It takes content that *overflows* the region to tell them
+     apart.
+     Two more of the same class are found and not fixed, which is worth
+     writing down rather than leaving for the next search to rediscover.
+     A `filter` is dropped, so a blurred element comes in sharp — at two
+     pixels outside a blurred rect resvg draws a quarter coverage and
+     this draws nothing. That one is not an importer gap but a model one:
+     a filter layer here applies to everything below it, and clipping it
+     to the shape would cut exactly the spread that makes it a blur, so
+     there is no way to say "blur this one layer" yet. And a pattern fill
+     comes in unpainted, since `Paint::Pattern` has no answer here; the
+     honest fix is to rasterize a tile, which is worth less than it costs
+     for the files people bring to a photo editor.
      Then whatever the next user of the editor misses first — a brush
      that paints pixels rather than laying down live strokes. This line
      used to ask for text shaping worth the name as well, and that has
