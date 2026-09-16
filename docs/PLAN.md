@@ -3046,18 +3046,27 @@ without reading anything else.*
      that deleting the attribute fails it, and that is what was checked.)
      `WELD` survived at 1e-1, at 1.0 and at 5.0 — five thousand times
      looser, five whole document pixels, on a page where the shapes in
-     those tests are ten across — and that is a real blind spot with no
-     test written for it, deliberately. Welding rounds each fragment end
-     onto a grid and matches the keys, so a coarse weld can only do harm
-     where three or more ends share a cell *and* the right pairing is not
-     the one it picks. Two convex shapes give two intersection points and
-     an unambiguous pairing, which is why every attempt to break it from
-     the outside came back green: a sliver three hundredths of a pixel
-     wide survives a weld a hundred times too coarse, because the keys
-     are only used for matching and the coordinates are kept. Pinning it
-     properly wants a self-intersecting outline or many fragments, and a
-     weak test that only rules out absurd values would be the same sin as
-     the one this whole entry is about. Written down instead.
+     those tests are ten across. It resisted an obvious test for a reason
+     worth keeping: welding only matches *ends*, and the coordinates
+     themselves are kept, so with two convex outlines there are two
+     crossings, the pairing is unambiguous whatever the tolerance, and
+     the answer comes out right however coarse the grid. A sliver three
+     hundredths of a pixel wide survives a weld a hundred times too
+     coarse. What it takes is an outline that crosses *itself*, so one
+     small neighbourhood holds several fragment ends and the chain has a
+     choice about which to join to which.
+     That is now written, and it was found rather than invented: four
+     hundred random self-crossing pairs through all three operations at
+     two tolerances, and the signatures diffed. Six of twelve hundred
+     answers move at a weld ten times looser. One of them — the case is
+     kept verbatim, since rounding its numbers moves the crossings apart
+     again — loses a piece of its intersection, the area dropping with a
+     vertex, while its union and difference keep their area and lose
+     vertices, which is the chain taking a short cut across a corner it
+     no longer believes in. It fails at 1e-2, 1e-1 and 5e-1, and still
+     passes at 1e-4, since welding *less* cannot merge what is distinct.
+     Method three earning its keep on a question the other methods could
+     not reach.
      Five, and new: **ask the document what it has never said**. The
      four above all start from a person deciding what to look at, which
      is the thing they have in common and the limit they share. This one

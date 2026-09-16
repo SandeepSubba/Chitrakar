@@ -299,6 +299,78 @@ mod tests {
         );
     }
 
+    /// Two corners a hundredth of a pixel apart are two corners.
+    ///
+    /// Fragments are chained back together by rounding each end onto a
+    /// grid of [`WELD`] and matching the keys, which is what lets the
+    /// intersection arithmetic land one shared corner at two very
+    /// slightly different places and still be understood as one. How
+    /// coarse that grid is decides which corners count as the same, and
+    /// it had nothing watching it at all: a weld five thousand times
+    /// looser passed every test in this crate.
+    ///
+    /// It resisted an obvious test for a good reason, worth stating so
+    /// the next person does not repeat it. Welding only matches ends; the
+    /// coordinates themselves are kept. So with two convex outlines there
+    /// are two crossings, the pairing is unambiguous whatever the
+    /// tolerance, and the answer comes out right however coarse the grid
+    /// — a sliver three hundredths of a pixel wide survives a weld a
+    /// hundred times too coarse. What it takes is an outline that crosses
+    /// *itself*, so one small neighbourhood holds several fragment ends
+    /// and the chain has a choice about which to join to which.
+    ///
+    /// This one is such a case, found by running four hundred random
+    /// self-crossing pairs through all three operations at two
+    /// tolerances and diffing the answers. At a weld ten times looser its
+    /// intersection loses a piece — the area drops and a vertex with it —
+    /// while the union and the difference keep their area and lose
+    /// vertices, which is the chain taking a short cut across a corner it
+    /// no longer believes in.
+    #[test]
+    fn a_self_crossing_outline_keeps_its_corners_apart() {
+        // A six-point ring that crosses itself twice, and a quad laid
+        // over it. The numbers are what they are: this is a found case,
+        // and rounding them moves the crossings apart again.
+        let a: Ring = vec![
+            [16.147861, 14.831324],
+            [9.027339, 17.533096],
+            [8.482729, 11.186256],
+            [15.499235, 14.831325],
+            [8.658344, 18.172215],
+            [7.9206634, 10.212734],
+        ];
+        let b: Ring = vec![
+            [17.038256, 13.831324],
+            [11.587209, 19.914165],
+            [4.8880835, 13.831323],
+            [11.587209, 8.517552],
+        ];
+        let got = combine(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b),
+            BoolOp::Intersect,
+        )
+        .expect("the two do overlap");
+        let area = covered_area(&got);
+        assert!(
+            (area - 7.812).abs() < 0.03,
+            "the overlap keeps the piece a coarse weld loses: {area}"
+        );
+        // And the shape of it, since an area can be right for the wrong
+        // reasons: the chain found every corner it should have.
+        let verts: usize = got.iter().map(|r| r.len()).sum();
+        assert_eq!(verts, 9, "nine corners, one of which a coarse weld eats");
+        // The other two operations lose vertices rather than area, which
+        // is the same fault seen from the other side.
+        let sub = combine(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b),
+            BoolOp::Subtract,
+        )
+        .expect("and differ");
+        assert_eq!(sub.len(), 3, "the difference is three islands");
+    }
+
     #[test]
     fn subtracting_an_enclosed_square_leaves_a_hole() {
         // Nothing crosses, so there is nothing to chain: the answer is both
