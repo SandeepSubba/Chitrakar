@@ -2872,6 +2872,24 @@ without reading anything else.*
      outside standard to be right against. What it buys is that changing
      the strength becomes a deliberate act rather than a drift. The
      fifth-strength mutant now fails in the render crate alone.
+     The last optional oracle is the press profile, and the sweep there
+     has a twist worth separating. A CMYK colour *through a profile* is
+     inherently untestable without one — that is not a gap, it is what
+     the thing is. What is not inherent is the **plain uncalibrated
+     formula** every document uses until somebody loads a profile, which
+     is the path most CMYK colours are actually seen through. What held
+     it was black mapping to black — true of the formula with cyan and
+     magenta traded, with any two channels traded, and with the inks read
+     in any order at all, since at full black every channel is nought and
+     the arrangement cannot be seen. Trading cyan and magenta did in fact
+     survive the whole workspace with no profile set.
+     The meaning is physical and each ink can be asked for its own: cyan
+     absorbs red, magenta green, yellow blue. So a full cyan leaves green
+     and blue and takes the red away; two inks together leave only the
+     third light, which is what makes cyan over magenta blue rather than
+     a muddier cyan; and a half ink moves its own channel and no other,
+     which says the inks do not leak. Four mutations are caught in the
+     colour crate alone with no profile anywhere.
      Worth keeping in mind for the next sweep: **a test that self-skips
      is not a test on a machine that skips it.** Twelve adjustments
      happened to have a second, local pin; one did not, and nothing said

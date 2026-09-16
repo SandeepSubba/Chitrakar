@@ -361,6 +361,73 @@ mod tests {
         assert_eq!(to_working(&chain), to_working(&green));
     }
 
+    /// Each ink takes out the light it is named for.
+    ///
+    /// Without a press profile a CMYK colour goes through the plain
+    /// uncalibrated formula, and that is what every document gets until
+    /// somebody loads one — so it is the path most CMYK colours are seen
+    /// through, not a fallback nobody meets. What it had was black
+    /// mapping to black, which is true of the formula with cyan and
+    /// magenta traded, with any two channels traded, and with the inks
+    /// read in any order at all: at full black every channel is nought
+    /// and the arrangement cannot be seen. Trading cyan and magenta did
+    /// in fact survive the whole workspace with no profile set.
+    ///
+    /// The meaning is physical and each ink can be asked for its own:
+    /// cyan absorbs red, magenta absorbs green, yellow absorbs blue. So
+    /// a full cyan leaves green and blue and takes the red away, and the
+    /// other two say the same thing one channel over. Two inks together
+    /// leave only the third light, which is what makes cyan over magenta
+    /// blue rather than a muddier cyan.
+    #[test]
+    fn each_ink_takes_out_the_light_it_is_named_for() {
+        let ink = |c: f32, m: f32, y: f32, k: f32| {
+            to_working(&AuthoredColor::Cmyk { c, m, y, k, a: 1.0 }).to_srgb8()
+        };
+        // One ink at a time, full strength, no black.
+        assert_eq!(
+            ink(1.0, 0.0, 0.0, 0.0),
+            [0, 255, 255, 255],
+            "cyan takes the red"
+        );
+        assert_eq!(
+            ink(0.0, 1.0, 0.0, 0.0),
+            [255, 0, 255, 255],
+            "magenta takes the green"
+        );
+        assert_eq!(
+            ink(0.0, 0.0, 1.0, 0.0),
+            [255, 255, 0, 255],
+            "yellow takes the blue"
+        );
+        // Two at a time: only the light neither absorbs is left.
+        assert_eq!(
+            ink(1.0, 1.0, 0.0, 0.0),
+            [0, 0, 255, 255],
+            "cyan and magenta leave blue"
+        );
+        assert_eq!(
+            ink(1.0, 0.0, 1.0, 0.0),
+            [0, 255, 0, 255],
+            "cyan and yellow leave green"
+        );
+        assert_eq!(
+            ink(0.0, 1.0, 1.0, 0.0),
+            [255, 0, 0, 255],
+            "magenta and yellow leave red"
+        );
+        // No ink at all is paper.
+        assert_eq!(ink(0.0, 0.0, 0.0, 0.0), [255, 255, 255, 255], "bare paper");
+        // And a half-strength ink is partway there, on its own channel
+        // only — which says the inks do not leak into one another.
+        let half = ink(0.5, 0.0, 0.0, 0.0);
+        assert!(
+            half[0] > 100 && half[0] < 160,
+            "half a cyan takes half the red: {half:?}"
+        );
+        assert_eq!(&half[1..3], &[255, 255], "and leaves the other two alone");
+    }
+
     #[test]
     fn cmyk_black_maps_to_black() {
         let px = to_working(&AuthoredColor::Cmyk {
