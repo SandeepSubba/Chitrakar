@@ -2915,6 +2915,35 @@ without reading anything else.*
      every reader that branches on the top of the range would otherwise
      have to know; the curve is now exact at both ends, still monotone,
      and unchanged in between.
+     A fourth sweep over the three **effects** found nothing: a drop
+     shadow, an inner shadow and an outline each keep pins of their own
+     without the GPU. Worth recording as a negative — that part of the
+     renderer is covered, and the next search need not start there.
+     A fifth, over the **blur**, found the largest hole of the series.
+     Its tests said a blur *blurs*: the peak flattens, neighbours light
+     up, the total is conserved, nothing happens at zero, a flat field is
+     untouched. All five hold for a blur at sixty per cent of the width
+     asked for — and that mutation passes the whole workspace once the
+     GPU crate is left out. The width of a blur, which is the only thing
+     a blur really has, was pinned by a test that self-skips.
+     What pins a width is the second moment: blur one lit pixel and the
+     variance of what comes back is the square of the blur's effective
+     standard deviation, which no amount of flattening gets right by
+     accident. The number to hold it to is *not* sigma squared, and that
+     is the part worth writing down rather than rediscovering. This is
+     the W3C filter construction — three box passes of
+     `floor(sigma × 3 × √(2π) / 4 + 0.5)`, about 1.88 sigma — and three
+     boxes of width `w` have variance `3(w² − 1)/12`, so what it delivers
+     is about `0.88 σ²`: a blur some six per cent narrower than its name,
+     by design, because that formula matches an equivalent width rather
+     than a variance. Matching it is the point, since an SVG saying
+     `stdDeviation="4"` should soften here the way it softens in a
+     browser.
+     Small sigmas are left out, honestly: the box radius is an integer
+     halved, so under about five the quantisation is coarser than the
+     thing being measured — at sigma one the delivered variance is twice
+     what the name suggests. Held to a tenth from five up, where a
+     fifteen per cent error is caught, let alone sixty.
      Worth noticing how it was found. Nothing about that defect is
      visible from inside: the blend is right, the branch is right, the
      table is built right, and each of the three is checkable on its own

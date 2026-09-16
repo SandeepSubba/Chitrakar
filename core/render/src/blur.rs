@@ -285,4 +285,74 @@ mod tests {
             assert!((p.r - px.r).abs() < 1e-5 && (p.a - px.a).abs() < 1e-5);
         }
     }
+
+    /// A blur is as wide as the sigma asked for.
+    ///
+    /// Everything else here says a blur *blurs*: the peak flattens,
+    /// neighbours light up, the total is conserved, nothing happens at
+    /// zero and a flat field is untouched. Every one of those holds for a
+    /// blur at sixty per cent of the width it was asked for — and that
+    /// mutation passes the whole workspace once the GPU crate is left
+    /// out, which is to say the width of a blur was pinned by a test that
+    /// self-skips.
+    ///
+    /// What pins a width is the second moment. Blur a single lit pixel
+    /// and the result is a distribution; its variance is the square of
+    /// the blur's effective standard deviation, and no amount of
+    /// flattening or spreading gets that right by accident.
+    ///
+    /// The number to hold it to is not sigma squared, and the reason is
+    /// worth writing down rather than discovering again. This is the W3C
+    /// filter construction: three box passes of size
+    /// `floor(sigma * 3 * sqrt(2*pi) / 4 + 0.5)`, which is about 1.88
+    /// sigma. Three boxes of width `w` have variance `3 * (w^2 - 1) / 12`,
+    /// so the width that construction actually delivers is about
+    /// `0.88 * sigma^2` — a blur some six per cent narrower than its name,
+    /// by design and by the spec, since the formula matches an equivalent
+    /// width rather than a variance. Matching the spec is the point: an
+    /// SVG that says `stdDeviation="4"` should soften here the way it
+    /// softens in a browser.
+    ///
+    /// Small sigmas are left out and that is the honest part: the box
+    /// radius is an integer halved, so under about five the quantisation
+    /// is coarser than the thing being measured — at sigma one the
+    /// delivered variance is twice what the name suggests. Held to a
+    /// tenth from five up, where the steps are fine enough to mean
+    /// something.
+    #[test]
+    fn a_blur_is_as_wide_as_the_sigma_it_was_given() {
+        for sigma in [5.0f32, 6.0, 8.0, 10.0, 12.0] {
+            let n = 241u32;
+            let mid = n / 2;
+            let mut s = Surface::new(n, n);
+            s.pixels[(mid * n + mid) as usize] = LinearRgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            };
+            let clip = full(&s);
+            gaussian_blur(&mut s, clip, sigma, Beyond::Edge);
+            let (mut mass, mut second) = (0.0f64, 0.0f64);
+            for y in 0..n {
+                for x in 0..n {
+                    let w = s.get(x, y).r as f64;
+                    let dx = x as f64 - mid as f64;
+                    mass += w;
+                    second += w * dx * dx;
+                }
+            }
+            assert!(
+                (mass - 1.0).abs() < 1e-3,
+                "the light is all still there at sigma {sigma} ({mass})"
+            );
+            let variance = second / mass;
+            let want = 0.88 * (sigma * sigma) as f64;
+            assert!(
+                (variance - want).abs() < want * 0.1,
+                "at sigma {sigma} the blur's variance is {variance:.2}, \
+                 against the {want:.2} the three-box construction delivers"
+            );
+        }
+    }
 }
