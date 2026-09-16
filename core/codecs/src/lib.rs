@@ -136,6 +136,27 @@ mod tests {
         assert_eq!(decoded.rgba8, pixels);
     }
 
+    /// A tagged picture arrives as the colour it names, not merely as
+    /// different numbers.
+    ///
+    /// What this used to say was `assert_ne!` — that the pixel changed.
+    /// Every wrong conversion changes the pixel too, so the only thing
+    /// it ruled out was the profile being ignored altogether; channels
+    /// swapped, the transfer function applied twice, or the transform
+    /// run backwards would all have passed.
+    ///
+    /// Importing is one-way, so there is no round trip to lean on. What
+    /// stands in for one is the definition: Display P3 and sRGB share a
+    /// white point and a transfer function and differ in their primaries,
+    /// so the answer follows from the two primary matrices alone.
+    /// Linearize (200,100,50), through P3's matrix to XYZ, back through
+    /// the inverse of sRGB's, and encode: (215, 93, 31). Wider primaries
+    /// mean the same colour needs a more extreme triple to say it in
+    /// sRGB, which is the sense of the change as well as its size.
+    ///
+    /// Two levels of slack, which is what a real profile's own
+    /// chromatic adaptation and table rounding cost against the
+    /// arithmetic — this lands one level under on red and green.
     #[test]
     fn embedded_icc_profile_is_honored_on_import() {
         use image::ImageEncoder;
@@ -153,6 +174,16 @@ mod tests {
         assert_eq!(plain.rgba8, pixels);
         let tagged = decode(&png_p3.into_inner()).unwrap();
         assert_ne!(tagged.rgba8, pixels, "P3-tagged pixels must be normalized");
+        let want = [215i32, 93, 31];
+        for (c, name) in [(0usize, "red"), (1, "green"), (2, "blue")] {
+            let got = tagged.rgba8[c] as i32;
+            assert!(
+                (got - want[c]).abs() <= 2,
+                "the {name} the file names is {}, got {got} (whole pixel {:?})",
+                want[c],
+                &tagged.rgba8[..3]
+            );
+        }
         assert_eq!(tagged.rgba8[3], 255, "alpha preserved");
     }
 

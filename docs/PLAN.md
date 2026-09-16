@@ -2493,7 +2493,7 @@ without reading anything else.*
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth. Six methods have been paying, and all of them are cheap
+  3. Depth. Eight methods have been paying, and all of them are cheap
      enough to keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
      off an image, a group two deep — and see which audits stop holding.
@@ -2847,6 +2847,46 @@ without reading anything else.*
      number rather than because neither had to. Asked of the markup
      rather than the picture, which is method Two and is the only way
      this one can be asked.
+     Seven, and new: **for a one-way path, borrow an oracle**. Almost
+     every audit here leans on a round trip — write it and read it back,
+     draw it both ways, apply it and undo it — and *importing* has no
+     round trip to lean on. There is nothing to compare an imported file
+     against except an idea of what it should have said, which is why
+     four separate losses sat in `svg_import.rs` while every other edge
+     of this program was watched: a picture dropped, a dash pattern
+     written over, a fill rule never read, a clip path never read. The
+     fix is not more care, it is a second implementation of the same
+     spec. resvg is already a dev-dependency for the export witness;
+     pointing it at the *import* side turns "does this look right" into
+     "does this agree with a reader that is not us", and all four of
+     those defects are now held that way.
+     Where no second implementation exists, the *definition* will do.
+     The ICC check on import said `assert_ne!` — that a tagged pixel
+     came out different — which rules out the profile being ignored and
+     nothing else: channels traded, the transfer applied twice, half a
+     conversion would all have passed it, and one of those is a plausible
+     mistake rather than a contrived one. Display P3 and sRGB share a
+     white point and a transfer function and differ only in their
+     primaries, so the answer follows from the two matrices: (200,100,50)
+     in P3 is (215,93,31) in sRGB. The engine says (214,92,31), one level
+     under on two channels, which is what a real profile's own chromatic
+     adaptation costs against the arithmetic. It is asserted to two
+     levels now, and the three mistakes above are each caught — the
+     half-converted one especially, since that is the one an
+     is-it-different check can never see.
+     Eight, and it is a habit rather than a method: **the case has to
+     break the tie**. Every test written for those four losses passed on
+     its first draft *with the fix removed or inverted*, and always for
+     the same reason — the example chosen could not tell the right answer
+     from a plausible wrong one. A picture in a square box cannot tell
+     the two scale axes apart (and an oblong box cannot either, since SVG
+     letterboxes by default). A dashed line with no transform cannot tell
+     whether the pattern was scaled. Rings all wound the same way cannot
+     tell whether the winding sign was looked at. Clip outlines that do
+     not overlap cannot tell a union from an intersection. In each case
+     the fix was a second example chosen for that one purpose, and the
+     way to find out is the same every time: break the thing the test
+     was written for and watch it pass.
      Six, and new: **move a number and see who complains**. The vacuous
      miter check above was found by accident, which raised the obvious
      question — how many more are there? — and that question is
