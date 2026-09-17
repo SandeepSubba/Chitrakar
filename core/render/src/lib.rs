@@ -508,12 +508,31 @@ fn bounds_in_parent_space_inner(
         // occupies is what it draws. `local_bounds_of` asks that question
         // of the copy itself and falls back to the original's box where
         // there is nothing standing in.
-        NodeKind::Instance { .. } => match local_bounds_of(doc, id) {
+        NodeKind::Instance { of, .. } => match local_bounds_of(doc, id) {
             Ok(Some([x0, y0, x1, y1])) => {
                 transformed_local_bounds(node.transform, (x0, y0, x1, y1))
             }
-            // The original is gone, or is a change to what is under it
-            // rather than a picture with a box.
+            // No box means one of two things and they are opposite. The
+            // original may be *gone*, and then the copy draws nothing and
+            // occupies nothing. Or the original may be a change to what is
+            // under it rather than a picture — an adjustment, a filter, a
+            // group holding one — and then it has no box because it reaches
+            // everywhere, and so does the copy.
+            //
+            // Both were answered `None` here, and the optimistic reading is
+            // the one the drawing itself takes: `render_child` has said
+            // `None => Bounds::Everything` for as long as it has drawn a
+            // copy. The same question answered two ways in two places, and
+            // the pessimistic answer was the one cutting the surface a
+            // blended or masked copy is drawn on — so a copy of a group
+            // holding an adjustment lost the part of itself that fell
+            // outside a box that meant "nothing at all". Found at seed 2854
+            // of the random pages, by asking the reference renderer for the
+            // same layer twice, once with its blend and once without: a
+            // blend decides how a layer meets what is under it and never
+            // what it covers, so the two have to cover the same pixels, and
+            // they differed by 97 of them.
+            Ok(None) if doc.node(*of).is_ok() => Bounds::Everything,
             Ok(None) => Bounds::None,
             Err(_) => Bounds::None,
         },
@@ -15941,5 +15960,130 @@ mod tests {
                 normal(i)
             );
         }
+    }
+
+    /// A blend decides how a layer meets what is under it, never what it
+    /// covers.
+    ///
+    /// That follows from what a blend is, so it can be asked of this
+    /// renderer alone: draw the page twice, once with a layer's blend and
+    /// once with it set to Normal, and the same pixels have to be inked
+    /// either way. Only their colour may differ.
+    ///
+    /// It is worth asking because a blend puts a layer on a surface of its
+    /// own, and a surface has to be cut to something. For a copy that
+    /// something was a box that meant "nothing at all": a copy of a group
+    /// holding an adjustment has no *finite* box — an adjustment reaches
+    /// as far as what it changes — and `bounds_in_parent_space` answered
+    /// that with `Bounds::None`, which is the box of a layer that draws
+    /// nothing, rather than `Bounds::Everything`, which is what
+    /// `render_child` has always answered when it does the drawing. The
+    /// same question answered two ways in two places. So the surface was
+    /// cut away and the copy lost the part of itself outside it — 97
+    /// pixels on the page this is built from, which is seed 2854 of the
+    /// cross-renderer audit reduced to its three layers.
+    ///
+    /// The adjustment is *hidden*, exactly as the seed has it, and that is
+    /// deliberate rather than incidental: it proves the box is wrong and
+    /// not the drawing, since a hidden layer paints nothing and can only
+    /// be reached through a question about extent.
+    #[test]
+    fn a_blend_does_not_decide_what_a_layer_covers() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        let group = add(&mut doc, Box::new(Node::group("copied")));
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: Transform::translation(3.239, 1.802),
+        })
+        .unwrap();
+        // A shape wide enough that a box cut to nothing loses a lot of it.
+        let mut shape = Node::vector(
+            "drawn",
+            VectorShape::Path {
+                points: vec![
+                    [2.492, 5.9742],
+                    [14.888, 13.563],
+                    [12.410, 15.0894],
+                    [17.262, 16.9254],
+                    [18.232, 6.75],
+                ],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut shape.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.4485,
+                g: 0.5628,
+                b: 0.9614,
+                a: 0.8422,
+            });
+        }
+        shape.transform = Transform::translation(5.456, 4.6236);
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: Box::new(shape),
+        })
+        .unwrap();
+        // The layer with no box of its own: it changes what is under it
+        // rather than drawing, so it reaches as far as that goes. Hidden,
+        // so that nothing it does can be mistaken for what is being asked.
+        let mut tint = Node::adjustment("reaches everywhere", Adjustment::Exposure { stops: 0.4 });
+        tint.visible = false;
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 1,
+            node: Box::new(tint),
+        })
+        .unwrap();
+
+        let mut copy = Node::instance("the copy", group);
+        copy.transform = Transform::translation(24.2682, 0.707);
+        let copy = add(&mut doc, Box::new(copy));
+
+        let covered = |doc: &Document| -> Vec<bool> {
+            render(doc)
+                .unwrap()
+                .pixels
+                .iter()
+                .map(|p| p.a > 0.01)
+                .collect()
+        };
+        let plain = covered(&doc);
+        doc.apply(Command::SetBlendMode {
+            id: copy,
+            blend: BlendMode::Lighten,
+        })
+        .unwrap();
+        let blended = covered(&doc);
+
+        // The tie the case has to break: the copy has to cover something,
+        // or "the same pixels either way" is true of two empty pages.
+        let ink = plain.iter().filter(|c| **c).count();
+        assert!(
+            ink > 200,
+            "the page has to be drawn on for this to mean anything: {ink} pixels"
+        );
+        let lost = plain
+            .iter()
+            .zip(&blended)
+            .filter(|(a, b)| **a && !**b)
+            .count();
+        let gained = plain
+            .iter()
+            .zip(&blended)
+            .filter(|(a, b)| !**a && **b)
+            .count();
+        assert_eq!(
+            (lost, gained),
+            (0, 0),
+            "a blend changed what the layer covers: {lost} pixels lost and \
+             {gained} gained of {ink} drawn. A copy of a group holding an \
+             adjustment has no finite box, and a box that means \"nothing\" \
+             is not the same as one that means \"everywhere\"."
+        );
     }
 }

@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~467),
+- **Verify before committing:** `cargo test --workspace` (~468),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3384,12 +3384,44 @@ without reading anything else.*
      small to close. Refusing every path that carries an outline would
      hide a coarseness and shrink what the audit compares, which is the
      wrong trade.
-     The other three are **leads rather than diagnoses**, and they are
-     three different things: 2854 is nested copies of a group each
-     carrying a blend, with no mask and no effect anywhere; 3091 is a
-     plain vector, an adjustment and the ground with nothing dressed at
-     all, barely over at 0.0041; 4162 is a masked copy of a group holding
-     **text**, where two glyph rasterizers are the obvious suspect.
+     **Seeds 2854 and 4162 were one defect**, and the third in the
+     reference renderer this stretch. What found it was not the backend at
+     all but a question the renderer can be asked about *itself*: **a blend
+     decides how a layer meets what is under it, never what it covers.**
+     That follows from what a blend is, so drawing a page twice — once with
+     a layer's blend and once with it set to Normal — must ink exactly the
+     same pixels. It did not: 97 of them went missing.
+     A blend puts a layer on a surface of its own, and a surface has to be
+     cut to something. For a copy that something was a box meaning
+     *nothing at all*. A copy of a group holding an **adjustment** has no
+     finite box — an adjustment reaches as far as what it changes — and
+     `local_bounds_of` can only answer `Option<[f32; 4]>`, so "everywhere"
+     came back as `None`, and `bounds_in_parent_space` turned that into
+     `Bounds::None`, which is the box of a layer that draws nothing. The
+     surface was cut away and the copy lost the part of itself outside it.
+     The two readings of the same question were already in the file, four
+     hundred lines apart: `render_child` has said `None => Bounds::Everything`
+     for as long as it has drawn a copy, with the reason written beside it,
+     and the extent that cuts the surface said `Bounds::None`. So the fix is
+     to distinguish the two things `None` was carrying — the original *gone*,
+     which really is nothing, from the original having no box because it
+     reaches everywhere.
+     It clears 2854 and 4162 both, 4162 being a *masked* copy rather than a
+     blended one and so taking a surface for the same reason by another
+     road, which is what says the fix is about the box and not about blends.
+     Four thousand two hundred and twenty pages drawn of six thousand and
+     two left over the mean: 2325, which is the path-and-outline coarseness
+     above and is staying, and 3091 at 0.0041, a hair over.
+     Two things about the finding worth more than the fix. The first is the
+     oracle: it needs no second renderer, no spec and no arithmetic — the
+     page is drawn twice and compared with itself, and it would have found
+     this on a machine with no GPU at all. The second is that the layer
+     that breaks it is **hidden**, exactly as the seed has it, and the test
+     keeps it hidden on purpose: a hidden layer paints nothing, so it can
+     only be reached through a question about *extent*, which is what makes
+     it proof that the box is wrong rather than the drawing
+     (`a_blend_does_not_decide_what_a_layer_covers`; take the fix out and it
+     loses 101 of 202 pixels drawn, half the layer).
      And one thing about the *instrument* rather than the findings, which
      cost a wrong conclusion before it was noticed: **the greedy minimiser
      is not reproducible.** Hiding every layer that is not needed to keep a
