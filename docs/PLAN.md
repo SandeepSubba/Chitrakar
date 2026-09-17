@@ -3524,9 +3524,19 @@ without reading anything else.*
      The second is the residue, recorded so the next search does not start
      there: nine pages still move their alpha, all of them small — two to
      eleven pixels, worst 0.084 — where the large family was 0.16 to 0.87.
-     That is the shape of a fringe pixel lost to a surface's edge rather
-     than a layer losing itself, and it is why the invariant is not yet a
-     test over the corpus. The hand-built case is
+     It is why the invariant is not yet a test over the corpus, and it was
+     measured rather than guessed at, which corrected the guess. Every one
+     of those pixels sits on the *fractional boundary* of the blended
+     layer's own box — seed 413's box starts at (14.369, 8.152) and the
+     pixels are (14, 8), (15, 8), (14, 9) — and the blended page **gains**
+     alpha there rather than losing it: 0.4621 against 0.4231 on seed 346.
+     So it is not a layer being cut short by a surface, which is what the
+     first description of it said; it is the two paths disagreeing about a
+     part-covered edge pixel, with the surface covering slightly more.
+     Which of the two is right is the open question, and the seeds above
+     are where to ask it — seed 346 is a *raster*, which draws one mark and
+     so cannot be a case of something being applied twice where a layer
+     overlaps itself. The hand-built case is
      (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
      asks the tie as well as the claim: the copy has to *change* the page,
      or "the same whatever blend it wears" is true of a layer that draws
