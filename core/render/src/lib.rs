@@ -1025,6 +1025,40 @@ fn draw_layer(
             render_child(doc, child, dst, clip, parent, node.blend, bare)?;
             return Ok(None);
         }
+        // Being *read as* the cut is the weaker of those two, and for a
+        // copy it is too weak to pay for. What a copy draws is another
+        // layer, and that layer's blend has to meet what is under the
+        // copy — an empty surface is not that. Every separable blend
+        // collapses to Normal against nothing, `ab` being zero so the
+        // blended term drops out, and the surface then comes down by the
+        // copy's own blend, which is `Normal`: the blend is spent against
+        // nothing and never asked for again. So the copy goes down
+        // straight, where its blend meets the real page, and the alpha
+        // the layers above want is drawn again aside.
+        //
+        // A copy alone. A group on a surface is *isolated* by it, which is
+        // the whole reason it is there, and a leaf's own blend is applied
+        // when its own surface comes down and so was never lost. Hoisting
+        // the copied blend onto the copy instead was tried twice and made
+        // more of the random pages worse than it fixed — see PLAN §0.
+        if !effected
+            && !blended
+            && cover.is_none()
+            && matches!(node.kind, NodeKind::Instance { .. })
+        {
+            if let Some(pad) = capture {
+                render_child(doc, child, dst, clip, parent, node.blend, bare)?;
+                let mut aside = Surface::new(dst.width, dst.height);
+                let window = grow(clip, pad, dst.width, dst.height);
+                render_layer(doc, child, &mut aside, window, parent, bare)?;
+                return Ok(Some(Cover {
+                    alpha: aside.pixels.iter().map(|p| p.a).collect(),
+                    origin: (0, 0),
+                    width: aside.width,
+                    height: aside.height,
+                }));
+            }
+        }
         // An adjustment, a filter and a clone are transformations of what
         // is already on the page rather than pictures of their own: drawn
         // on a surface of their own they would have nothing to work on. So
@@ -15783,5 +15817,129 @@ mod tests {
             "the palette tells the two apart ({once:.3?} against {twice:.3?})"
         );
         let _ = id;
+    }
+
+    /// A copy blends against the page, not against its own empty surface.
+    ///
+    /// A copy draws the layer it copies, where the copy is — so a layer
+    /// with a blend mode, copied, has to meet what is under the *copy*.
+    /// Drawn straight onto the page it does. But a copy goes onto a
+    /// surface of its own for any of several reasons that have nothing to
+    /// do with its colour — it is faded, it is masked, or, as here, the
+    /// layer above is held to it and so its own alpha is wanted back —
+    /// and that surface starts empty. Every separable blend collapses to
+    /// Normal against nothing (`ab` is zero, so the blended term drops
+    /// out of the compositing formula), which is exactly right for
+    /// getting the layer *into* the surface. What it means is that the
+    /// blend still has to happen when the surface comes down, and the
+    /// blend it came down by was the *copy's* own — `Normal` — so the
+    /// blend was simply lost. A copy of a Lighten layer composited as
+    /// though it were Normal.
+    ///
+    /// Found on a page nobody wrote (seed 1206 of the cross-renderer
+    /// audit, at two thousand seeds) and settled by arithmetic rather
+    /// than by either renderer: the GPU backend draws such a copy
+    /// straight in and so had it right.
+    ///
+    /// The expected value is the spec's, worked here from the definition —
+    /// `Lighten` is `max` per channel, composited over an opaque backdrop
+    /// as `as·max(Cb,Cs) + (1−as)·Cb` — and the test says the wrong answer
+    /// too, so a regression cannot pass by landing on it. The colours are
+    /// chosen so that two channels have the source *darker* than the
+    /// backdrop, which is the only place Lighten and Normal differ at all:
+    /// where the source is lighter the two agree exactly, and a case built
+    /// on such a channel could not tell them apart.
+    #[test]
+    fn a_copy_blends_against_the_page_under_it() {
+        let ground = AuthoredColor::Srgb {
+            r: 0.2122,
+            g: 0.657,
+            b: 0.7807,
+            a: 1.0,
+        };
+        let ink = AuthoredColor::Srgb {
+            r: 0.5422,
+            g: 0.4635,
+            b: 0.3696,
+            a: 0.45862,
+        };
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        add(&mut doc, filled_rect("ground", 48.0, 36.0, ground));
+        let mut leaf = Node::vector("original", VectorShape::Ellipse { rx: 10.0, ry: 7.0 });
+        if let NodeKind::Vector { fill, .. } = &mut leaf.kind {
+            *fill = Some(ink);
+        }
+        leaf.blend = BlendMode::Lighten;
+        leaf.transform = Transform::translation(2.0, 20.0);
+        let original = add(&mut doc, Box::new(leaf));
+        let mut copy = Node::instance("copy", original);
+        copy.transform = Transform::translation(26.0, 2.0);
+        let copy = add(&mut doc, Box::new(copy));
+        // The layer above is held to the copy, which is what asks for the
+        // copy's own alpha and so for a surface of its own. Hidden,
+        // because what it draws is beside the point — the clip run is the
+        // point, and a visible one would only paint over the pixel being
+        // read.
+        let above = add(
+            &mut doc,
+            filled_rect(
+                "held to the copy",
+                6.0,
+                6.0,
+                AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+        );
+        doc.apply(Command::SetClipped {
+            id: above,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetVisible {
+            id: above,
+            visible: false,
+        })
+        .unwrap();
+        let _ = copy;
+
+        let page = render(&doc).unwrap();
+        // The middle of the copy: an ellipse is placed from its box's
+        // corner, so this is the corner plus its radii.
+        let (px, py) = (26 + 10, 2 + 7);
+        let got = page.pixels[py * page.width as usize + px];
+
+        let lin = |c: f32| chitrakar_color::srgb_to_linear(c);
+        let cb = [lin(0.2122), lin(0.657), lin(0.7807)];
+        let cs = [lin(0.5422), lin(0.4635), lin(0.3696)];
+        let a = 0.45862f32;
+        let lighten = |i: usize| a * cb[i].max(cs[i]) + (1.0 - a) * cb[i];
+        let normal = |i: usize| a * cs[i] + (1.0 - a) * cb[i];
+        // The tie the case has to break: green and blue must tell the two
+        // apart, or the test proves nothing.
+        for i in [1usize, 2] {
+            assert!(
+                (lighten(i) - normal(i)).abs() > 0.05,
+                "channel {i} cannot tell Lighten from Normal: \
+                 {} against {}",
+                lighten(i),
+                normal(i)
+            );
+        }
+        for (i, (name, v)) in [("r", got.r), ("g", got.g), ("b", got.b)]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(
+                (v - lighten(i)).abs() < 2e-3,
+                "the copy's {name} is {v}: the spec says {} (Lighten against the page) \
+                 and {} is what losing the blend gives (Normal)",
+                lighten(i),
+                normal(i)
+            );
+        }
     }
 }

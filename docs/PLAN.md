@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~465),
+- **Verify before committing:** `cargo test --workspace` (~466),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3233,9 +3233,9 @@ without reading anything else.*
      Seed 557 is clean, which is the fix holding. And two pages the
      earlier run never reached are not: the audit asserts per seed and so
      had stopped at 557. **Seed 1206**, at a mean of 0.0101 against a
-     ceiling of 0.004, is a second defect in the reference renderer —
-     found, reproduced, settled by arithmetic, and *not fixed*, which is
-     why it is written out in full here rather than summarized.
+     ceiling of 0.004, is a second defect in the reference renderer,
+     and it took three attempts to fix, which is why the two that were
+     withdrawn are written out below rather than quietly dropped.
      It reduces to three layers and a fourth that draws nothing. A page
      48×36; an opaque ground, sRGB (0.2122, 0.657, 0.7807); an ellipse
      `rx` 10, `ry` 7 filled sRGB (0.5422, 0.4635, 0.3696) at α 0.45862
@@ -3284,23 +3284,36 @@ without reading anything else.*
      effect comes down by the layer's blend as well as the layer, so the
      layer would arrive by Multiply and its shadow by Normal — two
      different blends for one picture.
-     What that leaves is the case the defect actually needs, and it is
-     narrower than either attempt: a surface taken *only* to hand the
-     layers above their base's alpha should not change the picture at all.
-     The layer could go down straight, where its blend meets the real page,
-     and its alpha be drawn again aside — `layer_coverage_at` already does
-     exactly that for the backend's clip bases. The care it wants is that
-     the surface is also what *isolates* a group, so the straight path is
-     only safe where nothing inside reads the backdrop (`any_reads_backdrop`
-     is the existing question), and that the alpha has to be the clipped
-     alpha where the base is itself held to something, which is the one
-     case `layer_coverage_at` deliberately does not answer. That is the
-     next thing to do here, and it is a fix rather than a search.
-     Recorded rather than left as a red test, since a failing test in the
-     tree is worse than a paragraph and an `#[ignore]` is worse than
-     both — it reads as coverage. The committed audit runs 120 seeds and
-     sees none of this, so nothing is newly red either way; turning the
-     dial is what finds it, and the dial is one number.
+     What worked is narrower than either, and the narrowness is the
+     point: a surface taken *only* to hand the layers above their base's
+     alpha should not change the picture at all, so for a copy it is not
+     taken. The copy goes down straight, where its blend meets the real
+     page, and the alpha those layers want is drawn again aside. A copy
+     alone — a group on a surface is *isolated* by it, which is the whole
+     reason it is there, and a leaf's own blend is applied when its own
+     surface comes down and so was never lost. Being read as the cut is
+     the weaker of the two things a surface is for, and for a copy it is
+     too weak to pay for.
+     It costs a second drawing of the copy, and only for a copy that
+     something is held to. Which is the trade the other two attempts were
+     trying to avoid and should not have been: the reference renderer is
+     the thing every other answer here is measured against, and a surface
+     it cannot justify is worse than a page it draws twice.
+     Six thousand seeds say it is right rather than merely better. Over
+     the two thousand, nothing at all is above the mean now — 1206 and
+     1389 both clean, 1392 pages drawn, and the worst pixel anywhere down
+     from 0.885 to 0.607. The lesson from the two withdrawals is that the
+     workspace passing is not evidence: both of them passed all 466 tests,
+     the cross-renderer audit among them, and only the dial could tell.
+     And the dial, turned to six thousand, hands over the next seven
+     (2325, 2854, 3091, 3775, 4162, 4898, 5985). They are not regressions
+     — every one gives the same number with this fix switched off, which
+     is worth checking before chasing any of them — so they are new
+     ground rather than damage. **Seed 4898 is the one to take first**, at
+     a mean of 0.240 against a ceiling of 0.004: sixty times over, where
+     everything found so far has been two or three times over, and a
+     worst pixel of 0.991. Something is drawn almost entirely differently
+     there, which after all of the above is a promising thing to be told.
      The first run found four things, three of them in the backend and
      one in the reference renderer.
      A copy *held to the layer under it* was drawn whole: a copy's draws
