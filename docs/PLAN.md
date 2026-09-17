@@ -3354,6 +3354,52 @@ without reading anything else.*
      part with something ordinary — a group where a copy stood — is the
      cheapest way to find that out. The guard is to check that the
      ordinary version agrees before it is dressed.
+     **Seed 2325 is diagnosed and deliberately not fixed**, which is a
+     different answer from 4898's and the difference is the point. It is a
+     three-point closed **path** with an *outline*, and taking the outline
+     off is the only thing that settles it. An outline's band is a
+     distance from a *thresholded* silhouette — half of the layer's own
+     opacity is inside, which is what lets a faded layer have an inside at
+     all — and this backend antialiases a path by four samples a pixel. So
+     a quarter-step of coverage flips a whole pixel across the threshold,
+     and a whole pixel of silhouette moves a two-and-a-half-wide band
+     visibly. Measured on plain pages: a rect with an outline is exact to
+     0.00007 at every fill alpha, because a rect's coverage is exact on
+     both sides; a path with an outline is 0.0012 to 0.0023 at *every*
+     alpha above the threshold, and clean below it where there is no
+     inside and so no outline.
+     A second and quite separate instability came out of the same sweep,
+     and it is nobody's defect: a **disc** with an outline degrades as the
+     fill alpha approaches the threshold — 0.00011 at 0.80, 0.00023 at
+     0.60, 0.00065 at 0.52, 0.00155 at 0.504. Thresholding is
+     discontinuous by definition, so two rasterizers differing by a
+     thousandth of coverage differ by a whole outline. The seed's fill
+     alpha is 0.504. Worth knowing before reading any outline comparison.
+     Not declined, and this is the rule the two findings together give:
+     **decline a wrong answer, tolerate a coarse one.** The mask collision
+     above made the backend draw a *different picture* — a mask dropped —
+     and there is no defending that. Here it draws the same picture
+     measured more coarsely, which is the path-antialiasing gap already
+     written down two paragraphs up as the biggest of the three and not
+     small to close. Refusing every path that carries an outline would
+     hide a coarseness and shrink what the audit compares, which is the
+     wrong trade.
+     The other three are **leads rather than diagnoses**, and they are
+     three different things: 2854 is nested copies of a group each
+     carrying a blend, with no mask and no effect anywhere; 3091 is a
+     plain vector, an adjustment and the ground with nothing dressed at
+     all, barely over at 0.0041; 4162 is a masked copy of a group holding
+     **text**, where two glyph rasterizers are the obvious suspect.
+     And one thing about the *instrument* rather than the findings, which
+     cost a wrong conclusion before it was noticed: **the greedy minimiser
+     is not reproducible.** Hiding every layer that is not needed to keep a
+     page rough walks `Document::nodes()`, and that is a `HashMap` reseeded
+     every run, so the order differs and so does the answer — seed 2854
+     minimised to 0.02266 twice and 0.04061 once. Two undressings of it
+     were compared across runs and were therefore comparing two different
+     pages. Sort the ids. The 4898 conclusions do not rest on it: every one
+     of them was reproduced on hand-built pages, which is why the sixteen
+     combinations and the mask-removed oracle were worth the trouble.
      The first run found four things, three of them in the backend and
      one in the reference renderer.
      A copy *held to the layer under it* was drawn whole: a copy's draws
