@@ -3229,6 +3229,78 @@ without reading anything else.*
      surface since the surface is cut to the layer's own extent.
      The test says both answers, so a regression cannot pass by landing
      on the other one, and it checks the palette tells them apart.
+     Turning the dial again, with that fix in, says two useful things.
+     Seed 557 is clean, which is the fix holding. And two pages the
+     earlier run never reached are not: the audit asserts per seed and so
+     had stopped at 557. **Seed 1206**, at a mean of 0.0101 against a
+     ceiling of 0.004, is a second defect in the reference renderer —
+     found, reproduced, settled by arithmetic, and *not fixed*, which is
+     why it is written out in full here rather than summarized.
+     It reduces to three layers and a fourth that draws nothing. A page
+     48×36; an opaque ground, sRGB (0.2122, 0.657, 0.7807); an ellipse
+     `rx` 10, `ry` 7 filled sRGB (0.5422, 0.4635, 0.3696) at α 0.45862
+     with blend **Lighten**; a copy of that ellipse elsewhere; and above
+     the copy a layer *held to* it — hidden, since what it draws is
+     beside the point and the clip run is the point. Take the held layer
+     away and the two renderers agree.
+     The arithmetic names the right answer without asking either of them.
+     Lighten is `max` per channel, so over an opaque backdrop the answer
+     is `as·max(Cb,Cs) + (1−as)·Cb`; the colours are chosen so that green
+     and blue have the source *darker* than the ground, which is the only
+     place Lighten and Normal differ at all. Green should be 0.38918 and
+     the reference renderer gives 0.29407, which is `as·Cs + (1−as)·Cb`
+     exactly — plain Normal. The backend gives the spec's answer. **A
+     copy of a layer with a blend mode loses the blend.**
+     The mechanism is worth having, because it is not a missing branch.
+     A copy goes onto a surface of its own for reasons that have nothing
+     to do with its colour: it is faded, it is masked, or — as here — the
+     layer above is held to it, so its own alpha is wanted back and a
+     surface is where that is read. That surface starts empty, and every
+     separable blend collapses to Normal against nothing, `ab` being zero
+     so the blended term drops out of the compositing formula. Which is
+     exactly right for getting the layer *into* the surface, and exactly
+     why the blend has still to happen when the surface comes down. It
+     comes down by `node.blend` — the *copy's* own, `Normal`. So the
+     blend is not mishandled anywhere; it is spent against nothing and
+     then never asked for again.
+     Two fixes were written and both were withdrawn, and the measuring is
+     the part worth keeping. The first hoisted the copied layer's blend
+     onto the copy (`meeting_blend`) and used it for the *surface
+     decision* as well as the composite, so a copy of a blended layer is
+     isolated the way a blended leaf now is. The whole workspace passed —
+     466 tests, the cross-renderer audit among them — and the two
+     thousand seeds said **ten pages worse**, against the two it fixed.
+     The reason is already written down two paragraphs up, about effects:
+     a copy's extent is not its content's, what it draws being another
+     layer somewhere else, so a surface cut to the copy's box cuts the
+     picture. That is why an effect cannot hang on a copy either, and it
+     was there to be read rather than discovered.
+     The second kept the straight path — where a copy is already correct,
+     the layer it copies being drawn by its own `draw_layer` and bringing
+     its blend with it — and hoisted the blend only where a surface had
+     been taken anyway. Five pages worse. Seed 860 says why, and it is a
+     shape nobody would think of: a copy of a copy, where the inner one
+     carries Multiply, and the outer one also wears an *effect*. An
+     effect comes down by the layer's blend as well as the layer, so the
+     layer would arrive by Multiply and its shadow by Normal — two
+     different blends for one picture.
+     What that leaves is the case the defect actually needs, and it is
+     narrower than either attempt: a surface taken *only* to hand the
+     layers above their base's alpha should not change the picture at all.
+     The layer could go down straight, where its blend meets the real page,
+     and its alpha be drawn again aside — `layer_coverage_at` already does
+     exactly that for the backend's clip bases. The care it wants is that
+     the surface is also what *isolates* a group, so the straight path is
+     only safe where nothing inside reads the backdrop (`any_reads_backdrop`
+     is the existing question), and that the alpha has to be the clipped
+     alpha where the base is itself held to something, which is the one
+     case `layer_coverage_at` deliberately does not answer. That is the
+     next thing to do here, and it is a fix rather than a search.
+     Recorded rather than left as a red test, since a failing test in the
+     tree is worse than a paragraph and an `#[ignore]` is worse than
+     both — it reads as coverage. The committed audit runs 120 seeds and
+     sees none of this, so nothing is newly red either way; turning the
+     dial is what finds it, and the dial is one number.
      The first run found four things, three of them in the backend and
      one in the reference renderer.
      A copy *held to the layer under it* was drawn whole: a copy's draws
