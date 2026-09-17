@@ -2069,6 +2069,34 @@ impl Scene {
     }
 }
 
+/// Whether anything a layer *draws* carries a mask of its own — its
+/// children, or, for a copy, the layer it copies and that one's children.
+/// The layer itself is not counted: its own mask is the other half of the
+/// pair this asks about.
+fn draws_something_masked(doc: &Document, id: NodeId) -> bool {
+    fn walk(doc: &Document, id: NodeId, depth: usize) -> bool {
+        if depth > 32 {
+            // Deeper than anything here, and a ring would otherwise spin.
+            return true;
+        }
+        let Ok(node) = doc.node(id) else {
+            return false;
+        };
+        if depth > 0 && node.mask.is_some() {
+            return true;
+        }
+        if let NodeKind::Instance { of, .. } = &node.kind {
+            if walk(doc, *of, depth + 1) {
+                return true;
+            }
+        }
+        doc.children_of(id)
+            .map(|kids| kids.iter().any(|k| walk(doc, *k, depth + 1)))
+            .unwrap_or(false)
+    }
+    walk(doc, id, 0)
+}
+
 /// Everything the page needs drawn onto a surface of `size`, with the
 /// document mapped through `view` on the way — or `None` when some of it
 /// cannot be.
@@ -2175,6 +2203,28 @@ fn one(
                 | NodeKind::Group
                 | NodeKind::Instance { .. }
         ) {
+            return None;
+        }
+        // One coverage texture, and here two things want it. An effect is
+        // built from the layer's silhouette, and that silhouette is what
+        // the layer's own mask decides — so the mask rides the slot for
+        // the silhouette pass. If something *inside* the layer is masked
+        // too, its mask wants the same slot and does not get it: the
+        // child's mask is dropped, and not only from the shadow. Measured
+        // rather than reasoned — a masked group holding a masked ellipse
+        // and casting a drop shadow came out pixel for pixel like the
+        // reference renderer's answer for the same page with the child's
+        // mask *removed*, while the reference renderer's own answer
+        // differed from that by two hundredths of the page and two thirds
+        // of a channel at its worst.
+        //
+        // Either mask alone is fine, which is what makes this narrow: with
+        // no mask on the layer the child's rides the slot and is honoured,
+        // and with no mask inside there is nothing to collide. So the page
+        // goes back only for the pair of them, which is the same answer a
+        // stroke carrying a region gets on a layer whose own mask is
+        // already on that slot.
+        if node.mask.is_some() && draws_something_masked(doc, child) {
             return None;
         }
         node.effects
@@ -10802,5 +10852,167 @@ mod tests {
             "subnormal"
         );
         assert!(f16_to_f32(0x7c00).is_infinite());
+    }
+
+    /// A layer's own mask and a mask inside it want the same slot, and
+    /// where an effect is asking for the silhouette they cannot share it.
+    ///
+    /// One coverage texture. An effect is built from the layer's
+    /// silhouette and the layer's own mask is what decides that
+    /// silhouette, so the mask rides the slot for the silhouette pass; a
+    /// mask on something *inside* the layer wants the same slot and does
+    /// not get it. What that cost was not a softer shadow but the child's
+    /// mask dropped altogether — this backend's answer for such a page was
+    /// the reference renderer's answer for the same page *with the child's
+    /// mask removed*, pixel for pixel.
+    ///
+    /// So the page goes back, which is the same answer a stroke carrying a
+    /// region gets on a layer whose own mask is already on that slot.
+    ///
+    /// Three things are asserted and the second two are what keep the limit
+    /// honest: that the page is refused; that either mask *alone* is still
+    /// drawn, and drawn the way the reference renderer draws it, so the
+    /// refusal is no wider than the collision; and that the two pictures
+    /// really are different, so what is being declined is a wrong answer
+    /// rather than a scruple. Found at seed 4898 of the random pages, which
+    /// is three of them.
+    #[test]
+    fn a_mask_inside_a_masked_layer_with_effects_goes_back() {
+        let at = Transform::translation(14.0, 10.0);
+        let region = |w: f32, h: f32, x: f32, y: f32| chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(x, y),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        // `inside` masks the child, `outside` masks the group holding it.
+        let build = |inside: bool, outside: bool| {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 48.0,
+                        height: 36.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.6,
+                        b: 0.75,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let group = add(
+                &mut doc,
+                Box::new(Node::group("holds it")),
+                Transform::default(),
+            );
+            let mut child = filled(
+                "child",
+                VectorShape::Ellipse { rx: 9.0, ry: 6.0 },
+                AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.35,
+                    b: 0.2,
+                    a: 1.0,
+                },
+            );
+            if inside {
+                child.mask = Some(region(14.0, 30.0, 8.0, 4.0));
+            }
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: child,
+            })
+            .unwrap();
+            let kid = doc.children_of(group).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: kid,
+                transform: at,
+            })
+            .unwrap();
+            if outside {
+                doc.apply(Command::SetMask {
+                    id: group,
+                    mask: Some(Box::new(region(30.0, 14.0, 4.0, 12.0))),
+                })
+                .unwrap();
+            }
+            // The shadow is what asks for the silhouette, and so what
+            // turns two masks into a collision.
+            doc.apply(Command::SetEffects {
+                id: group,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 4.0,
+                    dy: 3.0,
+                    blur: 2.5,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.85,
+                }],
+            })
+            .unwrap();
+            doc
+        };
+
+        let both = build(true, true);
+        assert!(
+            !GpuRenderer::can_render(&both),
+            "a mask inside a masked layer with an effect has to go back: \
+             one coverage texture, and the child's mask is what gets dropped"
+        );
+        // Declining is only worth anything because the two pictures differ.
+        // What this backend drew was the page without the child's mask, so
+        // that is what the difference is measured against.
+        let as_if_dropped = build(false, true);
+        let (mean, worst) = difference(
+            &chitrakar_render::render(&both).unwrap(),
+            &chitrakar_render::render(&as_if_dropped).unwrap(),
+        );
+        assert!(
+            mean > 0.01 && worst > 0.5,
+            "the child's mask has to matter to the picture or there is \
+             nothing to decline: mean {mean:.5}, worst {worst:.3}"
+        );
+
+        // And no wider than the collision: either mask alone is drawn, and
+        // drawn the way the reference renderer draws it.
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        for (inside, outside, what) in [
+            (true, false, "a mask inside it and none of its own"),
+            (false, true, "a mask of its own and none inside it"),
+        ] {
+            let doc = build(inside, outside);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a layer with an effect and {what} is still drawn"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "with {what} it draws what the reference draws: \
+                 mean {mean:.5}, worst {worst:.3}"
+            );
+        }
     }
 }

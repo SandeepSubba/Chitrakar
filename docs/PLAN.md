@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~466),
+- **Verify before committing:** `cargo test --workspace` (~467),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3309,11 +3309,51 @@ without reading anything else.*
      (2325, 2854, 3091, 3775, 4162, 4898, 5985). They are not regressions
      — every one gives the same number with this fix switched off, which
      is worth checking before chasing any of them — so they are new
-     ground rather than damage. **Seed 4898 is the one to take first**, at
-     a mean of 0.240 against a ceiling of 0.004: sixty times over, where
-     everything found so far has been two or three times over, and a
-     worst pixel of 0.991. Something is drawn almost entirely differently
-     there, which after all of the above is a promising thing to be told.
+     ground rather than damage. Seed 4898 was the one to take first, at a
+     mean of 0.240 against a ceiling of 0.004 — sixty times over, where
+     everything found so far had been two or three times over — and it
+     paid, though not for the reason it looked like.
+     It presents as a copy of a copy, and it is not about copies at all.
+     Undressing it said four things were needed at once: a mask on the
+     inner copy, a mask on the outer one, a blend, and a drop shadow.
+     Then the copies were replaced by a **group** holding the same masked
+     shape, dressed the same way — and the check that makes that worth
+     anything is that the undressed pair agree *exactly*, on both
+     renderers, so the two constructions really are the same page and a
+     placement mistake cannot be read as a defect. Dressed, each renderer
+     draws the copy and the group identically to itself and the two
+     disagree with each other by a third of a channel. So the copy was
+     scenery.
+     Sixteen combinations of the four, on the group alone, name it: **a
+     mask inside a masked layer that casts a shadow**. The blend is not
+     needed — without it the disagreement is worse, 0.0204 and 0.681 —
+     and either mask alone is clean to a ten-thousandth.
+     And the arithmetic is not needed either, because a sharper oracle
+     turned up: this backend's answer for that page is the *reference
+     renderer's answer for the same page with the child's mask removed*,
+     to 0.0002. Not a softer shadow, not a shifted one — the child's mask
+     dropped altogether. One coverage texture is what a pass here has, an
+     effect is built from the layer's silhouette, the layer's own mask is
+     what decides that silhouette and so rides the slot, and a mask
+     inside wants the same slot and does not get it.
+     So the page goes back, which is what a stroke carrying a region
+     already gets on a layer whose own mask is on that slot, and this is
+     the row beside it. Teaching the pass a second coverage is the real
+     answer and is not small; declining is honest and is available now.
+     Three of the seven go with it (3775, 4898, 5985), 1780 pages declined
+     instead of 1772. The test asserts the refusal, asserts that either
+     mask *alone* is still drawn and drawn the reference's way so the
+     limit is no wider than the collision, and asserts that the two
+     pictures really differ so what is declined is a wrong answer rather
+     than a scruple — and it was checked both ways round, since a refusal
+     made too wide passes the first of those three perfectly well
+     (`a_mask_inside_a_masked_layer_with_effects_goes_back`).
+     What is left is four (2325, 2854, 3091, 4162), and the lesson to
+     carry into them is this one's: the shape a rough page *presents* need
+     not be the shape of what is wrong with it, and replacing the exotic
+     part with something ordinary — a group where a copy stood — is the
+     cheapest way to find that out. The guard is to check that the
+     ordinary version agrees before it is dressed.
      The first run found four things, three of them in the backend and
      one in the reference renderer.
      A copy *held to the layer under it* was drawn whole: a copy's draws
