@@ -3628,14 +3628,18 @@ without reading anything else.*
      Each of the three is needed and the test names which: take the clip
      growth out and seed 136 fails, the two surface arms and seed 62, the
      margin and seed 1221.
-     What is left is eight rectangles, and the one case is written into
-     the test as an exclusion rather than hidden: a **clipped** layer
+     There was a fourth place, and it is closed too: a **clipped** layer
      carrying a feathered mask. What such a layer is held to comes from
-     the base drawn aside, and that reading is itself cut to the
-     rectangle, so the softening runs out of neighbours there exactly as
-     it did on a surface before these three. Worst 0.057, all of it colour
-     rather than coverage. Take the exclusion out and those eight are what
-     fails.
+     the base drawn aside, and *how far past the rectangle that alpha is
+     wanted* counted the effects of the layers about to be cut by it and
+     not their masks — `Effect::reach` and nothing else. A soft edge reads
+     beyond its own pixels for the same reason a shadow does. With that,
+     nothing of two thousand pages fails; take it out and seed 724 does.
+     Four places, and the shape of the search is worth keeping: each one
+     was invisible until the one before it was fixed, because any of them
+     alone was enough to keep the rectangles wrong. A count that goes 48,
+     19, 8, 0 is not four guesses, it is one cause found in the four
+     places it had been written out.
      The exclusions are wide for an honest reason and the test says so:
      an adjustment, a filter and a clone read what is under them, and an
      effect reads past its layer's own silhouette, so the engine grows the

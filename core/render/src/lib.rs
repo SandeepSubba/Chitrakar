@@ -905,7 +905,18 @@ fn render_group(
                 .filter_map(|&c| doc.node(c).ok())
                 .flat_map(|n| n.effects.iter().map(Effect::reach))
                 .fold(0.0f32, f32::max);
-            (reach * max_scale(parent)).ceil() as u32
+            // A soft-edged mask reads beyond its own pixels too, for the
+            // same reason and by its own margin: the plane it softens on
+            // is cut to what is being drawn, so a layer held to this one
+            // wants the cut known that much further out as well. Already
+            // in the space the drawing happens in, where `reach` is in the
+            // layer's own and has to be scaled.
+            let soft = children[i + 1..end]
+                .iter()
+                .filter_map(|&c| doc.node(c).ok())
+                .filter_map(|n| feathered_reach(n, parent))
+                .fold(0.0f32, f32::max);
+            (reach * max_scale(parent)).max(soft).ceil() as u32
         });
         let cover = draw_layer(doc, children[i], dst, clip, parent, None, capture, bare)?;
         for &above in &children[i + 1..end] {
@@ -16528,14 +16539,14 @@ mod tests {
     /// much. An adjustment, a filter and a clone layer read what is under
     /// them; an effect reads past its layer's own silhouette.
     ///
-    /// And one gap, which is not a design decision but the next thing to
-    /// fix: a **clipped** layer carrying a **feathered** mask. What it is
-    /// held to comes from the base layer drawn aside, and that reading is
-    /// itself cut to the rectangle, so the softening runs out of
-    /// neighbours there exactly as it did on a layer's own surface before
-    /// the three places below were given room. Eight rectangles of two
-    /// thousand pages, worst 0.057, all of them colour rather than
-    /// coverage. Take the exclusion out and they are what fails.
+    /// Nothing else is left out. A **clipped** layer carrying a
+    /// **feathered** mask was the last thing that failed it, and it is the
+    /// fourth place a softening had to be given room: what such a layer is
+    /// held to comes from the base drawn aside, and how far past the
+    /// rectangle that alpha is wanted counted the *effects* of the layers
+    /// about to be cut by it and not their masks. A soft edge reads beyond
+    /// its own pixels for the same reason a shadow does. Take that out and
+    /// seed 724 fails.
     #[test]
     fn a_rectangle_repainted_is_the_page_drawn_whole() {
         const SEEDS: u64 = 2000;
@@ -16548,7 +16559,6 @@ mod tests {
                         n.kind,
                         NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
                     )
-                    || (n.clipped && n.mask.as_ref().is_some_and(|m| m.feather > 0.0))
             });
             if reaches_out {
                 continue;
