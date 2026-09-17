@@ -861,6 +861,11 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
+- **Asking who notices a sabotage?** Use `cargo test --workspace
+  --no-fail-fast`. Without it cargo stops at the first test binary that
+  fails, so a break in `core/render` hides whatever `core/gpu` would have
+  said about it — which turned a count of six into a count of one, and put
+  the wrong number in a commit message.
 - **Verify before committing:** `cargo test --workspace` (~477),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
@@ -2871,10 +2876,22 @@ without reading anything else.*
      and it is the question that had just produced three defects in two
      renderers. Every audit held. So, the method's own rule, the code it
      was meant to exercise was broken: make the reference renderer ignore
-     a copy's mask entirely and **exactly one test in the workspace
-     notices**, and it is a pages-nobody-wrote test rather than anything
-     over this document. The cross-renderer audit does not. The exporters
-     do not. The file round trip does not.
+     a copy's mask entirely and see who notices. Six tests do — two over
+     pages nobody wrote, four in the GPU crate, one of them the new
+     reading below. No exporter and no file round trip does, which is
+     worth knowing on its own: a copy's mask is a thing only a renderer
+     has ever been asked about.
+     **That count was first read as one, and the reading was the
+     instrument's fault rather than the suite's.** `cargo test --workspace`
+     stops at the first test binary that fails, so the render crate failing
+     meant the GPU crate never ran at all — `--no-fail-fast` is what makes
+     "who notices" a question about the suite rather than about the order
+     the crates happen to build in. Every sabotage from here on is run that
+     way. The wrong count went out in a commit message and is corrected
+     here, which is the second time this session a conclusion has come
+     from a measurement that was not measuring what it was read as; the
+     first was a sweep whose filter, not whose fix, was moving the
+     number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
      fixture's twenty-six layers can be removed outright without moving
@@ -2912,9 +2929,18 @@ without reading anything else.*
      dropped `words` reads 45 of 116 against 11. The whole-page mean saw
      nothing; the interiors saw nothing.
      The old audit gained the interior reading too, which costs nothing
-     and catches the wide errors the mean would dilute, and the new shape
-     itself is what it is: a copy wearing a mask, held now rather than
-     earned. The earning was done by asking why nobody noticed it.
+     and catches the wide errors the mean would dilute.
+     And the shape earns its place after all, once the sabotage is run
+     properly: the new reading is among the six that catch a copy's mask
+     being ignored, and this copy is the only masked one in the document,
+     so without it there would be nothing there to catch. What was
+     genuinely blind was text, and blind in the way that matters — with
+     the fixture as it stood, dropping text from the GPU backend entirely
+     passed the whole-page mean at 0.00134 and the interior reading at
+     0.0004 with nothing over the threshold, so the audit meant to compare
+     the two renderers over a page with one of everything on it had no
+     objection at all to one of the everything going missing. Tests
+     written *for* text do catch it; that is not the same thing.
      Six and a half, which is the same method pointed at a *function*
      rather than a constant: **weaken the whole of something and see who
      complains**. `apply_adjustment` was wrapped so that every adjustment
