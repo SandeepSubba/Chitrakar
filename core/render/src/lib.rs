@@ -1169,6 +1169,105 @@ fn draw_layer(
         // one of these is applied where it stands, over the region it is
         // confined to, and mixed back into what was there by how much of
         // that region its cover lets through.
+        // A clone layer with effects on it. It cannot go on a surface of
+        // its own — what it paints with is what is under it, and a fresh
+        // surface has nothing under it — which is why it is down here
+        // among the layers that are drawn where they stand. But an
+        // effect wants a silhouette, and unlike an adjustment or a
+        // filter a clone layer *has* one: the strokes it lays. So it is
+        // drawn once into a scratch page, where its reads see exactly
+        // what they would have seen, and what it laid is kept aside;
+        // then the effects that go under are drawn from that, then what
+        // it laid comes down on top of them.
+        //
+        // The layer's blend is taken once over the whole of what it
+        // laid rather than stroke by stroke, which is what every other
+        // kind with an effect on it gets and for the same reason: a
+        // layer with a blend has to meet what is under it once, as the
+        // whole of itself.
+        //
+        // Found by asking what this backend's GPU counterpart still
+        // hands back and why. It hands a clone layer with an effect
+        // back, and the reference renderer was drawing that page with
+        // the effect silently missing — a shadow put on a clone layer
+        // did nothing at all, and nothing said so.
+        if let NodeKind::Clone { strokes } = &node.kind {
+            if !node.effects.is_empty() {
+                let scale = max_scale(parent);
+                let reach = node
+                    .effects
+                    .iter()
+                    .map(Effect::reach)
+                    .fold(0.0f32, f32::max);
+                let region = grow(clip, (reach * scale).ceil() as u32, dst.width, dst.height);
+                let t = parent.compose(node.transform);
+                let plane = MaskRef::plane_over(
+                    Some(doc),
+                    node.mask.as_ref(),
+                    parent,
+                    region,
+                    (dst.width, dst.height),
+                );
+                let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                let mut scratch = dst.clone();
+                let mut laid = Surface::new(dst.width, dst.height);
+                draw_clone(
+                    &mut scratch,
+                    doc,
+                    strokes,
+                    t,
+                    node.opacity,
+                    BlendMode::Normal,
+                    region,
+                    m,
+                    Some(&mut laid),
+                );
+                // Whatever it is held to cuts what it laid before
+                // anything is made of it, so the effects grow from the
+                // shape that will really be seen.
+                if let Some(c) = cover {
+                    for y in region.y0..region.y1 {
+                        for x in region.x0..region.x1 {
+                            let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                            let i = (y * laid.width + x) as usize;
+                            laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+                        }
+                    }
+                }
+                for effect in node.effects.iter().filter(|e| !e.over()) {
+                    draw_effect(
+                        dst,
+                        &laid,
+                        (0, 0),
+                        doc,
+                        effect,
+                        parent,
+                        region,
+                        clip,
+                        node.blend,
+                        node.opacity,
+                    );
+                }
+                composite_from(dst, &laid, (0, 0), 1.0, node.blend, clip.intersect(region));
+                for effect in node.effects.iter().filter(|e| e.over()) {
+                    draw_effect(
+                        dst,
+                        &laid,
+                        (0, 0),
+                        doc,
+                        effect,
+                        parent,
+                        region,
+                        clip,
+                        node.blend,
+                        node.opacity,
+                    );
+                }
+                return Ok(
+                    capture.map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height)))
+                );
+            }
+        }
         if matches!(
             node.kind,
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
@@ -1801,7 +1900,7 @@ fn render_child(
                 draw_paint(dst, doc, strokes, t, node.opacity, blend, clip, mask)
             }
             NodeKind::Clone { strokes } => {
-                draw_clone(dst, doc, strokes, t, node.opacity, blend, clip, mask)
+                draw_clone(dst, doc, strokes, t, node.opacity, blend, clip, mask, None)
             }
         }
     }
@@ -5613,6 +5712,15 @@ fn draw_clone(
     blend: BlendMode,
     clip: ClipRect,
     mask: MaskRef<'_>,
+    // What the layer laid, kept aside as a picture of its own.
+    //
+    // A clone layer paints with what is under it, so it can never be
+    // drawn on a surface of its own — and an effect is built from a
+    // layer's silhouette, which is why an effect on one used to be
+    // dropped in silence. It does have a silhouette, though: the strokes
+    // it lays, at the alpha it lifted them at. That is this, and it costs
+    // one write on a pixel the layer was painting anyway.
+    mut laid: Option<&mut Surface>,
 ) {
     let Some(inv) = Inverse::of(t) else {
         return;
@@ -5753,7 +5861,11 @@ fn draw_clone(
                     };
                 }
                 let i = (py * dst.width + px) as usize;
-                dst.pixels[i] = blend_pixel(scale_alpha(lifted, weight), dst.pixels[i], blend);
+                let src = scale_alpha(lifted, weight);
+                if let Some(aside) = laid.as_deref_mut() {
+                    aside.pixels[i] = blend_pixel(src, aside.pixels[i], BlendMode::Normal);
+                }
+                dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
             }
         }
     }
@@ -16422,6 +16534,207 @@ mod tests {
                  is no picture for a blend to bring down."
             );
         }
+    }
+
+    /// A clone layer casts the shadow its strokes cast.
+    ///
+    /// An effect is built from a layer's silhouette, and a clone layer
+    /// has no surface of its own to take one from: what it paints with is
+    /// what is under it, and a fresh surface has nothing under it. So it
+    /// is drawn where it stands, among the adjustments and filters — and
+    /// those two really have no silhouette, being changes to what is
+    /// below rather than pictures. A clone layer is not like them. It
+    /// lays strokes, and strokes have a shape.
+    ///
+    /// The effect was being dropped in silence: a drop shadow put on a
+    /// clone layer moved not one pixel of the page, with nothing said.
+    /// The renderer's own `effected` predicate disagreed with the code
+    /// below it — it excludes an adjustment and a filter by name and
+    /// lets a clone layer through — which is what says this was an
+    /// oversight rather than a decision.
+    ///
+    /// What makes this sharp rather than merely non-empty: a clone
+    /// layer's silhouette is its strokes at the alpha it lifted them at,
+    /// so where it clones from something opaque it is exactly the
+    /// silhouette a *paint* layer with the same strokes would have. The
+    /// two shadows have to be the same shadow. Asserting only that some
+    /// shadow appears would pass on a silhouette of the wrong shape.
+    #[test]
+    fn a_clone_layer_casts_the_shadow_its_strokes_cast() {
+        let strokes = || {
+            vec![chitrakar_doc::PaintStroke {
+                points: vec![[10.0, 10.0], [26.0, 16.0]],
+                radii: vec![4.0],
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                softness: 0.0,
+                erase: false,
+                // Back into the ground, which is opaque, so what it
+                // lifts is opaque and its silhouette is its coverage.
+                source: [4.0, 14.0],
+                heal: false,
+                clip: None,
+            }]
+        };
+        let shadow = || {
+            vec![Effect::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 2.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }]
+        };
+        // `lifting` picks the layer kind; `cast` says whether it wears
+        // the shadow.
+        let page = |lifting: bool, cast: bool| {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = Node::vector(
+                "ground",
+                VectorShape::Rect {
+                    width: 48.0,
+                    height: 36.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.75,
+                    g: 0.8,
+                    b: 0.85,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(ground),
+            })
+            .unwrap();
+            // Something worth lifting. Cloning a uniform ground onto
+            // itself puts down what was already there and changes not one
+            // pixel — which is how the first draft of this measured a
+            // silhouette of nothing and read it as the defect.
+            let mut patch = Node::vector(
+                "patch",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 12.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut patch.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.25,
+                    b: 0.15,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(patch),
+            })
+            .unwrap();
+            let patch_id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: patch_id,
+                transform: Transform::translation(4.0, 20.0),
+            })
+            .unwrap();
+            let node = if lifting {
+                Node::clone_layer("borrowed")
+            } else {
+                Node::paint("brushed")
+            };
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[2];
+            doc.apply(Command::AddStroke {
+                id,
+                index: 0,
+                stroke: Box::new(strokes().remove(0)),
+                on_mask: false,
+            })
+            .unwrap();
+            if cast {
+                doc.apply(Command::SetEffects {
+                    id,
+                    effects: shadow(),
+                })
+                .unwrap();
+            }
+            (doc, id)
+        };
+
+        let differs = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .filter(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs())
+                        > 0.01
+                })
+                .count()
+        };
+
+        let (lifted, id) = page(true, true);
+        let (plain, _) = page(true, false);
+        let lit = render(&lifted).unwrap();
+        let bare = render(&plain).unwrap();
+        let cast = differs(&lit, &bare);
+        // Non-vacuity: the layer has to be laying something down at all,
+        // or there is no silhouette to cast from and this passes for the
+        // wrong reason. An earlier draft of this asked a clone layer with
+        // no strokes on it and read zero as a defect.
+        let mut hidden = plain.clone();
+        hidden
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+        let laid = differs(&bare, &render(&hidden).unwrap());
+        assert!(
+            laid > 50,
+            "the clone layer lays only {laid} pixels, which is too few to \
+             cast anything"
+        );
+        assert!(
+            cast > 100,
+            "a shadow on a clone layer moved {cast} pixels of the page. It \
+             lays {laid}, so it has a silhouette; an effect built from one \
+             cannot come to nothing."
+        );
+
+        // And it is the *right* shadow: the same strokes on a paint layer
+        // have the same coverage, and a shadow is built from coverage
+        // alone, so the two must land in the same place.
+        let (brushed, _) = page(false, true);
+        let (brushed_plain, _) = page(false, false);
+        let theirs = differs(&render(&brushed).unwrap(), &render(&brushed_plain).unwrap());
+        assert!(
+            theirs.abs_diff(cast) <= 2,
+            "a clone layer's shadow covers {cast} pixels where a brush \
+             layer with the same strokes covers {theirs}. A shadow is its \
+             layer's silhouette, and these two layers have the same one."
+        );
     }
 
     /// A mask that hides nothing is no mask.

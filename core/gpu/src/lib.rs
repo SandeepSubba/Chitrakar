@@ -2189,11 +2189,19 @@ fn one(
     let shadings: Vec<Shading> = if node.effects.is_empty() {
         Vec::new()
     } else {
-        // A frame is out: the CPU renderer cuts its contents to its own
-        // rectangle before anything is made of them, and the silhouette
-        // here is the surface uncut. A copy is out because what it draws
-        // is another layer, somewhere else. A clone layer is out because
-        // it is never on a surface of its own to have a silhouette.
+        // What is left out, and only these two. A frame: the CPU renderer
+        // cuts its contents to its own rectangle before anything is made
+        // of them, and the silhouette here is the surface uncut. A clone
+        // layer: it paints with what is under it, so it is never on a
+        // surface of its own to take a silhouette from. The reference
+        // renderer builds one for it out of the strokes it lays — see
+        // `a_clone_layer_casts_the_shadow_its_strokes_cast` — which is
+        // what makes handing the page back *necessary* here rather than
+        // merely safe: there is now a shadow to disagree about.
+        // A group and a copy used to be on this list and are not: both
+        // are drawn, and the comment saying otherwise outlived the code
+        // by long enough to be written into the roadmap as work still to
+        // do.
         if !matches!(
             node.kind,
             NodeKind::Vector { .. }
@@ -11383,6 +11391,152 @@ mod tests {
                  mean {mean:.5}, worst {worst:.3}"
             );
         }
+    }
+
+    /// An effect on a clone layer goes back, and now it has to.
+    ///
+    /// A clone layer paints with what is under it, so it is never on a
+    /// surface of its own, and an effect is built from a silhouette this
+    /// backend has no pass to make for one. That was always a safe
+    /// answer. It was not, until now, a *necessary* one: the reference
+    /// renderer was dropping the effect in silence too, so both drew the
+    /// same page and the refusal cost a page it could have drawn for
+    /// nothing. It builds the silhouette out of the strokes the layer
+    /// lays now, so there is a shadow here to disagree about.
+    ///
+    /// Three things, and the last two are what keep the limit honest:
+    /// that the page goes back; that the same layer without the effect is
+    /// still drawn, and drawn the reference's way, so the refusal is no
+    /// wider than it needs; and that the effect really changes the
+    /// picture, so what is declined is a disagreement rather than a
+    /// scruple.
+    #[test]
+    fn an_effect_on_a_clone_layer_goes_back() {
+        let build = |cast: bool| {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 48.0,
+                        height: 36.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.75,
+                        g: 0.8,
+                        b: 0.85,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            // Something worth lifting: a clone of a uniform ground puts
+            // back what was already there and has no silhouette at all.
+            add(
+                &mut doc,
+                filled(
+                    "patch",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 12.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.25,
+                        b: 0.15,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(4.0, 20.0),
+            );
+            let lifting = add(
+                &mut doc,
+                Box::new(Node::clone_layer("borrowed")),
+                Transform::default(),
+            );
+            doc.apply(Command::AddStroke {
+                id: lifting,
+                index: 0,
+                on_mask: false,
+                stroke: Box::new(chitrakar_doc::PaintStroke {
+                    points: vec![[10.0, 10.0], [26.0, 16.0]],
+                    radii: vec![4.0],
+                    color: AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.1,
+                        a: 1.0,
+                    },
+                    softness: 0.0,
+                    erase: false,
+                    source: [4.0, 14.0],
+                    heal: false,
+                    clip: None,
+                }),
+            })
+            .unwrap();
+            if cast {
+                doc.apply(Command::SetEffects {
+                    id: lifting,
+                    effects: vec![chitrakar_doc::Effect::DropShadow {
+                        dx: 4.0,
+                        dy: 4.0,
+                        blur: 2.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 1.0,
+                    }],
+                })
+                .unwrap();
+            }
+            doc
+        };
+
+        let casting = build(true);
+        assert!(
+            !GpuRenderer::can_render(&casting),
+            "an effect on a clone layer has to go back: there is no \
+             surface to take its silhouette from here"
+        );
+
+        // Declining is worth something only because the effect changes
+        // the picture, which is asked of the renderer that draws it.
+        let plain = build(false);
+        let (mean, worst) = difference(
+            &chitrakar_render::render(&casting).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(
+            mean > 0.005,
+            "the shadow has to be worth declining a page over: mean \
+             {mean:.5}, worst {worst:.4} against the same layer bare"
+        );
+
+        // And no wider than it needs: bare, the layer is drawn, the way
+        // the reference renderer draws it.
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        assert!(
+            GpuRenderer::can_render(&plain),
+            "a clone layer wearing no effect is still drawn"
+        );
+        let (mean, worst) = difference(
+            &gpu.render(&plain).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "bare it draws what the reference draws: mean {mean:.5}, \
+             worst {worst:.3}"
+        );
     }
 
     /// A copy of a blended layer wearing a mask goes back.

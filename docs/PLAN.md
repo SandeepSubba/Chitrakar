@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~477),
+- **Verify before committing:** `cargo test --workspace` (~479),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2374,8 +2374,14 @@ without reading anything else.*
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: press ink, a healing
      stroke, an outline wider than a pass will walk, effects on a frame
-     or on a copy or on a clone layer, and a stroke carrying a region on
-     a layer whose own mask is already riding that slot.
+     or on a clone layer, and a stroke carrying a region on a layer whose
+     own mask is already riding that slot.
+     Effects on a *copy* were on that list and should not have been: the
+     backend draws them, and has for long enough that the comment saying
+     otherwise had been copied into this roadmap as work still to do.
+     Worth the half hour it cost to find out, because asking what is
+     really refused rather than what is written down is what turned up
+     the clone-layer defect below.
      A brush layer it draws
      (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
      into a coverage of its own with max blending, since the segments of
@@ -2954,6 +2960,53 @@ without reading anything else.*
      the two renderers over a page with one of everything on it had no
      objection at all to one of the everything going missing. Tests
      written *for* text do catch it; that is not the same thing.
+     **A shadow on a clone layer did nothing at all, and nothing said
+     so.** Found by asking the previous question — what does this
+     backend still refuse, and why — rather than by looking for a defect.
+     Two of the five things on that list turned out to be drawn already;
+     of the two really refused, a clone layer with an effect was refused
+     for a reason that *also applied to the reference renderer*, and
+     there it was silent rather than safe.
+     An effect is built from a layer's silhouette, and a clone layer has
+     no surface of its own to take one from: what it paints with is what
+     is under it, and a fresh surface has nothing under it. So it is
+     drawn where it stands, among the adjustments and filters — and
+     those two really have no silhouette, being changes to what is below
+     rather than pictures. A clone layer is not like them. It lays
+     strokes, and strokes have a shape. The renderer's own `effected`
+     predicate said as much and was not being listened to: it excludes an
+     adjustment and a filter *by name* and lets a clone layer through,
+     and then the branch below it swallowed the layer before any effect
+     could be drawn. A predicate disagreeing with the code under it is
+     the tell that this was an oversight rather than a decision.
+     The silhouette costs nothing to have: `draw_clone` already works out
+     what it lays, pixel by pixel, and now writes it aside as it goes.
+     The layer is drawn once into a scratch page, where its reads see
+     exactly what they would have seen; the effects that go under are
+     drawn from what it laid; then what it laid comes down on top of
+     them, with the layer's blend taken once over the whole of it rather
+     than stroke by stroke — which is what every other kind with an
+     effect on it gets, and for the same reason.
+     The test asks the sharp question rather than the easy one. A clone
+     layer's silhouette is its strokes at the alpha it lifted them at, so
+     where it clones from something opaque it is *exactly* the silhouette
+     a paint layer with the same strokes would have, and the two shadows
+     must be the same shadow. Asserting that some shadow appears would
+     pass on a silhouette of the wrong shape — and the second sabotage
+     shows it: leave the silhouette unwritten and the shadow covers 111
+     pixels where the brush layer's covers 382.
+     Its first draft was vacuous in a way worth recording, since it is
+     the third vacuous draft this session: it cloned from a *uniform
+     ground* onto itself, which puts back exactly what was already there
+     and lays nothing. Zero pixels, read as the defect rather than as the
+     page. A clone layer needs something worth lifting or it has no
+     silhouette at all, and the non-vacuity floor in the test now says so.
+     The backend still hands such a page back, and that refusal has gone
+     from safe to *necessary*: before this there was no shadow for the
+     two to disagree about. `an_effect_on_a_clone_layer_goes_back` pins
+     it, and asks the two things that keep a limit honest — that the
+     effect really changes the picture, and that the same layer bare is
+     still drawn.
      The per-layer reading was then pointed at **pages nobody wrote**,
      since a random page is mostly small layers and the dilution there is
      worse than the fixture's. It does not transfer, and why it does not
