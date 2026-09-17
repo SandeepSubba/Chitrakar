@@ -3524,19 +3524,31 @@ without reading anything else.*
      The second is the residue, recorded so the next search does not start
      there: nine pages still move their alpha, all of them small — two to
      eleven pixels, worst 0.084 — where the large family was 0.16 to 0.87.
-     It is why the invariant is not yet a test over the corpus, and it was
-     measured rather than guessed at, which corrected the guess. Every one
-     of those pixels sits on the *fractional boundary* of the blended
-     layer's own box — seed 413's box starts at (14.369, 8.152) and the
-     pixels are (14, 8), (15, 8), (14, 9) — and the blended page **gains**
-     alpha there rather than losing it: 0.4621 against 0.4231 on seed 346.
-     So it is not a layer being cut short by a surface, which is what the
-     first description of it said; it is the two paths disagreeing about a
-     part-covered edge pixel, with the surface covering slightly more.
-     Which of the two is right is the open question, and the seeds above
-     are where to ask it — seed 346 is a *raster*, which draws one mark and
-     so cannot be a case of something being applied twice where a layer
-     overlaps itself. The hand-built case is
+     It is why the invariant is not yet a test over the corpus. It took
+     three readings to describe correctly, which is worth recording as
+     plainly as the answer: first "a fringe pixel lost to a surface's
+     edge", then "the surface covers more and which is right is open",
+     and only then the measurement that settles it. Each guess was
+     plausible and two were wrong.
+     What it is: **a layer that carries both a mask and a blend does not
+     have its mask applied at the pixels on the boundary of its own box.**
+     Every moving pixel sits on that fractional boundary — seed 413's box
+     starts at (14.369, 8.152) and its pixels are (14, 8), (15, 8),
+     (14, 9) — and the blended page *gains* alpha there, which is the
+     mask's contribution going missing rather than the layer being cut
+     short.
+     Four renders of seed 346 say it without any argument. At (21, 21):
+     blended 0.4621, plain 0.4231, plain with the mask taken off 0.4621,
+     blended with the mask taken off 0.4621. So the mask lowers the alpha
+     in the plain path and does nothing at all in the blended one, and
+     0.4621 is exactly the area the picture's rectangle covers of that
+     pixel, computed from its placement. The plain path is the right one.
+     It wants a mask *and* a blend *and* a part-covered edge, which is why
+     it is nine pages of two thousand and never more than eleven pixels;
+     it is not raster-only (seeds 398 and 413 are vectors); and a
+     hard-edged mask takes no plane, being read per pixel through
+     `coverage_at`, so whatever is wrong is in that reading at the
+     surface's own edge rather than in a cached plane. The hand-built case is
      (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
      asks the tie as well as the claim: the copy has to *change* the page,
      or "the same whatever blend it wears" is true of a layer that draws
