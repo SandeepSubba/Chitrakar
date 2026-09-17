@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~479),
+- **Verify before committing:** `cargo test --workspace` (~480),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2373,15 +2373,19 @@ without reading anything else.*
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: press ink, a healing
-     stroke, an outline wider than a pass will walk, effects on a frame
-     or on a clone layer, and a stroke carrying a region on a layer whose
-     own mask is already riding that slot.
-     Effects on a *copy* were on that list and should not have been: the
-     backend draws them, and has for long enough that the comment saying
-     otherwise had been copied into this roadmap as work still to do.
-     Worth the half hour it cost to find out, because asking what is
-     really refused rather than what is written down is what turned up
-     the clone-layer defect below.
+     stroke, an outline wider than a pass will walk, an effect on a clone
+     layer, and a stroke carrying a region on a layer whose own mask is
+     already riding that slot.
+     That list was three items longer an hour ago and every one of the
+     three came off for a different reason, which is the argument for
+     asking what is *really* refused rather than reading what is written
+     down. Effects on a **group** and on a **copy** were drawn already,
+     and the stale comment saying otherwise had been copied into this
+     roadmap as work still to do. An effect on a **frame** was really
+     refused, and the reason given for it was wrong; it is drawn now.
+     And an effect on a **clone layer** was refused for a reason that
+     applied to the reference renderer too, where it was silent rather
+     than safe — that one was a defect, and it is below.
      A brush layer it draws
      (`a_brush_lays_the_strokes_the_cpu_lays`) — every stroke gathered
      into a coverage of its own with max blending, since the segments of
@@ -2960,6 +2964,30 @@ without reading anything else.*
      the two renderers over a page with one of everything on it had no
      objection at all to one of the everything going missing. Tests
      written *for* text do catch it; that is not the same thing.
+     **A frame with an effect opened a surface nothing ever closed.**
+     The reason written down for handing such a page back was that the
+     silhouette would be "the surface uncut" — a child sticking out past
+     the frame's edge casting a shadow the frame's own rectangle would
+     not. That reason is wrong, and checking it took one page: a frame's
+     contents are collected with its rectangle as their bound, so the
+     surface holds them already cut, and the shadow is the frame's. The
+     reference renderer agrees, and does so whether or not a child
+     overhangs.
+     What was really wrong was plainer and had nothing to do with
+     silhouettes. The frame's arm of the pass returns before the end, and
+     the surface is brought down *after* it — so opening one for a frame
+     left it open. No shadow anywhere, and the frame's own pixels wrong
+     besides: the backend's "what the effect adds" landed on the frame's
+     own rectangle rather than five pixels down and across from it.
+     Nothing was ever wrong on anybody's page, because the page was
+     declined; but it was declined for a reason nobody had checked, and
+     the check is four lines.
+     The test's sharp assertion is the overhang, which is what the old
+     reason was about: with a child half again the frame's size inside
+     it, the shadow has to be the same shadow as with no child at all, on
+     *both* renderers. Break the cut and it fails on the overhang case
+     alone, which is the assertion doing exactly the work it was written
+     for.
      **A shadow on a clone layer did nothing at all, and nothing said
      so.** Found by asking the previous question — what does this
      backend still refuse, and why — rather than by looking for a defect.

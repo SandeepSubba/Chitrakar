@@ -2210,6 +2210,7 @@ fn one(
                 | NodeKind::Paint { .. }
                 | NodeKind::Group
                 | NodeKind::Instance { .. }
+                | NodeKind::Artboard { .. }
         ) {
             return None;
         }
@@ -2764,7 +2765,7 @@ fn one(
             ..
         } => {
             let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
-            if !upright || alone || node.opacity < 1.0 || node.mask.is_some() {
+            if !upright || node.opacity < 1.0 || node.mask.is_some() {
                 return None;
             }
             let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
@@ -2826,7 +2827,18 @@ fn one(
             // and the frame itself has no mask — it was declined
             // above if it had one — so there is nothing left to put
             // over what was drawn.
-            return Some(());
+            //
+            // Unless the frame wears an effect, and then there is: the
+            // surface it was drawn into has to be brought down again,
+            // and that is below, past the end of this match. Returning
+            // here used to skip it, so a frame with a shadow opened a
+            // surface nothing ever closed — no shadow anywhere, and the
+            // frame's own pixels wrong besides. It was declined rather
+            // than drawn, so nothing was ever wrong on a page; but the
+            // reason written down for declining it was not this one.
+            if !alone {
+                return Some(());
+            }
         }
         // A copy draws what the original draws, where the copy is: the
         // original's own placement is undone first, so moving the
@@ -11389,6 +11401,170 @@ mod tests {
                 mean < 0.004,
                 "with {what} it draws what the reference draws: \
                  mean {mean:.5}, worst {worst:.3}"
+            );
+        }
+    }
+
+    /// A frame casts the shadow of its own rectangle, on both sides.
+    ///
+    /// A frame with an effect used to be handed back, and the reason
+    /// written down was that the silhouette here would be "the surface
+    /// uncut" — a child sticking out past the frame's edge casting a
+    /// shadow the frame's own rectangle would not. That reason was
+    /// wrong. A frame's contents are collected with its rectangle as
+    /// their bound, so the surface holds them already cut, and the
+    /// silhouette is the frame.
+    ///
+    /// What was really wrong was plainer: the frame arm returned before
+    /// the end of the pass, and the surface is brought down after it. So
+    /// a frame with an effect opened a surface nothing ever closed —
+    /// no shadow anywhere, and the frame's own pixels wrong besides.
+    /// Nothing was ever wrong on a page, because the page was declined;
+    /// but it was declined for a reason nobody had checked.
+    ///
+    /// The overhang is the assertion that matters. With a child half
+    /// again the frame's size inside it, the shadow has to be the same
+    /// shadow as with no child at all — on *both* renderers, which is
+    /// what says the two agree about the frame being the silhouette
+    /// rather than agreeing about something else.
+    #[test]
+    fn a_frame_casts_the_shadow_of_its_own_rectangle() {
+        let build = |overhang: bool, cast: bool| {
+            let mut doc = Document::new(64, 48, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 64.0,
+                        height: 48.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.87,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let frame = add(
+                &mut doc,
+                Box::new(Node::artboard(
+                    "frame",
+                    20.0,
+                    14.0,
+                    Some(AuthoredColor::Srgb {
+                        r: 0.95,
+                        g: 0.95,
+                        b: 0.95,
+                        a: 1.0,
+                    }),
+                )),
+                Transform::translation(10.0, 10.0),
+            );
+            if overhang {
+                doc.apply(Command::AddNode {
+                    parent: frame,
+                    index: 0,
+                    node: filled(
+                        "sticks out",
+                        VectorShape::Rect {
+                            width: 40.0,
+                            height: 30.0,
+                            radius: 0.0,
+                        },
+                        AuthoredColor::Srgb {
+                            r: 0.2,
+                            g: 0.4,
+                            b: 0.9,
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+            }
+            if cast {
+                doc.apply(Command::SetEffects {
+                    id: frame,
+                    effects: vec![chitrakar_doc::Effect::DropShadow {
+                        dx: 5.0,
+                        dy: 5.0,
+                        blur: 1.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 1.0,
+                    }],
+                })
+                .unwrap();
+            }
+            doc
+        };
+        // Where the effect put ink, as a set of pixels, so two shadows
+        // can be compared as shapes rather than as pages.
+        let cast_of = |lit: &Surface, plain: &Surface| -> Vec<bool> {
+            lit.pixels
+                .iter()
+                .zip(&plain.pixels)
+                .map(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs())
+                        > 0.01
+                })
+                .collect()
+        };
+
+        let by_cpu = |overhang: bool| {
+            cast_of(
+                &chitrakar_render::render(&build(overhang, true)).unwrap(),
+                &chitrakar_render::render(&build(overhang, false)).unwrap(),
+            )
+        };
+        let (bare, over) = (by_cpu(false), by_cpu(true));
+        let inked = bare.iter().filter(|b| **b).count();
+        assert!(
+            inked > 100,
+            "the shadow has to be worth comparing: {inked} pixels"
+        );
+        assert_eq!(
+            bare, over,
+            "a child bigger than the frame changed the frame's shadow. A \
+             frame cuts its contents to itself before anything is made of \
+             them, so its silhouette is its own rectangle."
+        );
+
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        for overhang in [false, true] {
+            let (lit, plain) = (build(overhang, true), build(overhang, false));
+            assert!(
+                GpuRenderer::can_render(&lit),
+                "a frame with an effect is drawn (overhang {overhang})"
+            );
+            let mine = cast_of(&gpu.render(&lit).unwrap(), &gpu.render(&plain).unwrap());
+            let theirs = if overhang { &over } else { &bare };
+            let apart = mine.iter().zip(theirs).filter(|(a, b)| a != b).count();
+            assert!(
+                apart <= 2,
+                "with overhang {overhang} the backend's shadow differs from \
+                 the reference's in {apart} pixels"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&lit).unwrap(),
+                &chitrakar_render::render(&lit).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "overhang {overhang}: mean {mean:.5}, worst {worst:.3}"
             );
         }
     }
