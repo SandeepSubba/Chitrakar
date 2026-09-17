@@ -2954,6 +2954,40 @@ without reading anything else.*
      the two renderers over a page with one of everything on it had no
      objection at all to one of the everything going missing. Tests
      written *for* text do catch it; that is not the same thing.
+     The per-layer reading was then pointed at **pages nobody wrote**,
+     since a random page is mostly small layers and the dilution there is
+     worse than the fixture's. It does not transfer, and why it does not
+     is worth more than the audit would have been.
+     Sixty pages, forty-five of them drawn, 245 layers compared: two are
+     flagged, and they are one thing — seed 31's `l4` and `l5`, a clip run,
+     where hiding the base takes the layer held to it away as well. The
+     first guess was the base's own antialiased edge multiplying into what
+     it holds, and it is wrong: **31 of the 36 differing pixels sit where
+     the base's coverage is full**, five at its edge.
+     Bisecting `l5` names the ingredient exactly. As built, 36 pixels
+     differ; with its stroke taken off, 4; with its gradient taken off,
+     23; with its fill taken off and only the stroke left, 8; unclipped,
+     46; with its smoothing off, 31. So it is the stroke — and it is the
+     stroke *together with* the fill, since 36 is far more than 4 and 8
+     apart. Giving the stroke the fill's own colour still leaves 20, which
+     says the disagreement is about **coverage and not colour**: a shape's
+     fill and its own stroke are two draws that share an edge, and the
+     reference composites them one over the other while this backend
+     resolves both out of one multisample buffer. Every difference found
+     is under 0.25, which is one of that backend's four samples.
+     A distinct mechanism from seed 2325's, which is worth saying because
+     the two look alike from a distance: that one is `Effect::Outline` and
+     a *threshold*, where a quarter-step of coverage flips a whole pixel
+     of silhouette; this one is `Stroke` and a shared edge, with nothing
+     thresholded anywhere. Same rule applies to both — **decline a wrong
+     answer, tolerate a coarse one** — so nothing is declined and nothing
+     is fixed.
+     What that costs is the audit: a tolerance wide enough to let a
+     shape's stroke through is wide enough to let most of a thin layer
+     through, and a thin layer is all edge. The reading stays where it
+     earns its keep, over the fixture, whose layers are large enough to
+     have an inside. Written down so the next attempt at it starts from
+     the measurement rather than from the idea.
      Six and a half, which is the same method pointed at a *function*
      rather than a constant: **weaken the whole of something and see who
      complains**. `apply_adjustment` was wrapped so that every adjustment
