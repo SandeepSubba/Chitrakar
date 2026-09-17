@@ -3422,6 +3422,65 @@ without reading anything else.*
      it proof that the box is wrong rather than the drawing
      (`a_blend_does_not_decide_what_a_layer_covers`; take the fix out and it
      loses 101 of 202 pixels drawn, half the layer).
+     With the four fixed, the dial **stays where it paid**: the seeded
+     audit draws two thousand pages now rather than a hundred and twenty,
+     and passes, at about half a minute. Nothing in 0..2000 is over the
+     page mean any more — the two that are, 2325 and 3091, lie past it —
+     so turning it up cost nothing but time, and leaving it down would
+     have meant throwing away the instrument that found all four.
+     That audit has a second reading now, on the argument the export
+     witnesses were rebuilt over: **a page-wide mean is a poor thing to
+     hold two rasterizers to**, because every edge costs it a little, so
+     it rises as a page gains elements and the ceiling has to be loosened
+     to let innocent additions through. What is *not* allowed to differ is
+     the inside of a shape — a pixel whose eight neighbours the reference
+     renderer draws in its own colour, so neither side has an edge to
+     disagree about there. That leaves out exactly what is allowed to
+     differ, and grows rather than thins as a page does.
+     It earns its place on evidence rather than on the argument. Put the
+     copy-bounds defect back and the interiors fail at **seed 679** — a
+     page the mean passes, and two thousand seeds earlier than the one
+     that originally found it. Put the mask collision back and they name
+     786, 33 and 7 points on their pages. Meanwhile the two pages the mean
+     still calls rough do not move the interiors at all, which is the
+     whole point: the reading that means *correct* is silent on coarseness
+     and loud on defects.
+     Two numbers, because one is not enough. A point ceiling of a fifth of
+     full scale, and an interior *mean* of 0.006 — the fifth defect page (a
+     copy of a group holding text, where what was lost is glyph-sized and
+     so nearly all edge) raises that mean fiftyfold, 0.00017 to 0.00891,
+     without a single point crossing the ceiling.
+     The point ceiling is a fifth and not a hundredth because of the
+     backend's own resolution: four samples a pixel, so a sub-pixel crack
+     between two tessellated pieces costs a quarter of one sample, which
+     against a strong colour is a quarter of full scale. **Seed 283 is
+     exactly that**, at 0.164 — one pixel of a stroke drawn at three
+     quarters where the reference draws it whole, on a smooth path with a
+     band 2.8 wide, page mean 0.0005. Under the ceiling is the backend
+     being coarse; over it, something is drawn wrongly. The crack was
+     chased and not found, and the false trails are worth marking: it is
+     not the disc tessellation (rounding those polygons *out* to the
+     circle rather than inscribing them changes the number not at all),
+     and it is not parity in the stencil (a stroke's pieces go through a
+     union pipeline rather than the fill's `Invert`).
+     And the two old numbers were **re-based, not loosened**, a
+     distinction worth insisting on since a quietly loosened ceiling is
+     how an audit stops catching things. Both were counts over a hundred
+     and twenty pages, and a count is a fact about how many pages were
+     looked at rather than about the renderers. "How many are rough" is a
+     proportion now — 24% of those drawn, against 29% at a hundred and
+     twenty, so it went *down* — and "the worst pixel anywhere" is a
+     maximum over sixteen times as many samples, so 0.37 became 0.65.
+     Neither renderer got worse. What makes that safe is that the claim
+     those two used to carry has moved to the interiors, where it is
+     stated per point and does not drift with the page count at all.
+     One thing the seeded audit does **not** cover, said plainly rather
+     than assumed: no page in 0..2000 exhibits the mask collision, so
+     putting that refusal back leaves the audit green. Its own test is what
+     holds it, and that one was checked both ways round.
+     The next lead is **seed 1589**, whose interiors are 0.00496 apart on
+     average — the highest of two thousand, and the reason the mean ceiling
+     has a fifth of headroom rather than a comfortable margin.
      And one thing about the *instrument* rather than the findings, which
      cost a wrong conclusion before it was noticed: **the greedy minimiser
      is not reproducible.** Hiding every layer that is not needed to keep a

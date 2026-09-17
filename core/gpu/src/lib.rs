@@ -10442,6 +10442,71 @@ mod tests {
         }
     }
 
+    /// How far apart two renderings are *inside* shapes, where neither
+    /// has an edge to disagree about.
+    ///
+    /// An interior point is one whose eight neighbours the reference
+    /// renderer draws in exactly its own colour: no edge passes through
+    /// it, nothing is part-covered, and so the only thing that can differ
+    /// is what the two renderers think the colour *is*. That leaves out
+    /// exactly what is allowed to differ — antialiasing — and, unlike a
+    /// page-wide mean, it grows rather than thins as a page gains
+    /// elements.
+    ///
+    /// Gives the mean over those points, the worst of them, how many are
+    /// past a fifth of full scale, and where the worst one is.
+    fn interiors(mine: &Surface, reference: &Surface) -> (f32, f32, usize, (usize, usize)) {
+        let (w, h) = (mine.width as usize, mine.height as usize);
+        let same = |i: usize, j: usize| {
+            let (a, b) = (&reference.pixels[i], &reference.pixels[j]);
+            (a.r - b.r).abs() < 1e-4
+                && (a.g - b.g).abs() < 1e-4
+                && (a.b - b.b).abs() < 1e-4
+                && (a.a - b.a).abs() < 1e-4
+        };
+        let (mut n, mut sum, mut worst, mut over, mut at) =
+            (0usize, 0.0f64, 0.0f32, 0usize, (0, 0));
+        for y in 1..h.saturating_sub(1) {
+            for x in 1..w.saturating_sub(1) {
+                let i = y * w + x;
+                if !(-1i32..=1)
+                    .flat_map(|dy| (-1i32..=1).map(move |dx| (dx, dy)))
+                    .all(|(dx, dy)| {
+                        same(i, ((y as i32 + dy) as usize) * w + (x as i32 + dx) as usize)
+                    })
+                {
+                    continue;
+                }
+                let (a, b) = (&mine.pixels[i], &reference.pixels[i]);
+                let d = [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
+                    .iter()
+                    .map(|(u, v)| (u - v).abs())
+                    .fold(0.0f32, f32::max);
+                n += 1;
+                sum += d as f64;
+                if d > worst {
+                    worst = d;
+                    at = (x, y);
+                }
+                if d > 0.2 {
+                    over += 1;
+                }
+            }
+        }
+        ((sum / n.max(1) as f64) as f32, worst, over, at)
+    }
+
+    /// How many of them are drawn. It was a hundred and twenty, and
+    /// turning it up is the cheapest search there is: at two thousand it
+    /// found four defects that a hundred and twenty never reached — a
+    /// blend applied twice in a stroke band, a copy losing the blend of
+    /// what it copies, a mask dropped inside a masked layer with an
+    /// effect, and a copy's surface cut to a box that meant "nothing at
+    /// all". All four are fixed or declined, so the dial stays where it
+    /// paid rather than being turned back down. It costs about half a
+    /// minute.
+    const SEEDS_AUDITED: u64 = 2000;
+
     /// Pages nobody wrote, drawn both ways.
     ///
     /// The fixture audit asks this of a document with one of everything
@@ -10450,6 +10515,37 @@ mod tests {
     /// inside a faded group, a copy of a layer held to the one under it,
     /// whatever the seed says — so the comparison reaches arrangements
     /// nobody chose. A failure names the seed that found it.
+    ///
+    /// Two readings, and the second is the one that means "correct".
+    ///
+    /// A page-wide mean is a poor thing to hold two rasterizers to, for
+    /// the reason the export witnesses were rebuilt over: every edge
+    /// costs it a little, so it rises as a page gains elements and the
+    /// ceiling has to be loosened to let innocent additions through. It
+    /// is kept, because how *rough* a page is worth knowing, but what it
+    /// is now is a coarseness number.
+    ///
+    /// What is not allowed to differ is the inside of a shape — a pixel
+    /// whose eight neighbours the reference renderer draws in its own
+    /// colour, so neither side has an edge to disagree about there. Every
+    /// defect this audit has ever found shows up there and none of the
+    /// coarseness does: with the four above put back one at a time, the
+    /// interiors name 786, 33, 7 and 111 points on their pages, and the
+    /// fifth (a *copy* of a group holding text, where what was lost is
+    /// glyph-sized and so nearly all edge) raises the interior mean
+    /// fiftyfold without a single point crossing the ceiling, which is
+    /// why both readings are taken. Meanwhile the two pages this audit
+    /// still calls rough — an outline on a path, and a page that is
+    /// nothing but edges — do not move the interiors at all.
+    ///
+    /// The point ceiling is a fifth of full scale, and the reason is the
+    /// backend's own resolution: it multisamples four to a pixel, so a
+    /// sub-pixel crack between two tessellated pieces can cost a quarter
+    /// of one sample, and a quarter of full scale is what that is worth
+    /// against a strong colour. Seed 283 is exactly that and sits at
+    /// 0.164 — a single pixel of a stroke drawn at three quarters where
+    /// the reference draws it whole. Under that ceiling is the backend
+    /// being coarse; over it, something is drawn wrongly.
     #[test]
     fn pages_nobody_wrote_are_drawn_the_way_the_cpu_draws_them() {
         let Some(gpu) = gpu_or_skip() else {
@@ -10457,8 +10553,9 @@ mod tests {
         };
         let (mut drawn, mut declined) = (0usize, 0usize);
         let mut worst_seen = 0.0f64;
+        let mut worst_interior = 0.0f32;
         let mut rough: Vec<u64> = Vec::new();
-        for seed in 0..120u64 {
+        for seed in 0..SEEDS_AUDITED {
             let doc = chitrakar_doc::fixture::page(seed);
             if !GpuRenderer::can_render(&doc) {
                 declined += 1;
@@ -10475,6 +10572,26 @@ mod tests {
                 mean < 0.004,
                 "seed {seed}: mean {mean:.5}, worst pixel off by {worst:.3}"
             );
+            // And the inside of every shape, where neither side has an
+            // edge to disagree about.
+            let (in_mean, in_worst, over, at) = interiors(&mine, &reference);
+            assert!(
+                over == 0,
+                "seed {seed}: {over} points inside a shape are drawn differently, \
+                 the worst by {in_worst:.3} at {at:?} — which is past what four \
+                 samples a pixel can account for, so something is drawn wrongly \
+                 rather than coarsely (gpu {:?} against {:?})",
+                mine.pixels[at.1 * mine.width as usize + at.0].to_srgb8(),
+                reference.pixels[at.1 * mine.width as usize + at.0].to_srgb8()
+            );
+            assert!(
+                in_mean < 0.006,
+                "seed {seed}: the insides of its shapes are {in_mean:.5} apart on \
+                 average, worst {in_worst:.3} at {at:?}. No single point need be \
+                 far out for a layer to be losing part of itself — a copy of a \
+                 group holding text did exactly that at 0.00891."
+            );
+            worst_interior = worst_interior.max(in_worst);
             drawn += 1;
         }
         // A backend that declined everything would pass without drawing
@@ -10551,11 +10668,36 @@ mod tests {
         // hiding rough pixels, which is the same answer said louder.) A
         // rise here is good news when what is drawn rises with it and bad
         // news otherwise, which is why the two are printed together.
+        // Both of these were counts taken over a hundred and twenty pages,
+        // and a count is not a property of the renderers — it is a
+        // property of how many pages were looked at. With the dial at two
+        // thousand, "how many pages are rough" has to be a *proportion* or
+        // it says nothing, and "the worst pixel anywhere" is a maximum
+        // over sixteen times as many samples and so is naturally larger:
+        // 0.37 over a hundred and twenty, 0.607 over two thousand. Neither
+        // number got worse; both were re-based, and saying so is the point,
+        // because a loosened ceiling that is not explained is exactly how
+        // an audit quietly stops catching things.
+        //
+        // What makes the re-basing safe rather than a retreat is that the
+        // claim these two used to carry has moved to the interiors above,
+        // where it is stated per point and does not drift with the page
+        // count at all. These two are the coarseness of an edge drawn two
+        // ways: worth watching, not worth calling correctness. A rise here
+        // is good news when what is drawn rises with it and bad news
+        // otherwise, which is why the two are printed together.
+        let rough_pct = rough.len() * 100 / drawn.max(1);
         assert!(
-            rough.len() <= 21 && worst_seen < 0.37,
-            "pages with a pixel more than a twentieth off: {rough:?}, worst {worst_seen:.3}"
+            rough_pct <= 27 && worst_seen < 0.65,
+            "{} of {drawn} pages have a pixel more than a twentieth off ({rough_pct}%), \
+             worst {worst_seen:.3}",
+            rough.len()
         );
-        eprintln!("gpu drew {drawn} random pages, declined {declined}; rough {rough:?}, worst pixel {worst_seen:.3}");
+        eprintln!(
+            "gpu drew {drawn} random pages, declined {declined}; rough {} ({rough_pct}%), \
+             worst pixel {worst_seen:.3}, worst inside a shape {worst_interior:.4}",
+            rough.len()
+        );
     }
 
     /// A copy standing in for a layer of a group that reads what is
