@@ -10761,6 +10761,339 @@ mod tests {
         );
     }
 
+    /// The far side of the wire says the same words this side does.
+    ///
+    /// [`every_command_survives_the_boundary_the_ui_talks_over`] proves
+    /// the wire carries every command — but it asks Rust both times.
+    /// Serialize from this crate, read back into this crate, and a field
+    /// renamed on both sides at once passes perfectly. The half it cannot
+    /// see is the one that matters: the UI's vocabulary is *hand-written*
+    /// TypeScript in `app/src/engine.ts`, a mirror of these types kept by
+    /// somebody remembering to keep it.
+    ///
+    /// Most of the boundary is safe from that without anybody's help,
+    /// because `wasm-bindgen` generates the `.d.ts` for the typed methods
+    /// and the compiler then holds the UI to it — rename `on_mask` on
+    /// `paint_begin` and `npm run build` stops. The JSON commands have no
+    /// such guard, and the way they fail is quiet rather than loud. Serde
+    /// errors on an unknown *variant* and on a missing *required* field,
+    /// so most drift is at least an error in the browser. What is silent
+    /// is a field carrying `#[serde(default)]` — the UI keeps sending the
+    /// old name, serde ignores what it does not know, and the field takes
+    /// its default. `Mask::feather` and the six nullable fields of
+    /// `StyleRun` are exactly that shape: a soft-edged region would go
+    /// hard, and nothing native would say a word.
+    ///
+    /// So the vocabulary is asked of serde rather than of the source: the
+    /// commands are serialized and the names read back off the JSON, which
+    /// is the same text the UI has to write. Then every name the mirror
+    /// declares has to be one of them. One direction only — Rust holds
+    /// plenty the UI has no business saying — and where the mirror is
+    /// deliberately narrower it says so in its own comment (`MaskKind`
+    /// omits `Painted` because the engine is the only side that builds a
+    /// brushed region, and `regionMoved` returns null rather than learn a
+    /// shape it never makes).
+    ///
+    /// `include_str!` rather than a read at run time, so a moved file is a
+    /// build error: a test that self-skips is not a test.
+    #[test]
+    fn the_uis_mirror_of_the_wire_says_what_this_crate_says() {
+        const TS: &str = include_str!("../../../app/src/engine.ts");
+
+        /// The TypeScript with its comments taken out, so a name in prose
+        /// is not read as a declaration.
+        fn bare(src: &str) -> String {
+            let mut out = String::with_capacity(src.len());
+            let mut rest = src;
+            while let Some(i) = rest.find("/*") {
+                out.push_str(&rest[..i]);
+                rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+            }
+            out.push_str(rest);
+            out.lines()
+                .map(|l| l.split_once("//").map_or(l, |(a, _)| a))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// The body of `export type <name> =`, up to the `;` that ends the
+        /// declaration — the one at no depth, since the members of an
+        /// object type are separated by `;` as well.
+        fn block(src: &str, name: &str) -> String {
+            let head = format!("export type {name} =");
+            let at = src
+                .find(&head)
+                .unwrap_or_else(|| panic!("the mirror no longer declares {name}"))
+                + head.len();
+            let body = &src[at..];
+            let mut depth = 0i32;
+            for (i, c) in body.char_indices() {
+                match c {
+                    '{' | '(' | '[' => depth += 1,
+                    '}' | ')' | ']' => depth -= 1,
+                    ';' if depth == 0 => return body[..i].to_string(),
+                    _ => {}
+                }
+            }
+            panic!("the declaration of {name} does not end")
+        }
+
+        /// The arms of a union, one per line beginning `|`. Splitting on
+        /// the bar itself would cut `SetGuides` in half, its own guide type
+        /// being a union spelled inline.
+        fn arms(block: &str) -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for line in block.lines() {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("| ") {
+                    out.push(rest.to_string());
+                } else if let Some(last) = out.last_mut() {
+                    last.push(' ');
+                    last.push_str(t);
+                } else if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+            }
+            out
+        }
+
+        let ts = bare(TS);
+
+        // ---- the commands: variant names, and the fields under each ----
+        //
+        // Serde is asked what the names are. No type in `core/doc` carries
+        // `skip_serializing_if`, so every field of a variant is written
+        // and the JSON of the fixture's commands is the whole vocabulary.
+        let f = chitrakar_doc::fixture::everything();
+        let mut engine: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            Default::default();
+        // Into the batches as well as over them. A batch is a command in
+        // its own right and also how the list reaches `RestoreSubtree`,
+        // which only means anything on a document its subtree has just
+        // been taken out of and so travels with the removal.
+        fn note(
+            v: &serde_json::Value,
+            engine: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+        ) {
+            let obj = v
+                .as_object()
+                .expect("a command is written as one tagged object");
+            for (variant, payload) in obj {
+                let fields = engine.entry(variant.clone()).or_default();
+                match payload {
+                    serde_json::Value::Object(inner) => fields.extend(inner.keys().cloned()),
+                    serde_json::Value::Array(inner) => {
+                        for one in inner {
+                            note(one, engine);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            note(&serde_json::to_value(&command).unwrap(), &mut engine);
+        }
+        assert_eq!(
+            engine.len(),
+            chitrakar_doc::fixture::EVERY_VARIANT.len(),
+            "serde named {} command variants and the list holds {}",
+            engine.len(),
+            chitrakar_doc::fixture::EVERY_VARIANT.len()
+        );
+
+        let commands = block(&ts, "Command");
+        let mut said = 0usize;
+        for arm in arms(&commands) {
+            let arm = arm.trim_start_matches('{').trim();
+            let (variant, rest) = arm
+                .split_once(':')
+                .unwrap_or_else(|| panic!("cannot read a command out of {arm:?}"));
+            let variant = variant.trim();
+            let fields = engine.get(variant).unwrap_or_else(|| {
+                panic!(
+                    "the UI sends {variant}, which this crate does not name. \
+                     Serde would refuse it in the browser and nothing here would say so. \
+                     Known: {:?}",
+                    engine.keys().collect::<Vec<_>>()
+                )
+            });
+            // Every lowercase identifier followed by a colon is one of
+            // this variant's own fields: the nested types are named
+            // rather than spelled out, and the one union written inline
+            // (`SetGuides`) spells its arms with capitals.
+            for (name, _) in field_names(rest) {
+                assert!(
+                    fields.contains(&name),
+                    "the UI sends {variant}.{name}, which this crate does not name — \
+                     serde refuses it where the field is required and takes the default \
+                     in silence where it has one. It names: {fields:?}"
+                );
+                said += 1;
+            }
+            said += 1;
+        }
+        // A scanner that quietly matched nothing would pass every
+        // assertion above it.
+        assert!(
+            said >= 54,
+            "the mirror was read for far too little: {said} names"
+        );
+
+        // ---- the silent class: fields the mirror marks optional ----
+        //
+        // A `?` in the mirror is a field the UI may leave out, which is a
+        // field carrying `#[serde(default)]` over here — and that is the
+        // one shape where a rename says nothing at all. The names above
+        // are each variant's own; these live inside the payloads, so the
+        // vocabulary they are held against is every key in the whole
+        // document written out, the fixture being one of everything.
+        //
+        // Serde writes every field of every struct it reaches — nothing
+        // in `core/doc` carries `skip_serializing_if` — so a key is
+        // present whenever its struct is, whatever its value.
+        fn keys(v: &serde_json::Value, into: &mut std::collections::BTreeSet<String>) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    for (k, inner) in o {
+                        into.insert(k.clone());
+                        keys(inner, into);
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    for inner in a {
+                        keys(inner, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut vocabulary = std::collections::BTreeSet::new();
+        keys(&serde_json::to_value(&f.doc).unwrap(), &mut vocabulary);
+        for command in chitrakar_doc::fixture::every_command(&f) {
+            keys(&serde_json::to_value(&command).unwrap(), &mut vocabulary);
+        }
+        let mut optional = 0usize;
+        for (name, is_optional) in field_names(&bare(TS)) {
+            if !is_optional {
+                continue;
+            }
+            assert!(
+                vocabulary.contains(&name),
+                "the UI may leave out {name}, so this crate defaults it — and this crate \
+                 does not know the name. A field like that is renamed in silence: the UI \
+                 keeps sending the old one, serde ignores what it cannot place, and the \
+                 value is whatever Default says."
+            );
+            optional += 1;
+        }
+        // `Mask::feather` and the six nullable fields of `StyleRun`.
+        assert!(
+            optional >= 7,
+            "the optional fields were read for too little: {optional}"
+        );
+
+        // ---- the plain string unions ----
+        //
+        // A variant misspelled here is a loud error in the browser rather
+        // than a silent default, but it is still an error nothing native
+        // can see. `EffectKind` is left out because it has no counterpart:
+        // it is the UI's own way of telling three effects apart in a
+        // panel, not a mirror of anything.
+        /// A union in the mirror, and whether this crate can read one of
+        /// its spellings.
+        type Union = (&'static str, fn(&str) -> bool);
+        let spellings: &[Union] = &[
+            ("BlendMode", |s| {
+                serde_json::from_str::<chitrakar_doc::BlendMode>(s).is_ok()
+            }),
+            ("Marker", |s| {
+                serde_json::from_str::<chitrakar_doc::Marker>(s).is_ok()
+            }),
+            ("StrokeAlign", |s| {
+                serde_json::from_str::<chitrakar_doc::StrokeAlign>(s).is_ok()
+            }),
+            ("StrokeCap", |s| {
+                serde_json::from_str::<chitrakar_doc::StrokeCap>(s).is_ok()
+            }),
+            ("StrokeJoin", |s| {
+                serde_json::from_str::<chitrakar_doc::StrokeJoin>(s).is_ok()
+            }),
+            ("TextAlign", |s| {
+                serde_json::from_str::<chitrakar_doc::TextAlign>(s).is_ok()
+            }),
+            ("Pin", |s| {
+                serde_json::from_str::<chitrakar_doc::Pin>(s).is_ok()
+            }),
+        ];
+        let mut spelt = 0usize;
+        for (name, reads) in spellings {
+            let body = block(&ts, name);
+            let mut here = 0usize;
+            for word in quoted(&body) {
+                assert!(
+                    reads(&format!("\"{word}\"")),
+                    "the UI spells {name} \"{word}\", which this crate cannot read"
+                );
+                here += 1;
+                spelt += 1;
+            }
+            assert!(here > 1, "{name} was read as {here} spellings");
+        }
+        // The count today. A floor rather than an equality so a variant
+        // added on both sides does not fail it, and a scanner that
+        // quietly matched nothing cannot reach it.
+        assert!(
+            spelt >= 36,
+            "the unions were read for too little: {spelt} spellings"
+        );
+    }
+
+    /// Lowercase identifiers followed by `:` or `?:`, with the `?` kept as
+    /// the second half of the pair.
+    fn field_names(src: &str) -> Vec<(String, bool)> {
+        let b = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i].is_ascii_lowercase() || b[i] == b'_' {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                    i += 1;
+                }
+                let mut j = i;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                let optional = j < b.len() && b[j] == b'?';
+                if optional {
+                    j += 1;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                }
+                // A type annotation, not a `? :` ternary or a label in a
+                // nested type's name.
+                if j < b.len() && b[j] == b':' && start > 0 && !b[start - 1].is_ascii_alphanumeric()
+                {
+                    out.push((src[start..i].to_string(), optional));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Every double-quoted word in a stretch of TypeScript.
+    fn quoted(src: &str) -> Vec<String> {
+        src.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Every command there is, and then every way out of the editor.
     ///
     /// An exporter is where a node kind is forgotten: each writes the

@@ -861,9 +861,9 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~463),
+- **Verify before committing:** `cargo test --workspace` (~465),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1122 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -2509,7 +2509,7 @@ without reading anything else.*
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.
   2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
      wants a machine with Xcode/Android Studio).
-  3. Depth. Eight methods have been paying, and all of them are cheap
+  3. Depth. Nine methods have been paying, and all of them are cheap
      enough to keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
      off an image, a group two deep — and see which audits stop holding.
@@ -3720,6 +3720,72 @@ without reading anything else.*
      never crosses a boundary between two faces and the pen carries the
      run's own thickening. Worth striking rather than leaving to read as
      missing.
+     Nine, and new: **where a boundary is mirrored by hand, ask serde for
+     the vocabulary and hold the mirror to it.** Every method above works
+     inside the Rust. The editor's API is not inside the Rust: the UI is
+     TypeScript across a wasm boundary and every mutation it makes is a
+     serde-JSON `Command`, so the JSON *spelling* of these types is the
+     API, and `app/src/engine.ts` is a hand-written copy of it kept by
+     somebody remembering to keep it.
+     `every_command_survives_the_boundary_the_ui_talks_over` already
+     carries each command over that wire — but it asks Rust both times.
+     Serialize here, read back here, and a field renamed on *both* sides
+     at once passes perfectly while the far side goes on saying the old
+     word. That is the half nothing could see.
+     Most of the boundary turns out to be safe without anybody's help,
+     and knowing why is the useful part: `wasm-bindgen` generates the
+     `.d.ts` for the typed methods, so the compiler holds the UI to them
+     — rename `on_mask` on `paint_begin` and `npm run build` stops. The
+     JSON commands have no such guard. Serde does refuse an unknown
+     variant and a missing required field, so most drift is at least an
+     error in the browser; what is *silent* is a field carrying
+     `#[serde(default)]`, where the UI keeps sending the old name, serde
+     ignores what it cannot place, and the value is whatever `Default`
+     says. That class is small and nameable: `Mask::feather` and the six
+     nullable fields of `StyleRun`, which are exactly the seven the
+     mirror marks optional.
+     So the vocabulary is asked of serde rather than of the source — the
+     commands and the fixture written out, and the names read off the
+     JSON, which is the same text the UI has to write — and then every
+     name the mirror declares has to be one of them
+     (`the_uis_mirror_of_the_wire_says_what_this_crate_says`). One
+     direction only: Rust holds plenty the UI has no business saying.
+     Where the mirror is deliberately narrower it says so in its own
+     comment, which is the difference between a gap and a decision —
+     `MaskKind` omits `Painted` because the engine is the only side that
+     builds a brushed region, and `regionMoved` returns null rather than
+     learn a shape it never makes.
+     **No defect**, which was the expected answer and is worth writing
+     down: every name agrees today, and the seven optional fields line up
+     exactly with the seven `#[serde(default)]`s. The reason to keep it is
+     drift, and what it is worth was measured rather than assumed. Rename
+     `Mask::feather` on the wire alone — a `serde(rename)`, which is what
+     drift looks like with the code untouched — and it is the **only**
+     failure in the workspace: 419 other tests pass while a soft-edged
+     region picked in the browser would come out hard. Three more land
+     the same way, one per half of the check: a command's own field
+     renamed, a blend mode spelt differently, and the misspelling put in
+     the *TypeScript* instead, which is the direction where the UI is at
+     fault. The browser suite would catch the first of those too — in two
+     hours, when somebody runs it. This says it in a hundredth of a
+     second, which is the whole argument for it.
+     Two things about the writing of it, both mine rather than the code's.
+     The first draft's non-vacuity floor was *guessed* — forty spellings
+     where the true count is thirty-six — and a floor guessed rather than
+     counted fails honest code, which is the same carelessness as a bound
+     too loose to fire, pointing the other way. And the first version
+     counted twenty-six command variants against a list of twenty-seven
+     and I took it for a gap: `RestoreSubtree` arrives *inside a batch*,
+     deliberately and with the reason written down, since it only means
+     anything on a document its subtree has just been taken out of. The
+     audit beside it recurses into batches and this one now does too.
+     Worth keeping from that wrong turn: the older test's own coverage
+     assertion is `checked >= EVERY_VARIANT.len()`, and `checked` counts
+     *commands*, not variants — a count, not a cover, satisfied by
+     duplicates. It is fine, because `the_list_holds_every_command_there_is`
+     does the covering properly. But that is the shape to distrust on
+     sight, and this is the second time in this document that reading a
+     `>=` as a cover has been the mistake.
 - **What the view shows of the document** is one setting
   (`chitrakar_render::Showing`) rather than a growing pile of flags: the
   page, one layer on its own, or the picture before the work. Both of
