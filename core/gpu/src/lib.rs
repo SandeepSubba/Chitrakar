@@ -10478,9 +10478,20 @@ mod tests {
                     continue;
                 }
                 let (a, b) = (&mine.pixels[i], &reference.pixels[i]);
+                // Measured against the value's own size once it is over
+                // one. Light is not bounded here — an exposure of a couple
+                // of stops puts a channel at three — and this backend
+                // stores its surface as `Rgba16Float`, whose steps in
+                // [2, 4) are about a five-hundredth. So an absolute
+                // difference on a bright channel is reading the storage
+                // rather than the drawing: seed 1589 is a ground under two
+                // exposures, and its worst point is 3.0010 against 2.9961,
+                // two of those steps and a sixth of a per cent. Below one,
+                // where everything a screen shows lives, this is the plain
+                // difference it looks like.
                 let d = [(a.r, b.r), (a.g, b.g), (a.b, b.b), (a.a, b.a)]
                     .iter()
-                    .map(|(u, v)| (u - v).abs())
+                    .map(|(u, v)| (u - v).abs() / v.abs().max(1.0))
                     .fold(0.0f32, f32::max);
                 n += 1;
                 sum += d as f64;
@@ -10546,6 +10557,19 @@ mod tests {
     /// 0.164 — a single pixel of a stroke drawn at three quarters where
     /// the reference draws it whole. Under that ceiling is the backend
     /// being coarse; over it, something is drawn wrongly.
+    ///
+    /// Both readings measure a channel against its own size once it is
+    /// over one, and that correction is worth more than it looks. Light
+    /// is not bounded here — two stops of exposure put a channel at three
+    /// — and this backend keeps its surface in `Rgba16Float`, whose steps
+    /// in [2, 4) are about a five-hundredth. Taken absolutely, a bright
+    /// page reads the *storage* rather than the drawing: seed 1589 is a
+    /// ground under two exposures and its worst point is 3.0010 against
+    /// 2.9961, which is two of those steps and a sixth of a per cent, and
+    /// it was the worst interior mean of two thousand pages until it was
+    /// measured properly. With the correction the worst mean anywhere is
+    /// 0.00214 rather than 0.00496, which is what let the ceiling here be
+    /// 0.003 instead of 0.006 — the same evidence, read for what it says.
     #[test]
     fn pages_nobody_wrote_are_drawn_the_way_the_cpu_draws_them() {
         let Some(gpu) = gpu_or_skip() else {
@@ -10585,11 +10609,12 @@ mod tests {
                 reference.pixels[at.1 * mine.width as usize + at.0].to_srgb8()
             );
             assert!(
-                in_mean < 0.006,
+                in_mean < 0.003,
                 "seed {seed}: the insides of its shapes are {in_mean:.5} apart on \
                  average, worst {in_worst:.3} at {at:?}. No single point need be \
                  far out for a layer to be losing part of itself — a copy of a \
-                 group holding text did exactly that at 0.00891."
+                 group holding text did exactly that at 0.00891, with nothing \
+                 over the point ceiling at all."
             );
             worst_interior = worst_interior.max(in_worst);
             drawn += 1;

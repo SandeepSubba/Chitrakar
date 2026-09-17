@@ -3446,10 +3446,13 @@ without reading anything else.*
      whole point: the reading that means *correct* is silent on coarseness
      and loud on defects.
      Two numbers, because one is not enough. A point ceiling of a fifth of
-     full scale, and an interior *mean* of 0.006 — the fifth defect page (a
+     full scale, and an interior *mean* of 0.003 — the fifth defect page (a
      copy of a group holding text, where what was lost is glyph-sized and
      so nearly all edge) raises that mean fiftyfold, 0.00017 to 0.00891,
-     without a single point crossing the ceiling.
+     without a single point crossing the point ceiling at all. The other
+     way round happens too: seed 679 has three points over and an interior
+     mean of 0.00191, under the ceiling. Neither reading subsumes the
+     other, which is why both are taken.
      The point ceiling is a fifth and not a hundredth because of the
      backend's own resolution: four samples a pixel, so a sub-pixel crack
      between two tessellated pieces costs a quarter of one sample, which
@@ -3478,9 +3481,20 @@ without reading anything else.*
      than assumed: no page in 0..2000 exhibits the mask collision, so
      putting that refusal back leaves the audit green. Its own test is what
      holds it, and that one was checked both ways round.
-     The next lead is **seed 1589**, whose interiors are 0.00496 apart on
-     average — the highest of two thousand, and the reason the mean ceiling
-     has a fifth of headroom rather than a comfortable margin.
+     And **seed 1589** is the reason both readings measure a channel
+     against its own size once it is over one, which is worth more than it
+     looks. It was the worst interior mean of two thousand pages at
+     0.00496, and it is not a defect: light is not bounded here — two stops
+     of exposure put a channel at three — and the backend keeps its surface
+     in `Rgba16Float`, whose steps in [2, 4) are about a five-hundredth.
+     Its worst point is 3.0010 against 2.9961, two of those steps and a
+     sixth of a per cent, accumulated over two adjustment passes. Taken
+     absolutely, a bright page reads the *storage* rather than the drawing.
+     With the correction the worst mean anywhere is 0.00214 rather than
+     0.00496, and the ceiling is 0.003 rather than 0.006 — the same
+     evidence, read for what it says. Which is the lesson of the whole
+     stretch in one line: a number is worth only as much as knowing what it
+     measures.
      And one thing about the *instrument* rather than the findings, which
      cost a wrong conclusion before it was noticed: **the greedy minimiser
      is not reproducible.** Hiding every layer that is not needed to keep a
