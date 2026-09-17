@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~476),
+- **Verify before committing:** `cargo test --workspace` (~477),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2863,6 +2863,58 @@ without reading anything else.*
      number rather than because neither had to. Asked of the markup
      rather than the picture, which is method Two and is the only way
      this one can be asked.
+     The sixteenth was **a copy wearing a mask**, and it found nothing it
+     was aimed at and something much worse a foot to the left. Four copies
+     had stood in this document since copies were written and every one of
+     them is bare — no mask, no fade, nothing of its own — so the whole
+     question of what a copy's own mask means had never been asked here,
+     and it is the question that had just produced three defects in two
+     renderers. Every audit held. So, the method's own rule, the code it
+     was meant to exercise was broken: make the reference renderer ignore
+     a copy's mask entirely and **exactly one test in the workspace
+     notices**, and it is a pages-nobody-wrote test rather than anything
+     over this document. The cross-renderer audit does not. The exporters
+     do not. The file round trip does not.
+     Asking why turned up the thing worth having. That audit's reading is
+     a mean over the whole page against 0.004, and **nine of this
+     fixture's twenty-six layers can be removed outright without moving
+     it**: the picture, the text, the held-to layer and the group holding
+     it, the masked adjustment, the adjustment inside a group, the clone
+     layer, the copy's stand-in, and the new copy. Several of those are
+     shapes put here in earlier rounds precisely so this audit would
+     compare them. The text block moves the page by 0.00003 — three
+     orders of magnitude clear of the threshold.
+     The interior reading is no help, which is the part worth knowing.
+     It is the sharpest instrument here and it exists to tell a drawing
+     apart from its antialiasing, so it needs a pixel with eight
+     neighbours of its own colour — and a glyph has none. Drop text from
+     the GPU backend altogether and the interiors read 0.0004 with
+     nothing over the threshold, the page mean reads 0.00134, and both
+     assertions pass. The whole of text rendering, on every audit this
+     document has ever carried, was being compared on twenty-five
+     antialiased pixels.
+     Twenty-five because the text was also *falling off the page*: an
+     18pt line written at a baseline of 54 on a page 60 tall hangs most
+     of itself below the edge, and the raster mask meant to cut it sat at
+     y 50 to 58, under the glyphs rather than over them. Moved up, the
+     line puts down 115 pixels with the mask still cutting a third of it.
+     A fixture shape nothing can see is not a fixture shape, and this one
+     had been unreadable since it was written.
+     What replaces the blind spot is a reading that cannot be diluted:
+     **what a layer puts on the page**, taken as the difference between
+     the page with it and the page without it, on each backend, and the
+     two compared (`every_layer_of_the_fixture_puts_down_what_the_cpu_puts_down`).
+     A layer shows up at its own size rather than the page's, however
+     small it is and however much the fixture grows around it. Allowing a
+     tenth of a layer's own inked pixels to differ leaves room for
+     antialiasing along an edge and none for a layer to go missing: on
+     correct code the worst layer reads 28 of 337 allowed, and with text
+     dropped `words` reads 45 of 116 against 11. The whole-page mean saw
+     nothing; the interiors saw nothing.
+     The old audit gained the interior reading too, which costs nothing
+     and catches the wide errors the mean would dilute, and the new shape
+     itself is what it is: a copy wearing a mask, held now rather than
+     earned. The earning was done by asking why nobody noticed it.
      Six and a half, which is the same method pointed at a *function*
      rather than a constant: **weaken the whole of something and see who
      complains**. `apply_adjustment` was wrapped so that every adjustment

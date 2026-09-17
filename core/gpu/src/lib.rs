@@ -4668,6 +4668,147 @@ mod tests {
         (total / (a.pixels.len() * 4) as f64, worst)
     }
 
+    /// Every layer of the fixture, asked for its own contribution.
+    ///
+    /// The audit below reads the finished page, and a finished page is
+    /// the wrong place to look for a small layer. Nine of this fixture's
+    /// twenty-six layers can be *removed outright* without moving the
+    /// whole-page mean past the 0.004 it allows; the text block moves it
+    /// by 0.00003, three orders of magnitude clear. The interior reading
+    /// cannot see them either — it exists to tell a drawing apart from
+    /// its antialiasing, and a layer thin enough is all edge. Drop the
+    /// text from this backend altogether and the interiors read 0.0004
+    /// with nothing over the threshold. So the whole of text rendering,
+    /// on every audit this document has ever carried, was being compared
+    /// on twenty-five antialiased pixels.
+    ///
+    /// What a layer *puts on the page* is the thing that cannot be
+    /// diluted: render the page with it and without it on each backend,
+    /// and the two differences are what that layer contributed. A layer
+    /// the backend draws wrongly shows up at its own size rather than the
+    /// page's, however small it is and however large the page grows.
+    ///
+    /// Asked of the bare fixture only — two renders a layer is not free —
+    /// which is enough, because the commands below change the page and
+    /// not the backend.
+    #[test]
+    fn every_layer_of_the_fixture_puts_down_what_the_cpu_puts_down() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut f = chitrakar_doc::fixture::everything();
+        // As the audit below: the layers this backend hands back are
+        // taken off first, so that what is left is a page it draws.
+        f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
+        let mut hung: Vec<(NodeId, Vec<chitrakar_doc::Effect>)> = f
+            .doc
+            .nodes()
+            .filter(|(_, n)| !n.effects.is_empty())
+            .map(|(id, n)| (*id, n.effects.clone()))
+            .collect();
+        hung.sort_by_key(|(id, _)| *id);
+        for (id, _) in &hung {
+            f.doc
+                .apply(Command::SetEffects {
+                    id: *id,
+                    effects: Vec::new(),
+                })
+                .unwrap();
+        }
+        for (id, effects) in &hung {
+            f.doc
+                .apply(Command::SetEffects {
+                    id: *id,
+                    effects: effects.clone(),
+                })
+                .unwrap();
+            if !GpuRenderer::can_render(&f.doc) {
+                f.doc
+                    .apply(Command::SetEffects {
+                        id: *id,
+                        effects: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }
+        assert!(
+            GpuRenderer::can_render(&f.doc),
+            "the fixture has to be a page this backend draws"
+        );
+        let mine = gpu.render(&f.doc).unwrap();
+        let theirs = chitrakar_render::render(&f.doc).unwrap();
+        let mut ids: Vec<NodeId> = f.doc.nodes().map(|(i, _)| *i).collect();
+        ids.sort_by_key(|i| i.0);
+        let (mut asked, mut inked) = (0usize, 0usize);
+        for id in ids {
+            if f.doc.parent_of(id).is_none() {
+                continue;
+            }
+            let mut without = f.doc.clone();
+            if without
+                .apply(Command::SetVisible { id, visible: false })
+                .is_err()
+            {
+                continue;
+            }
+            if !GpuRenderer::can_render(&without) {
+                continue;
+            }
+            let name = f.doc.node(id).unwrap().name.clone();
+            let gone_mine = gpu.render(&without).unwrap();
+            let gone_theirs = chitrakar_render::render(&without).unwrap();
+            // What the layer put down, on each backend in turn.
+            let (mut n, mut worst, mut drew) = (0usize, 0.0f32, 0usize);
+            for i in 0..theirs.pixels.len() {
+                let (a, b) = (&mine.pixels[i], &gone_mine.pixels[i]);
+                let (c, d) = (&theirs.pixels[i], &gone_theirs.pixels[i]);
+                let mut most = 0.0f32;
+                let mut theirs_put = 0.0f32;
+                for (u, v, y, z) in [
+                    (a.r, b.r, c.r, d.r),
+                    (a.g, b.g, c.g, d.g),
+                    (a.b, b.b, c.b, d.b),
+                    (a.a, b.a, c.a, d.a),
+                ] {
+                    let scale = (y - z).abs().max(1.0);
+                    most = most.max(((u - v) - (y - z)).abs() / scale);
+                    theirs_put = theirs_put.max((y - z).abs());
+                }
+                if theirs_put > 0.01 {
+                    drew += 1;
+                }
+                if most > 0.1 {
+                    n += 1;
+                    worst = worst.max(most);
+                }
+            }
+            asked += 1;
+            if drew > 0 {
+                inked += 1;
+            }
+            // Every pixel a layer touches is one of its own edges when the
+            // layer is a glyph or a hairline, so an exact agreement is not
+            // what is being asked for: what is, is that the two backends
+            // put down the same layer. A tenth of the layer's own pixels
+            // is wide enough for antialiasing to differ along an edge and
+            // far too narrow for a layer to go missing.
+            let allowed = (drew / 10).max(4);
+            assert!(
+                n <= allowed,
+                "{name:?} is not the layer the reference puts down: {n} of \
+                 the {drew} pixels it inks differ by more than a tenth, the \
+                 worst by {worst:.4} ({allowed} allowed)"
+            );
+        }
+        // A backend that drew nothing, or a fixture whose layers land off
+        // the page, would pass every assertion above without being asked
+        // anything at all.
+        assert!(
+            asked > 15 && inked > 15,
+            "{asked} layers compared, {inked} of them drawing anything"
+        );
+    }
+
     /// Every command there is, asked of this backend one at a time.
     ///
     /// The CPU renderer is the reference and this one draws what it can,
@@ -4759,6 +4900,34 @@ mod tests {
             assert!(
                 mean < 0.004,
                 "after {what}: mean {mean:.5}, worst {worst:.3}"
+            );
+            // And a reading that a small layer cannot hide from. The
+            // mean above is taken over the whole page, and most of this
+            // fixture's layers are far too small to move it: nine of its
+            // twenty-six can be *removed outright* and still come in
+            // under 0.004 — the text layer by three orders of magnitude,
+            // at 0.00003. Several of them are shapes put here precisely
+            // to be compared: the clone layer, the held-to layer, the
+            // adjustment inside a group, the copy's stand-in. A whole-page
+            // average cannot see any of them.
+            //
+            // An interior pixel is one whose eight neighbours the
+            // reference draws in its own colour, so it is not on an edge
+            // and the two renderers' antialiasing is not being compared.
+            // Away from an edge they should agree closely, so this is
+            // the assertion that notices a small layer drawn wrongly —
+            // and unlike the mean it does not get weaker as the fixture
+            // grows.
+            let (in_mean, in_worst, over, at) = interiors(&mine, &reference);
+            assert!(
+                over == 0,
+                "after {what}: {over} interior pixels off by more than a \
+                 fifth, the worst {in_worst:.4} at {at:?}"
+            );
+            assert!(
+                in_mean < 0.002,
+                "after {what}: interiors mean {in_mean:.5}, worst \
+                 {in_worst:.4} at {at:?}"
             );
             *drawn += 1;
             true

@@ -51,6 +51,8 @@ pub struct Fixture {
     pub badge: NodeId,
     pub differs: NodeId,
     pub own_ring: NodeId,
+    /// A copy wearing a mask of its own — the one thing no copy here had.
+    pub worn: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -546,9 +548,18 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
     let words = doc.children_of(root).unwrap()[3];
+    // High enough that the line is *on* the page. An 18pt block written
+    // at a baseline of 54 on a page 60 tall hangs most of itself off the
+    // bottom: with no mask at all it put sixty-nine pixels down, and with
+    // the mask it had, twenty-five. Every audit that has ever compared
+    // text over this document was comparing those twenty-five, and none
+    // of them has eight neighbours of its own colour, so the interior
+    // reading could not see them either — the GPU backend can be made to
+    // draw no text whatever and the cross-renderer audit still passes.
+    // Two hundred and seventy-one now.
     doc.apply(Command::SetTransform {
         id: words,
-        transform: Transform::translation(8.0, 54.0),
+        transform: Transform::translation(8.0, 34.0),
     })
     .unwrap();
     // A mask read off an image, which is the one mask kind nothing here
@@ -583,13 +594,27 @@ pub fn everything() -> Fixture {
                 resource_id: coverage_id,
                 width: 4,
                 height: 4,
+                // Over the glyphs rather than under them. Written at
+                // (6, 50) it covered y 50 to 58, while an 18pt line on a
+                // baseline at 54 has its glyphs at roughly y 40 to 54 —
+                // so it cut all but the bottom few rows off, and the
+                // only text in this document changed twenty-five pixels
+                // of four thousand eight hundred. Every audit that has
+                // ever compared text over this fixture was comparing
+                // twenty-five antialiased pixels, none of them with
+                // eight neighbours of their own colour: the GPU backend
+                // can be made to draw no text at all and both the
+                // whole-page mean and the interior reading still pass.
+                // It still cuts — the mask's own greys are what make it
+                // worth having — it simply cuts the text instead of the
+                // air below it.
                 transform: Transform {
-                    a: 8.0,
+                    a: 12.0,
                     b: 0.0,
                     c: 0.0,
-                    d: 2.0,
+                    d: 4.0,
                     e: 6.0,
-                    f: 50.0,
+                    f: 38.0,
                 },
             },
             invert: false,
@@ -1095,6 +1120,54 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A copy that *wears something*. Four copies have stood in this
+    // document since copies were written and every one of them is bare:
+    // no mask, no fade, no blend, nothing of its own at all. So the whole
+    // question of what a copy's own mask means had never been asked here
+    // — and it is the question that has been producing defects. A mask is
+    // what sends a copy to a surface of its own, and a copy is not always
+    // the same picture there: it lost the blend of what it copies, and
+    // before that a copy of an adjustment vanished outright. Both were
+    // found by pages nobody wrote, which is the argument for putting the
+    // shape somewhere a person can see it.
+    //
+    // Of the plain group rather than of `pair`: `pair` wears a shadow, so
+    // a mask on a copy of it would be answering two questions at once —
+    // what a mask does to a copy, and what it does to the effects the
+    // copy draws. One at a time.
+    //
+    // The mask cuts it rather than covering it, and deliberately across
+    // the middle: a mask that hides nothing proves nothing here, and one
+    // that hides everything proves less.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::instance("a copy wearing a mask", badge)),
+    })
+    .unwrap();
+    let worn = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: worn,
+        transform: Transform::translation(52.0, 40.0),
+    })
+    .unwrap();
+    doc.apply(Command::SetMask {
+        id: worn,
+        mask: Some(Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 13.0,
+                    height: 12.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(50.0, 36.0),
+            },
+            invert: false,
+            feather: 0.0,
+        })),
+    })
+    .unwrap();
+
     doc.apply(Command::SetSelection {
         selection: Some(Box::new(Mask {
             kind: MaskKind::Vector {
@@ -1147,6 +1220,7 @@ pub fn everything() -> Fixture {
         badge,
         differs,
         own_ring,
+        worn,
         stroke,
     }
 }
