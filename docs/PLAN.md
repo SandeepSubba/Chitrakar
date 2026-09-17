@@ -865,7 +865,20 @@ without reading anything else.*
   --no-fail-fast`. Without it cargo stops at the first test binary that
   fails, so a break in `core/render` hides whatever `core/gpu` would have
   said about it — which turned a count of six into a count of one, and put
-  the wrong number in a commit message.
+  the wrong number in a commit message. The order is codecs, color, doc,
+  render, gpu, engine, so a render failure hides gpu and engine and a
+  codecs failure hides everything.
+  Two things limit how far back that reaches, and both were checked
+  rather than assumed. Truncation only happens once something *fails*, so
+  every "nothing noticed" in the record below is sound — the run went to
+  the end. And a count is a lower bound rather than a wrong number. Three
+  of the counts that carried an inference were re-run with
+  `--no-fail-fast`: the selection carry is three and the kept-region carry
+  is two, exactly as written; the stand-in walk reads seven now against
+  the two recorded, and five of those seven are tests that sabotage
+  caused to be written. Its inference — that nothing outside the renderer
+  had ever looked at a copy's stand-ins — holds, since nothing in gpu or
+  engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~477),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
