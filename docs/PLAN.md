@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~471),
+- **Verify before committing:** `cargo test --workspace` (~472),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3598,7 +3598,51 @@ without reading anything else.*
      mask's edge to fall inside the layer's own first column or both paths
      agree and it proves nothing — at `feather: 0.0` they agree to the last
      bit, which is what says the feather is the ingredient rather than the
-     mask. The hand-built case is
+     mask.
+     Ten, and it is the same method pointed at the thing the editor
+     actually does every keystroke: **a rectangle repainted has to be the
+     page drawn whole.** Nothing redraws the whole page for an edit — the
+     engine works out what a command touched and paints that much again
+     over what is on screen — so if a dirty rectangle does not come back
+     to what was there, the screen keeps pixels nobody could find by
+     reading the document: a stale seam along the edge of whatever was
+     last touched. It follows from what a dirty region *is*, so it needs
+     no second renderer, and it had never been asked over pages nobody
+     wrote (`a_rectangle_repainted_is_the_page_drawn_whole`).
+     Forty-eight rectangles of two thousand pages failed it, and every one
+     of them was the **feathered mask** again — take feathered masks out
+     and it was clean, which is what said the seam and the surface were
+     one thing. The plane a softening runs on is held to whatever is being
+     drawn on, and there were three such places, each of which had to be
+     given room before the next became visible: the layer's own surface
+     (48 → 19 once the clip was grown as well as the extent), the surface
+     a *group* or a *copy* is drawn on (19 → 8), and the margin inside
+     `plane_over` itself.
+     That last one is worth stating on its own, because it is a plain
+     arithmetic mistake rather than a missing case: the margin was
+     `3 * sigma + 1`, and the blur it is meant to cover is three box
+     passes whose radius is the W3C width **halved by an integer division
+     and then held at one**. At sigma 0.04 that reaches three pixels where
+     the margin allowed two. It is `blur::plane_reach` now, taken from the
+     radius the blur will actually use, so the two cannot drift apart.
+     Each of the three is needed and the test names which: take the clip
+     growth out and seed 136 fails, the two surface arms and seed 62, the
+     margin and seed 1221.
+     What is left is eight rectangles, and the one case is written into
+     the test as an exclusion rather than hidden: a **clipped** layer
+     carrying a feathered mask. What such a layer is held to comes from
+     the base drawn aside, and that reading is itself cut to the
+     rectangle, so the softening runs out of neighbours there exactly as
+     it did on a surface before these three. Worst 0.057, all of it colour
+     rather than coverage. Take the exclusion out and those eight are what
+     fails.
+     The exclusions are wide for an honest reason and the test says so:
+     an adjustment, a filter and a clone read what is under them, and an
+     effect reads past its layer's own silhouette, so the engine grows the
+     region or abandons it rather than repainting exactly that much. About
+     one page in seven is left — three hundred pages and fifteen hundred
+     rectangles, which the test also asserts, since every exclusion is a
+     way for it to pass by asking nothing. The hand-built case is
      (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
      asks the tie as well as the claim: the copy has to *change* the page,
      or "the same whatever blend it wears" is true of a layer that draws

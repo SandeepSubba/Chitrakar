@@ -48,13 +48,36 @@ pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32, beyond: 
 /// amount. Edges clamp, which for a coverage means the value at the edge
 /// carries on outwards rather than fading into nothing that was never
 /// worked out.
+/// The box radius [`blur_plane`] runs with, which is not `sigma` and is
+/// not proportional to it either: the W3C width is halved by an integer
+/// division and then held at one, so every small sigma comes out at one.
+pub fn plane_radius(sigma: f32) -> usize {
+    let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
+    ((d.max(1) / 2).max(1)) as usize
+}
+
+/// How far [`blur_plane`] reads from a pixel: three box passes, each
+/// reaching its own radius.
+///
+/// A caller working a plane out to be softened has to hold this much
+/// margin around what it will read back, or the softening runs out of
+/// neighbours at the plane's own edge and clamps. Taking the margin from
+/// `sigma` instead is what went wrong: at sigma 0.04 that gives two and
+/// the blur reaches three, because the radius is held at one however
+/// small the sigma is.
+pub fn plane_reach(sigma: f32) -> u32 {
+    if sigma <= 0.01 {
+        return 0;
+    }
+    (3 * plane_radius(sigma)) as u32
+}
+
 pub fn blur_plane(cover: &mut [f32], width: u32, height: u32, sigma: f32) {
     let (w, h) = (width as usize, height as usize);
     if sigma <= 0.01 || w == 0 || h == 0 || cover.len() < w * h {
         return;
     }
-    let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
-    let radius = ((d.max(1) / 2).max(1)) as usize;
+    let radius = plane_radius(sigma);
     let mut line = vec![0.0f32; w.max(h)];
     // A box wider than the line it runs along is a fade over the whole
     // of it, and there is nothing further to say past that: the window
