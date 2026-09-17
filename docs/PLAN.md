@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~469),
+- **Verify before committing:** `cargo test --workspace` (~471),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3563,15 +3563,42 @@ without reading anything else.*
      where their box radii differ, and only 3.0 moves them; and it is not
      the mask being dropped wholesale, since the mask plainly applies in
      both paths and only differs.
-     Where to look next, with the reproduction in hand rather than a
-     seed: `MaskPlane::at` answers **1.0** — "a mask that shows
-     everything" — for any pixel outside the plane's own rectangle, and
-     the plane's rectangle is grown from the clip and then clamped to the
-     surface being drawn on. A layer on its own surface and the same
-     layer on the page are two different rectangles. That is a smell
-     rather than a demonstration; the next step is to print the plane's
-     clip and its values on both paths for the reproduction above, which
-     is a few lines and settles it. The hand-built case is
+     Printing the plane's clip and its values on both paths settled it,
+     and the answer was the fourth guess. A mask with a soft edge is
+     worked out as a plane and then *blurred*, and a blur reads its
+     neighbours. The plane is grown from the region being drawn and then
+     held to the surface it is drawn on — `(0, 0, 48, 36)` for the page,
+     `(0, 0, 13, 11)` for the layer's own surface — so at the plane's
+     first row and column the blur has nothing to read and clamps. That
+     is the layer's own edge, which is where its mask matters most: the
+     same page pixel came out 0.4741 one way and 0.4889 the other.
+     The `MaskPlane::at` smell above was a red herring and is worth
+     striking rather than leaving: both planes cover their whole surface,
+     so the 1.0 fallback never fires here. So was "not the blur" — the
+     identical numbers at feathers 0.0398, 0.3 and 1.0 come from the box
+     radius landing on the same integer, not from the blur doing nothing.
+     Four mechanisms proposed, three measured wrong, and each one only
+     fell to an instrument rather than to more reading.
+     The fix is to grow the **extent** the surface is cut to by what the
+     softening reaches. Growing the *clip* does nothing, which is the part
+     that cost an hour: the surface is cut to the extent and the clip only
+     narrows it further, so `pad` was the wrong dial and changing it moved
+     not a pixel.
+     With that, the invariant is a test rather than a note
+     (`a_blend_never_changes_what_a_page_covers`, two thousand pages, about
+     eight seconds): zero pages move their alpha by a hundredth where
+     seventeen did, and three move by a thousandth, worst 0.0095. It is
+     asked with the ground *hidden*, which is the whole reason it works —
+     an opaque backdrop makes a page's alpha one everywhere and hides
+     exactly what is being looked for. And it is asked for non-vacuity
+     twice: that the pages carry blends at all, and that they draw
+     anything once the ground is gone.
+     The named case beside it is
+     `a_feathered_mask_softens_the_same_on_a_surface`, which needs the
+     mask's edge to fall inside the layer's own first column or both paths
+     agree and it proves nothing — at `feather: 0.0` they agree to the last
+     bit, which is what says the feather is the ingredient rather than the
+     mask. The hand-built case is
      (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
      asks the tie as well as the claim: the copy has to *change* the page,
      or "the same whatever blend it wears" is true of a layer that draws

@@ -992,6 +992,16 @@ pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
     false
 }
 
+/// How far a layer's mask softens past its own edge, in the space the
+/// layer is being drawn in, or `None` for a mask with a hard edge.
+///
+/// The same margin `MaskRef::plane_over` grows its plane by, because the
+/// point is to give that plane room to be softened over.
+fn feathered_reach(node: &chitrakar_doc::Node, parent: Transform) -> Option<f32> {
+    let sigma = feather_of(node.mask.as_ref()?, parent)?;
+    Some(sigma * 3.0 + 1.0)
+}
+
 fn render_layer(
     doc: &Document,
     child: NodeId,
@@ -1160,6 +1170,24 @@ fn draw_layer(
         let extent = match bounds_in_parent_space(doc, child)? {
             Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
             other => other,
+        };
+        // A feathered mask is worked out as a plane and then softened, and
+        // a softening reads its neighbours: at the plane's own first row
+        // and column there are none, so it clamps and comes out different
+        // from the same mask worked out over a wider region. The plane is
+        // grown from the clip and then held to the surface, so on a layer
+        // drawn into a surface of its own the plane stops exactly where
+        // the layer does — and the layer's own edge is where its mask
+        // matters most. The same layer drawn straight onto the page has
+        // the whole page to soften over and gets a different answer.
+        //
+        // So the surface is grown by what the softening reaches, which is
+        // the plane's own margin (`MaskRef::plane_over`). Growing the clip
+        // instead does nothing, which is worth knowing: the surface is cut
+        // to the *extent*, and the clip only narrows it further.
+        let extent = match (extent, feathered_reach(node, parent)) {
+            (Bounds::Rect(x0, y0, x1, y1), Some(r)) => Bounds::Rect(x0 - r, y0 - r, x1 + r, y1 + r),
+            (other, _) => other,
         };
         // A clipped layer cannot show outside what it is clipped to, so
         // its surface need never be bigger than that layer's window.
@@ -16258,6 +16286,186 @@ mod tests {
                  {worst_c:.4}. A filter is a change to what is under it: there \
                  is no picture for a blend to bring down."
             );
+        }
+    }
+
+    /// A blend never changes what a page covers.
+    ///
+    /// Compositing alpha is `as + ab(1 - as)` whatever the blend function
+    /// does to colour — `separable` says exactly that, and `Normal` is
+    /// `over`, which is the same — so taking every blend off a page must
+    /// leave its coverage untouched. It follows from the definition, so it
+    /// needs no second renderer to check it against, and it is asked of
+    /// pages nobody wrote because the interesting arrangements are the ones
+    /// nobody would think to build.
+    ///
+    /// The ground is hidden first, and that is the whole reason this works:
+    /// an opaque backdrop makes a page's alpha one everywhere, and then a
+    /// layer losing or gaining part of itself changes nothing that can be
+    /// seen. Take the ground away and coverage is what the alpha channel
+    /// *is*.
+    ///
+    /// It has found two defects, neither of them visible to the
+    /// cross-renderer audit, which is the argument for having it: a copy of
+    /// a filter wearing a blend, which vanished because the blend put it on
+    /// a surface with nothing under it to filter; and a feathered mask,
+    /// whose softening was worked out over a plane cut to the layer's own
+    /// surface and so came up short at exactly the layer's edge. Seventeen
+    /// of these two thousand pages failed before those two; none does now.
+    #[test]
+    fn a_blend_never_changes_what_a_page_covers() {
+        const SEEDS: u64 = 2000;
+        let (mut with_blends, mut inked, mut worst_page) = (0usize, 0usize, (0.0f32, 0u64, 0usize));
+        for seed in 0..SEEDS {
+            let mut doc = chitrakar_doc::fixture::page(seed);
+            let ground: Vec<NodeId> = doc
+                .nodes()
+                .filter(|(_, nd)| nd.name == "ground")
+                .map(|(i, _)| *i)
+                .collect();
+            for id in ground {
+                let _ = doc.apply(Command::SetVisible { id, visible: false });
+            }
+            let ids: Vec<NodeId> = doc.nodes().map(|(i, _)| *i).collect();
+            let mut plain = doc.clone();
+            let mut any = false;
+            for id in ids {
+                if doc.node(id).map(|nd| nd.blend) != Ok(BlendMode::Normal) {
+                    any = true;
+                    let _ = plain.apply(Command::SetBlendMode {
+                        id,
+                        blend: BlendMode::Normal,
+                    });
+                }
+            }
+            if any {
+                with_blends += 1;
+            }
+            let lit = render(&doc).unwrap();
+            let bare = render(&plain).unwrap();
+            inked += lit.pixels.iter().filter(|p| p.a > 0.01).count();
+            let (mut n, mut worst, mut at) = (0usize, 0.0f32, 0usize);
+            for (i, (p, q)) in lit.pixels.iter().zip(&bare.pixels).enumerate() {
+                let d = (p.a - q.a).abs();
+                if d > 0.01 {
+                    n += 1;
+                    if d > worst {
+                        worst = d;
+                        at = i;
+                    }
+                }
+            }
+            assert!(
+                n == 0,
+                "seed {seed}: taking the blends off changed what {n} pixels \
+                 cover, the worst by {worst:.4} at ({}, {}). Compositing alpha \
+                 does not depend on the blend function, so a layer is losing or \
+                 gaining part of itself rather than blending.",
+                at % lit.width as usize,
+                at / lit.width as usize
+            );
+            if worst > worst_page.0 {
+                worst_page = (worst, seed, n);
+            }
+        }
+        // Two ways this could pass while asking nothing: no page carrying a
+        // blend at all, and no page drawing anything once the ground is
+        // hidden.
+        assert!(
+            with_blends > SEEDS as usize / 10,
+            "only {with_blends} of {SEEDS} pages carry a blend at all"
+        );
+        assert!(
+            inked > 100_000,
+            "the pages draw almost nothing once the ground is hidden: {inked} px"
+        );
+        let _ = worst_page;
+    }
+
+    /// A feathered mask softens the same whether its layer is drawn on a
+    /// surface of its own or straight onto the page.
+    ///
+    /// A mask with a soft edge is worked out as a plane and then blurred,
+    /// and a blur reads its neighbours. The plane is grown from the region
+    /// being drawn and then held to the surface it is drawn on, so for a
+    /// layer put on a surface of its own the plane stops exactly where the
+    /// layer does — and at its first row and column the blur has nothing to
+    /// read and clamps. That is the layer's own edge, which is where its
+    /// mask matters most.
+    ///
+    /// A blend is the usual reason a layer is put on a surface, so this
+    /// read as a blend changing what a layer covers, which cannot happen.
+    /// The fix is to grow the *extent* the surface is cut to by what the
+    /// softening reaches; growing the clip does nothing, because the
+    /// surface is cut to the extent and the clip only narrows it further.
+    ///
+    /// The case needs the mask's edge to fall inside the layer's own first
+    /// column, or both paths agree and it proves nothing — with `feather`
+    /// at zero they agree to the last bit, which is what says the feather
+    /// is the ingredient and not the mask.
+    #[test]
+    fn a_feathered_mask_softens_the_same_on_a_surface() {
+        let build = |blend: BlendMode, feather: f32| {
+            let mut doc = Document::new(48, 36, ColorMode::Rgb);
+            let mut node = Node::vector(
+                "it",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 8.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.3,
+                    b: 0.2,
+                    a: 1.0,
+                });
+            }
+            // A fractional placement, so the layer's first column is only
+            // part covered and the mask has something to bite on.
+            node.transform = Transform::translation(21.2168, 21.41);
+            node.mask = Some(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(21.6, 15.0),
+                },
+                invert: false,
+                feather,
+            });
+            let id = add(&mut doc, Box::new(node));
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            doc
+        };
+        let at = |doc: &Document, x: usize, y: usize| {
+            let s = render(doc).unwrap();
+            s.pixels[y * s.width as usize + x].a
+        };
+        for feather in [0.0f32, 0.0398, 0.3, 1.0, 3.0] {
+            for (x, y) in [(21usize, 23usize), (21, 21)] {
+                let straight = at(&build(BlendMode::Normal, feather), x, y);
+                let surfaced = at(&build(BlendMode::Difference, feather), x, y);
+                // The tie: the mask has to be doing something there, or two
+                // equal numbers say nothing.
+                let unmasked = at(&build(BlendMode::Normal, feather), 25, 23);
+                assert!(
+                    straight < unmasked - 0.1,
+                    "the mask has to bite at ({x},{y}): {straight:.4} against \
+                     {unmasked:.4} where it does not reach"
+                );
+                assert!(
+                    (straight - surfaced).abs() < 1e-4,
+                    "feather {feather}: the layer covers {surfaced:.4} of ({x},{y}) \
+                     on a surface of its own and {straight:.4} drawn straight onto \
+                     the page. A blend decides how a layer meets what is under it, \
+                     never what it covers."
+                );
+            }
         }
     }
 }
