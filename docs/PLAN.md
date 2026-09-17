@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~468),
+- **Verify before committing:** `cargo test --workspace` (~469),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3495,6 +3495,42 @@ without reading anything else.*
      evidence, read for what it says. Which is the lesson of the whole
      stretch in one line: a number is worth only as much as knowing what it
      measures.
+     And then a fourth defect in the reference renderer, found by an
+     invariant rather than by looking, and by one that needs no second
+     renderer at all: **the alpha a page comes out with cannot depend on
+     any blend mode in it.** Compositing alpha is `as + ab(1 - as)`
+     whatever the blend function does to colour — `separable` says exactly
+     that — so taking every blend off a page must leave its coverage
+     untouched. Seventeen of two thousand pages nobody wrote changed by
+     more than a hundredth, seed 295 by 0.87 over four hundred pixels.
+     Every one of the large ones was **a copy of a filter wearing a
+     blend**. A filter is not a picture laid over the page, it is a change
+     to what is under it, so a blend on one means nothing — asked
+     directly, Darken, Multiply, Lighten and Difference each change not a
+     pixel. Both renderers knew that and both asked it the wrong way:
+     `matches!(node.kind, Adjustment | Filter)` answers what a layer *is*,
+     and a copy is an `Instance`. So the blend put the copy on a surface
+     of its own, what it copies was handed a transparent page to filter,
+     and it came back with nothing — the layer vanishing because it was
+     blended. Both sides walk what a layer *draws* now, through
+     `rewrites_what_is_under_it`, which the backend borrows from the
+     renderer so the two cannot drift apart on it.
+     Two things worth keeping. The first is that the two sides **agreed
+     while both were wrong**: fixing the reference alone made the
+     cross-renderer audit fail at seed 295, which is the right way round
+     for that audit to behave and a reminder that agreement is not
+     correctness — only an outside claim can say which of two agreeing
+     answers is right, and here it was arithmetic about alpha.
+     The second is the residue, recorded so the next search does not start
+     there: nine pages still move their alpha, all of them small — two to
+     eleven pixels, worst 0.084 — where the large family was 0.16 to 0.87.
+     That is the shape of a fringe pixel lost to a surface's edge rather
+     than a layer losing itself, and it is why the invariant is not yet a
+     test over the corpus. The hand-built case is
+     (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
+     asks the tie as well as the claim: the copy has to *change* the page,
+     or "the same whatever blend it wears" is true of a layer that draws
+     nothing, which is precisely the broken answer.
      And one thing about the *instrument* rather than the findings, which
      cost a wrong conclusion before it was noticed: **the greedy minimiser
      is not reproducible.** Hiding every layer that is not needed to keep a

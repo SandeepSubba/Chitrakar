@@ -2318,7 +2318,13 @@ fn one(
     // read `node.blend`, so the answer is to keep the blend from forcing
     // a surface and then ignore it, which is what the renderer being
     // matched does.
-    let rewrites = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+    // What a layer *draws*, not what kind it is: a copy of an adjustment
+    // or a filter rewrites the page exactly as the layer it copies does,
+    // and taking its blend literally would put it on a surface of its own
+    // where what it copies is handed a transparent page to work on and
+    // comes back with nothing. The reference renderer had the same
+    // `matches!` here and the same hole behind it.
+    let rewrites = chitrakar_render::rewrites_what_is_under_it(doc, child);
     let alone = !shadings.is_empty()
         // A brush layer always: its strokes go on one after another and
         // an eraser takes off what the ones before it left, which is a

@@ -967,6 +967,31 @@ impl Cover {
 /// Pulled out of the walk so a caller with one layer in mind — a panel
 /// wanting to show what a layer holds — can draw exactly what the page
 /// would have drawn of it, effects and all.
+/// Whether what a layer draws is a change to what is under it rather
+/// than a picture of its own.
+///
+/// An adjustment and a filter are that, and so is a *copy* of one: a copy
+/// draws the layer it copies, so it rewrites the page exactly as its
+/// original would. The distinction matters because such a layer must
+/// never be put on a surface of its own — on one there is nothing
+/// underneath for it to work on, and it comes back with nothing. Asking
+/// `node.kind` answers this for the original and gets it wrong for the
+/// copy, which is the whole reason this is a walk rather than a `matches!`.
+pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
+    let mut at = id;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        let Ok(node) = doc.node(at) else {
+            return false;
+        };
+        match &node.kind {
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) => return true,
+            NodeKind::Instance { of, .. } => at = *of,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn render_layer(
     doc: &Document,
     child: NodeId,
@@ -1035,8 +1060,17 @@ fn draw_layer(
         // the backend: they rewrite what is under them and have nothing
         // left to blend against it, so a blend means nothing to them and
         // a surface would only cost.
-        let blended = node.blend != BlendMode::Normal
-            && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+        // The exception asks what the layer *draws*, not what kind it is.
+        // A copy of a filter rewrites the page just as the filter does, and
+        // putting one on a surface of its own hands it a transparent page
+        // to filter: it comes back with nothing, and a layer that draws
+        // nothing where it used to draw something has had its coverage
+        // changed by a blend. Which cannot happen — compositing alpha is
+        // `as + ab(1 - as)` whatever the blend function does to colour — and
+        // that is how this was found: seventeen of two thousand random
+        // pages changed their alpha when their blends were taken off, and
+        // every one of them was a copy of a filter wearing a blend.
+        let blended = node.blend != BlendMode::Normal && !rewrites_what_is_under_it(doc, child);
         // Clipping needs the layer as a picture before it goes down —
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
@@ -1311,6 +1345,21 @@ fn render_child(
                 // this does not arise — `render_layer` draws the group,
                 // and the group isolates itself.
                 let isolate = !stand_ins.is_empty() && any_reads_backdrop(doc, &stand_ins)?;
+                // A copy of an adjustment or a filter is a change to what
+                // is under it, and a blend means nothing to one: there is
+                // no picture to bring down by it. Taken literally, the
+                // blend would put the copy on a surface of its own, and
+                // what it copies would be handed a transparent page to
+                // work on and come back with nothing at all — the layer
+                // vanishing because it was blended. So the blend is kept
+                // from forcing the surface and then ignored, which is
+                // exactly what the layer it copies gets, and what the GPU
+                // backend already does for both.
+                let blend = if rewrites_what_is_under_it(doc, child) {
+                    BlendMode::Normal
+                } else {
+                    blend
+                };
                 if node.opacity >= 1.0
                     && blend == BlendMode::Normal
                     && mask.mask.is_none()
@@ -16085,5 +16134,130 @@ mod tests {
              adjustment has no finite box, and a box that means \"nothing\" \
              is not the same as one that means \"everywhere\"."
         );
+    }
+
+    /// A copy of a filter draws the same thing whatever blend it wears,
+    /// because a filter does.
+    ///
+    /// A filter is not a picture laid over the page, it is a change to
+    /// what is under it, so there is nothing for a blend to bring down and
+    /// a blend on one means nothing at all — asked directly, Darken,
+    /// Multiply, Lighten and Difference each change not one pixel. A
+    /// *copy* of a filter is the same thing: what a copy draws is the
+    /// layer it copies.
+    ///
+    /// Both renderers asked what kind the layer *was* rather than what it
+    /// *drew*, so the exception matched the filter and missed the copy.
+    /// The blend then put the copy on a surface of its own, and what it
+    /// copies was handed a transparent page to filter and came back with
+    /// nothing: the layer vanished because it was blended.
+    ///
+    /// Found by an invariant rather than by looking, and the invariant
+    /// needs no second renderer: compositing alpha is `as + ab(1 - as)`
+    /// whatever the blend function does to colour, so **the alpha a page
+    /// comes out with cannot depend on any blend mode in it**. Seventeen
+    /// of two thousand pages nobody wrote broke that, and every one of the
+    /// large ones was a copy of a filter wearing a blend — seed 295 by
+    /// 0.87 over four hundred pixels.
+    #[test]
+    fn a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled_rect(
+                "ground",
+                48.0,
+                36.0,
+                AuthoredColor::Srgb {
+                    r: 0.20,
+                    g: 0.60,
+                    b: 0.75,
+                    a: 1.0,
+                },
+            ),
+        );
+        // Something with an edge, so a blur has work to do and the page
+        // can tell whether the filter ran.
+        let mut disc = Node::vector("shape", VectorShape::Ellipse { rx: 9.0, ry: 7.0 });
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.90,
+                g: 0.30,
+                b: 0.20,
+                a: 1.0,
+            });
+        }
+        disc.transform = Transform::translation(10.0, 8.0);
+        add(&mut doc, Box::new(disc));
+        let blur = add(
+            &mut doc,
+            Box::new(Node::filter("blur", Filter::GaussianBlur { sigma: 3.0 })),
+        );
+        // The copy, which is what the original test never had.
+        let copy = add(&mut doc, Box::new(Node::instance("a copy of it", blur)));
+
+        let page = |doc: &Document| render(doc).unwrap();
+        let plain = page(&doc);
+
+        // The tie the case has to break: the copy has to *do* something,
+        // or "the same whatever blend it wears" is true of a layer that
+        // draws nothing at all — which is precisely the broken answer.
+        let mut without = doc.clone();
+        without
+            .apply(Command::SetVisible {
+                id: copy,
+                visible: false,
+            })
+            .unwrap();
+        let none = page(&without);
+        let moved = plain
+            .pixels
+            .iter()
+            .zip(&none.pixels)
+            .filter(|(p, q)| (p.r - q.r).abs() > 0.002)
+            .count();
+        assert!(
+            moved > 100,
+            "the copy of the filter has to change the page or this proves \
+             nothing: it moved {moved} pixels"
+        );
+
+        for blend in [
+            BlendMode::Darken,
+            BlendMode::Multiply,
+            BlendMode::Lighten,
+            BlendMode::Difference,
+            BlendMode::Overlay,
+        ] {
+            let mut lit = doc.clone();
+            lit.apply(Command::SetBlendMode { id: copy, blend })
+                .unwrap();
+            let drawn = page(&lit);
+            let (mut worst_a, mut worst_c, mut at) = (0.0f32, 0.0f32, 0usize);
+            for (i, (p, q)) in drawn.pixels.iter().zip(&plain.pixels).enumerate() {
+                let da = (p.a - q.a).abs();
+                if da > worst_a {
+                    worst_a = da;
+                    at = i;
+                }
+                worst_c = worst_c
+                    .max((p.r - q.r).abs())
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs());
+            }
+            assert!(
+                worst_a < 1e-4,
+                "{blend:?} on a copy of a filter changed what it covers, by \
+                 {worst_a:.4} at pixel {at} — and compositing alpha does not \
+                 depend on the blend function, so the layer is losing itself \
+                 rather than blending"
+            );
+            assert!(
+                worst_c < 1e-3,
+                "{blend:?} on a copy of a filter changed what it draws, by \
+                 {worst_c:.4}. A filter is a change to what is under it: there \
+                 is no picture for a blend to bring down."
+            );
+        }
     }
 }
