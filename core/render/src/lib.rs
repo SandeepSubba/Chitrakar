@@ -995,10 +995,33 @@ fn draw_layer(
         // ignored rather than given a surface.
         let effected = !node.effects.is_empty()
             && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+        // A blend mode is the same kind of demand. A layer with one has
+        // to meet what is under it *once*, as the whole of itself — and
+        // almost every layer here puts down more than one mark: a shape
+        // draws its fill and then its stroke, a text block draws a run
+        // at a time and its underlines besides, a brush layer draws
+        // every stroke. Drawn straight onto the page each of those took
+        // the blend separately, so where two of them overlapped the
+        // backdrop was blended twice. On a stroked rect set to Overlay
+        // that was the whole band: the stroke came down onto an already
+        // blended fill instead of onto the page, and the outline was a
+        // colour neither renderer's arithmetic could account for.
+        //
+        // Found by the GPU backend disagreeing on a page nobody wrote,
+        // and settled against the compositing spec rather than against
+        // either renderer — the backend was right and the reference was
+        // wrong, which is not the way round the convention here assumes.
+        //
+        // An adjustment and a filter are the exception, as they are on
+        // the backend: they rewrite what is under them and have nothing
+        // left to blend against it, so a blend means nothing to them and
+        // a surface would only cost.
+        let blended = node.blend != BlendMode::Normal
+            && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
         // Clipping needs the layer as a picture before it goes down —
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
-        if !effected && cover.is_none() && capture.is_none() {
+        if !effected && !blended && cover.is_none() && capture.is_none() {
             render_child(doc, child, dst, clip, parent, node.blend, bare)?;
             return Ok(None);
         }
@@ -15638,5 +15661,127 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A blended layer meets what is under it once, as the whole of
+    /// itself.
+    ///
+    /// Almost every layer here puts down more than one mark: a shape
+    /// draws its fill and then its stroke, a text block draws a run at a
+    /// time, a brush layer draws every stroke. Drawn straight onto the
+    /// page each of those took the blend separately, so wherever two
+    /// marks overlapped the backdrop was blended *twice*. On a stroked
+    /// rect set to Overlay that was the whole stroke band: the stroke
+    /// came down onto an already-blended fill instead of onto the page.
+    ///
+    /// Asked against the spec rather than against a number this renderer
+    /// produced, because the bug was invisible from inside — both halves
+    /// were doing exactly what they were told. Overlay is `HardLight`
+    /// with its arguments the other way round, and in the band the
+    /// layer's own content is an opaque stroke over an opaque fill,
+    /// which is the stroke. So the answer is `Overlay(backdrop, stroke)`
+    /// and nothing to do with the fill; blending twice gives
+    /// `Overlay(Overlay(backdrop, fill), stroke)`, which is what it gave,
+    /// and the test says both so a regression cannot pass by landing on
+    /// the other one.
+    #[test]
+    fn a_blended_layer_meets_the_page_once() {
+        let enc = chitrakar_color::linear_to_srgb;
+        let back = [0.20f32, 0.40, 0.55];
+        let fill = [0.88f32, 0.92, 0.09];
+        let line = [0.87f32, 0.31, 0.47];
+        let srgb = |c: [f32; 3]| AuthoredColor::Srgb {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+            a: 1.0,
+        };
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        add(&mut doc, filled_rect("ground", 40.0, 40.0, srgb(back)));
+        let mut node = Node::vector(
+            "marked",
+            VectorShape::Rect {
+                width: 24.0,
+                height: 24.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector {
+            fill: f,
+            stroke: st,
+            ..
+        } = &mut node.kind
+        {
+            *f = Some(srgb(fill));
+            *st = Some(chitrakar_doc::Stroke {
+                color: srgb(line),
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        node.blend = BlendMode::Overlay;
+        node.transform = Transform::translation(8.0, 8.0);
+        let id = add(&mut doc, Box::new(node));
+        let page = render(&doc).unwrap();
+
+        // Overlay(b, s) is HardLight(s, b): the backdrop decides which
+        // half of the curve, the source is what is multiplied or
+        // screened.
+        let hard = |cb: f32, cs: f32| {
+            if cs <= 0.5 {
+                cb * 2.0 * cs
+            } else {
+                let s = 2.0 * cs - 1.0;
+                cb + s - cb * s
+            }
+        };
+        let overlay = |b: [f32; 3], s: [f32; 3]| -> [f32; 3] {
+            [hard(s[0], b[0]), hard(s[1], b[1]), hard(s[2], b[2])]
+        };
+        let shown = |x: u32, y: u32| {
+            let p = page.get(x, y);
+            [
+                enc(p.r / p.a.max(1e-6)),
+                enc(p.g / p.a.max(1e-6)),
+                enc(p.b / p.a.max(1e-6)),
+            ]
+        };
+        // Two pixels inside the stroke band — the layer is at (8,8),
+        // 24 across, stroked six wide inside its outline.
+        let once = overlay(back, line);
+        let twice = overlay(overlay(back, fill), line);
+        for (x, y) in [(10u32, 20u32), (20, 10)] {
+            let got = shown(x, y);
+            for c in 0..3 {
+                assert!(
+                    (got[c] - once[c]).abs() < 3e-3,
+                    "at {x},{y} the band is the stroke blended once: \
+                     {got:.3?} against {once:.3?} (blended twice would be {twice:.3?})"
+                );
+            }
+        }
+        // And the interior, where there is only the fill, is unchanged by
+        // any of this — the half that was right all along.
+        let inside = shown(20, 20);
+        let want = overlay(back, fill);
+        for c in 0..3 {
+            assert!(
+                (inside[c] - want[c]).abs() < 3e-3,
+                "and the fill is still blended once: {inside:.3?} against {want:.3?}"
+            );
+        }
+        // The two answers really are different, so the assertion above is
+        // not passing on a coincidence of this palette.
+        assert!(
+            (once[1] - twice[1]).abs() > 0.2,
+            "the palette tells the two apart ({once:.3?} against {twice:.3?})"
+        );
+        let _ = id;
     }
 }

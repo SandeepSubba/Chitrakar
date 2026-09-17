@@ -3199,6 +3199,36 @@ without reading anything else.*
      file_and_comes_back`), and the same hundred and twenty drawn both
      ways wherever the GPU backend takes them
      (`pages_nobody_wrote_are_drawn_the_way_the_cpu_draws_them`).
+     The seed count is a dial, and turning it up is the cheapest search
+     there is. At two thousand instead of a hundred and twenty the
+     cross-renderer audit found **seed 557**, and behind it a defect in
+     the *reference* renderer — which is not the way round this project's
+     convention assumes, and is the reason it took a spec to settle.
+     A shape with a fill and a stroke and a blend mode had the blend
+     applied **twice** in the stroke band. Almost every layer here puts
+     down more than one mark — a shape draws its fill and then its
+     stroke, a text block draws a run at a time and its underlines
+     besides, a brush layer draws every stroke — and a layer drawn
+     straight onto the page took the blend once per mark. Where two of
+     them overlapped, the backdrop was blended again: the stroke came
+     down onto an already-blended fill instead of onto the page.
+     Both halves were doing exactly what they were told, which is why
+     nothing inside could see it. What settled it was arithmetic from
+     outside: in the band the layer's own content is an opaque stroke
+     over an opaque fill, so the answer is `Overlay(backdrop, stroke)` —
+     the GPU's answer to three places — and blending twice gives
+     `Overlay(Overlay(backdrop, fill), stroke)`, which was the CPU's to
+     three places. The backend was right and the reference was wrong.
+     A blended leaf composites as a unit now, on a surface of its own,
+     exactly as the backend already had it and as this renderer already
+     did for a group. Adjustments and filters are the same exception
+     they are there: they rewrite what is under them, so a blend means
+     nothing to them and a surface would only cost. It does cost, and the
+     number is worth having: a *page-filling* blended rect went 68.2 ms
+     to 75.6 ms, about a ninth, and a small blended shape pays a small
+     surface since the surface is cut to the layer's own extent.
+     The test says both answers, so a regression cannot pass by landing
+     on the other one, and it checks the palette tells them apart.
      The first run found four things, three of them in the backend and
      one in the reference renderer.
      A copy *held to the layer under it* was drawn whole: a copy's draws
