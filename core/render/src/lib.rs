@@ -988,6 +988,36 @@ impl Cover {
 /// underneath for it to work on, and it comes back with nothing. Asking
 /// `node.kind` answers this for the original and gets it wrong for the
 /// copy, which is the whole reason this is a walk rather than a `matches!`.
+/// Whether a copy draws a blend that a surface of its own would spend.
+///
+/// A copy is a window onto another layer, and that layer's blend is part
+/// of what it draws. Put the copy on a surface of its own and the blend
+/// meets a transparent page instead of the real one: every separable
+/// blend collapses to Normal against nothing — `ab` is zero, so the
+/// blended term drops out — and the blend is simply lost. Drawn where it
+/// stands, it meets what is under the copy, which is what it is for.
+///
+/// Not if what it copies carries effects, though, and that is the one
+/// subtlety here. Drawing it where it stands means handing the copy's
+/// mask down as the *copied layer's* coverage, and a layer's own
+/// coverage is taken before its effects are made, so that they grow from
+/// the shape that will really be seen. A copy's mask is not that: it
+/// belongs over the finished copy, the shadow it casts included. Handing
+/// it down would cut the layer before the shadow grew from it, which is
+/// a different picture — and a worse one, by half an alpha on a page
+/// found by the coverage invariant.
+pub fn copies_a_blend(doc: &Document, id: NodeId) -> bool {
+    let Ok(node) = doc.node(id) else {
+        return false;
+    };
+    let NodeKind::Instance { of, .. } = &node.kind else {
+        return false;
+    };
+    doc.node(*of)
+        .map(|t| t.blend != BlendMode::Normal && t.effects.is_empty())
+        .unwrap_or(false)
+}
+
 pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
@@ -1419,8 +1449,20 @@ fn render_child(
                 // which is the same thing `draw_layer` hands an adjustment
                 // that is held to the layer below: render where it stands,
                 // then mix back by how much of the region is let through.
-                if rewrites_what_is_under_it(doc, child)
+                // A copy wearing a blend of its own is not one of these.
+                // Its blend has to meet the page once, as the whole of
+                // itself, and that is what a surface is for — `draw_layer`
+                // has already made one by the time this is reached, and
+                // drawing what the copy copies straight into it would put
+                // the copied blend against a transparent page just the
+                // same, while losing the coverage the surface gets right.
+                // So a copy of a blend that wears a blend keeps its own
+                // and spends what it copies, which is the limit here.
+                let blend_would_be_spent =
+                    copies_a_blend(doc, child) && node.blend == BlendMode::Normal;
+                if (rewrites_what_is_under_it(doc, child) || blend_would_be_spent)
                     && (node.mask.is_some() || node.opacity < 1.0)
+                    && stand_ins.is_empty()
                 {
                     let plane = MaskRef::plane_over(
                         Some(doc),
@@ -16380,6 +16422,117 @@ mod tests {
                  is no picture for a blend to bring down."
             );
         }
+    }
+
+    /// A mask that hides nothing is no mask.
+    ///
+    /// Coverage one everywhere is the identity, so putting such a mask on
+    /// every layer that has none must leave the page exactly as it was.
+    /// Like the blend invariant above it follows from the definition and
+    /// needs no second renderer, and like it, it is asked of pages nobody
+    /// wrote.
+    ///
+    /// What it catches is not masking at all: a mask is what *sends a
+    /// layer to a surface of its own*, and a layer is not always the same
+    /// picture there. Six of these six hundred pages changed colour, and
+    /// every one of them was a copy of a layer wearing a blend — the
+    /// blend belongs to what the copy draws, and on a fresh surface it
+    /// meets a transparent page, where every separable blend collapses to
+    /// Normal and is simply spent. `copies_a_blend` is the answer: such a
+    /// copy is drawn where it stands with its mask handed down as a
+    /// coverage, so the blend meets the page that is really under it.
+    ///
+    /// The floors at the end are not decoration. An earlier draft of this
+    /// masked two layers a page, lowest-numbered first, and a copy is
+    /// rarely the lowest — it passed with both of the fixes it was
+    /// written for taken out.
+    #[test]
+    fn a_mask_that_hides_nothing_is_no_mask() {
+        const SEEDS: u64 = 600;
+        // Big enough to cover any page whatever a layer's transform does
+        // to it, and centred so that it does.
+        let wide = Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 4800.0,
+                    height: 3600.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(-2400.0, -1800.0),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let (mut masked, mut copies) = (0usize, 0usize);
+        for seed in 0..SEEDS {
+            let plain = chitrakar_doc::fixture::page(seed);
+            // Sorted: `nodes()` walks a map whose order is reseeded every
+            // run, and an unsorted sweep is not the same sweep twice.
+            let mut ids: Vec<NodeId> = plain.nodes().map(|(i, _)| *i).collect();
+            ids.sort_by_key(|i| i.0);
+            let bare: Vec<NodeId> = ids
+                .into_iter()
+                .filter(|id| plain.parent_of(*id).is_some())
+                .filter(|id| {
+                    plain
+                        .node(*id)
+                        .map(|nd| !matches!(nd.kind, NodeKind::Group) && nd.mask.is_none())
+                        .unwrap_or(false)
+                })
+                .collect();
+            if bare.is_empty() {
+                continue;
+            }
+            masked += bare.len();
+            copies += bare
+                .iter()
+                .filter(|id| {
+                    plain
+                        .node(**id)
+                        .map(|nd| matches!(nd.kind, NodeKind::Instance { .. }))
+                        .unwrap_or(false)
+                })
+                .count();
+            let mut doc = plain.clone();
+            for id in bare {
+                doc.apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(wide.clone())),
+                })
+                .unwrap();
+            }
+            let want = render(&plain).unwrap();
+            let got = render(&doc).unwrap();
+            let (mut n, mut worst) = (0usize, 0.0f32);
+            for (a, b) in got.pixels.iter().zip(&want.pixels) {
+                let d = (a.r - b.r)
+                    .abs()
+                    .max((a.g - b.g).abs())
+                    .max((a.b - b.b).abs())
+                    .max((a.a - b.a).abs());
+                if d > 0.002 {
+                    n += 1;
+                    worst = worst.max(d);
+                }
+            }
+            assert!(
+                n == 0,
+                "seed {seed}: a mask that hides nothing changed {n} pixels, \
+                 the worst by {worst:.4}. Coverage one everywhere is the \
+                 identity, so a layer is being drawn differently for having \
+                 been masked at all."
+            );
+        }
+        // Two ways this could pass while asking nothing: masking no layer,
+        // and masking no copy — which is the whole of what it found.
+        assert!(
+            masked > SEEDS as usize,
+            "only {masked} layers over {SEEDS} pages were masked at all"
+        );
+        assert!(
+            copies > SEEDS as usize / 4,
+            "only {copies} of the {masked} masked layers were copies"
+        );
     }
 
     /// A blend never changes what a page covers.

@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~474),
+- **Verify before committing:** `cargo test --workspace` (~476),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3681,13 +3681,50 @@ without reading anything else.*
      eighty-seven, 0.1792 over twelve hundred. A copy drawn on a surface
      of its own is not the same picture as the same copy drawn straight,
      and a mask is what sends it to one.
-     That is why the invariant is not a test yet, and the draft of it is
-     worth recording as a warning rather than committed: written with the
-     narrower sweep's filter, `a_mask_that_hides_nothing_is_no_mask`
-     **passed with both of the fixes it was written for taken out**. Two
-     layers a page, lowest-numbered first, and a copy is rarely the lowest
-     — so it masked the ground and its neighbour and asked nothing. It
-     bites at once when it masks every leaf.
+     **That seam is now closed, and all six were one thing.** Every one of
+     the six is a copy whose *target* wears a non-Normal blend — Overlay,
+     Multiply, Darken, Difference — while the copy itself is plain. The
+     blend belongs to what the copy draws, and a mask sends the copy to a
+     surface where that blend meets a transparent page: every separable
+     blend collapses to Normal against nothing, `ab` being zero, so it is
+     spent and never asked for again. `copies_a_blend` is the fix, and it
+     reuses the pass the adjustment case already built — the copy's mask
+     and opacity go down as a `Cover` and what it copies is drawn where it
+     stands, so the blend meets the page really under it. Six of six
+     hundred to none. The backend refuses such a page on the same terms as
+     the adjustment one, and for the same reason: a coverage handed down
+     is a pass it has no shape for.
+     Two conditions on it, and **both were bought with a failing test
+     rather than reasoned out in advance** — which is the whole argument
+     for keeping the coverage invariant next to the mask one:
+     - *The copy must wear no blend of its own.* Seed 114 said so: a copy
+       of a blended brush layer, itself Overlay at 0.59, had already been
+       given a surface by `draw_layer` for its own blend, and drawing what
+       it copies straight into that surface put the copied blend against a
+       transparent page exactly as before, while losing the coverage the
+       surface gets right. So such a copy keeps its own blend and spends
+       what it copies. That is a real limit, and it is written down rather
+       than papered over.
+     - *What it copies must carry no effects.* Seed 569 said so, by half
+       an alpha: a layer's own coverage is taken **before** its effects are
+       made, so that they grow from the shape that will really be seen — but
+       a copy's mask is not the copied layer's coverage. It belongs over the
+       finished copy, the shadow it casts included. Handing it down cuts the
+       layer before the shadow grows from it, which is a different picture.
+     Both were caught by `a_blend_never_changes_what_a_page_covers`, not by
+     the mask invariant that motivated the fix: the mask test says the
+     colour is right and the coverage test says nothing was gained by
+     moving pixels. Neither alone would have been enough.
+     The draft of the mask invariant is still worth recording as a
+     warning, because it is committed now only after being rewritten:
+     written with the narrower sweep's filter,
+     `a_mask_that_hides_nothing_is_no_mask` **passed with both of the fixes
+     it was written for taken out**. Two layers a page, lowest-numbered
+     first, and a copy is rarely the lowest — so it masked the ground and
+     its neighbour and asked nothing. It bites at once when it masks every
+     leaf, which is what it does now; its floors are the honest measured
+     counts (2635 layers masked over 600 pages, 211 of them copies) rather
+     than round numbers, so it cannot go quiet again without saying so.
      One change was written for the chain case and **withdrawn for want of
      evidence**, which is worth saying plainly: making `draw_layer` ask
      `rewrites_what_is_under_it` rather than `matches!(node.kind, ...)`

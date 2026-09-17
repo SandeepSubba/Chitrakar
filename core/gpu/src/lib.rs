@@ -2334,7 +2334,19 @@ fn one(
     // has no shape for: its own masks ride the one coverage slot a layer
     // already uses. Drawing it anyway is how both of them used to lose the
     // layer altogether.
-    if rewrites
+    //
+    // A copy of a *blended* layer goes back on the same terms and for the
+    // same reason. The blend belongs to what the copy draws, not to the
+    // copy, and on a surface of its own it meets a transparent page:
+    // every separable blend collapses to Normal against nothing, so the
+    // blend is spent and never asked for again. Six pages of six hundred
+    // changed colour when a mask that hides nothing went on a copy, and
+    // every one of them copied a layer wearing a blend.
+    // …and not one wearing a blend of its own: there the reference
+    // renderer keeps the surface too, and spends the copied blend on it,
+    // so both draw the same picture and there is nothing to decline.
+    if (rewrites
+        || (chitrakar_render::copies_a_blend(doc, child) && node.blend == BlendMode::Normal))
         && matches!(node.kind, NodeKind::Instance { .. })
         && (node.mask.is_some() || node.opacity < 1.0)
     {
@@ -11202,6 +11214,136 @@ mod tests {
                  mean {mean:.5}, worst {worst:.3}"
             );
         }
+    }
+
+    /// A copy of a blended layer wearing a mask goes back.
+    ///
+    /// The blend belongs to what the copy draws, not to the copy. On a
+    /// surface of its own it meets a transparent page, and every
+    /// separable blend collapses to Normal against nothing — `ab` is
+    /// zero, so the blended term drops out — which spends the blend and
+    /// never asks for it again. A mask is what sends a copy to a surface
+    /// here, so a masked copy of a blended layer loses the blend.
+    ///
+    /// The reference renderer hands the copy's mask down as a coverage
+    /// and draws what it copies where it stands, so the blend meets the
+    /// page really under it. That is a pass this backend has no shape
+    /// for, so the page goes back — the same answer, and the same
+    /// reason, as a copy of an adjustment wearing one.
+    ///
+    /// Found by a mask that hides nothing changing six of six hundred
+    /// random pages.
+    #[test]
+    fn a_copy_of_a_blend_wearing_a_mask_goes_back() {
+        let build = |masked: bool| {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 48.0,
+                        height: 36.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.30,
+                        g: 0.55,
+                        b: 0.70,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let lit = add(
+                &mut doc,
+                filled(
+                    "lit",
+                    VectorShape::Rect {
+                        width: 24.0,
+                        height: 18.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.85,
+                        g: 0.40,
+                        b: 0.20,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(4.0, 4.0),
+            );
+            doc.apply(Command::SetBlendMode {
+                id: lit,
+                blend: BlendMode::Multiply,
+            })
+            .unwrap();
+            let copy = add(
+                &mut doc,
+                Box::new(Node::instance("a copy of it", lit)),
+                Transform::translation(16.0, 10.0),
+            );
+            if masked {
+                doc.apply(Command::SetMask {
+                    id: copy,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 480.0,
+                                height: 360.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(-240.0, -180.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            }
+            (doc, copy)
+        };
+
+        let (masked, _) = build(true);
+        assert!(
+            !GpuRenderer::can_render(&masked),
+            "a copy of a blended layer wearing a mask has to go back: the \
+             mask puts it on a surface of its own, where the blend it copies \
+             meets nothing"
+        );
+
+        // Declining is worth something only because the two draw
+        // differently — and the mask here hides nothing, so on the
+        // renderer that is right they must not.
+        let (plain, _) = build(false);
+        let (mean, worst) = difference(
+            &chitrakar_render::render(&masked).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(
+            mean < 1e-6,
+            "the reference draws the masked copy as the unmasked one — the \
+             mask hides nothing: mean {mean:.6}, worst {worst:.4}"
+        );
+
+        // And no wider than it needs: unmasked, it is drawn, the way the
+        // reference renderer draws it.
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        assert!(
+            GpuRenderer::can_render(&plain),
+            "a copy of a blended layer wearing nothing is still drawn"
+        );
+        let (mean, worst) = difference(
+            &gpu.render(&plain).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "unmasked it draws what the reference draws: mean {mean:.5}, \
+             worst {worst:.3}"
+        );
     }
 
     /// A copy of an adjustment wearing a mask or a fade goes back.
