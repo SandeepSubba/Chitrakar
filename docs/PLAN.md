@@ -861,7 +861,7 @@ without reading anything else.*
   the crawl a shrunk photograph gets when it moves.
   `live_editing_probe` in `core/engine` keeps all of those numbers, since
   the drag was the only way to find this and nothing else measured one.
-- **Verify before committing:** `cargo test --workspace` (~472),
+- **Verify before committing:** `cargo test --workspace` (~474),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3640,6 +3640,45 @@ without reading anything else.*
      alone was enough to keep the rectangles wrong. A count that goes 48,
      19, 8, 0 is not four guesses, it is one cause found in the four
      places it had been written out.
+     The same method, asked three more ways, and the third was the best
+     yet. **A layer at no opacity draws what a hidden one draws** — clean,
+     a negative worth recording. **A layer hidden draws what a layer taken
+     away draws** — ninety-four pages of six hundred fail it, and the
+     *claim* is wrong rather than the code: a run of clipped layers is
+     formed from the flags without consulting visibility, so hiding a clip
+     base keeps it the base while removing it promotes the next layer up.
+     Worth writing down, because it is the one of the three that looks
+     most obviously true.
+     **A mask that hides nothing is no mask**, though, is exactly true,
+     and it found a defect a user would have hit: **a copy of an
+     adjustment vanished the moment it wore anything.** Masked by a mask
+     that hides nothing it drew, to the last bit, what hiding it drew; at
+     opacity 0.999 likewise; at a half likewise. The layer it copies has
+     no such trouble, because an adjustment takes its mask inside its own
+     pass — which is what says the fault is the copy's.
+     The reason is the one from two commits ago, reached by the other
+     door. An adjustment is a change to what is under it and cannot go on
+     a surface of its own, there being nothing under a fresh surface to
+     change; a *blend* was one way to send a copy to a surface and was
+     fixed; a **mask or a fade** is the other and was not. So the copy's
+     mask and opacity go down as a `Cover` now — the same thing
+     `draw_layer` already hands an adjustment held to the layer below:
+     render where it stands, then mix back by how much of the region is
+     let through.
+     And the backend had it too, which the cross-renderer audit said at
+     once: fixing the reference alone made seed 665 fail. Its own masks
+     ride the single coverage slot a layer already uses, so a coverage
+     handed down is a pass it has no shape for — the page goes back, which
+     is the answer a mask inside a masked layer with an effect already
+     gets. Sixteen more pages declined of two thousand, 1374 drawn.
+     Two are left of six hundred and both are narrower than what was
+     fixed: a copy of a *copy* of an adjustment, where the chain wants the
+     cover carried through more than one link, and one pixel on a copy of
+     a masked raster. Neither moved when the fix went in.
+     And the leaf-picking in that sweep had to be sorted before any of it
+     could be trusted — the same `HashMap` order that cost a wrong reading
+     of seed 2854 gave a different set of failures on each run until it
+     was. Twice now.
      The exclusions are wide for an honest reason and the test says so:
      an adjustment, a filter and a clone read what is under them, and an
      effect reads past its layer's own silhouette, so the engine grows the

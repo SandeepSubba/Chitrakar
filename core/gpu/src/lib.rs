@@ -2325,6 +2325,21 @@ fn one(
     // comes back with nothing. The reference renderer had the same
     // `matches!` here and the same hole behind it.
     let rewrites = chitrakar_render::rewrites_what_is_under_it(doc, child);
+    // A copy of one of those, wearing a mask or a fade, goes back. What it
+    // draws is a change to what is under it, so it cannot go on a surface
+    // of its own — there is nothing under a fresh surface to change — and
+    // a mask or an opacity below one is exactly what sends a copy to a
+    // surface here. The renderer being matched hands such a copy's mask
+    // and opacity down as a coverage instead, which is a pass this backend
+    // has no shape for: its own masks ride the one coverage slot a layer
+    // already uses. Drawing it anyway is how both of them used to lose the
+    // layer altogether.
+    if rewrites
+        && matches!(node.kind, NodeKind::Instance { .. })
+        && (node.mask.is_some() || node.opacity < 1.0)
+    {
+        return None;
+    }
     let alone = !shadings.is_empty()
         // A brush layer always: its strokes go on one after another and
         // an eraser takes off what the ones before it left, which is a
@@ -11187,5 +11202,129 @@ mod tests {
                  mean {mean:.5}, worst {worst:.3}"
             );
         }
+    }
+
+    /// A copy of an adjustment wearing a mask or a fade goes back.
+    ///
+    /// What such a copy draws is a change to what is under it, so it can
+    /// never go on a surface of its own — there is nothing under a fresh
+    /// surface to change. A mask or an opacity below one is exactly what
+    /// sends a copy to a surface here, and drawing it anyway is how this
+    /// backend used to lose the layer altogether: masked by a mask that
+    /// hides nothing, the copy drew what hiding it drew.
+    ///
+    /// The renderer being matched hands the copy's mask and opacity down
+    /// as a coverage instead, which is a pass this one has no shape for —
+    /// its own masks ride the single coverage slot a layer already uses.
+    /// So the page goes back, which is the same answer a mask inside a
+    /// masked layer with an effect gets, and for the same reason.
+    ///
+    /// Three things asserted, and the last two are what keep the limit
+    /// honest: that the page is refused; that the *unworn* copy is still
+    /// drawn and drawn the reference renderer's way, so the refusal is no
+    /// wider than it needs to be; and that the two pictures really differ,
+    /// so what is declined is a wrong answer rather than a scruple.
+    #[test]
+    fn a_copy_of_an_adjustment_wearing_something_goes_back() {
+        let build = |dressed: bool| {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 48.0,
+                        height: 36.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.30,
+                        g: 0.55,
+                        b: 0.70,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let adj = add(
+                &mut doc,
+                Box::new(Node::adjustment(
+                    "darker",
+                    chitrakar_doc::Adjustment::Exposure { stops: -1.5 },
+                )),
+                Transform::default(),
+            );
+            let copy = add(
+                &mut doc,
+                Box::new(Node::instance("a copy of it", adj)),
+                Transform::default(),
+            );
+            if dressed {
+                doc.apply(Command::SetMask {
+                    id: copy,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 20.0,
+                                height: 20.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(8.0, 6.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            }
+            (doc, copy)
+        };
+
+        let (dressed, _) = build(true);
+        assert!(
+            !GpuRenderer::can_render(&dressed),
+            "a copy of an adjustment wearing a mask has to go back: it cannot \
+             be put on a surface of its own, and a mask is what would put it \
+             there"
+        );
+
+        // Declining is only worth something because the mask changes the
+        // picture, which is asked of the renderer that draws it correctly.
+        let (plain, copy) = build(false);
+        let mut hidden = dressed.clone();
+        hidden
+            .apply(Command::SetVisible {
+                id: copy,
+                visible: false,
+            })
+            .unwrap();
+        let (mean, _) = difference(
+            &chitrakar_render::render(&dressed).unwrap(),
+            &chitrakar_render::render(&hidden).unwrap(),
+        );
+        assert!(
+            mean > 0.01,
+            "the mask has to leave something of the copy showing or there is \
+             nothing to decline: {mean:.5} against the copy hidden"
+        );
+
+        // And no wider than it needs: undressed, it is drawn, the way the
+        // reference renderer draws it.
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        assert!(
+            GpuRenderer::can_render(&plain),
+            "a copy of an adjustment wearing nothing is still drawn"
+        );
+        let (mean, worst) = difference(
+            &gpu.render(&plain).unwrap(),
+            &chitrakar_render::render(&plain).unwrap(),
+        );
+        assert!(
+            mean < 0.004,
+            "undressed it draws what the reference draws: mean {mean:.5}, \
+             worst {worst:.3}"
+        );
     }
 }

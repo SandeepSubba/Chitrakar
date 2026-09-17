@@ -1406,6 +1406,46 @@ fn render_child(
                 // for anything. Where the copy draws the original entire
                 // this does not arise — `render_layer` draws the group,
                 // and the group isolates itself.
+                // A copy of an adjustment, a filter or a clone layer is a
+                // change to what is under it, and there is nothing under a
+                // surface of its own. Wearing a mask or any opacity below
+                // one is what sends a copy to a surface, so a copy of one
+                // of those *vanished* the moment it wore either: masked by
+                // a mask that hides nothing, it drew exactly what hiding it
+                // drew. The layer it copies has no such trouble — an
+                // adjustment takes its mask inside its own pass.
+                //
+                // So the copy's mask and opacity go down as a `Cover`,
+                // which is the same thing `draw_layer` hands an adjustment
+                // that is held to the layer below: render where it stands,
+                // then mix back by how much of the region is let through.
+                if rewrites_what_is_under_it(doc, child)
+                    && (node.mask.is_some() || node.opacity < 1.0)
+                {
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
+                        node.mask.as_ref(),
+                        parent,
+                        sub_clip,
+                        (dst.width, dst.height),
+                    );
+                    let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                    let (w, h) = (sub_clip.x1 - sub_clip.x0, sub_clip.y1 - sub_clip.y0);
+                    let mut alpha = Vec::with_capacity((w * h) as usize);
+                    for y in sub_clip.y0..sub_clip.y1 {
+                        for x in sub_clip.x0..sub_clip.x1 {
+                            alpha.push(coverage_at(doc, m, x, y) * node.opacity);
+                        }
+                    }
+                    let cover = Cover {
+                        alpha,
+                        origin: (sub_clip.x0, sub_clip.y0),
+                        width: w,
+                        height: h,
+                    };
+                    return draw_layer(doc, *of, dst, sub_clip, space, Some(&cover), None, bare)
+                        .map(|_| ());
+                }
                 let isolate = !stand_ins.is_empty() && any_reads_backdrop(doc, &stand_ins)?;
                 // A copy of an adjustment or a filter is a change to what
                 // is under it, and a blend means nothing to one: there is
@@ -16632,5 +16672,139 @@ mod tests {
             pages > 200 && rects > 1000,
             "only {pages} pages and {rects} rectangles were actually compared"
         );
+    }
+
+    /// A copy of an adjustment still adjusts when it wears something.
+    ///
+    /// An adjustment is not a picture laid over the page, it is a change
+    /// to what is under it — and a copy of one is the same thing, since
+    /// what a copy draws is the layer it copies. Neither can go on a
+    /// surface of its own: there is nothing under a fresh surface to
+    /// change.
+    ///
+    /// A mask or any opacity below one is exactly what sends a copy to a
+    /// surface, so a copy of an adjustment *vanished* the moment it wore
+    /// either. Masked by a mask that hides nothing it drew what hiding it
+    /// drew, to the last bit; at opacity 0.999 likewise. The layer it
+    /// copies has no such trouble, because an adjustment takes its mask
+    /// inside its own pass — which is what says this is the copy's fault
+    /// and not the mask's.
+    ///
+    /// So the copy's mask and opacity go down as a `Cover`, the same thing
+    /// an adjustment held to the layer below is given: render where it
+    /// stands, then mix back by how much of the region is let through.
+    ///
+    /// Found by asking a question that follows from what a mask is — a
+    /// mask that hides nothing is no mask — over pages nobody wrote.
+    #[test]
+    fn a_copy_of_an_adjustment_still_adjusts_when_it_wears_something() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled_rect(
+                "ground",
+                48.0,
+                36.0,
+                AuthoredColor::Srgb {
+                    r: 0.30,
+                    g: 0.55,
+                    b: 0.70,
+                    a: 1.0,
+                },
+            ),
+        );
+        let adj = add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "darker",
+                Adjustment::Exposure { stops: -1.5 },
+            )),
+        );
+        let copy = add(&mut doc, Box::new(Node::instance("a copy of it", adj)));
+        let middle = |d: &Document| {
+            let s = render(d).unwrap();
+            let p = &s.pixels[18 * 48 + 24];
+            [p.r, p.g, p.b]
+        };
+        let applied = middle(&doc);
+        let mut without = doc.clone();
+        without
+            .apply(Command::SetVisible {
+                id: copy,
+                visible: false,
+            })
+            .unwrap();
+        let hidden = middle(&without);
+        // The tie: the copy has to be doing something, or every claim
+        // below is true of a layer that draws nothing at all — which is
+        // precisely the broken answer.
+        assert!(
+            (applied[0] - hidden[0]).abs() > 0.01,
+            "the copy of the adjustment has to change the page: {applied:?} against {hidden:?}"
+        );
+
+        let everything = || {
+            Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 4000.0,
+                        height: 4000.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(-2000.0, -2000.0),
+                },
+                invert: false,
+                feather: 0.0,
+            }))
+        };
+        let mut masked = doc.clone();
+        masked
+            .apply(Command::SetMask {
+                id: copy,
+                mask: everything(),
+            })
+            .unwrap();
+        let through = middle(&masked);
+        for i in 0..3 {
+            assert!(
+                (through[i] - applied[i]).abs() < 1e-4,
+                "masked by a mask that hides nothing the copy gives {through:?} \
+                 where unmasked it gives {applied:?} — and hiding it gives \
+                 {hidden:?}, which is what it used to give"
+            );
+        }
+
+        let mut faded = doc.clone();
+        faded
+            .apply(Command::SetOpacity {
+                id: copy,
+                opacity: 0.999,
+            })
+            .unwrap();
+        let nearly = middle(&faded);
+        for i in 0..3 {
+            assert!(
+                (nearly[i] - applied[i]).abs() < 2e-3,
+                "at opacity 0.999 the copy gives {nearly:?} where at one it \
+                 gives {applied:?}"
+            );
+        }
+
+        // And half way is half way, rather than one end or the other.
+        let mut half = doc.clone();
+        half.apply(Command::SetOpacity {
+            id: copy,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let mid = middle(&half);
+        for i in 0..3 {
+            let want = (applied[i] + hidden[i]) / 2.0;
+            assert!(
+                (mid[i] - want).abs() < 0.02,
+                "at half opacity the copy gives {mid:?}, which is not between \
+                 {applied:?} and {hidden:?}"
+            );
+        }
     }
 }
