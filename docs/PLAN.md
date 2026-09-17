@@ -3545,10 +3545,33 @@ without reading anything else.*
      pixel, computed from its placement. The plain path is the right one.
      It wants a mask *and* a blend *and* a part-covered edge, which is why
      it is nine pages of two thousand and never more than eleven pixels;
-     it is not raster-only (seeds 398 and 413 are vectors); and a
-     hard-edged mask takes no plane, being read per pixel through
-     `coverage_at`, so whatever is wrong is in that reading at the
-     surface's own edge rather than in a cached plane. The hand-built case is
+     it is not raster-only (seeds 398 and 413 are vectors).
+     It reproduces by hand now, which is the part that moves this on: a
+     rect at (21.2168, 21.41), a vector mask whose edge falls inside the
+     layer's own first column, and a blend. **The fourth ingredient is a
+     `feather`.** At feather zero the two paths agree exactly (0.3133 and
+     0.3133); at any feather at all they do not (0.3713 against 0.3829).
+     `invert` only decides the direction — with it the blended page loses
+     where without it the blended page gains — which is why the first
+     measurements read as "gains" and the seed that prompted them happens
+     to carry `invert: true`.
+     Three mechanisms were proposed and all three were measured and
+     ruled out, which is worth recording so they are not proposed again:
+     it is **not** the surface being too small for the softening (growing
+     `pad` by the feather's own reach changes nothing); it is **not** the
+     blur, since feathers of 0.0398, 0.3 and 1.0 give *identical* numbers
+     where their box radii differ, and only 3.0 moves them; and it is not
+     the mask being dropped wholesale, since the mask plainly applies in
+     both paths and only differs.
+     Where to look next, with the reproduction in hand rather than a
+     seed: `MaskPlane::at` answers **1.0** — "a mask that shows
+     everything" — for any pixel outside the plane's own rectangle, and
+     the plane's rectangle is grown from the clip and then clamped to the
+     surface being drawn on. A layer on its own surface and the same
+     layer on the page are two different rectangles. That is a smell
+     rather than a demonstration; the next step is to print the plane's
+     clip and its values on both paths for the reproduction above, which
+     is a few lines and settles it. The hand-built case is
      (`a_copy_of_a_filter_draws_the_same_whatever_blend_it_wears`), and it
      asks the tie as well as the claim: the copy has to *change* the page,
      or "the same whatever blend it wears" is true of a layer that draws
