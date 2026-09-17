@@ -660,6 +660,34 @@ pub fn everything() -> Fixture {
         transform: Transform::translation(56.0, 40.0),
     })
     .unwrap();
+    // An effect on the *frame*. Every effect in this document has hung on
+    // a layer or on a group, and a frame is neither: it is the one kind
+    // whose silhouette is not what it drew but the rectangle it cuts what
+    // it drew to. Nothing here had ever asked what an effect makes of
+    // that — and until an hour ago nothing could, since the GPU backend
+    // handed such a page back and would have declined the whole fixture
+    // with one on it.
+    //
+    // The shadow falls up and to the left, away from the page's edge:
+    // the frame sits at (56, 40) on an 80 by 60 page, so a shadow cast
+    // down and to the right would be mostly off it and would be asking
+    // about clipping rather than about frames.
+    doc.apply(Command::SetEffects {
+        id: frame,
+        effects: vec![Effect::DropShadow {
+            dx: -3.0,
+            dy: -2.0,
+            blur: 1.5,
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.05,
+                g: 0.05,
+                b: 0.15,
+                a: 0.9,
+            },
+            opacity: 0.7,
+        }],
+    })
+    .unwrap();
     // A group inside the frame, with a shape inside that: an empty frame
     // is a coloured rectangle and says nothing about being a frame, and
     // nothing else here is nested two deep. So this one layer answers

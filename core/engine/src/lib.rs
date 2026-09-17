@@ -8878,6 +8878,26 @@ mod tests {
                 ),
                 _ => (false, false, false, false),
             };
+            // And where the *copy* lands, which is not the same question.
+            // A paste is nudged so it does not hide behind the original,
+            // so a layer that cleared the page's right and bottom edges by
+            // less than that nudge hangs off them once pasted — its effect
+            // is then cut where the original's was not, and the two draw
+            // different pictures for a reason that is nobody's defect. The
+            // exclusion used to be worked out from the sent layer alone,
+            // which held until a frame with a shadow went into the shared
+            // fixture: it sits at (56, 40) on a page 80 by 60 and clears
+            // every edge, and its paste does not.
+            // Only the right and the bottom: the nudge is positive on
+            // both axes, so a paste can only ever hang off those two by
+            // more than the original did.
+            let over = match chitrakar_render::node_bounds(from.document(), id) {
+                Ok(chitrakar_render::Bounds::Rect(_, _, x1, y1)) if reach > 0.0 => (
+                    x1 + by as f32 > f.doc.meta.width as f32,
+                    y1 + by as f32 > f.doc.meta.height as f32,
+                ),
+                _ => (false, false),
+            };
             let band = reach.ceil() as u32;
             let (w, h) = (f.doc.meta.width, f.doc.meta.height);
             let cut_here = |x: u32, y: u32| {
@@ -8885,6 +8905,9 @@ mod tests {
                     || (cut.1 && y < band)
                     || (cut.2 && x + band >= w)
                     || (cut.3 && y + band >= h)
+                    // The same bands, read where the copy actually landed.
+                    || (over.0 && x + by + band >= w)
+                    || (over.1 && y + by + band >= h)
             };
             let mut worst = (0.0f32, 0u32, 0u32);
             for y in 0..(f.doc.meta.height - by) {

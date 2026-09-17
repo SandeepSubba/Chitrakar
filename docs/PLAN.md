@@ -3035,6 +3035,46 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The seventeenth was **an effect on a frame**, which could not have
+     gone in an hour earlier: the backend handed such a page back, and
+     one refused layer declines the whole fixture. Every effect in this
+     document had hung on a layer or on a group, and a frame is neither —
+     it is the one kind whose silhouette is not what it drew but the
+     rectangle it cuts what it drew to.
+     Two audits stopped holding, and neither was a defect. Both were
+     tests whose *instrument* was narrower than they read.
+     `every_kind_of_layer_survives_the_clipboard` excludes the bands near
+     a page edge where an effect would be cut, and worked them out from
+     where the layer was **sent** — but a paste is nudged so it does not
+     hide behind the original, so a layer clearing the right and bottom
+     edges by less than that nudge hangs off them once pasted. The frame
+     sits at (56, 40) on a page 80 by 60 and clears every edge; its paste
+     does not. The exclusion reads both places now.
+     `a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put` asked for
+     an exact box of every pixel above zero alpha, and a blur has no such
+     box: it reaches every way from what it blurs, and the far side picks
+     up a tail — nine ten-thousandths of a channel here. **That tail
+     nearly went down as a defect.** Drawn as ASCII with anything above
+     zero as ink, it looks like structure: a band eight pixels wide on
+     the side the shadow does *not* fall towards, and specks below the
+     frame in a suspicious pattern. Reading the alpha instead of the
+     picture ended it in one measurement. The threshold was the finding,
+     not the renderer — the same shape of mistake as the fail-fast count
+     and the "clippy ok" printed over a compile error, all three in one
+     session, and all three the instrument rather than the thing.
+     The test asks two sharper questions now instead of one loose one.
+     The cut and the ground are asked of the frame with its shadow off,
+     where the box is exact and stays exact. The shadow is asked as a
+     *direction*: what the copy draws above 0.95 alpha is still the
+     frame's box, since a shadow cast at 0.7 of a 0.9 colour cannot
+     reach there and a ground is opaque; and the faint reach is longer up
+     and to the left than down and to the right, which is what the offset
+     decides and what no tail can fake.
+     What the shape is worth, measured rather than assumed: break the
+     backend's frame close again and **three** tests fail — the one
+     written for it, and two audits over this document that could not
+     have noticed before, since there was no effect on a frame here to
+     notice with.
      The per-layer reading was then pointed at **pages nobody wrote**,
      since a random page is mostly small layers and the dilution there is
      worse than the fixture's. It does not transfer, and why it does not

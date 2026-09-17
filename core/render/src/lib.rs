@@ -9782,7 +9782,20 @@ mod tests {
         // The frame is 20 by 14 and the copy is put at (2, 44). Every
         // pixel of that box changes and not one outside it: the ground
         // fills it, and the cut holds.
-        let (n, box_) = changed(&f.doc);
+        //
+        // Asked of the frame with its shadow taken off, because the cut
+        // and the ground are what this is about and a shadow reaches
+        // past both of them. What the shadow does is asked below rather
+        // than folded in here, where it would only widen a box this test
+        // wants exact.
+        let mut plain = f.doc.clone();
+        plain
+            .apply(Command::SetEffects {
+                id: f.frame,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        let (n, box_) = changed(&plain);
         assert_eq!(
             box_,
             Some([2, 44, 21, 57]),
@@ -9790,9 +9803,66 @@ mod tests {
         );
         assert_eq!(n, 20 * 14, "and fills it, which is the frame's ground");
 
+        // And the copy carries the original's shadow, cast at the copy's
+        // place: a copy is a window onto a layer, and an effect is part
+        // of what that layer draws.
+        //
+        // Asked as a *direction* rather than as a box. A blur reaches
+        // every way from what it blurs, so the far sides pick up a tail
+        // — down to nine ten-thousandths of a channel here — and a box
+        // drawn round every pixel above zero is really a picture of where
+        // that tail dies out, which is not what this is about. What the
+        // offset decides is that there is more of it up and to the left
+        // than down and to the right. Reading the box as the finding
+        // rather than as the instrument is how this nearly went down as
+        // a defect.
+        let reaches = |doc: &Document, min: f32| -> [u32; 4] {
+            let mut surface = Surface::new(doc.meta.width, doc.meta.height);
+            let clip = surface.full_clip();
+            render_showing_at(
+                doc,
+                &mut surface,
+                clip,
+                Transform::default(),
+                Showing::Alone(f.frame_copy),
+            )
+            .unwrap();
+            let mut b = [u32::MAX, u32::MAX, 0, 0];
+            for y in 0..surface.height {
+                for x in 0..surface.width {
+                    if surface.get(x, y).a <= min {
+                        continue;
+                    }
+                    b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                }
+            }
+            b
+        };
+        // Above what the shadow itself can reach: it is cast at 0.7 of a
+        // colour with 0.9 alpha, so nothing of it clears 0.95, and the
+        // frame's ground is opaque.
+        let solid = reaches(&f.doc, 0.95);
+        assert_eq!(
+            solid,
+            [2, 44, 21, 57],
+            "what the copy draws opaquely is still the frame's box at the \
+             copy's place — a shadow goes behind a layer, not over it"
+        );
+        let faint = reaches(&f.doc, 0.01);
+        let (left, up) = (2 - faint[0], 44 - faint[1]);
+        let (right, down) = (faint[2] - 21, faint[3] - 57);
+        assert!(
+            left > right && up > down,
+            "the shadow falls up and to the left, so it has to reach \
+             further that way: {left} left against {right} right, {up} up \
+             against {down} down"
+        );
+
         // Made wider, the frame takes the copy with it — the copy has no
-        // size of its own to disagree with.
-        let mut doc = f.doc.clone();
+        // size of its own to disagree with. Asked of the frame with its
+        // shadow off, for the reason above: this is about the copy's
+        // width, and a blur has no edge to measure one against.
+        let mut doc = plain.clone();
         let NodeKind::Artboard {
             width,
             height,
