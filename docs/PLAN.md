@@ -3671,10 +3671,32 @@ without reading anything else.*
      handed down is a pass it has no shape for — the page goes back, which
      is the answer a mask inside a masked layer with an effect already
      gets. Sixteen more pages declined of two thousand, 1374 drawn.
-     Two are left of six hundred and both are narrower than what was
-     fixed: a copy of a *copy* of an adjustment, where the chain wants the
-     cover carried through more than one link, and one pixel on a copy of
-     a masked raster. Neither moved when the fix went in.
+     What is left is a **second seam, wider than it first looked**, and
+     the way it was nearly missed is the lesson. The sweep that found the
+     adjustment defect only masked layers that nothing copied, and only
+     two a page. Masking *every* leaf instead says six pages of six
+     hundred still change when a mask that hides nothing goes on — and
+     they are copies of a **raster, a vector and another copy**, not of
+     adjustments at all. Worst 0.2955 on a single pixel, 0.1060 over
+     eighty-seven, 0.1792 over twelve hundred. A copy drawn on a surface
+     of its own is not the same picture as the same copy drawn straight,
+     and a mask is what sends it to one.
+     That is why the invariant is not a test yet, and the draft of it is
+     worth recording as a warning rather than committed: written with the
+     narrower sweep's filter, `a_mask_that_hides_nothing_is_no_mask`
+     **passed with both of the fixes it was written for taken out**. Two
+     layers a page, lowest-numbered first, and a copy is rarely the lowest
+     — so it masked the ground and its neighbour and asked nothing. It
+     bites at once when it masks every leaf.
+     One change was written for the chain case and **withdrawn for want of
+     evidence**, which is worth saying plainly: making `draw_layer` ask
+     `rewrites_what_is_under_it` rather than `matches!(node.kind, ...)`
+     looks like the obvious generalisation, reads well, and moves not one
+     page of six hundred either way. It was kept only as long as the
+     narrow sweep seemed to say 2 → 0, and that 2 → 0 was the filter
+     rather than the fix. Three times today a plausible change to this
+     renderer has had to be measured before it could be believed, and
+     twice the measurement said no.
      And the leaf-picking in that sweep had to be sorted before any of it
      could be trusted — the same `HashMap` order that cost a wrong reading
      of seed 2854 gave a different set of failures on each run until it
