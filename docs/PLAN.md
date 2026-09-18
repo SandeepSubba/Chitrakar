@@ -3110,8 +3110,22 @@ without reading anything else.*
      *drawn*, by ignoring the effect as the reference always has. Handing
      a page back over an effect that changes nothing was a page declined
      for no reason.
-     What is left is two pages of a hundred and fifty at 0.009 and 0.011 —
-     edge residue below the threshold, recorded rather than chased.
+     What is left is two pages of a hundred and fifty at 0.009 and 0.011,
+     and they are worth a sharper description than "edge residue" because
+     the obvious reading of them is wrong. **The layer wearing the no-op
+     effect is drawn bit-identically** — rendered alone, with the effect
+     and without, not one pixel differs on either page. What changes is
+     what something *else* reads from it: on seed 129 a **copy** of that
+     layer, and on seed 122 a **clip run** held to it. So the residue is
+     not the layer's own edge at all; it is that a copy and a captured
+     cover both go through the layer's surface, and an effect grows that
+     surface's extent by its own reach even when it draws nothing.
+     Under the threshold the committed test uses, and left there
+     deliberately: the two readings are 0.009 and 0.011, and chasing them
+     means changing how an extent is grown, which is four places this
+     session has already had to fix once each. Written down with the
+     measurement so the next attempt starts from it rather than from the
+     word "edge".
      The filters were all clean: a blur of no radius, a sharpen of no
      amount, a motion blur of no distance, noise of no amount, a vignette
      of no amount and a pixelation of one pixel each leave the page alone
