@@ -3075,6 +3075,38 @@ without reading anything else.*
      written for it, and two audits over this document that could not
      have noticed before, since there was no effect on a frame here to
      notice with.
+     An invariant was written, measured, and **thrown away**, and what it
+     cost to find that out is the useful part. **A group that isolates
+     nothing is no group**: a plain group — opacity one, blend Normal, no
+     mask, holding nothing that reads what is under it — wrapped round a
+     run of layers must leave the page exactly as it was. It is
+     definitional, it needs no second renderer, and it is cheap. Two
+     hundred and forty-seven pages of six hundred qualified after the
+     exclusions were made honest (a blend inside a group meets the
+     group's contents and not the page, which is a real difference; a
+     clip run must not cross the boundary, or its base is left outside),
+     and it found nothing.
+     Finding nothing is not the reason it was thrown away. It was thrown
+     away because of what happened when the code it nominally watches was
+     broken: **stop clip runs forming altogether and it still reports
+     nothing wrong**, while thirteen other tests fail. It cannot see a
+     total break of the machinery it is supposed to cover.
+     The reason is worth keeping, because it generalises to every
+     invariant of this shape. A differential invariant renders the same
+     page two ways and compares — so it is blind to anything that moves
+     both sides equally. It pays only where the two sides take *different
+     paths*. The ones that have paid this session do: a mask sends a
+     layer to a surface of its own, so masked and unmasked are different
+     code; taking a blend off changes the surface decision, so blended and
+     plain are different code. Grouping does not, and cannot, because
+     source-over is associative — an isolated plain group and a flat run
+     of layers are *proved* equal by the arithmetic, which is exactly why
+     wrapping one changes nothing and exactly why the test can find
+     nothing. The invariant is true, cheap, and worthless.
+     So the question to ask of a proposed invariant before writing it is
+     not "is it true" but "**do the two sides go down different code**".
+     If the answer is no, it is a theorem about the arithmetic rather than
+     a test of the renderer.
      The per-layer reading was then pointed at **pages nobody wrote**,
      since a random page is mostly small layers and the dilution there is
      worse than the fixture's. It does not transfer, and why it does not
