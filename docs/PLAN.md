@@ -5221,13 +5221,42 @@ chitrakar/
 - Platform file integration (Files app, Android SAF, share sheets).
 
 ### Phase 5 — Depth (ongoing)
-- Pen tool + full path editing; boolean operations on shapes.
+- Pen tool + full path editing; boolean operations on shapes ✅. The pen
+  draws straight and smooth segments and closes a path; an anchor can be
+  put onto a line where it already runs and taken off again
+  (`Session::insert_anchor` / `remove_anchor`,
+  `adding_an_anchor_leaves_the_path_where_it_was`,
+  `an_anchor_on_a_brushed_line_keeps_the_widths_lined_up`); and union,
+  difference and intersection combine two shapes into one layer
+  (`Session::boolean_nodes` over `chitrakar_render::boolean`,
+  `booleans_combine_two_shapes_into_one_layer`,
+  `shapes_that_share_an_edge_still_combine`,
+  `combining_shapes_keeps_the_shape_that_was_combined`). The same
+  booleans are what add, subtract and intersect a *selection*.
+  This line carried no tick for a long time after the work was done,
+  which is worth a word: a roadmap that under-reports is not harmless.
+  A fresh session reads it as work outstanding and either redoes it or
+  goes looking for what is missing, and both cost more than the tick.
 - Text objects ✅ first pass: live TextSpec nodes (string, size, color as
   document state; glyphs rasterize at render time via ab_glyph + bundled
   DejaVu Sans, kerned per-glyph layout with newline support), blitted through
   the node transform with mask/opacity/blend support; Text tool click-places,
   panel edits content/size/color with gesture preview; resize handles work.
-  Proper shaping (`rustybuzz`/`parley`), font choice, and weights pending.
+  Proper shaping, font choice and weights ✅, all three, and this line
+  said "pending" long after they landed. The shaping is `rustybuzz`, and
+  it is the font's say over what the text becomes rather than a walk
+  along the characters: `fi` is one glyph, `office` is four, `AV` sets
+  closer than its advances add up to, and `e` plus a combining acute is
+  the same single glyph as the precomposed `é`
+  (`the_font_shapes_the_line_rather_than_the_characters`, which catches a
+  shaper put back to one glyph per codepoint — checked by doing exactly
+  that). A block names its face, and a weight or a lean the face cannot
+  supply is synthesized rather than dropped: an oblique twin is used
+  where one is registered and a lean or a thickening is applied where it
+  is not (`italic_leans_the_glyphs_when_no_oblique_face_exists`,
+  `bold_thickens_the_glyphs_when_no_bold_face_exists`). `parley` is not
+  used and is not wanted: line breaking, alignment and wrapping are
+  `text::set`'s own and are tested there.
 - Brush engine for raster painting ✅ first pass: a paint layer holding
   live strokes (line, per-point radius, colour, soft edge, erase), each
   one removable. Clone and heal ✅ as non-destructive ops: a clone layer
