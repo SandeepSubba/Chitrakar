@@ -3035,6 +3035,32 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The nineteenth was **a text block that wraps**, and it **holds**
+     rather than earns — which is worth recording as plainly as the ones
+     that found something. Every text block this document had held was
+     one short word on one line, leaving the whole multi-line path
+     unasked here: a line count, a line height, a second baseline, and in
+     the SVG exporter a tspan of its own per line anchored at the
+     alignment's x. Centred as well as wrapped, since alignment means
+     nothing until a line is shorter than the block it sits in.
+     Every audit held. So, the rule, the code it was meant to exercise
+     was broken — twice, on the two things the shape newly asks. Make
+     every line left-aligned in the renderer and two tests fail, both
+     written for alignment. Make the *SVG exporter* ignore alignment and
+     one fails, on the markup. So both halves were already pinned, and
+     the shape adds reach rather than an assertion: a wrapped, centred,
+     two-line block now travels through the file round trip, the
+     clipboard, the undo runs, the dirty-region audit and both exporters,
+     none of which had ever carried one.
+     One thing the sabotage turned up that is worth keeping. The resvg
+     witness draws the shared fixture and **can** see the text — drop it
+     from the export entirely and the witness fails — but it cannot see
+     the text *move* under an alignment change. So SVG alignment is
+     pinned by the markup and not by the picture. That is the same shape
+     of blind spot as the GPU fixture audit's, where a glyph has no
+     interior to compare, and it is recorded rather than closed: the
+     markup assertion does catch it, and a second witness for the same
+     property would be belt over braces.
      The eighteenth was **an adjustment stated by a ramp of colours**, and
      it found a defect by the plainest route in this whole method: asking
      what the document had never held and then reading the code that

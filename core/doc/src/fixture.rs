@@ -512,7 +512,16 @@ pub fn everything() -> Fixture {
         index: 3,
         node: Box::new(Node::text("words", {
             let mut spec = TextSpec::new(
-                "Agile",
+                // Two words and a width, so the block *wraps*. Every text
+                // block this document has held was one short word on one
+                // line, which left the whole of the multi-line path
+                // unasked here: a line count, a line height, a second
+                // baseline, and — in the SVG exporter — a tspan of its
+                // own per line anchored at the alignment's x. Centred for
+                // the same reason: alignment only means something once a
+                // line is shorter than the block it sits in, so on one
+                // full line it cannot be told from the default.
+                "Agile mark",
                 18.0,
                 chitrakar_color::AuthoredColor::Srgb {
                     r: 0.05,
@@ -528,6 +537,8 @@ pub fn everything() -> Fixture {
             // and the only text here that is drawn in more than one
             // pass. Its own colour and weight, so the difference
             // shows on the page rather than only in the file.
+            spec.width = 30.0;
+            spec.align = crate::TextAlign::Center;
             spec.runs = vec![StyleRun {
                 start: 1,
                 end: 4,
