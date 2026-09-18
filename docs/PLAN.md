@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~481),
+- **Verify before committing:** `cargo test --workspace` (~482),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3075,6 +3075,36 @@ without reading anything else.*
      written for it, and two audits over this document that could not
      have noticed before, since there was no effect on a frame here to
      notice with.
+     The same question asked of everything *else* that touches a pixel
+     found the same defect in two more places, and one of them is worse
+     than the adjustments were. **Every blend but `Normal` crushed the
+     highlights it met.** A blend is written in the display encoding, and
+     that encoding stops at white, so the channels were held there before
+     the blend function ever saw them: `Lighten` of a half grey over a
+     ground at 2.415 came back **1.000** — a maximum that made the
+     picture darker. Screen, Overlay, Difference and Luminosity the same.
+     sRGB's curve is a power law and runs on past one happily, so the fix
+     is to let it: below white the table still answers, above it the real
+     function does, and the two meet at the join.
+     Not by changing `linear_to_srgb`, which holds everything from white
+     upwards *at* white on purpose — at one, `1.055 · 1 − 0.055` is a
+     rounding short of one in f32, and colour burn's "is the backdrop
+     white" branch has to be able to ask. That exactness is load-bearing
+     and stays where it is; the blend path carries its own extension.
+     And **sharpen**, which held its premultiplied channels to the alpha
+     they are a share of — true of display-referred colour and false
+     here. A ground two stops up came back at one, the filter throwing
+     away what the exposure above it had been keeping. Blur, pixelate,
+     vignette, the shadows and the outline were all clean.
+     The sharpest assertion in the test is `Lighten`, because `max` can
+     only be wrong one way: what comes back cannot be less than the
+     brighter of the two, and no argument about encodings or rounding
+     excuses less. That one line would have caught this on the day the
+     blend path was written.
+     Both renderers again, and again the cross-renderer audit was the
+     only test that failed when the reference was fixed — twice over, once
+     for the blends and once for sharpen. Nothing below white moved
+     either time.
      The rule from that discarded invariant paid at once. **An adjustment
      at its neutral setting is no adjustment** — the two sides plainly go
      down different code, since with the layer the whole page under it

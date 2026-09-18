@@ -462,7 +462,12 @@ fn shown3(c: vec3f, a: f32) -> vec3f {
     if a <= 0.0 {
         return vec3f(0.0, 0.0, 0.0);
     }
-    let s = clamp(c / a, vec3f(0.0), vec3f(1.0));
+    // Held at nothing below and let run above: a display encoding stops
+    // at white, but the light this engine carries does not, and holding
+    // a channel at one here made every blend but Normal a highlight
+    // crusher — `Lighten` of a half grey over a ground at 2.415 came
+    // back 1.000. The curve is a power law and carries on happily.
+    let s = max(c / a, vec3f(0.0));
     return vec3f(to_shown(s.r), to_shown(s.g), to_shown(s.b));
 }
 
@@ -585,7 +590,7 @@ fn fs_blend(in: ImageOut) -> @location(0) vec4f {
     let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
     let sa = src.a;
     let da = dst.a;
-    let b = clamp(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0), vec3f(1.0));
+    let b = max(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0));
     let light = vec3f(to_light(b.r), to_light(b.g), to_light(b.b));
     // W3C compositing: (1-da)*s + (1-sa)*d + sa*da*B, all premultiplied.
     return vec4f(
@@ -1118,7 +1123,7 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
     let src = lifted * cover;
     let sa = src.a;
     let da = dst.a;
-    let b = clamp(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0), vec3f(1.0));
+    let b = max(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0));
     let light = vec3f(to_light(b.r), to_light(b.g), to_light(b.b));
     return vec4f(
         (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
@@ -1390,11 +1395,12 @@ fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
     if in.params.x == 0.0 {
         return mix(was, soft, weight);
     }
-    // Premultiplied, so the channels are clamped to the alpha they are a
-    // share of; the layer's weight goes into the amount rather than into
-    // a mix, which is where the two readings differ once a channel
-    // clips.
+    // Premultiplied, held at nothing below and let run above the alpha
+    // they are a share of: light does not stop at white here, and
+    // holding them there meant sharpening a ground two stops up brought
+    // it back to one. The layer's weight goes into the amount rather
+    // than into a mix, which is where the two readings differ.
     let amount = in.params.x * weight;
-    let out = clamp(was.rgb + (was.rgb - soft.rgb) * amount, vec3f(0.0), vec3f(max(was.a, 0.0)));
+    let out = max(was.rgb + (was.rgb - soft.rgb) * amount, vec3f(0.0));
     return vec4f(out, was.a);
 }

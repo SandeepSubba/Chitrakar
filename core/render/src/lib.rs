@@ -2395,6 +2395,42 @@ fn shown_value(v: f32) -> f32 {
     on_curve(&transfer().to_shown, v.clamp(0.0, 1.0))
 }
 
+/// The display encoding, and back, for values that may stand above
+/// white.
+///
+/// The tables run from nothing to white, because that is where a display
+/// encoding is defined — so reading one held a channel above white at
+/// white, and a blend is written in that encoding. Every blend but
+/// `Normal` therefore crushed the highlights it met: `Lighten` of a half
+/// grey over a ground at 2.415 came back 1.000, which is a maximum that
+/// made a picture darker. sRGB's own curve is a power law and is happily
+/// monotone past one, so above white the real function answers and the
+/// two agree exactly at the join. Below it the table still serves, which
+/// is what it was built for — a blend is the dearest thing this renderer
+/// does per pixel.
+fn shown_of(t: &Transfer, v: f32) -> f32 {
+    if v > 1.0 {
+        // The power law itself rather than `linear_to_srgb`, which holds
+        // everything from white upwards *at* white on purpose: at one,
+        // `1.055 * 1 - 0.055` is a rounding short of one in f32, and
+        // colour burn's "is the backdrop white" branch has to be able to
+        // ask. That exactness is worth keeping where it is; what is
+        // wanted here is the curve carrying on, and the two agree to
+        // within that same rounding at the join.
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    } else {
+        on_curve(&t.to_shown, v)
+    }
+}
+
+fn light_of(t: &Transfer, v: f32) -> f32 {
+    if v > 1.0 {
+        chitrakar_color::srgb_to_linear(v)
+    } else {
+        on_curve(&t.to_linear, v)
+    }
+}
+
 fn on_curve(table: &Curve, v: f32) -> f32 {
     let x = v.clamp(0.0, 1.0) * CURVE_STEPS as f32;
     // Held to the table's own last entry before either is read, so the
@@ -2408,8 +2444,8 @@ fn on_curve(table: &Curve, v: f32) -> f32 {
 
 /// The channels a blend function sees: unpremultiplied and in the
 /// display encoding, which is the space the spec is written in.
-fn shown(table: &Curve, v: f32, a: f32) -> f32 {
-    straight(table, v, recip(a))
+fn shown(t: &Transfer, v: f32, a: f32) -> f32 {
+    straight(t, v, recip(a))
 }
 
 /// One over `a`, or nothing at all when there is no `a` — the shape a
@@ -2425,8 +2461,8 @@ fn recip(a: f32) -> f32 {
 
 /// A premultiplied channel as the value a device shows, given one over
 /// its own alpha.
-fn straight(table: &Curve, v: f32, inv: f32) -> f32 {
-    on_curve(table, (v * inv).clamp(0.0, 1.0))
+fn straight(t: &Transfer, v: f32, inv: f32) -> f32 {
+    shown_of(t, (v * inv).max(0.0))
 }
 
 fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> LinearRgba {
@@ -2434,7 +2470,6 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     // Once per pixel rather than once per crossing: consulting the lock
     // the tables live behind costs more than reading from them.
     let t = transfer();
-    let (to, from) = (&t.to_shown, &t.to_linear);
     // Straight alpha is what a blend reads, and dividing by it is six
     // divisions a pixel — two reciprocals and six multiplies instead,
     // which on eight million pixels is a fifth of what the blend costs.
@@ -2453,7 +2488,7 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     // out above one goes the long way round and is treated as it always
     // was.
     if sa == 1.0 && da == 1.0 {
-        let mix = |s: f32, d: f32| on_curve(from, f(on_curve(to, s), on_curve(to, d)));
+        let mix = |s: f32, d: f32| light_of(t, f(shown_of(t, s), shown_of(t, d)));
         return LinearRgba {
             r: mix(src.r, dst.r),
             g: mix(src.g, dst.g),
@@ -2463,7 +2498,7 @@ fn separable(src: LinearRgba, dst: LinearRgba, f: impl Fn(f32, f32) -> f32) -> L
     }
     let (si, di) = (recip(sa), recip(da));
     let mix = |s: f32, d: f32| {
-        let blended = on_curve(from, f(straight(to, s, si), straight(to, d, di)));
+        let blended = light_of(t, f(straight(t, s, si), straight(t, d, di)));
         // W3C compositing: result = (1-da)*s + (1-sa)*d + sa*da*B
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
@@ -2484,7 +2519,6 @@ fn non_separable(
 ) -> LinearRgba {
     let (sa, da) = (src.a, dst.a);
     let t = transfer();
-    let (to, from) = (&t.to_shown, &t.to_linear);
     // The same reservation as the separable ones above: both opaque and
     // one over one is one, and the compositing weights come out 0, 0 and
     // 1, so the answer is the blended value.
@@ -2495,26 +2529,26 @@ fn non_separable(
         (recip(sa), recip(da))
     };
     let s = [
-        straight(to, src.r, si),
-        straight(to, src.g, si),
-        straight(to, src.b, si),
+        straight(t, src.r, si),
+        straight(t, src.g, si),
+        straight(t, src.b, si),
     ];
     let d = [
-        straight(to, dst.r, di),
-        straight(to, dst.g, di),
-        straight(to, dst.b, di),
+        straight(t, dst.r, di),
+        straight(t, dst.g, di),
+        straight(t, dst.b, di),
     ];
     let b = f(s, d);
     if opaque {
         return LinearRgba {
-            r: on_curve(from, b[0]),
-            g: on_curve(from, b[1]),
-            b: on_curve(from, b[2]),
+            r: light_of(t, b[0]),
+            g: light_of(t, b[1]),
+            b: light_of(t, b[2]),
             a: 1.0,
         };
     }
     let mix = |i: usize, s: f32, d: f32| {
-        let blended = on_curve(from, b[i]);
+        let blended = light_of(t, b[i]);
         (1.0 - da) * s + (1.0 - sa) * d + sa * da * blended
     };
     LinearRgba {
@@ -3984,7 +4018,6 @@ fn ramp(stops: &[(f32, LinearRgba)], t: f32) -> LinearRgba {
 /// out of the door.
 fn mix_shown(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
     let tr = transfer();
-    let (to, from) = (&tr.to_shown, &tr.to_linear);
     let alpha = a.a + (b.a - a.a) * t;
     if alpha <= 0.0 {
         return LinearRgba::TRANSPARENT;
@@ -3992,8 +4025,8 @@ fn mix_shown(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
     // Unpremultiplied on the way in, premultiplied again on the way out,
     // so a stop's colour mixes as the colour it was authored as.
     let mix = |x: f32, y: f32| {
-        let (s, d) = (shown(to, x, a.a), shown(to, y, b.a));
-        on_curve(from, s + (d - s) * t) * alpha
+        let (s, d) = (shown(tr, x, a.a), shown(tr, y, b.a));
+        light_of(tr, s + (d - s) * t) * alpha
     };
     LinearRgba {
         r: mix(a.r, b.r),
@@ -5362,8 +5395,13 @@ fn apply_filter(
             blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
             mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
                 let amt = amount * opacity * coverage_at(doc, mask, x, y);
-                // Unsharp mask; keep alpha, clamp premultiplied channels to it.
-                let un = |ov: f32, bv: f32, a: f32| (ov + amt * (ov - bv)).clamp(0.0, a.max(0.0));
+                // Unsharp mask, holding the premultiplied channels at
+                // nothing below and letting them run above. Held to the
+                // alpha they would be if light stopped at white, which
+                // here it does not: sharpening a ground two stops up used
+                // to come back at one, the filter throwing away what the
+                // exposure above it had been keeping.
+                let un = |ov: f32, bv: f32, _a: f32| (ov + amt * (ov - bv)).max(0.0);
                 LinearRgba {
                     r: un(o.r, blurred.r, o.a),
                     g: un(o.g, blurred.g, o.a),
@@ -16829,6 +16867,170 @@ mod tests {
              layer with the same strokes covers {theirs}. A shadow is its \
              layer's silhouette, and these two layers have the same one."
         );
+    }
+
+    /// Light above white survives a blend, a filter and an effect.
+    ///
+    /// The companion to the neutral-adjustment test next to this one, and
+    /// it found the same defect in two more places. This pipeline carries
+    /// highlights past white on purpose; every blend but `Normal` and the
+    /// sharpen filter threw them away.
+    ///
+    /// The blends because a blend is written in the display encoding and
+    /// that encoding stops at white, so the channels were held there
+    /// before the blend function saw them. `Lighten` of a half grey over
+    /// a ground at 2.415 came back **1.000** — a maximum that made the
+    /// picture darker, which is not a matter of taste. sRGB's curve is a
+    /// power law and runs on past one happily, so the two now meet at
+    /// white and carry on.
+    ///
+    /// The strongest single reading here is `Lighten`, because `max` can
+    /// only be wrong one way: whatever it returns must be at least the
+    /// brighter of the two, and nothing about encodings or rounding can
+    /// excuse less.
+    #[test]
+    fn light_above_white_survives_what_is_drawn_over_it() {
+        let page = |dress: &dyn Fn(&mut Document, NodeId)| {
+            let mut doc = Document::new(48, 16, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = Node::vector(
+                "ground",
+                VectorShape::Rect {
+                    width: 48.0,
+                    height: 16.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.6,
+                    b: 0.4,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(ground),
+            })
+            .unwrap();
+            // Two stops, which is what puts the ground above white.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    Adjustment::Exposure { stops: 2.0 },
+                )),
+            })
+            .unwrap();
+            dress(&mut doc, root);
+            render(&doc).unwrap()
+        };
+        let peak = |s: &Surface, x0: u32, x1: u32| {
+            let mut m = 0.0f32;
+            for y in 0..s.height {
+                for x in x0..x1 {
+                    let p = s.get(x, y);
+                    m = m.max(p.r.max(p.g).max(p.b));
+                }
+            }
+            m
+        };
+
+        let bare = page(&|_, _| {});
+        let lit = peak(&bare, 0, 48);
+        assert!(
+            lit > 2.0,
+            "the ground has to stand above white for any of this to ask \
+             anything: it peaks at {lit:.3}"
+        );
+
+        // A half grey laid over the right-hand half, by blend.
+        let over = |mode: BlendMode| {
+            page(&move |doc: &mut Document, root: NodeId| {
+                let mut n = Node::vector(
+                    "over",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 16.0,
+                        radius: 0.0,
+                    },
+                );
+                if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                    *fill = Some(AuthoredColor::Srgb {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 1.0,
+                    });
+                }
+                let at = doc.children_of(root).unwrap().len();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: at,
+                    node: Box::new(n),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[at];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(28.0, 0.0),
+                })
+                .unwrap();
+                doc.apply(Command::SetBlendMode { id, blend: mode })
+                    .unwrap();
+            })
+        };
+        // Lighten is the sharp one: it is `max`, so what comes back
+        // cannot be less than the backdrop it met, whatever the encoding.
+        let lighten = peak(&over(BlendMode::Lighten), 28, 48);
+        assert!(
+            lighten > lit - 1e-3,
+            "Lighten of a half grey over a ground at {lit:.3} came back \
+             {lighten:.3}. A maximum cannot make a picture darker."
+        );
+        // Screen can only go up too.
+        let screen = peak(&over(BlendMode::Screen), 28, 48);
+        assert!(
+            screen > 1.5,
+            "Screen over a ground at {lit:.3} came back {screen:.3}"
+        );
+        // And nothing a blend does to one half may touch the other.
+        assert!(
+            (peak(&over(BlendMode::Lighten), 0, 24) - lit).abs() < 1e-3,
+            "the half with no layer over it has to be the ground it was"
+        );
+
+        // A filter over the whole page keeps what it was given.
+        for f in [
+            Filter::GaussianBlur { sigma: 2.0 },
+            Filter::Pixelate { size: 4.0 },
+            Filter::Sharpen {
+                sigma: 1.0,
+                amount: 0.5,
+            },
+        ] {
+            let name = format!("{f:?}");
+            let name = name.split([' ', '{']).next().unwrap_or("").to_string();
+            let got = page(&move |doc: &mut Document, root: NodeId| {
+                let at = doc.children_of(root).unwrap().len();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: at,
+                    node: Box::new(Node::filter("f", f.clone())),
+                })
+                .unwrap();
+            });
+            let kept = peak(&got, 0, 48);
+            assert!(
+                kept > lit - 1e-3,
+                "{name} brought a ground at {lit:.3} back to {kept:.3}. A \
+                 blur, a pixelation and a sharpen are all readings of what \
+                 is there, and none of them is a ceiling."
+            );
+        }
     }
 
     /// An adjustment at its neutral setting is no adjustment.
