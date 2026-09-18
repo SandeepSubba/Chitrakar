@@ -1076,6 +1076,60 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // An adjustment stated by a *ramp of colours*, which is two things
+    // this document has never held. Every adjustment in it until now was
+    // an exposure — one of thirteen kinds, and the one whose parameters
+    // are a single number — so an adjustment carrying a *list* had never
+    // gone through the file format, the clipboard or the undo runs, and
+    // an adjustment carrying a *colour* had never been walked by the
+    // palette at all.
+    //
+    // One of its stops stands for the palette entry, which is what makes
+    // the second half bite: a named colour in a gradient map did not
+    // settle when the palette moved, because the colour walk waved every
+    // adjustment past with `Adjustment(_)`.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::adjustment(
+            "a ramp",
+            crate::Adjustment::GradientMap {
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.08,
+                            g: 0.05,
+                            b: 0.2,
+                            a: 1.0,
+                        },
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.2,
+                            g: 0.45,
+                            b: 0.8,
+                            a: 1.0,
+                        }
+                        .standing_for("ink"),
+                    },
+                ],
+            },
+        )),
+    })
+    .unwrap();
+    let ramp = *doc.children_of(root).unwrap().last().unwrap();
+    // Held to the layer under it, so it recolours that layer rather than
+    // the whole page: a gradient map over everything is a page nobody
+    // would keep, and holding it also puts a *list-stated* adjustment
+    // into a clip run, which nothing here had either.
+    doc.apply(Command::SetClipped {
+        id: ramp,
+        clipped: true,
+    })
+    .unwrap();
+
     doc.apply(Command::SetGuides {
         guides: vec![Guide::Vertical(12.0)],
     })

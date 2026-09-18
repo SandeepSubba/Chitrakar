@@ -2718,6 +2718,198 @@ mod tests {
     /// that name means another; the palette is where the name is defined,
     /// so settling reads the file the palette's way. Every colour a layer
     /// can hold is asked, not only its fill.
+    /// After the palette moves, nothing in the document still means what
+    /// it used to.
+    ///
+    /// Asked of the shared fixture and asked *structurally* — the
+    /// document is serialized and every `Named.means` in the JSON is
+    /// read — because the obvious way to ask it is to walk the colours,
+    /// and the walk is the thing that was wrong. A colour the walk
+    /// cannot see is a colour it cannot report either, so a test built
+    /// on it would have passed on the very defect that prompted this.
+    ///
+    /// That is what makes the fixture's gradient map worth its place
+    /// here rather than merely held: break the colour walk back to
+    /// `Adjustment(_) => {}` and this fails on the shared document, which
+    /// nothing else in the workspace does.
+    #[test]
+    fn a_palette_change_leaves_nothing_meaning_the_old_colour() {
+        let f = crate::fixture::everything();
+        let mut doc = f.doc;
+        // What the fixture's one entry says today, and what nothing may
+        // still mean once it has been moved.
+        let was = doc
+            .swatches
+            .iter()
+            .find(|s| s.name == "ink")
+            .map(|s| s.color.clone())
+            .expect("the fixture keeps a swatch called ink");
+        let serde_json::Value::Object(before) = serde_json::to_value(&was).unwrap() else {
+            panic!("a colour serializes as an object")
+        };
+        doc.apply(Command::SetSwatches {
+            swatches: vec![Swatch {
+                name: "ink".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.97,
+                    g: 0.13,
+                    b: 0.51,
+                    a: 1.0,
+                },
+            }],
+        })
+        .unwrap();
+        // Every `means` under a `Named`, wherever it sits in the tree.
+        fn meanings(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    if let Some(named) = m.get("Named") {
+                        if let Some(means) = named.get("means") {
+                            out.push(means.clone());
+                        }
+                    }
+                    for (_, x) in m {
+                        meanings(x, out);
+                    }
+                }
+                serde_json::Value::Array(a) => {
+                    for x in a {
+                        meanings(x, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        meanings(&serde_json::to_value(&doc).unwrap(), &mut found);
+        // Non-vacuity: the document has to be carrying names at all, and
+        // more than one, or this passes by finding nothing.
+        assert!(
+            found.len() >= 2,
+            "the fixture has to carry at least two named colours for this \
+             to ask anything: {} found",
+            found.len()
+        );
+        let stale: Vec<&serde_json::Value> = found
+            .iter()
+            .filter(|m| {
+                m.as_object()
+                    .and_then(|o| o.get("Srgb"))
+                    .zip(before.get("Srgb"))
+                    .is_some_and(|(a, b)| a == b)
+            })
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{} named colours still mean what the palette said before it \
+             moved: {stale:?}",
+            stale.len()
+        );
+    }
+
+    /// A named colour inside an adjustment follows the palette too.
+    ///
+    /// Twelve of the thirteen adjustments are read as numbers, and the
+    /// walk that keeps a document's colours in step said so about all
+    /// thirteen — `NodeKind::Adjustment(_) => {}`, with a comment
+    /// explaining that neither an adjustment nor a filter holds a colour
+    /// of its own. A **gradient map** is a ramp of colours and holds
+    /// nothing else. So a stop standing for a palette entry never
+    /// settled: the palette moved, every layer followed, and that one
+    /// stop kept what it was authored with and went into the file that
+    /// way.
+    ///
+    /// The walk's promise is that a kind holding a colour will not
+    /// compile until it says so. The promise stopped at the `NodeKind`
+    /// and never reached inside, which is why `Adjustment` and `Filter`
+    /// have walks of their own now, each matching variant by variant.
+    #[test]
+    fn a_named_colour_in_an_adjustment_follows_the_palette() {
+        let mut doc = Document::new(30, 20, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::SetSwatches {
+            swatches: vec![Swatch {
+                name: "ink".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.45,
+                    b: 0.8,
+                    a: 1.0,
+                },
+            }],
+        })
+        .unwrap();
+        let stale = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.2,
+            g: 0.45,
+            b: 0.8,
+            a: 1.0,
+        }
+        .standing_for("ink");
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::adjustment(
+                "a ramp",
+                Adjustment::GradientMap {
+                    stops: vec![
+                        GradientStop {
+                            offset: 0.0,
+                            color: chitrakar_color::AuthoredColor::Srgb {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            },
+                        },
+                        GradientStop {
+                            offset: 1.0,
+                            color: stale,
+                        },
+                    ],
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let far = |doc: &Document| {
+            let NodeKind::Adjustment(Adjustment::GradientMap { stops }) =
+                &doc.node(id).unwrap().kind
+            else {
+                panic!("the ramp is a gradient map");
+            };
+            match *stops[1].color.flat() {
+                chitrakar_color::AuthoredColor::Srgb { r, g, b, a } => [r, g, b, a],
+                _ => panic!("the stop is an sRGB colour"),
+            }
+        };
+        // Non-vacuity: it has to be standing for the name to begin with,
+        // or the palette has nothing to reach.
+        let before = far(&doc);
+        assert!(
+            (before[0] - 0.2).abs() < 1e-6,
+            "the stop starts as what the palette said: {before:?}"
+        );
+        doc.apply(Command::SetSwatches {
+            swatches: vec![Swatch {
+                name: "ink".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.1,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            }],
+        })
+        .unwrap();
+        let after = far(&doc);
+        assert!(
+            (after[0] - 0.9).abs() < 1e-6 && (after[2] - 0.1).abs() < 1e-6,
+            "a stop standing for the palette entry has to follow it when \
+             it moves: {after:?}"
+        );
+    }
+
     #[test]
     fn settling_makes_every_colour_agree_with_the_palette() {
         let mut doc = Document::new(40, 30, ColorMode::Rgb);

@@ -996,6 +996,22 @@ mod tests {
             "/document/meta:dpi",
             "/document/meta:height",
             "/document/meta:width",
+            // A gradient map is a ramp of colours, and a stop cannot be
+            // missing where it sits or what colour it is. The same twelve
+            // a vector's own gradient wants, in the one adjustment that
+            // is stated by a list rather than by numbers.
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:color",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:offset",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named:means",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named:name",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named/means/Srgb:a",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named/means/Srgb:b",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named/means/Srgb:g",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named/means/Srgb:r",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Srgb:a",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Srgb:b",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Srgb:g",
+            "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Srgb:r",
             "/document/nodes/*/effects/*/DropShadow/color/Srgb:a",
             "/document/nodes/*/effects/*/DropShadow/color/Srgb:b",
             "/document/nodes/*/effects/*/DropShadow/color/Srgb:g",

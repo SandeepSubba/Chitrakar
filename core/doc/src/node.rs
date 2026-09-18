@@ -1073,6 +1073,54 @@ pub struct Mask {
     pub feather: f32,
 }
 
+impl Adjustment {
+    /// Every colour written inside an adjustment.
+    ///
+    /// Twelve of the thirteen are read as numbers. The gradient map is
+    /// not: it *is* a ramp of colours, and one of them can stand for a
+    /// palette entry like any other. Matched kind by kind rather than
+    /// with a catch-all, so that a new adjustment holding a colour does
+    /// not compile until it says so — which is the promise
+    /// `Node::each_color_mut` makes and did not keep.
+    pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
+        match self {
+            Adjustment::GradientMap { stops } => {
+                for stop in stops {
+                    f(&mut stop.color);
+                }
+            }
+            Adjustment::BrightnessContrast { .. }
+            | Adjustment::Exposure { .. }
+            | Adjustment::HueSaturation { .. }
+            | Adjustment::Levels { .. }
+            | Adjustment::Curves { .. }
+            | Adjustment::WhiteBalance { .. }
+            | Adjustment::Vibrance { .. }
+            | Adjustment::BlackAndWhite { .. }
+            | Adjustment::Invert { .. }
+            | Adjustment::SelectiveHsl { .. }
+            | Adjustment::ShadowsHighlights { .. }
+            | Adjustment::ColorBalance { .. } => {}
+        }
+    }
+}
+
+impl Filter {
+    /// Every colour written inside a filter, of which there are none —
+    /// said kind by kind rather than assumed, for the reason above.
+    pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
+        let _ = f;
+        match self {
+            Filter::GaussianBlur { .. }
+            | Filter::Sharpen { .. }
+            | Filter::MotionBlur { .. }
+            | Filter::Pixelate { .. }
+            | Filter::Noise { .. }
+            | Filter::Vignette { .. } => {}
+        }
+    }
+}
+
 impl Mask {
     /// Every colour written inside the mask.
     ///
@@ -1329,9 +1377,19 @@ impl Node {
     pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
         match &mut self.kind {
             NodeKind::Group | NodeKind::Raster(_) | NodeKind::Instance { .. } => {}
-            // An adjustment and a filter are read as numbers: neither
-            // holds a colour of its own, however much it changes them.
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) => {}
+            // An adjustment or a filter, which have to be asked kind by
+            // kind rather than waved past. The line that stood here said
+            // neither holds a colour of its own, however much it changes
+            // them — convincing, and wrong: a gradient map is a *ramp of
+            // colours*, and a named one in it never settled. The palette
+            // moved and every layer followed except that one, which kept
+            // what it was authored with and went into the file that way.
+            // Matching `Adjustment(_)` is what let it through: this walk's
+            // promise is that a new kind will not compile until it says
+            // whether it holds a colour, and that promise stopped at the
+            // `NodeKind` and never reached inside.
+            NodeKind::Adjustment(adjustment) => adjustment.each_color_mut(f),
+            NodeKind::Filter(filter) => filter.each_color_mut(f),
             NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
                 for stroke in strokes {
                     stroke.each_color_mut(f);

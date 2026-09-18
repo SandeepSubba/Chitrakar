@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~483),
+- **Verify before committing:** `cargo test --workspace` (~485),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3035,6 +3035,41 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The eighteenth was **an adjustment stated by a ramp of colours**, and
+     it found a defect by the plainest route in this whole method: asking
+     what the document had never held and then reading the code that
+     should have handled it. Every adjustment here was an `Exposure` —
+     one of thirteen kinds, and the one whose parameters are a single
+     number — so an adjustment carrying a *list* had never gone through
+     the file format, the clipboard or the undo runs, and an adjustment
+     carrying a *colour* had never been walked by the palette at all.
+     **A named colour in a gradient map never settled.** The walk that
+     keeps a document's colours in step read
+     `NodeKind::Adjustment(_) | NodeKind::Filter(_) => {}`, under a
+     comment saying neither holds a colour of its own however much it
+     changes them. Convincing, and wrong: a gradient map *is* a ramp of
+     colours. So the palette moved, every layer followed, and that one
+     stop kept what it was authored with — and went into the file that
+     way. `Adjustment` and `Filter` have walks of their own now, each
+     matching variant by variant, which is what makes the promise in that
+     doc comment true: a kind holding a colour does not compile until it
+     says so. The promise had stopped at the `NodeKind` and never reached
+     inside it.
+     One audit stopped holding on the shape alone — the file format's
+     inventory, by the twelve fields a gradient stop cannot be missing,
+     the same twelve a vector's own gradient wants.
+     And then the rule the method carries: everything else held, so the
+     code the shape was meant to exercise was broken, and **only the new
+     test noticed**. So the shape was holding rather than earning, and
+     what earns it is the audit written next: after the palette moves,
+     nothing in the shared document still means what it used to. Asked
+     *structurally* — the document is serialized and every `Named.means`
+     in the JSON is read — because the obvious way to ask is to walk the
+     colours, and the walk is the thing that was wrong. A colour the walk
+     cannot see is one it cannot report either, so a test built on it
+     would have passed on the very defect that prompted it. With that in,
+     breaking the walk back fails on the shared fixture, which nothing
+     else in the workspace does.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
