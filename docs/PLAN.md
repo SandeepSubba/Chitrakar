@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~480),
+- **Verify before committing:** `cargo test --workspace` (~481),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3075,6 +3075,42 @@ without reading anything else.*
      written for it, and two audits over this document that could not
      have noticed before, since there was no effect on a frame here to
      notice with.
+     The rule from that discarded invariant paid at once. **An adjustment
+     at its neutral setting is no adjustment** — the two sides plainly go
+     down different code, since with the layer the whole page under it
+     runs through `apply_adjustment` a pixel at a time and without it
+     nothing happens at all — and it found the worst defect of the
+     session.
+     **Seven of the eleven adjustments clamped every channel to one.** At
+     their neutral settings, which are the app's own `ADJUSTMENT_PRESETS`
+     defaults. This pipeline keeps highlights unbounded on purpose — an
+     exposure of a couple of stops puts a channel at three, which is why
+     the GPU backend stores `Rgba16Float` and why the interior reading
+     scales by `max(1, |v|)` — and Brightness/Contrast, Hue/Saturation,
+     White balance, Vibrance, Levels, Curves and Invert-at-nothing each
+     threw all of it away. Add a Levels layer to a photograph with
+     headroom, touch nothing, and two stops of it are gone for good. A
+     non-destructive editor destroying something.
+     It hid because every test of an adjustment used a page inside 0..1,
+     where a clamp at one is invisible. The sweep that found it puts a
+     stop and a half of exposure under the page first, and the test keeps
+     that with a floor saying so: a hundred pixels must stand above 1.2 or
+     the page cannot catch a clamp at all.
+     The rule now, everywhere: **clamp below at zero, never above one.**
+     Light below nothing is meaningless; light above white is what the
+     rest of the engine is built to carry. Two are drawn over the display
+     encoding, where there really is no graph past white — Curves and
+     Invert — and those hold the part that fits, work on it, and carry the
+     excess across: a curve's *gain at white* multiplies what is above it,
+     so the diagonal is the identity and a curve pulling white down pulls
+     the highlights with it, meeting exactly at one.
+     Both renderers, since the shader had the same seven clamps written
+     the same way, and the cross-renderer audit said so the moment the
+     reference was fixed — it was the only test in the workspace that
+     failed, which is that audit doing its job. Nothing below white moved
+     on either side: every other test passed untouched, before and after.
+     Three sabotages, one per shape of fix — the plain clamp, the levels
+     clamp, and the curve's carry — and each moves the page by 1.8284.
      An invariant was written, measured, and **thrown away**, and what it
      cost to find that out is the useful part. **A group that isolates
      nothing is no group**: a plain group — opacity one, blend Normal, no

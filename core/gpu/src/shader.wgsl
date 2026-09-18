@@ -611,7 +611,7 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
         }
         // Brightness and contrast, about the middle.
         case 2: {
-            return clamp((c + vec3f(p.y) - vec3f(0.5)) * (1.0 + p.z) + vec3f(0.5), vec3f(0.0), vec3f(1.0));
+            return max((c + vec3f(p.y) - vec3f(0.5)) * (1.0 + p.z) + vec3f(0.5), vec3f(0.0));
         }
         // Hue rotation (the feColorMatrix one), then saturation about
         // the pixel's own luminance, then a lightness offset.
@@ -624,21 +624,21 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
             let m2 = vec3f(0.213 - cs * 0.213 - sn * 0.787, 0.715 - cs * 0.715 + sn * 0.715, 0.072 + cs * 0.928 + sn * 0.072);
             let turned = vec3f(dot(m0, c), dot(m1, c), dot(m2, c));
             let l = dot(vec3f(0.2126, 0.7152, 0.0722), turned);
-            return clamp(vec3f(l) + (turned - vec3f(l)) * (1.0 + p.z) + vec3f(p.w), vec3f(0.0), vec3f(1.0));
+            return max(vec3f(l) + (turned - vec3f(l)) * (1.0 + p.z) + vec3f(p.w), vec3f(0.0));
         }
         // Levels: an input range, a gamma, an output range.
         case 4: {
             let span = max(p.z - p.y, 1e-3);
             let e = 1.0 / max(p.w, 0.05);
-            let v = pow(clamp((c - vec3f(p.y)) / span, vec3f(0.0), vec3f(1.0)), vec3f(e));
-            return clamp(vec3f(q.x) + v * (q.y - q.x), vec3f(0.0), vec3f(1.0));
+            let v = pow(max((c - vec3f(p.y)) / span, vec3f(0.0)), vec3f(e));
+            return max(vec3f(q.x) + v * (q.y - q.x), vec3f(0.0));
         }
         // White balance: a gain per channel, half the slider's travel at
         // each end so the extremes still hold a picture.
         case 5: {
             let warm = clamp(p.y, -1.0, 1.0) * 0.5;
             let mag = clamp(p.z, -1.0, 1.0) * 0.5;
-            return clamp(c * vec3f(1.0 + warm, 1.0 - mag, 1.0 - warm), vec3f(0.0), vec3f(1.0));
+            return max(c * vec3f(1.0 + warm, 1.0 - mag, 1.0 - warm), vec3f(0.0));
         }
         // Vibrance: saturation weighted by how much colour there is
         // already, measured as a fraction of the pixel's own brightness.
@@ -650,7 +650,7 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
                 sat = (top - min(c.r, min(c.g, c.b))) / top;
             }
             let s = 1.0 + p.y * (1.0 - clamp(sat, 0.0, 1.0));
-            return clamp(vec3f(l) + (c - vec3f(l)) * s, vec3f(0.0), vec3f(1.0));
+            return max(vec3f(l) + (c - vec3f(l)) * s, vec3f(0.0));
         }
         // Black and white: a recipe, normalized by its own total.
         case 7: {
@@ -661,15 +661,17 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
             } else {
                 w = w / total;
             }
-            return vec3f(clamp(dot(c, w), 0.0, 1.0));
+            return vec3f(max(dot(c, w), 0.0));
         }
         // Inverted on the values a device shows: linear 0.5 shows as 188
         // and would come back a near-black rather than itself.
         case 8: {
             let k = clamp(p.y, 0.0, 1.0);
-            let s = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let inside = clamp(c, vec3f(0.0), vec3f(1.0));
+            let over = max(c - inside, vec3f(0.0));
+            let s = vec3f(to_shown(inside.r), to_shown(inside.g), to_shown(inside.b));
             let f = s + (vec3f(1.0) - s - s) * k;
-            return vec3f(to_light(f.r), to_light(f.g), to_light(f.b));
+            return vec3f(to_light(f.r), to_light(f.g), to_light(f.b)) + over * (1.0 - k);
         }
         // Shadows and highlights: each end pulls as the cube of the
         // distance from the other, and what moves is the brightness —
@@ -750,10 +752,26 @@ fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec
         // channel that was never drawn carries the straight line, so
         // there is nothing to ask about.
         case 10: {
-            let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            // A curve is drawn over the display encoding, which stops at
+            // white, so a channel above it is off the end of the graph.
+            // Reading the table holds it at the last point, which turns
+            // every highlight above one into white and a curve down the
+            // diagonal into a highlight crusher. What is above white
+            // takes the curve's gain at white instead, as the reference
+            // renderer does: the diagonal has a gain of one and is the
+            // identity, and the two meet exactly at one.
+            let inside = clamp(c, vec3f(0.0), vec3f(1.0));
+            let over = max(c - inside, vec3f(0.0));
+            let shown = vec3f(to_shown(inside.r), to_shown(inside.g), to_shown(inside.b));
             let master = vec3f(table_at(shown.r).r, table_at(shown.g).r, table_at(shown.b).r);
             let own = vec3f(table_at(master.r).g, table_at(master.g).b, table_at(master.b).a);
-            return vec3f(to_light(own.r), to_light(own.g), to_light(own.b));
+            let white_m = table_at(1.0).r;
+            let white = vec3f(
+                to_light(table_at(white_m).g),
+                to_light(table_at(white_m).b),
+                to_light(table_at(white_m).a),
+            );
+            return vec3f(to_light(own.r), to_light(own.g), to_light(own.b)) + over * white;
         }
         // A gradient map: every tone replaced by the colour at its own
         // place along a ramp. Where a tone sits is its brightness as a

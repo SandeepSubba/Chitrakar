@@ -6755,7 +6755,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             brightness,
             contrast,
         } => {
-            let f = |v: f32| ((v + brightness - 0.5) * (1.0 + contrast) + 0.5).clamp(0.0, 1.0);
+            let f = |v: f32| ((v + brightness - 0.5) * (1.0 + contrast) + 0.5).max(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::Exposure { stops } => {
@@ -6794,7 +6794,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // Saturation: scale distance from luminance; then lightness add.
             let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let s = 1.0 + saturation;
-            let f = |v: f32| (lum + (v - lum) * s + lightness).clamp(0.0, 1.0);
+            let f = |v: f32| (lum + (v - lum) * s + lightness).max(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::SelectiveHsl { bands } => {
@@ -6849,8 +6849,8 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let span = (in_white - in_black).max(1e-3);
             let exponent = 1.0 / gamma.max(0.05);
             let f = |v: f32| {
-                let v = ((v - in_black) / span).clamp(0.0, 1.0).powf(exponent);
-                (out_black + v * (out_white - out_black)).clamp(0.0, 1.0)
+                let v = ((v - in_black) / span).max(0.0).powf(exponent);
+                (out_black + v * (out_white - out_black)).max(0.0)
             };
             (f(r), f(g), f(b))
         }
@@ -6861,7 +6861,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // travel at each end, so the extremes still hold a picture.
             let warm = temperature.clamp(-1.0, 1.0) * 0.5;
             let mag = tint.clamp(-1.0, 1.0) * 0.5;
-            let f = |v: f32, gain: f32| (v * gain).clamp(0.0, 1.0);
+            let f = |v: f32, gain: f32| (v * gain).max(0.0);
             (f(r, 1.0 + warm), f(g, 1.0 - mag), f(b, 1.0 - warm))
         }
         Adjustment::Vibrance { amount } => {
@@ -6882,7 +6882,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 0.0
             };
             let s = 1.0 + amount * (1.0 - sat.clamp(0.0, 1.0));
-            let f = |v: f32| (lum + (v - lum) * s).clamp(0.0, 1.0);
+            let f = |v: f32| (lum + (v - lum) * s).max(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::BlackAndWhite { red, green, blue } => {
@@ -6895,7 +6895,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             } else {
                 [red / total, green / total, blue / total]
             };
-            let grey = (r * wr + g * wg + b * wb).clamp(0.0, 1.0);
+            let grey = (r * wr + g * wg + b * wb).max(0.0);
             (grey, grey, grey)
         }
         Adjustment::GradientMap { stops } => {
@@ -7032,8 +7032,17 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // and would come back a near-black rather than itself.
             let k = amount.clamp(0.0, 1.0);
             let f = |v: f32| {
-                let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
-                chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k)
+                // What is above white has no display value to invert —
+                // sRGB's curve stops at one — so it is held back, the
+                // part that fits is inverted, and what was held back is
+                // returned in proportion to how much of the layer is
+                // *not* the inversion. At `amount` zero that is all of
+                // it, and the layer is the identity it is asked to be
+                // rather than a highlight crusher.
+                let inside = v.clamp(0.0, 1.0);
+                let over = (v - inside).max(0.0);
+                let s = chitrakar_color::linear_to_srgb(inside);
+                chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k) + over * (1.0 - k)
             };
             (f(r), f(g), f(b))
         }
@@ -7050,15 +7059,30 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // is linear, so it crosses over and back. The master runs
             // first and each channel's own curve after it, which is the
             // order the graph is read in.
+            // A curve is drawn over the display encoding, which stops at
+            // white, so a channel above it is off the end of the graph.
+            // Holding it at the last point — which is what reading the
+            // table does — turns every highlight above one into white,
+            // and a curve straight down the diagonal into a highlight
+            // crusher. What is above white takes the curve's *gain at
+            // white* instead: the diagonal has a gain of one and is the
+            // identity, a curve that pulls white down pulls the
+            // highlights down with it in proportion, and the two meet
+            // exactly at one.
             let f = |v: f32, own: Option<&Vec<f32>>| {
-                let s = curve_at(
-                    &luts.master,
-                    chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)),
-                );
-                chitrakar_color::srgb_to_linear(match own {
-                    Some(lut) => curve_at(lut, s),
-                    None => s,
-                })
+                let through = |x: f32| {
+                    let m = curve_at(&luts.master, x);
+                    match own {
+                        Some(lut) => curve_at(lut, m),
+                        None => m,
+                    }
+                };
+                let inside = v.clamp(0.0, 1.0);
+                let white = chitrakar_color::srgb_to_linear(through(1.0));
+                let at = chitrakar_color::srgb_to_linear(through(chitrakar_color::linear_to_srgb(
+                    inside,
+                )));
+                at + (v - inside).max(0.0) * white
             };
             (
                 f(r, luts.red.as_ref()),
@@ -16805,6 +16829,210 @@ mod tests {
              layer with the same strokes covers {theirs}. A shadow is its \
              layer's silhouette, and these two layers have the same one."
         );
+    }
+
+    /// An adjustment at its neutral setting is no adjustment.
+    ///
+    /// Adding a layer and touching nothing is the first thing anybody
+    /// does, and the picture must not move. It follows from what neutral
+    /// means, so it needs no second renderer — and the two sides really
+    /// do go down different code, which is what makes it worth writing:
+    /// with the layer the whole page under it goes through
+    /// `apply_adjustment` a pixel at a time, and without it nothing
+    /// happens at all.
+    ///
+    /// Asked of a page carrying **light above white**, which is where it
+    /// bit. This pipeline keeps highlights unbounded on purpose — an
+    /// exposure of a couple of stops puts a channel at three, and the GPU
+    /// backend stores `Rgba16Float` to hold them — and seven of the
+    /// eleven adjustments clamped every channel to one. At their neutral
+    /// settings, which are the app's own defaults, that made each of them
+    /// a highlight crusher: add a Levels layer, touch nothing, and two
+    /// stops of headroom are gone for good. Non-destructive editing that
+    /// destroys something.
+    ///
+    /// The rule now is the same everywhere: **clamp below at zero, never
+    /// above one.** Light below nothing is meaningless; light above white
+    /// is what the rest of this engine is built to carry. The two that
+    /// are drawn over the display encoding, where there is genuinely no
+    /// graph past white — Curves and Invert — hold the part that fits and
+    /// carry the excess across, so the diagonal and an amount of zero are
+    /// the identities they claim to be.
+    #[test]
+    fn an_adjustment_at_its_neutral_setting_is_no_adjustment() {
+        // The app's own defaults, from `ADJUSTMENT_PRESETS`, for every
+        // preset that is meant to do nothing until it is touched. The
+        // ones left out are meant to act on sight — Invert at one, black
+        // and white, a gradient map, shadows and highlights at 0.35 —
+        // and Invert is here at zero, where it does claim to be neutral.
+        let neutral: Vec<(&str, Adjustment)> = vec![
+            ("Exposure", Adjustment::Exposure { stops: 0.0 }),
+            (
+                "Brightness/Contrast",
+                Adjustment::BrightnessContrast {
+                    brightness: 0.0,
+                    contrast: 0.0,
+                },
+            ),
+            (
+                "Hue/Saturation",
+                Adjustment::HueSaturation {
+                    hue_degrees: 0.0,
+                    saturation: 0.0,
+                    lightness: 0.0,
+                },
+            ),
+            (
+                "White balance",
+                Adjustment::WhiteBalance {
+                    temperature: 0.0,
+                    tint: 0.0,
+                },
+            ),
+            ("Vibrance", Adjustment::Vibrance { amount: 0.0 }),
+            (
+                "Colour bands",
+                Adjustment::SelectiveHsl {
+                    bands: vec![[0.0; 3]; 6],
+                },
+            ),
+            (
+                "Colour balance",
+                Adjustment::ColorBalance {
+                    shadows: [0.0; 3],
+                    midtones: [0.0; 3],
+                    highlights: [0.0; 3],
+                    preserve_luminosity: true,
+                },
+            ),
+            (
+                "Levels",
+                Adjustment::Levels {
+                    in_black: 0.0,
+                    in_white: 1.0,
+                    gamma: 1.0,
+                    out_black: 0.0,
+                    out_white: 1.0,
+                },
+            ),
+            (
+                "Curves",
+                Adjustment::Curves {
+                    points: vec![[0.0, 0.0], [1.0, 1.0]],
+                    red: Vec::new(),
+                    green: Vec::new(),
+                    blue: Vec::new(),
+                },
+            ),
+            ("Invert at nothing", Adjustment::Invert { amount: 0.0 }),
+            (
+                "Shadows/highlights at nothing",
+                Adjustment::ShadowsHighlights {
+                    shadows: 0.0,
+                    highlights: 0.0,
+                },
+            ),
+        ];
+        // A page with headroom in it: bands of colour under a stop and a
+        // half of exposure, so channels stand well above one. Without
+        // that lift every one of these passes, which is exactly how they
+        // came to clamp unnoticed.
+        let page = |added: Option<Adjustment>| {
+            let mut doc = Document::new(64, 16, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            for i in 0..16usize {
+                let t = i as f32 / 15.0;
+                let mut band = Node::vector(
+                    "band",
+                    VectorShape::Rect {
+                        width: 4.0,
+                        height: 16.0,
+                        radius: 0.0,
+                    },
+                );
+                if let NodeKind::Vector { fill, .. } = &mut band.kind {
+                    *fill = Some(AuthoredColor::Srgb {
+                        r: t,
+                        g: 1.0 - t,
+                        b: (t * 2.0).min(1.0) * 0.6 + 0.2,
+                        a: 1.0,
+                    });
+                }
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(band),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(i as f32 * 4.0, 0.0),
+                })
+                .unwrap();
+            }
+            let at = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: Box::new(Node::adjustment(
+                    "lift",
+                    Adjustment::Exposure { stops: 1.5 },
+                )),
+            })
+            .unwrap();
+            if let Some(a) = added {
+                let at = doc.children_of(root).unwrap().len();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: at,
+                    node: Box::new(Node::adjustment("added", a)),
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+
+        let base = page(None);
+        // Non-vacuity: the page really does carry light above white, or
+        // clamping to one would be invisible and this would pass on any
+        // arithmetic at all.
+        let over = base
+            .pixels
+            .iter()
+            .filter(|p| p.r.max(p.g).max(p.b) > 1.2)
+            .count();
+        assert!(
+            over > 100,
+            "only {over} pixels of the page stand above white, which is \
+             too few to catch a clamp"
+        );
+        for (what, adj) in neutral {
+            let got = page(Some(adj));
+            let (mut worst, mut at) = (0.0f32, 0usize);
+            for (i, (a, b)) in got.pixels.iter().zip(&base.pixels).enumerate() {
+                let d = (a.r - b.r)
+                    .abs()
+                    .max((a.g - b.g).abs())
+                    .max((a.b - b.b).abs());
+                if d > worst {
+                    worst = d;
+                    at = i;
+                }
+            }
+            assert!(
+                worst < 1e-5,
+                "{what} at its neutral setting moved the page by {worst:.4} \
+                 at ({}, {}), where the channel stands at {:.3}. Neutral \
+                 means neutral, above white as much as below it.",
+                at as u32 % got.width,
+                at as u32 / got.width,
+                base.pixels[at]
+                    .r
+                    .max(base.pixels[at].g)
+                    .max(base.pixels[at].b)
+            );
+        }
     }
 
     /// A mask that hides nothing is no mask.
