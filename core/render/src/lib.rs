@@ -1088,8 +1088,18 @@ fn draw_layer(
         // adjustment or filter has no silhouette — it is a transformation
         // of what is below — so effects on one mean nothing and are
         // ignored rather than given a surface.
+        // The exception asks what the layer *draws*, not what kind it is —
+        // the same reading `blended` takes just below, and for the same
+        // reason. A copy of an adjustment or a filter rewrites the page
+        // exactly as the layer it copies does, and an effect means no
+        // more to it than to that layer: there is no silhouette to build
+        // one from. Taken literally it put the copy on a surface of its
+        // own, where what it copies was handed a transparent page to
+        // rewrite and came back with nothing — so a copy of a filter
+        // wearing a drop shadow *at no opacity at all* vanished.
         let effected = !node.effects.is_empty()
-            && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+            && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+            && !rewrites_what_is_under_it(doc, child);
         // A blend mode is the same kind of demand. A layer with one has
         // to meet what is under it *once*, as the whole of itself — and
         // almost every layer here puts down more than one mark: a shape
@@ -17031,6 +17041,172 @@ mod tests {
                  is there, and none of them is a ceiling."
             );
         }
+    }
+
+    /// An effect that draws nothing is no effect.
+    ///
+    /// Another where the two sides plainly take different code: an effect
+    /// is built from a silhouette, so a layer wearing one is staged on a
+    /// surface of its own, and a layer wearing none is drawn straight
+    /// onto the page. An effect turned down to nothing must leave the
+    /// page exactly as it was, which asks whether those two agree.
+    ///
+    /// It found a hole in a fix made earlier in this same session. A copy
+    /// of an adjustment or a filter cannot go on a surface — what it
+    /// copies rewrites what is under it, and there is nothing under a
+    /// fresh surface — and that was answered for a copy sent to a surface
+    /// by a **mask or a fade**. An effect sends one just the same, and
+    /// that was missed: a copy of a filter wearing a drop shadow *at no
+    /// opacity at all* still vanished, and so did copies of adjustments.
+    /// Five pages of a hundred and fifty, the worst by 0.468.
+    ///
+    /// The answer is the one the `blended` predicate beside it already
+    /// takes: ask what the layer **draws**, not what kind it is. An
+    /// adjustment and a filter are excluded from `effected` by name, and
+    /// a copy of one draws exactly what they draw, so it is excluded too
+    /// — the effect is ignored rather than given a surface, which is what
+    /// the layer it copies has always got.
+    #[test]
+    fn an_effect_that_draws_nothing_is_no_effect() {
+        const SEEDS: u64 = 150;
+        let black = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let nothing: Vec<(&str, Effect)> = vec![
+            (
+                "a drop shadow at no opacity",
+                Effect::DropShadow {
+                    dx: 4.0,
+                    dy: 4.0,
+                    blur: 2.0,
+                    color: black.clone(),
+                    opacity: 0.0,
+                },
+            ),
+            (
+                "an inner shadow at no opacity",
+                Effect::InnerShadow {
+                    dx: 4.0,
+                    dy: 4.0,
+                    blur: 2.0,
+                    color: black.clone(),
+                    opacity: 0.0,
+                },
+            ),
+            (
+                "an outline at no opacity",
+                Effect::Outline {
+                    width: 3.0,
+                    color: black.clone(),
+                    opacity: 0.0,
+                },
+            ),
+            (
+                "an outline of no width",
+                Effect::Outline {
+                    width: 0.0,
+                    color: black,
+                    opacity: 1.0,
+                },
+            ),
+        ];
+        let (mut dressed, mut copies) = (0usize, 0usize);
+        for (what, effect) in &nothing {
+            for seed in 0..SEEDS {
+                let plain = chitrakar_doc::fixture::page(seed);
+                let Ok(want) = render(&plain) else { continue };
+                // Sorted: `nodes()` walks a map reseeded every run.
+                let mut ids: Vec<NodeId> = plain.nodes().map(|(i, _)| *i).collect();
+                ids.sort_by_key(|i| i.0);
+                let bare: Vec<NodeId> = ids
+                    .into_iter()
+                    .filter(|id| plain.parent_of(*id).is_some())
+                    .filter(|id| {
+                        plain
+                            .node(*id)
+                            .map(|n| n.effects.is_empty() && !matches!(n.kind, NodeKind::Group))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                if bare.is_empty() {
+                    continue;
+                }
+                // One case is left out by name, and it is a limit rather
+                // than an oversight: a copy of a layer that wears a
+                // *blend*. An effect puts such a copy on a surface, where
+                // the blend it copies meets a transparent page and is
+                // spent. Lifting that would mean letting the target's
+                // blend decide which path the copy takes — and then
+                // taking the blend off changes what the page covers,
+                // which `a_blend_never_changes_what_a_page_covers` caught
+                // on seed 1097 by 271 pixels when it was tried. A blend
+                // may not decide coverage, so this stays.
+                let copies_a_blend_here = bare.iter().any(|id| {
+                    let Ok(n) = plain.node(*id) else { return false };
+                    let NodeKind::Instance { of, .. } = &n.kind else {
+                        return false;
+                    };
+                    plain
+                        .node(*of)
+                        .map(|t| t.blend != BlendMode::Normal)
+                        .unwrap_or(false)
+                });
+                if copies_a_blend_here {
+                    continue;
+                }
+                dressed += bare.len();
+                copies += bare
+                    .iter()
+                    .filter(|id| {
+                        plain
+                            .node(**id)
+                            .map(|n| matches!(n.kind, NodeKind::Instance { .. }))
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let mut doc = plain.clone();
+                for id in bare {
+                    doc.apply(Command::SetEffects {
+                        id,
+                        effects: vec![effect.clone()],
+                    })
+                    .unwrap();
+                }
+                let got = render(&doc).unwrap();
+                let (mut n, mut worst) = (0usize, 0.0f32);
+                for (a, b) in got.pixels.iter().zip(&want.pixels) {
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    if d > 0.02 {
+                        n += 1;
+                        worst = worst.max(d);
+                    }
+                }
+                assert!(
+                    n == 0,
+                    "seed {seed}: {what} changed {n} pixels, the worst by \
+                     {worst:.4}. An effect that puts nothing down cannot \
+                     change the page — and what it changes is not the \
+                     effect but the surface it asked for."
+                );
+            }
+        }
+        // Two ways to pass while asking nothing: dressing no layer, and
+        // dressing no copy — which is where every one of these lived.
+        assert!(
+            dressed > SEEDS as usize,
+            "only {dressed} layers were dressed at all"
+        );
+        assert!(
+            copies > SEEDS as usize / 2,
+            "only {copies} of the {dressed} dressed layers were copies"
+        );
     }
 
     /// An adjustment at its neutral setting is no adjustment.

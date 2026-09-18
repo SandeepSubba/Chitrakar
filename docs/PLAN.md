@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~482),
+- **Verify before committing:** `cargo test --workspace` (~483),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3075,6 +3075,47 @@ without reading anything else.*
      written for it, and two audits over this document that could not
      have noticed before, since there was no effect on a frame here to
      notice with.
+     **An effect that draws nothing is no effect** is the third of these,
+     and it found a hole in a fix made earlier *this same session*. An
+     effect is built from a silhouette, so a layer wearing one is staged
+     on a surface and a layer wearing none is drawn straight — plainly
+     different code, which is the test worth writing.
+     A copy of an adjustment or a filter cannot go on a surface: what it
+     copies rewrites what is under it, and there is nothing under a fresh
+     one. That was answered for a copy sent to a surface by a **mask or a
+     fade**, and an effect sends one just the same — which the answer
+     missed. A copy of a filter wearing a drop shadow *at no opacity at
+     all* still vanished, and so did copies of adjustments. Five pages of
+     a hundred and fifty, the worst by 0.468.
+     The first fix was wrong and the invariants said so, which is the part
+     worth keeping. Drawing such a copy *straight after* its effects were
+     taken from the surface — the shape of answer a clone layer with an
+     effect gets — fixed the pages and broke two others: seed 11 of the
+     mask invariant and, fatally, seed 1097 of the coverage one by 271
+     pixels. The reason is general. Extending the condition to a copy of a
+     **blended** layer makes the *target's blend* decide which path the
+     copy takes, and then taking that blend off changes what the page
+     covers. **A blend may not decide coverage.** Whether a layer rewrites
+     what is under it asks no such question, so that half is safe and the
+     blended half is a limit, written into the test as a named exclusion
+     rather than a widened tolerance.
+     The answer that held is the one the `blended` predicate beside it
+     already takes: **ask what the layer draws, not what kind it is.** An
+     adjustment and a filter are excluded from `effected` by name; a copy
+     of one draws exactly what they draw, so it is excluded too, and the
+     effect is ignored rather than given a surface — which is what the
+     layer it copies has always got.
+     A row of the backend's table of what it will draw turned from false
+     to true with it: an adjustment or a filter wearing an effect is now
+     *drawn*, by ignoring the effect as the reference always has. Handing
+     a page back over an effect that changes nothing was a page declined
+     for no reason.
+     What is left is two pages of a hundred and fifty at 0.009 and 0.011 —
+     edge residue below the threshold, recorded rather than chased.
+     The filters were all clean: a blur of no radius, a sharpen of no
+     amount, a motion blur of no distance, noise of no amount, a vignette
+     of no amount and a pixelation of one pixel each leave the page alone
+     over all hundred and fifty.
      The same question asked of everything *else* that touches a pixel
      found the same defect in two more places, and one of them is worse
      than the adjustments were. **Every blend but `Normal` crushed the

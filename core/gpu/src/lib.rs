@@ -2186,7 +2186,17 @@ fn one(
     // shape. A group is out for the same reason and one more: what a
     // group's opacity means to its children is not what a layer's means
     // to itself.
-    let shadings: Vec<Shading> = if node.effects.is_empty() {
+    // A layer that rewrites what is under it has no silhouette to build
+    // an effect from, and the reference renderer reads that from what the
+    // layer *draws* rather than from its kind: a copy of an adjustment or
+    // a filter is one of these just as much as the layer it copies. Taken
+    // literally the effect would put such a copy on a surface of its own,
+    // where what it copies is handed a transparent page to rewrite and
+    // comes back with nothing — a copy of a filter wearing a drop shadow
+    // at no opacity at all, vanishing. So the effects are ignored here
+    // exactly as they are there.
+    let rewriting = chitrakar_render::rewrites_what_is_under_it(doc, child);
+    let shadings: Vec<Shading> = if node.effects.is_empty() || rewriting {
         Vec::new()
     } else {
         // What is left out, and only these two. A frame: the CPU renderer
@@ -10032,9 +10042,15 @@ mod tests {
             [true, true, true, true, true, true],  // group
             [true, true, true, true, true, true],  // paint
             [true, true, true, true, true, false], // clone
-            [true, true, true, true, true, false], // adjustment
-            [true, true, true, true, true, false], // filter
-            [true, true, true, true, true, true],  // copy
+            // An adjustment and a filter wear an effect and are still
+            // drawn — by *ignoring* it, which is what the reference
+            // renderer has always done with one: there is no silhouette
+            // to build an effect from on a layer that rewrites what is
+            // under it. Handing the page back for an effect that changes
+            // nothing was a page declined for no reason.
+            [true, true, true, true, true, true], // adjustment
+            [true, true, true, true, true, true], // filter
+            [true, true, true, true, true, true], // copy
         ];
         let mut wrong = Vec::new();
         for (k, kind) in KINDS.iter().enumerate() {
