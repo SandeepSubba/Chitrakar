@@ -2373,10 +2373,13 @@ without reading anything else.*
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: a healing stroke, an
-     outline wider than a pass will walk, an effect on a clone layer, and
-     a stroke carrying a region on a layer whose own mask is already
-     riding that slot. Press ink came off that list and the way it came
-     off is below.
+     outline wider than a pass will walk, and an effect on a clone layer.
+     Two more came off in the same sitting — press ink, and a stroke
+     carrying a region on a layer whose own mask was already riding that
+     slot — and both are below. With those two gone there is no whole
+     layer left that the shared fixture has to have removed before the
+     cross-renderer audits can run: every one of its twenty-six is
+     compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
      asking what is *really* refused rather than reading what is written
@@ -3069,14 +3072,70 @@ without reading anything else.*
      and so past the profile, held harmless only by the guard that
      refused the page whenever a profile existed. Both halves now come
      from the same function.
-     The fixture's paint layer still comes out of the cross-renderer
-     audit, and the line saying so now says why: not press ink any more
-     but the one limit left in the walk — that layer wears a brushed mask
-     *and* its strokes carry the region they were painted inside, and one
-     texture slot holds one coverage. Checked rather than assumed, the
-     way the frame's reason should have been: take the mask off and the
-     page is accepted; take the stroke's region off and the page is
-     accepted; leave both and it is not.
+     That left the fixture's paint layer out of the cross-renderer audit
+     for one remaining reason rather than two, and checking *which* is
+     what produced the next find. Not press ink any more but the one
+     limit left in the walk: that layer wears a brushed mask *and* its
+     strokes carry the region they were painted inside, and one texture
+     slot holds one coverage. Checked rather than assumed, the way the
+     frame's reason should have been — take the mask off and the page is
+     accepted; take the stroke's region off and the page is accepted;
+     leave both and it is not.
+     **And then that limit went too, and the interesting part is which
+     half of it was real.** One texture slot holds one coverage: a
+     layer's own mask rides it, and so does the region a stroke was
+     painted inside, so a layer with both handed the page back. Two
+     coverages read together are one coverage — which is the answer this
+     backend has always given a layer that is both masked and held to
+     another — so they are multiplied into the stroke's own texture now,
+     and `held_back` is the one place that folds a mask, a held-to layer
+     and a frame's rectangle together, asked once for a layer and once
+     for a stroke so the two cannot come to disagree about what held
+     back means.
+     The first sabotage said the fold changed nothing: dropped entirely,
+     the whole workspace passed. That is the instrument again and not the
+     thing — the case it serves is a **clone** layer, and nothing was
+     asking about one. A paint layer is always drawn on a surface of its
+     own (its strokes have their conversation with each other before any
+     of them meets the page), so its mask goes on the quad that lays that
+     surface down and never met the stroke's region at all: for a paint
+     layer the refusal had been over-broad rather than load-bearing. A
+     clone layer is never on a surface of its own — what it paints with
+     is what is under it — so its mask rides each stroke, and there the
+     collision was real.
+     Which turned up the defect the fold would otherwise have introduced.
+     Folded everywhere, a masked paint layer whose stroke carries a
+     region takes its mask **twice**: once in the stroke's texture and
+     once on the way down. A hard-edged mask hides that completely, being
+     idempotent; a feathered one does not, half a coverage squared being
+     a quarter. So the fold is conditional — nothing where the mask goes
+     down with the surface, everything where it rides the layer's own
+     drawing, which is a clone layer always and a paint layer with
+     effects (there the mask belongs to the drawing, because it decides
+     what silhouette a shadow is cast from).
+     Three sabotages, three tests, one each: drop the fold and only
+     `a_clone_lifts_what_the_cpu_lifts` fails; drop the pass that puts a
+     stroke's own coverage back after the layer's has been written over
+     everything, and the same one fails; fold where the mask was already
+     going down with the surface, and `a_stroke_laid_in_a_region_stays_in_it`
+     fails on its feathered case, which is there for exactly that.
+     The clone reading is laid out so each coverage owns a side of the
+     dab and they share the middle — the mask everything left of x = 56,
+     the region everything right of x = 44, the dab reaching past both —
+     with hard edges, since what is being asked is *which* coverages were
+     read. And it is read on both renderers rather than compared between
+     them, so two backends losing the same coverage cannot agree their
+     way past it.
+     One wrong turn worth recording: the first version of that reading
+     used a feathered disc for the mask and read three points, and the
+     non-vacuity check failed — the case drew nothing where it should
+     have drawn. That looked like a defect for a minute. It was the
+     geometry of the test: a feathered mask over a soft dab leaves very
+     little at full strength, and the points chosen were in the part it
+     had faded. Rebuilt with hard edges the same three points answer
+     unambiguously, and both renderers agree with each other *and* with
+     what the arithmetic says. A test whose failure you cannot explain
+     is not a finding yet.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing

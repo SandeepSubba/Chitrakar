@@ -2438,6 +2438,41 @@ fn one(
     // Where the layer's own drawing starts, so the mask can be put
     // on everything the layer turns into and nothing else.
     let mut mark = (out.vertices.len(), out.draws.len());
+    // What the layer as a whole is held back by, which a stroke carrying
+    // a region of its own has to fold into that region rather than lose
+    // — the one slot holds one coverage, and two coverages read together
+    // are one coverage.
+    //
+    // Except where the mask is not going on the strokes at all. A layer
+    // drawn on a surface of its own with no effects wears its mask on
+    // the quad that lays that surface down, which is the whole point of
+    // a surface: the strokes have their conversation with each other
+    // first and the mask is taken once over the result. Folding it into
+    // a stroke as well would take it twice, which a hard edge hides and
+    // a feathered one does not. So a paint layer, which is always on one
+    // of its own, folds in nothing; one with effects does fold, since
+    // there the mask rides the layer's own drawing so that the
+    // silhouette a shadow is cast from is the masked one; and a clone
+    // layer, never on a surface of its own, always folds.
+    let held = if alone && shadings.is_empty() {
+        Held {
+            mask: None,
+            to: None,
+            bound: None,
+            parent,
+        }
+    } else {
+        Held {
+            mask: node.mask.as_ref(),
+            to: held_to,
+            bound,
+            parent,
+        }
+    };
+    // The strokes that did exactly that. They already carry everything
+    // the pass at the end would apply, so that pass puts them back
+    // afterwards rather than writing over them.
+    let mut settled: Vec<Settled> = Vec::new();
     match &node.kind {
         NodeKind::Group => {
             collect(
@@ -2492,16 +2527,11 @@ fn one(
                 // carries a region has nowhere to put it and that page
                 // is the CPU's.
                 let confined = match stroke.clip.as_deref() {
-                    Some(region) => {
-                        if node.mask.is_some() || held_to.is_some() || bound.is_some() {
-                            return None;
-                        }
-                        match stroke.bounds() {
-                            Some(box_) => clip_texture(doc, region, box_, t, out)?,
-                            None => continue,
-                        }
-                    }
-                    None => (None, NO_MASK),
+                    Some(region) => match stroke.bounds() {
+                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, out)?),
+                        None => continue,
+                    },
+                    None => None,
                 };
                 let n = stroke.points.len();
                 if n == 0 {
@@ -2526,8 +2556,17 @@ fn one(
                     colour,
                     [0.0; 3],
                 ));
+                let (at, box_) = confined.unwrap_or((None, NO_MASK));
                 for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
-                    v.mask = confined.1;
+                    v.mask = box_;
+                }
+                if confined.is_some() {
+                    settled.push(Settled {
+                        vertices: quad.start as usize..quad.end as usize,
+                        draw: out.draws.len(),
+                        texture: at,
+                        quad: box_,
+                    });
                 }
                 out.draws.push(Item {
                     draw: Draw::Brush {
@@ -2535,7 +2574,7 @@ fn one(
                         quad,
                         erase: stroke.erase,
                     },
-                    mask: confined.0,
+                    mask: at,
                 });
             }
         }
@@ -2556,16 +2595,11 @@ fn one(
                     return None;
                 }
                 let confined = match stroke.clip.as_deref() {
-                    Some(region) => {
-                        if node.mask.is_some() || held_to.is_some() || bound.is_some() {
-                            return None;
-                        }
-                        match stroke.bounds() {
-                            Some(box_) => clip_texture(doc, region, box_, t, out)?,
-                            None => continue,
-                        }
-                    }
-                    None => (None, NO_MASK),
+                    Some(region) => match stroke.bounds() {
+                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, out)?),
+                        None => continue,
+                    },
+                    None => None,
                 };
                 let segments = stroke_segments(stroke, t, band, out);
                 if segments.is_empty() {
@@ -2586,12 +2620,21 @@ fn one(
                     [0.0; 4],
                     [0.0; 3],
                 ));
+                let (at, box_) = confined.unwrap_or((None, NO_MASK));
                 for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
-                    v.mask = confined.1;
+                    v.mask = box_;
+                }
+                if confined.is_some() {
+                    settled.push(Settled {
+                        vertices: quad.start as usize..quad.end as usize,
+                        draw: out.draws.len(),
+                        texture: at,
+                        quad: box_,
+                    });
                 }
                 out.draws.push(Item {
                     draw: Draw::Clone { segments, quad },
-                    mask: confined.0,
+                    mask: at,
                 });
             }
         }
@@ -2894,8 +2937,9 @@ fn one(
           // drawn here now, so a new one will not compile until it says
           // how — which is the same bargain `Node::each_color_mut` makes.
           // What a layer is still handed back for is a thing it holds
-          // rather than the kind it is: press ink, a healing stroke, a
-          // band wider than a pass will walk.
+          // rather than the kind it is: a healing stroke, which is an
+          // average over the whole stroke before any of it goes down,
+          // and a band wider than a pass will walk.
     }
     // Where the quads that lay the surface down start, so the mask can
     // be kept off them: a layer with effects wears its mask on its own
@@ -3051,6 +3095,15 @@ fn one(
         for item in &mut out.draws[mark.1..] {
             item.mask = at;
         }
+        // A stroke carrying a region of its own already holds all of
+        // this, folded into that region when it was built. Putting those
+        // back is what lets one slot answer two questions.
+        for own in &settled {
+            for v in &mut out.vertices[own.vertices.clone()] {
+                v.mask = own.quad;
+            }
+            out.draws[own.draw].mask = own.texture;
+        }
         // The surface already holds the mask; laying it down is not the
         // place to take the coverage a second time.
         if let Some((from, draws)) = laid {
@@ -3130,6 +3183,7 @@ fn clip_texture(
     region: &chitrakar_doc::Mask,
     box_: [f32; 4],
     t: Transform,
+    layer: Held<'_>,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
     let page = out.surface;
@@ -3151,7 +3205,14 @@ fn clip_texture(
         return Some((None, NO_MASK));
     }
     let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
-    let cover = chitrakar_render::mask_plane_over(doc, region, t, clip, page);
+    let mut cover = chitrakar_render::mask_plane_over(doc, region, t, clip, page);
+    // And whatever the layer as a whole is held back by, over the same
+    // pixels: one slot holds one coverage, so the stroke's region and the
+    // layer's own become one here rather than one displacing the other.
+    // Multiplied, which is what the CPU renderer does with them — it asks
+    // the region as the stroke goes down and the layer's coverage as the
+    // layer does, and a coverage taken twice is a coverage multiplied.
+    held_back(doc, &mut cover, (x0, y0, w), layer, clip, page)?;
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -3160,6 +3221,70 @@ fn clip_texture(
         texels: cover.iter().map(|c| f32_to_f16(*c)).collect(),
     });
     Some((Some(at), [x0 as f32, y0 as f32, w as f32, h as f32]))
+}
+
+/// A stroke that carries a region of its own, and so already holds the
+/// whole of what its layer is held back by: where its quad's vertices and
+/// its draw landed, and the coverage they were given.
+struct Settled {
+    vertices: std::ops::Range<usize>,
+    draw: usize,
+    texture: Option<usize>,
+    quad: [f32; 4],
+}
+
+/// What a layer as a whole is held back by: its own mask, the layer it is
+/// held to, and the frame it is inside. Carried together because they are
+/// read together — by the time a fragment sees them they are one number.
+#[derive(Clone, Copy)]
+struct Held<'a> {
+    mask: Option<&'a chitrakar_doc::Mask>,
+    to: Option<NodeId>,
+    bound: Option<chitrakar_render::ClipRect>,
+    /// The space the mask is authored in, which is the layer's parent's.
+    parent: Transform,
+}
+
+/// Multiply a coverage plane, laid over the device pixels `(x0, y0)` to
+/// `(x0 + w, ..)`, by everything `layer` is held back by.
+///
+/// The one place that folds the three together, so a coverage built for a
+/// layer and a coverage built for one of its strokes cannot come to
+/// disagree about what "held back" means.
+fn held_back(
+    doc: &Document,
+    cover: &mut [f32],
+    at: (u32, u32, u32),
+    layer: Held<'_>,
+    clip: chitrakar_render::ClipRect,
+    page: (u32, u32),
+) -> Option<()> {
+    let (x0, y0, w) = at;
+    if let Some(mask) = layer.mask {
+        let plane = chitrakar_render::mask_plane_over(doc, mask, layer.parent, clip, page);
+        for (c, m) in cover.iter_mut().zip(plane) {
+            *c *= m;
+        }
+    }
+    if let Some(base) = layer.to {
+        let held = chitrakar_render::layer_coverage_at(doc, base, layer.parent, page).ok()?;
+        for (i, c) in cover.iter_mut().enumerate() {
+            let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
+            *c *= held[(y * page.0 + x) as usize];
+        }
+    }
+    // A frame somewhere above: everything drawn inside one is held to its
+    // rectangle, which is whole pixels, so this takes all of a pixel or
+    // none of it.
+    if let Some(inside) = layer.bound {
+        for (i, c) in cover.iter_mut().enumerate() {
+            let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
+            if x < inside.x0 || x >= inside.x1 || y < inside.y0 || y >= inside.y1 {
+                *c = 0.0;
+            }
+        }
+    }
+    Some(())
 }
 
 /// Rasterize a layer's mask into a scene texture, and say where it went
@@ -3217,28 +3342,20 @@ fn mask_texture(
     // than the textures this backend asked for was handed back before
     // any of this.
     let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
-    let mut cover = match mask {
-        Some(mask) => chitrakar_render::mask_plane_over(doc, mask, parent, clip, page),
-        None => vec![1.0; (w * h) as usize],
-    };
-    if let Some(base) = held_to {
-        let held = chitrakar_render::layer_coverage_at(doc, base, parent, page).ok()?;
-        for (i, c) in cover.iter_mut().enumerate() {
-            let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
-            *c *= held[(y * page.0 + x) as usize];
-        }
-    }
-    // A frame somewhere above: everything drawn inside one is held to
-    // its rectangle, which is whole pixels, so this takes all of a
-    // pixel or none of it.
-    if let Some(inside) = bound {
-        for (i, c) in cover.iter_mut().enumerate() {
-            let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
-            if x < inside.x0 || x >= inside.x1 || y < inside.y0 || y >= inside.y1 {
-                *c = 0.0;
-            }
-        }
-    }
+    let mut cover = vec![1.0; (w * h) as usize];
+    held_back(
+        doc,
+        &mut cover,
+        (x0, y0, w),
+        Held {
+            mask,
+            to: held_to,
+            bound,
+            parent,
+        },
+        clip,
+        page,
+    )?;
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -4714,9 +4831,9 @@ mod tests {
             return;
         };
         let mut f = chitrakar_doc::fixture::everything();
-        // As the audit below: the layers this backend hands back are
-        // taken off first, so that what is left is a page it draws.
-        f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
+        // As the audit below: what this backend hands a page back for is
+        // taken off first, so that what is left is a page it draws. No
+        // whole layer is on that list any more — only the effects below.
         let mut hung: Vec<(NodeId, Vec<chitrakar_doc::Effect>)> = f
             .doc
             .nodes()
@@ -4841,21 +4958,16 @@ mod tests {
             return;
         };
         let mut f = chitrakar_doc::fixture::everything();
-        // The fixture holds one of every node kind and this backend
-        // draws them all — its press ink included now, which is what had
-        // been keeping the paint layer out. What keeps it out still is
-        // narrower and is the one limit left in the walk: that layer
-        // wears a brushed mask *and* its strokes carry the region they
-        // were painted inside, and one slot holds one coverage. One
-        // layer it cannot draw makes the whole page declined, and an
-        // audit that is declined every time measures nothing, so that
-        // one comes out first. When the slot stops being one, this line
-        // goes and the commands that speak to a paint layer come into
-        // scope by themselves.
-        f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
-        // The effects the fixture hangs on layers come off too, for a
-        // reason of the same shape but not so blunt. An effect is drawn
-        // from a layer's
+        // The fixture holds one of every node kind and this backend now
+        // draws every one of them, the paint layer included — press ink
+        // and a stroke carrying a region inside a layer that wears a mask
+        // were the last two things keeping a whole layer out of this
+        // comparison, and neither does now. Nothing is removed here any
+        // more, so every command that speaks to a paint layer is in scope
+        // by itself.
+        //
+        // The effects the fixture hangs on layers do come off, for a
+        // reason of a different shape. An effect is drawn from a layer's
         // silhouette, and this backend draws a shadow and an outline
         // that way now — what it still hands back is one on a blended
         // layer or inside a frame, and one of those anywhere declines
@@ -8150,6 +8262,88 @@ mod tests {
             }
         }
 
+        // A clone layer is never on a surface of its own — what it paints
+        // with is what is under it — so its mask goes on each stroke as
+        // it lands, on the one slot a stroke's own region wants. That
+        // used to hand the page back; the two are folded into one
+        // coverage now, which is the same answer this backend gives a
+        // layer that is both masked and held to another.
+        //
+        // The two are laid out so that each has a side of the dab to
+        // itself and they share the middle: the layer's mask is
+        // everything left of x = 56, the stroke's region everything
+        // right of x = 44, and the dab is wide enough to reach past
+        // both. Hard edges on purpose — what is being asked is which
+        // coverages were read, and a feathered one answers that in
+        // fractions.
+        let band = |x: f32, w: f32| {
+            Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: w,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(x, 0.0),
+                },
+                invert: false,
+                feather: 0.0,
+            })
+        };
+        let confined = |mask: bool, region: bool| {
+            let mut stroke = dab(&[[50.0, 36.0]], 14.0, lift);
+            if region {
+                stroke.clip = Some(band(44.0, 36.0));
+            }
+            let (mut doc, id) = page(vec![stroke]);
+            if mask {
+                doc.apply(Command::SetMask {
+                    id,
+                    mask: Some(band(0.0, 56.0)),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        // Lifted from the patch, the dab is red where it lands; the page
+        // under it is not. So one channel says whether it landed.
+        let landed = |s: &Surface, x: u32| s.get(x, 36).g < 0.3;
+        let free = chitrakar_render::render(&confined(false, false)).unwrap();
+        for x in [40u32, 50, 60] {
+            assert!(
+                landed(&free, x),
+                "the dab reaches {x} with nothing in its way"
+            );
+        }
+        for (what, mask, region, reach) in [
+            ("a region", false, true, [false, true, true]),
+            ("a mask", true, false, [true, true, false]),
+            ("both", true, true, [false, true, false]),
+        ] {
+            let doc = confined(mask, region);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{what} on a clone layer is drawn rather than handed back"
+            );
+            let mine = gpu.render(&doc).unwrap();
+            let theirs = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &theirs);
+            assert!(mean < 0.004, "{what}: mean {mean:.5}, worst {worst:.3}");
+            // Read on both renderers rather than compared, so that two
+            // backends losing the same coverage cannot agree their way
+            // past this.
+            for (i, x) in [40u32, 50, 60].into_iter().enumerate() {
+                for (whose, page) in [("gpu", &mine), ("cpu", &theirs)] {
+                    assert_eq!(
+                        landed(page, x),
+                        reach[i],
+                        "{what}: {whose} at {x} {:?}",
+                        page.get(x, 36)
+                    );
+                }
+            }
+        }
+
         // The reading a mean over a page hides, which is most of what a
         // clone gets wrong: *which* pixel it reads. The patch's own left
         // edge at x = 6 falls inside what this dab lifts, so that edge
@@ -8380,9 +8574,16 @@ mod tests {
             "and not on this one"
         );
 
-        // One slot holds one coverage: a layer's own mask is already
-        // riding it for everything the layer draws, so a stroke that
-        // also carries a region goes back to the CPU.
+        // One slot still holds one coverage, and a layer's own mask was
+        // already riding it — so a stroke that also carried a region used
+        // to send the page back. Two coverages read together are one
+        // coverage, which is the same answer this backend has always given
+        // for a layer that is both masked and held to another, so the two
+        // are multiplied into the stroke's own texture instead.
+        //
+        // The two regions here are opposite halves of the page with a
+        // stroke running across both, so a fold that dropped either one
+        // would show as a whole half of the stroke.
         let (mut both, id) = page(vec![stroke(Some(region(0.0, false)), false)]);
         both.apply(Command::SetMask {
             id,
@@ -8390,9 +8591,68 @@ mod tests {
         })
         .unwrap();
         assert!(
-            !GpuRenderer::can_render(&both),
+            GpuRenderer::can_render(&both),
             "a masked layer whose stroke also carries a region"
         );
+        let two = gpu.render(&both).unwrap();
+        let (mean, worst) = difference(&two, &chitrakar_render::render(&both).unwrap());
+        assert!(
+            mean < 0.004,
+            "a region inside a mask: mean {mean:.5}, worst {worst:.3}"
+        );
+        // Opposite halves leave nothing, which is the answer — and an
+        // answer a dropped coverage cannot give, since dropping either
+        // one puts back half the stroke.
+        for x in [15u32, 45] {
+            assert!(
+                (two.get(x, 20).b - bare.get(x, 20).b).abs() < 0.01,
+                "nothing of the stroke survives both at {x}: {} against {}",
+                two.get(x, 20).b,
+                bare.get(x, 20).b
+            );
+        }
+        // And the same stroke inside a mask that agrees with its region
+        // is the stroke, so the fold is not simply erasing. Feathered,
+        // which is the case that says *how many times* each coverage was
+        // read: a hard edge is idempotent and would pass on a mask taken
+        // twice, and a paint layer is drawn on a surface of its own
+        // where its mask belongs to the quad that lays that surface
+        // down. Half a coverage squared is a quarter, and the CPU's own
+        // answer is the half.
+        let (mut agreed, id) = page(vec![stroke(Some(region(0.0, false)), false)]);
+        agreed
+            .apply(Command::SetMask {
+                id,
+                mask: Some(region(8.0, false)),
+            })
+            .unwrap();
+        let same = gpu.render(&agreed).unwrap();
+        let (mean, worst) = difference(&same, &chitrakar_render::render(&agreed).unwrap());
+        assert!(
+            mean < 0.004,
+            "a region inside the same mask: mean {mean:.5}, worst {worst:.3}"
+        );
+        assert!(
+            same.get(15, 20).b > same.get(15, 20).r + 0.2,
+            "the stroke is still laid where both agree: {:?}",
+            same.get(15, 20)
+        );
+        // Along the feather, read against the reference rather than
+        // against a number: a coverage taken twice is a different curve,
+        // not a different edge.
+        let theirs = chitrakar_render::render(&agreed).unwrap();
+        let mut soft = 0;
+        for x in 20u32..30 {
+            let (a, b) = (same.get(x, 20), theirs.get(x, 20));
+            if b.b > 0.02 && b.b < 0.9 {
+                soft += 1;
+            }
+            assert!(
+                (a.b - b.b).abs() < 0.02,
+                "along the feather at {x}: {a:?} against {b:?}"
+            );
+        }
+        assert!(soft >= 4, "the feather really is a ramp here: {soft} steps");
     }
 
     #[test]
