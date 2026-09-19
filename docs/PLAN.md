@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~486),
+- **Verify before committing:** `cargo test --workspace` (~487),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3035,6 +3035,33 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The same question asked of the other two things a file carries beside
+     its manifest — a **font** and an **ICC profile** — found the third
+     kind of answer: not a crash, not a wrong picture, but **memory that
+     never comes back**.
+     A registered face lives for the whole process. The shaper and the
+     rasterizer both hold borrows of it, so its bytes are leaked on
+     purpose to give them the `'static` they need. The leak came *first*,
+     though, and the refusal after it: `Box::leak(bytes)` and then a `?`
+     on the parse. So a `.chitra` carrying a face that will not parse
+     handed over its bytes and never got them back, and the document
+     opened cleanly with nothing to say so. A file can carry as many
+     faces as it likes.
+     Measured rather than argued, which took building something that
+     could see it: a counting global allocator in a test binary of its
+     own, since a global allocator is per-binary and nothing else in the
+     workspace can watch memory at all. Twenty megabytes of not-a-font
+     offered, **twenty megabytes still held**. With the check moved ahead
+     of the leak, nought. That behaviour was unobservable until there was
+     something built to observe it, which is the argument for the test
+     rather than for a comment.
+     The rest of what a file carries came back clean, and the negatives
+     are worth their place: a face whose file is missing from the zip
+     opens with the text in the bundled face; a face that is not a face
+     opens the same way and is refused by name; and a profile that is not
+     a profile is dropped with `set_cmyk_profile` saying so. All three
+     were already decisions rather than accidents — it is only the bytes
+     that were not being given back.
      The damage sweep has a reach it cannot extend, and past it sits a
      real crash. Every entry it writes is re-zipped with its own CRC, so
      damage to a PNG's *bytes* is refused one layer down — but **a valid

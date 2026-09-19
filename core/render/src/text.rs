@@ -57,6 +57,20 @@ pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
             "\"{name}\" is the bundled face's name; register the file under another"
         ));
     }
+    // Read once while the bytes are still owned, and given away only
+    // once they are known to be a face.
+    //
+    // A registered face lives for the process — the shaper and the
+    // rasterizer both hold borrows of it, so the bytes are leaked on
+    // purpose to give them the `'static` they need. The leak used to
+    // come *first*, though, with the refusal after it, so a file
+    // carrying a face that would not parse handed over its bytes and
+    // never got them back: twenty megabytes of not-a-font offered is
+    // twenty megabytes still held, and the document opens cleanly so
+    // nothing says otherwise. A `.chitra` can carry as many faces as it
+    // likes.
+    FontRef::try_from_slice(&bytes).map_err(|e| e.to_string())?;
+    rustybuzz::Face::from_slice(&bytes, 0).ok_or("not a font the shaper can read")?;
     let fonts: &'static Fonts = Box::leak(Box::new(parse(Box::leak(bytes.into_boxed_slice()))?));
     registry()
         .write()
