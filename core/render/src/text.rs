@@ -57,6 +57,27 @@ pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
             "\"{name}\" is the bundled face's name; register the file under another"
         ));
     }
+    // The same face offered again under the same name, which is what
+    // happens when two documents carry it or somebody loads the file
+    // twice. Answered from what is already registered rather than by
+    // parsing and keeping a second copy.
+    //
+    // Replacing a name with *different* bytes still keeps the old face
+    // for good, and that is the design rather than an oversight: what
+    // the registry hands out is a `&'static Fonts`, and a render in
+    // flight may be holding one, so there is no moment the old face
+    // could be freed without a borrow outliving it. The cost is a face's
+    // worth of memory per genuine replacement — three quarters of a
+    // megabyte for the bundled one — and it is written down here because
+    // it is the sort of thing that is otherwise found by wondering where
+    // the memory went.
+    FontRef::try_from_slice(&bytes).map_err(|e| e.to_string())?;
+    rustybuzz::Face::from_slice(&bytes, 0).ok_or("not a font the shaper can read")?;
+    if let Ok(map) = registry().read() {
+        if map.get(name).is_some_and(|f| f.bytes == bytes) {
+            return Ok(());
+        }
+    }
     // Read once while the bytes are still owned, and given away only
     // once they are known to be a face.
     //
@@ -69,8 +90,6 @@ pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
     // twenty megabytes still held, and the document opens cleanly so
     // nothing says otherwise. A `.chitra` can carry as many faces as it
     // likes.
-    FontRef::try_from_slice(&bytes).map_err(|e| e.to_string())?;
-    rustybuzz::Face::from_slice(&bytes, 0).ok_or("not a font the shaper can read")?;
     let fonts: &'static Fonts = Box::leak(Box::new(parse(Box::leak(bytes.into_boxed_slice()))?));
     registry()
         .write()

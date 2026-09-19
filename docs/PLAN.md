@@ -3055,6 +3055,28 @@ without reading anything else.*
      of the leak, nought. That behaviour was unobservable until there was
      something built to observe it, which is the argument for the test
      rather than for a comment.
+     The same instrument, turned on the registry once more, found the
+     accident beside the design. Offering the **same face twice under the
+     same name** — two documents carrying it, or somebody loading the file
+     twice — parsed it afresh and kept it afresh each time, and the copy
+     it displaced became unreachable: nine repeats of the bundled face
+     held seven megabytes nothing could ever read again. Answered from
+     what is already registered now, when the bytes match to the last
+     one.
+     Replacing a name with *different* bytes still keeps the old face for
+     good, and that stays: the registry hands out a `&'static Fonts` and a
+     render in flight may be holding one, so there is no moment it could
+     be freed without a borrow outliving it. That is the design and the
+     price of it — three quarters of a megabyte per genuine replacement —
+     written down rather than left to be discovered by wondering where
+     the memory went. The fix covers the case that is an accident and not
+     the one that is a choice.
+     The test is **one test and not two**, for a reason worth keeping: a
+     global allocator belongs to the whole binary and cargo runs tests in
+     a thread each, so split in two the halves measured one another — the
+     second's seven megabytes landed inside the first's reading and
+     failed it. That is a flaky test rather than a finding, and it took
+     seeing a sabotage fail *both* halves to notice.
      The rest of what a file carries came back clean, and the negatives
      are worth their place: a face whose file is missing from the zip
      opens with the text in the bundled face; a face that is not a face

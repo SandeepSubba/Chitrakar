@@ -1,4 +1,4 @@
-//! A face that will not parse gives its bytes back.
+//! What a font registry keeps, and what it must not.
 //!
 //! A registered face lives for the whole process: the shaper and the
 //! rasterizer both hold borrows of it, so its bytes are leaked on purpose
@@ -35,8 +35,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
+/// One test rather than two, deliberately: both halves read a counter
+/// that belongs to the whole binary, and cargo runs tests in a thread
+/// each. Split in two they measured each other — the second's seven
+/// megabytes landed inside the first's reading and failed it, which is a
+/// flaky test rather than a finding.
 #[test]
-fn a_face_that_will_not_parse_gives_its_bytes_back() {
+fn a_font_registry_keeps_what_it_must_and_nothing_else() {
     const ONE: usize = 1 << 20;
     const TIMES: usize = 20;
     let before = HELD.load(Ordering::Relaxed);
@@ -60,5 +65,46 @@ fn a_face_that_will_not_parse_gives_its_bytes_back() {
          bytes are leaked on purpose once a face is registered, and that \
          has to happen after the refusal rather than before it.",
         kept as f64 / ONE as f64
+    );
+
+    // And the same face offered twice is kept once.
+    //
+    // Two documents carrying the same file, or somebody loading it
+    // twice, should not cost twice. It did: each registration parsed
+    // afresh and leaked afresh, and the earlier face — still the same
+    // bytes — became unreachable.
+    //
+    // Replacing a name with *different* bytes still keeps the old face
+    // for good, and that is the design rather than an oversight: the
+    // registry hands out a `&'static Fonts` and a render in flight may
+    // be holding one, so there is no moment the old face could be freed
+    // without a borrow outliving it. This covers the case that is an
+    // accident, not the one that is a choice.
+    let face = include_bytes!("../assets/DejaVuSans.ttf").to_vec();
+    let name = "a face offered twice";
+    let before = HELD.load(Ordering::Relaxed);
+    chitrakar_render::text::register_font(name, face.clone()).expect("the bundled face parses");
+    let first = HELD.load(Ordering::Relaxed) - before;
+    // Non-vacuity: the first registration really does keep the face, so
+    // "nothing more is kept" below is about the repeats and not about a
+    // registry that quietly keeps nothing at all.
+    assert!(
+        first as usize > face.len() / 2,
+        "registering a face has to keep it: {first} bytes held for a face \
+         of {}",
+        face.len()
+    );
+    let before = HELD.load(Ordering::Relaxed);
+    for _ in 0..9 {
+        chitrakar_render::text::register_font(name, face.clone()).expect("and again");
+    }
+    let again = HELD.load(Ordering::Relaxed) - before;
+    assert!(
+        again < (face.len() / 2) as isize,
+        "the same face offered nine more times held {:.2} MiB more. A face \
+         already registered under that name, byte for byte, is the face \
+         that is wanted — parsing and keeping it again buys nothing and \
+         the copy it displaces can never be read.",
+        again as f64 / (1 << 20) as f64
     );
 }
