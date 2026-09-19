@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~485),
+- **Verify before committing:** `cargo test --workspace` (~486),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3035,6 +3035,35 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The damage sweep has a reach it cannot extend, and past it sits a
+     real crash. Every entry it writes is re-zipped with its own CRC, so
+     damage to a PNG's *bytes* is refused one layer down — but **a valid
+     PNG of the wrong size passes every check the container has**. A
+     `.chitra` says a resource's size in its manifest and carries its
+     pixels in a file beside it, and nothing in the format makes the two
+     agree: another writer, a hand-edited zip, a merge gone wrong.
+     They are held against each other once, in
+     `Document::restore_resource_bytes`, and bytes that do not fit the
+     declared size are dropped — the manifest is the source of truth, and
+     a layer with no pixels behind it draws nothing. That one line had
+     nothing asking about it end to end, and it is load-bearing: let the
+     bytes through regardless and the resource becomes a four-by-two
+     picture holding a hundred and sixty bytes, and the **SVG export
+     panics inside the image encoder**. A crash while writing somebody's
+     file, one line away.
+     Pinned now end to end, both ways a picture can be wrong — a valid
+     PNG of another size, and no PNG at all — through the open, the
+     render and the export, with the unswapped file asserted to draw and
+     to travel as a picture so that "draws nothing" cannot pass on a page
+     that never drew. Refusing a whole document over one bad picture
+     would be worse than losing the picture, so losing it is the
+     decision; this is what says so.
+     Everything else probed around it came back clean, and the negatives
+     are worth as much as the find: the catch-all pattern that hid the
+     gradient map exists nowhere else in the document model; the
+     exporters omit an adjustment with a comment rather than silently;
+     and an empty resource goes into an SVG as nothing rather than as an
+     empty `<image>`, which a reader still parses.
      A different kind of question, after two rounds of the fixture strand
      returning nothing: **what does this do with a file that is
      damaged?** An editor opens files somebody else's disk wrote. There

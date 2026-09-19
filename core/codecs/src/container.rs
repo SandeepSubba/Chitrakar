@@ -1458,6 +1458,133 @@ mod tests {
     /// A file that is damaged, truncated, or simply not one of ours must
     /// be refused rather than bring the editor down with it: a save cut
     /// short by a full disk is exactly the file someone will try to open.
+    /// A file whose picture is the wrong size opens without the picture.
+    ///
+    /// A `.chitra` says a resource's size in its manifest and carries its
+    /// pixels in a PNG beside it, and nothing in the format makes the two
+    /// agree — another writer, a hand-edited zip, a merge gone wrong. The
+    /// two are held against each other once, in
+    /// `Document::restore_resource_bytes`, and bytes that do not fit the
+    /// size the manifest declared are dropped: the manifest is the source
+    /// of truth, and a layer with no pixels behind it draws nothing.
+    ///
+    /// That one line is load-bearing and had nothing asking about it end
+    /// to end. Let the bytes through regardless and the resource becomes
+    /// a four-by-two picture holding a hundred and sixty bytes — and the
+    /// SVG export **panics inside the image encoder**, which is a crash
+    /// while writing somebody's file. Refusing the whole document over
+    /// one bad picture would be worse than losing the picture, so losing
+    /// it is the decision; this is the test that says so.
+    ///
+    /// The damaged-file sweep below cannot reach this: every entry there
+    /// is re-zipped with its own CRC intact, so damage to a PNG's *bytes*
+    /// is refused one layer down. A picture that is a valid PNG of the
+    /// wrong size passes every check the container has.
+    #[test]
+    fn a_picture_of_the_wrong_size_is_left_out_rather_than_believed() {
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        let root = doc.root();
+        let id = doc.add_resource(
+            4,
+            2,
+            (0..8u32)
+                .flat_map(|i| [255u8, (i * 30) as u8, 0, 255])
+                .collect(),
+        );
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "pic",
+                chitrakar_doc::RasterRef {
+                    resource_id: id.clone(),
+                    width: 4,
+                    height: 2,
+                },
+            )),
+        })
+        .unwrap();
+        let good = save_chitra(&doc).unwrap();
+
+        // Every entry carried over, its CRC written afresh, with the one
+        // picture swapped for a valid PNG of another size.
+        let swap = |png: Option<Vec<u8>>| -> Vec<u8> {
+            let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+            let names: Vec<String> = zip.file_names().map(String::from).collect();
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                for name in names {
+                    let mut body = Vec::new();
+                    zip.by_name(&name).unwrap().read_to_end(&mut body).unwrap();
+                    if name.starts_with("resources/") {
+                        match &png {
+                            // Left out of the file altogether.
+                            None => continue,
+                            Some(other) => body = other.clone(),
+                        }
+                    }
+                    w.start_file(&name, SimpleFileOptions::default()).unwrap();
+                    w.write_all(&body).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            out
+        };
+
+        // Non-vacuity first: as saved, the picture is there and draws.
+        let whole = load_chitra(&good).expect("the file as written opens");
+        let there = whole.resource(&id).expect("the picture is in the file");
+        assert_eq!(
+            (there.width, there.height, there.rgba8.len()),
+            (4, 2, 32),
+            "the picture arrives whole when nothing is wrong with it"
+        );
+        let ink = |doc: &Document| {
+            chitrakar_render::render(doc)
+                .unwrap()
+                .pixels
+                .iter()
+                .filter(|p| p.a > 0.01)
+                .count()
+        };
+        assert!(ink(&whole) > 4, "and it puts ink on the page");
+        assert!(
+            crate::export_svg(&whole).unwrap().contains("<image"),
+            "and travels into an SVG as a picture"
+        );
+
+        // Now the same file with a picture of another size in it, and
+        // with no picture at all: both open, both without it.
+        let other = crate::encode_png(8, 5, &[128u8; 8 * 5 * 4]).unwrap();
+        for (what, bytes) in [
+            ("a picture of the wrong size", swap(Some(other))),
+            ("no picture at all", swap(None)),
+        ] {
+            let back = load_chitra(&bytes)
+                .unwrap_or_else(|e| panic!("{what}: the document still opens, {e}"));
+            let res = back.resource(&id).expect("the manifest still declares it");
+            assert_eq!(
+                (res.width, res.height, res.rgba8.len()),
+                (4, 2, 0),
+                "{what}: the size is the manifest's and the bytes are \
+                 nobody's — anything else is the file's account of a \
+                 picture being taken on trust"
+            );
+            assert_eq!(
+                ink(&back),
+                0,
+                "{what}: a layer with no pixels behind it draws nothing"
+            );
+            let svg = crate::export_svg(&back).unwrap();
+            assert!(
+                !svg.contains("<image"),
+                "{what}: and goes into an SVG as nothing rather than as an \
+                 empty picture"
+            );
+        }
+    }
+
     #[test]
     fn a_damaged_file_is_refused_not_survived() {
         assert!(load_chitra(b"").is_err(), "nothing at all");
