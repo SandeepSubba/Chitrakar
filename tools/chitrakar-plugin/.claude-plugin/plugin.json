@@ -1,0 +1,8 @@
+{
+  "name": "chitrakar",
+  "description": "Workflow for the Chitrakar photo/vector editor: one-command verification (fmt, clippy, engine tests, browser smoke suite), project status, a guarded ship command, and the engine's architectural conventions.",
+  "version": "0.1.0",
+  "author": { "name": "Chitrakar" },
+  "homepage": "https://github.com/SandeepSubba/Chitrakar",
+  "keywords": ["graphics", "rust", "wasm", "editor", "color-management"]
+}

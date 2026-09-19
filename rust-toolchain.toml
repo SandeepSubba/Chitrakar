@@ -1,0 +1,8 @@
+# Single source of truth for the toolchain, so CI and a dev machine run the
+# same clippy. Version skew is not cosmetic here: `-D warnings` turns any
+# lint a newer clippy adds into a CI error that never fired locally.
+# Bump deliberately, then re-run the full gate before pushing.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

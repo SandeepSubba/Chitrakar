@@ -1,0 +1,11 @@
+{
+  "name": "chitrakar",
+  "owner": { "name": "Chitrakar" },
+  "plugins": [
+    {
+      "name": "chitrakar",
+      "source": "./tools/chitrakar-plugin",
+      "description": "Verification, status, and engine conventions for working on Chitrakar."
+    }
+  ]
+}
