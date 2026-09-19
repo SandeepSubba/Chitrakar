@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~487),
+- **Verify before committing:** `cargo test --workspace` (~488),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3035,6 +3035,28 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     With something able to watch memory, the question the **unbounded
+     undo history** invites could finally be answered rather than worried
+     about. Nothing trims `undo`, so a long session grows for ever in
+     principle. In practice a brush stroke costs about two thirds of a
+     kilobyte: two thousand of them hold **1.4 MiB**, which is the
+     artwork rather than the bookkeeping. A cap would be a product
+     decision and not a fix, and the measurement is what says so.
+     What the measurement *is* worth is as a guard on how undo is built.
+     Undo here is an inverse command per step, so the history holds the
+     edit and an edit's inverse is about the size of the edit. The other
+     way to build undo, and the more common one, is a copy of the
+     document per step — hard to tell apart by reading, trivial by
+     weighing. Made to snapshot, the same two thousand strokes hold
+     **1120 MiB**: eight hundred times the ceiling the test allows, so
+     there is no reading of the number that mistakes one for the other
+     (`an_edit_costs_about_what_the_edit_is`).
+     Its floors matter as much as its ceiling, and both directions are
+     asked: the strokes have to be on the layer, and holding them has to
+     cost at least half their own weight, or the counter is not watching
+     what it is supposed to. And undoing the lot has to move the inverses
+     between the stacks rather than build new ones, which is the other
+     way a history can quietly double.
      The same question asked of the other two things a file carries beside
      its manifest — a **font** and an **ICC profile** — found the third
      kind of answer: not a crash, not a wrong picture, but **memory that
