@@ -54,18 +54,18 @@
 //! copy stands in for the original's children with layers of its own,
 //! those are what it draws.
 //!
-//! What is declined, and falls back to the CPU: a live effect; a layer
-//! held to a base whose own alpha is not a plain question — an
-//! adjustment, or one that is faded, blended or masked; a frame that is
-//! turned, composited as a whole, or whose box does not land on whole
-//! pixels, each of which the CPU draws another way; a copy of another
-//! layer that is faded, blended or masked, for the same reason; a paint
-//! layer;
-//! pixelate, which reads a neighbourhood but not along an axis; ink
-//! authored for a press; and anything needing a texture larger than the
-//! device was asked for. Declining is always a safe answer — the page
-//! comes out right, more slowly. Drawing the wrong thing never is,
-//! which is what the audit over every command is there to catch.
+//! What is declined, and falls back to the CPU, is **not listed here**,
+//! on purpose. A list in prose is a list that goes stale: three things
+//! this paragraph used to name had been drawn for some while before
+//! anybody read the walk again, and one of them was in the roadmap as
+//! work still to do. `what_it_will_draw_is_written_down` is the list —
+//! every kind of layer against everything a layer can wear, asserted
+//! rather than described, with the reason for each `no` beside it — and
+//! it is the one to change and the one to read.
+//!
+//! Declining is always a safe answer: the page comes out right, more
+//! slowly. Drawing the wrong thing never is, which is what the audit
+//! over every command is there to catch.
 
 use chitrakar_color::LinearRgba;
 use chitrakar_doc::{BlendMode, Document, NodeId, NodeKind, Transform, VectorShape};
@@ -2513,9 +2513,7 @@ fn one(
                     // brings it down takes that much off.
                     [0.0, 0.0, 0.0, 1.0]
                 } else {
-                    // Ink authored for a press is the CPU's, here as
-                    // everywhere else.
-                    premultiplied_color(stroke.color.clone(), 1.0)?
+                    premultiplied_color(doc, &stroke.color, 1.0)
                 };
                 let segments = stroke_segments(stroke, t, band, out);
                 if segments.is_empty() {
@@ -2641,7 +2639,7 @@ fn one(
             out.draws.push(Item::of(Draw::Image { quad, texture: at }));
         }
         NodeKind::Text(spec) => {
-            let color = premultiplied_color(spec.fill.clone(), alpha)?;
+            let color = premultiplied_color(doc, &spec.fill, alpha);
             text(spec, t, color, out)?;
         }
         NodeKind::Adjustment(adj) => {
@@ -3341,19 +3339,16 @@ fn vector(
         // flat fill stays covered up.
         Some(g) if g.stops().is_empty() => None,
         Some(g) => {
-            let (ramp, geom, radial) = bake(g)?;
+            let (ramp, geom, radial) = bake(doc, g);
             let at = out.textures.len();
             out.textures.push(ramp);
             let kind = if radial { 1.0 } else { 0.0 };
             Some(([kind, 0.0, 0.0, alpha], geom, Some(at)))
         }
-        None => match fill {
-            Some(c) => Some((premultiplied_color(c, alpha)?, [0.0; 4], None)),
-            None => None,
-        },
+        None => fill.map(|c| (premultiplied_color(doc, &c, alpha), [0.0; 4], None)),
     };
     let ink = match stroke {
-        Some(s) if s.width > 0.0 => Some((premultiplied_color(s.color.clone(), alpha)?, s)),
+        Some(s) if s.width > 0.0 => Some((premultiplied_color(doc, &s.color, alpha), s)),
         _ => None,
     };
     if paint.is_none() && ink.is_none() {
@@ -3427,17 +3422,20 @@ fn vector(
 }
 
 /// An authored colour premultiplied into linear light and scaled by the
-/// layer's opacity. `None` declines the page: ink authored for a press
-/// resolves through the document's profile, which is the CPU's business.
-fn premultiplied_color(color: chitrakar_color::AuthoredColor, alpha: f32) -> Option<[f32; 4]> {
-    // A colour standing for a swatch is whatever that swatch means, which
-    // is what decides here: a name for an sRGB is drawable, a name for an
-    // ink is the CPU's business exactly as the ink itself is.
-    let chitrakar_color::AuthoredColor::Srgb { .. } = color.flat() else {
-        return None;
-    };
-    let c = chitrakar_color::to_working(&color);
-    Some([c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha])
+/// layer's opacity.
+///
+/// Ink authored for a press resolves through the document's press profile
+/// — and that resolution is a colour at a time, on the CPU, in both
+/// renderers: `chitrakar_render::resolve_color` is the one that answers,
+/// so the two cannot drift. A colour standing for a swatch is whatever
+/// that swatch means, which that function reads past the name to find.
+fn premultiplied_color(
+    doc: &Document,
+    color: &chitrakar_color::AuthoredColor,
+    alpha: f32,
+) -> [f32; 4] {
+    let c = chitrakar_render::resolve_color(doc, color);
+    [c.r * alpha, c.g * alpha, c.b * alpha, c.a * alpha]
 }
 
 /// Stencil a path's rings and cover them.
@@ -3634,16 +3632,16 @@ const RAMP: u32 = 512;
 /// premultiplied linear texels, its geometry in the shape's normalized
 /// box, and whether that geometry is a radial one.
 ///
-/// `None` declines the page: a stop authored for a press resolves
-/// through the document's profile, which is the CPU's business. The
-/// caller has already ruled out a gradient with no stops.
-fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
+/// A stop authored for a press resolves through the document's profile,
+/// the same colour at a time the CPU renderer resolves it. The caller has
+/// already ruled out a gradient with no stops.
+fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) {
     let mut stops = Vec::with_capacity(g.stops().len());
     for stop in g.stops() {
-        let chitrakar_color::AuthoredColor::Srgb { .. } = stop.color.flat() else {
-            return None;
-        };
-        stops.push((stop.offset, chitrakar_color::to_working(&stop.color)));
+        stops.push((
+            stop.offset,
+            chitrakar_render::resolve_color(doc, &stop.color),
+        ));
     }
     stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let mut texels = Vec::with_capacity(RAMP as usize * 4);
@@ -3664,7 +3662,7 @@ fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
             ([center[0], center[1], *radius, 0.0], true)
         }
     };
-    Some((
+    (
         Image {
             width: RAMP,
             height: 1,
@@ -3673,7 +3671,7 @@ fn bake(g: &chitrakar_doc::Gradient) -> Option<(Image, [f32; 4], bool)> {
         },
         geom,
         radial,
-    ))
+    )
 }
 
 /// A resource's pixels as the compositor wants them: linear light,
@@ -3694,10 +3692,9 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
 }
 
 /// The parameters an adjustment is stated by, laid out the way the
-/// shader reads them: which adjustment it is, then up to seven numbers.
-/// `None` for the ones this backend has not learnt — a curve and a
-/// gradient map are read off tables, and the two that speak in bands of
-/// colour want the whole HSL round trip, so they wait.
+/// shader reads them: which adjustment it is, then up to seven numbers,
+/// and for the three stated by more than numbers a table baked here from
+/// what the CPU renderer prepares.
 fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adjusting> {
     use chitrakar_doc::Adjustment as A;
     let plain = |params: [f32; 4], grad: [f32; 4]| Adjusting {
@@ -4025,15 +4022,11 @@ fn effect_of(
     // points is that space's to say — the same carry the CPU renderer
     // makes before it stamps.
     let along = |dx: f32, dy: f32| [parent.a * dx + parent.c * dy, parent.b * dx + parent.d * dy];
-    let tinted = |color: &chitrakar_color::AuthoredColor, opacity: f32| {
-        let c = chitrakar_color::to_working(color);
-        [c.r * opacity, c.g * opacity, c.b * opacity, c.a * opacity]
-    };
     // Ink authored for a press resolves through the document's profile,
-    // which is the CPU's business here as everywhere else.
-    let plain = |color: &chitrakar_color::AuthoredColor| {
-        matches!(color.flat(), chitrakar_color::AuthoredColor::Srgb { .. })
-            || doc.cmyk_cms().is_none()
+    // which `premultiplied_color` is the one place that asks — the same
+    // place, and the same answer, the CPU renderer's own tints come from.
+    let tinted = |color: &chitrakar_color::AuthoredColor, opacity: f32| {
+        premultiplied_color(doc, color, opacity)
     };
     match effect {
         E::DropShadow {
@@ -4050,9 +4043,6 @@ fn effect_of(
             color,
             opacity,
         } => {
-            if !plain(color) {
-                return None;
-            }
             let inner = matches!(effect, E::InnerShadow { .. });
             Some(Shading {
                 over: inner,
@@ -4078,9 +4068,6 @@ fn effect_of(
             color,
             opacity,
         } => {
-            if !plain(color) {
-                return None;
-            }
             let w = width * scale;
             // Asked for nothing: the CPU renderer draws no band at all
             // for either of these, and an empty tint says so without a
@@ -4854,17 +4841,21 @@ mod tests {
             return;
         };
         let mut f = chitrakar_doc::fixture::everything();
-        // The fixture holds one of every node kind, and this backend
-        // draws them all now — except that the fixture's paint layer
-        // keeps a stroke authored in press ink, which a second renderer
-        // declines rather than guessing at a profile. One layer it
-        // cannot draw makes the whole page declined, and an audit that
-        // is declined every time measures nothing, so that one comes out
-        // first. As the backend learns a kind, its line here goes and
-        // the commands that speak to it come into scope by themselves.
+        // The fixture holds one of every node kind and this backend
+        // draws them all — its press ink included now, which is what had
+        // been keeping the paint layer out. What keeps it out still is
+        // narrower and is the one limit left in the walk: that layer
+        // wears a brushed mask *and* its strokes carry the region they
+        // were painted inside, and one slot holds one coverage. One
+        // layer it cannot draw makes the whole page declined, and an
+        // audit that is declined every time measures nothing, so that
+        // one comes out first. When the slot stops being one, this line
+        // goes and the commands that speak to a paint layer come into
+        // scope by themselves.
         f.doc.apply(Command::RemoveNode { id: f.painted }).unwrap();
-        // And the effects the fixture hangs on layers, for the same
-        // reason but not so bluntly. An effect is drawn from a layer's
+        // The effects the fixture hangs on layers come off too, for a
+        // reason of the same shape but not so blunt. An effect is drawn
+        // from a layer's
         // silhouette, and this backend draws a shadow and an outline
         // that way now — what it still hands back is one on a blended
         // layer or inside a frame, and one of those anywhere declines
@@ -11069,6 +11060,209 @@ mod tests {
         assert!(mean < 0.001, "a copy that differs: {mean}, worst {worst:?}");
     }
 
+    /// Ink authored for a press, in every place a colour can be written
+    /// on a page: a fill, a stroke, a stop in a gradient, a block of
+    /// text, the tint of a shadow, and a swatch whose name means an ink.
+    ///
+    /// This backend used to hand the whole page back for any of them,
+    /// and the reason written down was that such ink "resolves through
+    /// the document's profile, which is the CPU's business". The first
+    /// half is true and the second does not follow. Resolving an
+    /// authored colour is one question per colour with one answer per
+    /// document — a fill is one colour, and a gradient's stops are
+    /// resolved once into a ramp either way — so it happens on the CPU
+    /// in *both* renderers, and the way to keep the two from drifting is
+    /// for both to call the same function. `chitrakar_render::resolve_color`
+    /// is that function, and this backend now asks it rather than
+    /// declining.
+    ///
+    /// Asked twice: once with no press profile, where both fall back to
+    /// the device formulas, and once with a real one, where the ICC
+    /// transform decides. The second run asserts the profile *moved* the
+    /// picture before it asserts the two renderers agree about it —
+    /// otherwise a backend quietly ignoring the profile would pass, the
+    /// two device-formula answers being identical.
+    #[test]
+    fn ink_authored_for_a_press_lands_where_the_cpu_lands_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |c, m, y, k| AuthoredColor::Cmyk { c, m, y, k, a: 1.0 };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let build = || {
+            let mut doc = Document::new(120, 80, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    rect(120.0, 80.0),
+                    AuthoredColor::Srgb {
+                        r: 0.55,
+                        g: 0.55,
+                        b: 0.55,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            // A fill and a stroke, both in ink.
+            let mut inked = Node::vector("inked", rect(30.0, 24.0));
+            if let NodeKind::Vector { fill, stroke, .. } = &mut inked.kind {
+                *fill = Some(ink(0.85, 0.2, 0.1, 0.0));
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: ink(0.0, 0.9, 0.85, 0.05),
+                    width: 3.0,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    align: None,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            add(&mut doc, Box::new(inked), Transform::translation(6.0, 6.0));
+            // A ramp with one plain stop and one in ink.
+            let mut ramped = Node::vector("ramped", rect(30.0, 24.0));
+            if let NodeKind::Vector { gradient, .. } = &mut ramped.kind {
+                *gradient = Some(chitrakar_doc::Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [1.0, 0.0],
+                    stops: ramp(&[(0.0, RED), (1.0, ink(0.9, 0.7, 0.0, 0.1))]),
+                });
+            }
+            add(
+                &mut doc,
+                Box::new(ramped),
+                Transform::translation(44.0, 6.0),
+            );
+            // Text set in ink.
+            add(
+                &mut doc,
+                texted("words", "Press", 22.0, |spec| {
+                    spec.fill = ink(0.1, 0.95, 0.9, 0.0);
+                }),
+                Transform::translation(6.0, 38.0),
+            );
+            // A shadow tinted with ink, which is the other place a colour
+            // reaches the page — through an effect rather than a layer.
+            let lit = add(
+                &mut doc,
+                filled("lit", rect(20.0, 16.0), RED),
+                Transform::translation(70.0, 44.0),
+            );
+            doc.apply(Command::SetEffects {
+                id: lit,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 4.0,
+                    dy: 4.0,
+                    blur: 1.5,
+                    color: ink(0.95, 0.85, 0.0, 0.0),
+                    opacity: 0.9,
+                }],
+            })
+            .unwrap();
+            // And a swatch whose name means an ink: a colour is reached
+            // for by name here, and reading past the name is the same
+            // question one layer down.
+            add(
+                &mut doc,
+                filled(
+                    "spot",
+                    rect(18.0, 14.0),
+                    ink(0.05, 0.15, 0.95, 0.0).standing_for("spot"),
+                ),
+                Transform::translation(96.0, 6.0),
+            );
+            doc
+        };
+
+        // Somewhere inside each of the six, and one patch of bare ground
+        // to say the page is not simply all one colour.
+        let probes = [
+            ("fill", 18u32, 16u32),
+            ("stroke", 7, 16),
+            ("ramp", 70, 16),
+            ("text", 14, 48),
+            ("shadow", 92, 62),
+            ("swatch", 104, 12),
+        ];
+        let ground = AuthoredColor::Srgb {
+            r: 0.55,
+            g: 0.55,
+            b: 0.55,
+            a: 1.0,
+        };
+        let bare = chitrakar_color::to_working(&ground);
+
+        let doc = build();
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "ink authored for a press is drawn rather than handed back"
+        );
+        let plain_cpu = chitrakar_render::render(&doc).unwrap();
+        let plain_gpu = gpu.render(&doc).unwrap();
+        for (what, x, y) in probes {
+            let px = plain_cpu.get(x, y);
+            assert!(
+                (px.r - bare.r).abs() + (px.g - bare.g).abs() + (px.b - bare.b).abs() > 0.02,
+                "{what} put something on the page at {x},{y}: {px:?}"
+            );
+            let mine = plain_gpu.get(x, y);
+            assert!(
+                (mine.r - px.r).abs() < 0.02
+                    && (mine.g - px.g).abs() < 0.02
+                    && (mine.b - px.b).abs() < 0.02,
+                "{what} with no profile at {x},{y}: {mine:?} against {px:?}"
+            );
+        }
+        let (mean, worst) = difference(&plain_gpu, &plain_cpu);
+        assert!(
+            mean < 0.004,
+            "ink with no profile: mean {mean:.5} (worst {worst:.3})"
+        );
+
+        // And again through a real press profile, where the ICC
+        // transform rather than the device formula says what the ink is.
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped the profiled half: set CHITRAKAR_TEST_CMYK_ICC to run it");
+            return;
+        };
+        let icc = std::fs::read(path).expect("the profile named by CHITRAKAR_TEST_CMYK_ICC");
+        let mut pressed = build();
+        pressed.set_cmyk_profile(icc).unwrap();
+        assert!(GpuRenderer::can_render(&pressed));
+        let press_cpu = chitrakar_render::render(&pressed).unwrap();
+        let press_gpu = gpu.render(&pressed).unwrap();
+        // The profile has to be deciding something, or the run below
+        // proves nothing: a backend ignoring it would agree with a CPU
+        // that was also ignoring it.
+        let (moved, _) = difference(&press_cpu, &plain_cpu);
+        assert!(
+            moved > 0.01,
+            "the press profile moved the picture: mean {moved:.5}"
+        );
+        for (what, x, y) in probes {
+            let px = press_cpu.get(x, y);
+            let mine = press_gpu.get(x, y);
+            assert!(
+                (mine.r - px.r).abs() < 0.02
+                    && (mine.g - px.g).abs() < 0.02
+                    && (mine.b - px.b).abs() < 0.02,
+                "{what} through the profile at {x},{y}: {mine:?} against {px:?}"
+            );
+        }
+        let (mean, worst) = difference(&press_gpu, &press_cpu);
+        assert!(
+            mean < 0.004,
+            "ink through a press profile: mean {mean:.5} (worst {worst:.3})"
+        );
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -11183,8 +11377,11 @@ mod tests {
             "held to a base that casts a shadow"
         );
 
-        // Ink authored for a press resolves through the document's
-        // profile, so a gradient with a CMYK stop goes back too.
+        // Ink authored for a press is drawn now rather than handed back
+        // — a colour is resolved once, on the CPU, by the function the
+        // reference renderer resolves its own with, so there is nothing
+        // for a second renderer to guess at. See
+        // `ink_authored_for_a_press_lands_where_the_cpu_lands_it`.
         let mut pressed = doc.clone();
         pressed
             .apply(Command::SetKind {
@@ -11213,7 +11410,7 @@ mod tests {
                 }),
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&pressed));
+        assert!(GpuRenderer::can_render(&pressed));
 
         // A hidden layer it cannot draw is no obstacle: it is not drawn.
         let mut hidden = outlined(400.0);

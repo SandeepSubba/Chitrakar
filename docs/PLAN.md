@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~489),
+- **Verify before committing:** `cargo test --workspace` (~490),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2372,10 +2372,11 @@ without reading anything else.*
   1. The GPU backend, in two halves. What is left to *teach* it:
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
-     *holds* rather than the kind of layer it is: press ink, a healing
-     stroke, an outline wider than a pass will walk, an effect on a clone
-     layer, and a stroke carrying a region on a layer whose own mask is
-     already riding that slot.
+     *holds* rather than the kind of layer it is: a healing stroke, an
+     outline wider than a pass will walk, an effect on a clone layer, and
+     a stroke carrying a region on a layer whose own mask is already
+     riding that slot. Press ink came off that list and the way it came
+     off is below.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
      asking what is *really* refused rather than reading what is written
@@ -3035,6 +3036,47 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     **Ink authored for a press was refused for half a reason.** Asked
+     of the same list one more time, and the answer was written down in
+     the backend's own module doc: a colour authored in CMYK "resolves
+     through the document's profile, which is the CPU's business". The
+     first half is true. The second does not follow, and the code one
+     function away already knew it — the tint of a shadow accepted press
+     ink whenever the document had no profile, which is exactly the case
+     where the two renderers would have agreed.
+     Resolving an authored colour is one question per colour with one
+     answer per document. A fill is one colour; a stroke is one colour; a
+     gradient's stops are resolved once into a ramp of 512 texels either
+     way; a block of text is one colour; a shadow's tint is one colour.
+     None of it is per pixel, so none of it needs a profile on the GPU at
+     all — it needs the CPU's *answer*, which is what
+     `chitrakar_render::resolve_color` is (public now, for that reason).
+     Both renderers call it, so the two cannot drift by construction
+     rather than by agreement.
+     What that cost was two guards and two functions losing their
+     `Option`. What it bought is every place a colour reaches a page:
+     `ink_authored_for_a_press_lands_where_the_cpu_lands_it` puts ink in
+     all six of them — a fill, a stroke, a stop in a ramp, a block of
+     text, a shadow's tint, and a swatch whose *name* means an ink — and
+     asks the page twice, once with no profile and once through a real
+     one. The second run asserts the profile **moved the picture** before
+     it asserts the two agree about it; without that the whole profiled
+     half would pass on a backend quietly ignoring the profile, since two
+     device-formula answers are identical. Made to ignore it, exactly one
+     test in the workspace fails, and it is this one.
+     It also mended a divergence that was latent rather than live: the
+     backend's effect tints went through `chitrakar_color::to_working`
+     and so past the profile, held harmless only by the guard that
+     refused the page whenever a profile existed. Both halves now come
+     from the same function.
+     The fixture's paint layer still comes out of the cross-renderer
+     audit, and the line saying so now says why: not press ink any more
+     but the one limit left in the walk — that layer wears a brushed mask
+     *and* its strokes carry the region they were painted inside, and one
+     texture slot holds one coverage. Checked rather than assumed, the
+     way the frame's reason should have been: take the mask off and the
+     page is accepted; take the stroke's region off and the page is
+     accepted; leave both and it is not.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing

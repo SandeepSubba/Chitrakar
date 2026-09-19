@@ -2208,7 +2208,12 @@ fn stamp(
 /// Authored color → working space: CMYK goes through the document's press
 /// profile when one is set; everything else (and profileless CMYK) uses the
 /// device formulas in `chitrakar_color`.
-fn resolve_color(doc: &Document, color: &AuthoredColor) -> LinearRgba {
+///
+/// Public because a second renderer needs the *same* answer rather than a
+/// plausible one: resolving an authored colour is a per-colour question
+/// with a per-document answer, so a backend drawing the page some other
+/// way still asks it here.
+pub fn resolve_color(doc: &Document, color: &AuthoredColor) -> LinearRgba {
     // A swatch's colour is a colour: a name meaning an ink still resolves
     // through the press profile, which is why this reads past the name.
     if let (AuthoredColor::Cmyk { c, m, y, k, a }, Some(cms)) = (color.flat(), doc.cmyk_cms()) {
