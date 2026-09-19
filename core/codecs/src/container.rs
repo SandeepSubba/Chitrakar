@@ -1491,6 +1491,75 @@ mod tests {
         }
         // And the whole of it still opens.
         assert_eq!(load_chitra(&good).unwrap().meta.width, 64);
+
+        // The same treatment on a file worth damaging, which is the half
+        // of this that earns its keep. A document of one shape is a few
+        // hundred bytes of manifest, so flipping bytes in the first
+        // kilobyte mostly lands in the zip's own headers and never
+        // reaches the page. The fixture's file is four kilobytes of
+        // masks, strokes, gradients, text, copies, regions, a palette
+        // and a ramp of colours, damaged right across rather than at its
+        // head: 421 damaged files against about 155, over a document
+        // that actually exercises the parser.
+        //
+        // The comparison below — refused, or identical, never quietly
+        // something else — is worth being honest about. It cannot be
+        // made to fail. The zip's own CRC refuses damaged entry data one
+        // layer down, so the only flips that open are ones landing
+        // somewhere inert, and those cannot change the page: 24 of the
+        // 421 open and all 24 are the file that was saved. Every
+        // sabotage tried to make it fire was caught by the older
+        // assertions above it instead.
+        //
+        // It stays anyway, and narrowly: the guarantee lives in the zip
+        // layer, and recovery logic added *above* that layer — a "repair
+        // a corrupt file" feature, a lenient reader, a blank page handed
+        // back rather than an error — would move the property out from
+        // under the CRC without touching it. That is the regression this
+        // watches for. It is insurance, not a live guard, and the
+        // difference is worth writing down rather than discovering
+        // later.
+        let f = chitrakar_doc::fixture::everything().doc;
+        let whole = save_chitra(&f).unwrap();
+        let truth = serde_json::to_string(&f).unwrap();
+        let (mut refused, mut opened) = (0usize, 0usize);
+        let mut check = |bytes: &[u8], what: String| match load_chitra(bytes) {
+            Err(_) => refused += 1,
+            Ok(back) => {
+                opened += 1;
+                assert_eq!(
+                    serde_json::to_string(&back).unwrap(),
+                    truth,
+                    "{what} opened as a different page. A file either \
+                     refuses or is the one that was saved; there is no \
+                     third answer a reader can be given without being \
+                     told."
+                );
+            }
+        };
+        for cut in 1..20 {
+            let at = whole.len() * cut / 20;
+            check(&whole[..at], format!("cut short at {at} bytes"));
+        }
+        let step = (whole.len() / 400).max(1);
+        for i in (0..whole.len()).step_by(step) {
+            let mut bent = whole.clone();
+            bent[i] ^= 0xff;
+            check(&bent, format!("byte {i} flipped"));
+        }
+        // Two ways to pass while asking nothing: refusing everything, so
+        // that the comparison never runs, and accepting everything, so
+        // that damage is not being made.
+        assert!(
+            refused > 100,
+            "only {refused} of the damaged files were refused, which is \
+             too few to be damaging anything"
+        );
+        assert!(
+            opened > 5,
+            "only {opened} damaged files opened, so the comparison that \
+             matters barely ran"
+        );
     }
 
     /// A page that opens is one the engine could draw. A file claiming an

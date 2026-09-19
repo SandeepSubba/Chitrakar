@@ -3035,6 +3035,38 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     A different kind of question, after two rounds of the fixture strand
+     returning nothing: **what does this do with a file that is
+     damaged?** An editor opens files somebody else's disk wrote. There
+     was an audit (`a_damaged_file_is_refused_not_survived`) and it had
+     two soft spots. It damaged a document of *one rectangle* — a few
+     hundred bytes of manifest, so flipping bytes in the first kilobyte
+     mostly lands in the zip's own headers and never reaches the page —
+     and it threw the loader's answer away, claiming only that nothing
+     panicked. It is the fixture's file now, four kilobytes of masks,
+     strokes, gradients, text, copies, regions, a palette and a ramp of
+     colours, damaged right across rather than at its head: 421 damaged
+     files against about 155, over a document that exercises the parser.
+     The measurement itself is clean and worth having written down: of
+     421, **397 are refused, 24 open, none panics, and all 24 are the
+     file that was saved**. No silent corruption anywhere.
+     The stronger assertion added beside it — refused, or identical,
+     never quietly something else — **cannot be made to fail**, and that
+     is recorded in the test rather than glossed. The zip's own CRC
+     refuses damaged entry data one layer down, so the only flips that
+     open are ones landing somewhere inert, and those cannot change the
+     page. Two sabotages were tried; both were caught by the *older*
+     assertions above it instead, not by the new one. By the rule from
+     the discarded group invariant that would make it worthless, and it
+     is kept only on a narrow argument: the guarantee lives in the zip
+     layer, and recovery logic added *above* that layer — a repair
+     feature, a lenient reader, a blank page handed back rather than an
+     error — moves the property out from under the CRC without touching
+     it. Insurance, not a live guard, and the test says which it is.
+     Twice in that work a sabotage was read as passing when it had
+     failed, because the check grepped for two particular strings rather
+     than reading the result line. Third time this session that the
+     instrument, not the thing, was what went wrong.
      The nineteenth was **a text block that wraps**, and it **holds**
      rather than earns — which is worth recording as plainly as the ones
      that found something. Every text block this document had held was
