@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~488),
+- **Verify before committing:** `cargo test --workspace` (~489),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3035,6 +3035,21 @@ without reading anything else.*
      it, and asks the two things that keep a limit honest — that the
      effect really changes the picture, and that the same layer bare is
      still drawn.
+     The **render cache** answered the same way, and the answer is one
+     page: exactly one surface after a render, after twenty-one renders,
+     and after fifty rounds of edit-then-repaint. No growth, nothing
+     leaked, the previous frame not kept beside the current one.
+     Worth guarding rather than merely knowing, because of what a
+     surface weighs. It is premultiplied linear f32, sixteen bytes a
+     pixel: the 1200 by 900 page tested is 16.5 MiB and A4 at 300dpi is
+     133. A second copy kept by accident is not a rounding error, and
+     "keep the last frame to diff against" is a few lines away — made to
+     do exactly that, the same run holds **1170 MiB** against a ceiling
+     of 24.7 (`the_cache_holds_one_page_however_long_it_is_edited`).
+     Its floor is the half-surface below: a cache dropped between calls
+     would satisfy the ceiling for entirely the wrong reason, so the
+     test asks that a frame is being kept before it asks that only one
+     is.
      With something able to watch memory, the question the **unbounded
      undo history** invites could finally be answered rather than worried
      about. Nothing trims `undo`, so a long session grows for ever in
