@@ -2094,6 +2094,11 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         },
         Command::TurnCanvas { quarters: 1 },
         Command::TurnCanvas { quarters: 2 },
+        Command::ScaleCanvas {
+            factor: 1.5,
+            width: 120,
+            height: 90,
+        },
         Command::MoveNode {
             id: under,
             parent: root,
@@ -2244,6 +2249,7 @@ pub fn variant_name(cmd: &Command) -> &'static str {
         Command::SetRegions { .. } => "SetRegions",
         Command::ResizeCanvas { .. } => "ResizeCanvas",
         Command::TurnCanvas { .. } => "TurnCanvas",
+        Command::ScaleCanvas { .. } => "ScaleCanvas",
         Command::MirrorCanvas { .. } => "MirrorCanvas",
         Command::StraightenCanvas { .. } => "StraightenCanvas",
         Command::Batch(_) => "Batch",
@@ -2282,6 +2288,7 @@ pub const EVERY_VARIANT: &[&str] = &[
     "SetRegions",
     "ResizeCanvas",
     "TurnCanvas",
+    "ScaleCanvas",
     "MirrorCanvas",
     "StraightenCanvas",
     "Batch",
@@ -2292,10 +2299,15 @@ pub const EVERY_VARIANT: &[&str] = &[
 /// A page turned by anything but a quarter cannot be turned back
 /// exactly — a sine and its cosine do not multiply out to one — and an
 /// axis-aligned guide cannot record a tilt at all, so it comes back on
-/// its own axis where it crosses the middle of the page. That is the
-/// one command allowed to be near rather than exact.
+/// its own axis where it crosses the middle of the page. A page scaled
+/// by a ratio that is not a power of two cannot be scaled back exactly
+/// either. Those are the two commands allowed to be near rather than
+/// exact.
 pub fn exact(cmd: &Command) -> bool {
-    !matches!(cmd, Command::StraightenCanvas { .. })
+    !matches!(
+        cmd,
+        Command::StraightenCanvas { .. } | Command::ScaleCanvas { .. }
+    )
 }
 
 /// A document as a value, with the id counter set aside: an id is never

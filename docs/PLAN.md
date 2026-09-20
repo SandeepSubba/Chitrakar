@@ -879,9 +879,9 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~497),
+- **Verify before committing:** `cargo test --workspace` (~498),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1229 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1235 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5360,11 +5360,8 @@ without reading anything else.*
        shift+S), the two switches gone — see *Chrome*.
      - ✅ **Node tool** (A): a press brings a shape's anchors out, a
        press on the outline adds one — see *Chrome*.
-     - **Scale the page and everything on it** — Photoshop's Image
-       Size, Canva's Resize. Canvas size… changes the page and leaves
-       the artwork where it is; scaling a whole design to another size
-       is a different ask and the one Canva is built around. One
-       command over every top-level transform plus the page.
+     - ✅ **Scale the page and everything on it** (Page › Scale the
+       page…), one factor both ways — see *Chrome* for why not two.
      - **Open recent**, on the desktop shell where a path can be
        reopened; a browser cannot reopen a file by name, so there it
        stays a draft.
@@ -5525,6 +5522,25 @@ without reading anything else.*
   rim a quarter of the way round from the axes, where a wrong arc
   strays furthest, and allows a fifth of a pixel's coverage: both
   pictures are sixty-four chords, laid in different places.
+  **Scale the page…** on the Page menu is the same design at another
+  size — Photoshop's Image Size, Canva's Resize — where Canvas size…
+  is the same artwork on a page of another size. It is a command of
+  the document's own, `ScaleCanvas { factor, width, height }`: one
+  factor, the same both ways, and the size it lands on said rather
+  than worked out, as a straighten's is, so the inverse (the
+  reciprocal, with the old size) puts the page exactly where it was.
+  One factor rather than one per axis for two reasons the audits
+  taught in that order: a length carried through a page transform — a
+  brush's radius, a shadow's blur, an edge's softness — goes by the
+  larger axis scale, so a scale by 1.875 one way and 1.5 the other
+  came back with a radius of 11.25 that had been 9 (the first version
+  was two sizes, and `every_command_undoes_to_exactly_where_it_started`
+  said no); and a design stretched one way is not the same design. It
+  is in `fixture::exact` as the second command allowed to be near
+  rather than exact under undo, beside the straighten. The window asks
+  for a width, a height or a percentage and keeps them one number;
+  what a layer holds in its own units — a blur's radius, a stroke's
+  width — does not scale, and the window says so.
   Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its

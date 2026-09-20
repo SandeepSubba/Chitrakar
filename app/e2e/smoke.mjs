@@ -11631,6 +11631,60 @@ assert(
   await pickTool("Move");
 }
 
+// 9bq. Scaling the page: the same design at another size, which is not
+// what Canvas size does. One factor, the same both ways; width, height
+// and percentage are one number three ways; and it is one undo.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 300), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+
+  await menuClick("Page", "Scale the page…");
+  const dialog = page.locator('[role=dialog][aria-label="Scale the page"]');
+  assert((await dialog.count()) === 1, "the Page menu opens the scale window");
+  await page.locator('input[aria-label="Scale to width"]').fill("1200");
+  await page.waitForTimeout(120);
+  assert(
+    (await page.locator('input[aria-label="Scale to height"]').inputValue()) === "800" &&
+      (await page.locator('input[aria-label="Scale by"]').inputValue()) === "200",
+    "a width typed sets the height and the percentage with it",
+  );
+  await page.locator('input[aria-label="Scale by"]').fill("150");
+  await page.waitForTimeout(120);
+  assert(
+    (await page.locator('input[aria-label="Scale to width"]').inputValue()) === "900",
+    "and a percentage typed sets the width",
+  );
+  await page.click('.modal-actions .primary:text-is("Scale")');
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".doc-facts").innerText()).includes("900×600"),
+    `the page is the size asked for (${await page.locator(".doc-facts").innerText()})`,
+  );
+  // The rectangle went with it: it was 100..300 and is 150..450.
+  assert(
+    (await canvasPixel(400, 400))[3] === 255 && (await canvasPixel(120, 120))[3] === 0,
+    "and the artwork scaled with the page",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".doc-facts").innerText()).includes("600×400") &&
+      (await canvasPixel(120, 120))[3] === 255 &&
+      (await canvasPixel(400, 400))[3] === 0,
+    "one undo puts the page and everything on it back",
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

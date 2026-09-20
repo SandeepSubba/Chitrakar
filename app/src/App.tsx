@@ -1080,6 +1080,7 @@ export function App() {
     setPrefsOpen(true);
   };
   const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
+  const [scalePageOpen, setScalePageOpen] = useState(false);
   /** Whether the softness of what is picked is being chosen in its own
    * window. The number is also in the rail, where a hand already on the
    * canvas can reach it; this is the way to it for somebody who does not
@@ -6635,6 +6636,10 @@ export function App() {
       label: "Page",
       entries: [
         item("canvas-size", "crop", "Canvas size…", () => setCanvasSizeOpen(true)),
+        // Canvas size is the same artwork on a page of another size;
+        // this is the same design at another size — Photoshop's Image
+        // Size, Canva's Resize — and the two are asked for differently.
+        item("scale-page", "fit", "Scale the page…", () => setScalePageOpen(true)),
         SEP,
         item("turn-right", "turnRight", "Turn right", () => turnPage(1)),
         item("turn-left", "turnLeft", "Turn left", () => turnPage(3)),
@@ -7268,6 +7273,27 @@ export function App() {
             </>
           )}
         </div>
+      )}
+      {scalePageOpen && (
+        <ScalePageDialog
+          width={docSize[0]}
+          height={docSize[1]}
+          units={units}
+          dpi={docDpi}
+          onCancel={() => setScalePageOpen(false)}
+          onScale={(factor) => {
+            setScalePageOpen(false);
+            if (!session) return;
+            try {
+              session.scale_canvas(factor);
+              setDocumentSize(session.width, session.height);
+              refresh(session);
+              fitView();
+            } catch (err) {
+              alert(`Scale the page: ${err}`);
+            }
+          }}
+        />
       )}
       {canvasSizeOpen && (
         <CanvasSizeDialog
@@ -10063,6 +10089,115 @@ function StraightenDialog({
             aria-label="Straighten the page"
           >
             Straighten
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The same design at another size. One factor, the same both ways,
+ * asked for as a width, a height or a percentage — whichever is typed,
+ * the others follow, since a design stretched one way is not the same
+ * design and a length carried through the scale can only be undone when
+ * the scale is the same both ways. What a layer holds in its own units
+ * — a blur's radius, a stroke's width — does not scale, and the window
+ * says so. */
+function ScalePageDialog({
+  width,
+  height,
+  units,
+  dpi,
+  onScale,
+  onCancel,
+}: {
+  width: number;
+  height: number;
+  units: Units;
+  dpi: number;
+  onScale: (factor: number) => void;
+  onCancel: () => void;
+}) {
+  const [factor, setFactor] = useState(1);
+  const per = perPixel(units, dpi);
+  const shown = (px: number) => inUnits(px, units, dpi);
+  const fromWidth = (w: number) => setFactor(w / per / width);
+  const fromHeight = (h: number) => setFactor(h / per / height);
+  const ok = Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 1e-6;
+  const [nw, nh] = [Math.max(1, Math.round(width * factor)), Math.max(1, Math.round(height * factor))];
+  const apply = () => {
+    if (ok) onScale(factor);
+  };
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  const field = (
+    label: string,
+    value: number,
+    set: (v: number) => void,
+    unit: string,
+    step: number,
+  ) => (
+    <label className="row">
+      {label}
+      <input
+        type="number"
+        min={0}
+        step={step}
+        value={value}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v) && v > 0) set(v);
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") apply();
+        }}
+        aria-label={label}
+      />
+      <span className="unit">{unit}</span>
+    </label>
+  );
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Scale the page"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Scale the page</h2>
+        <p className="modal-note">
+          {shown(width)} × {shown(height)} {units} now. Everything on the
+          page scales with it.
+        </p>
+        {field("Scale to width", shown(nw), fromWidth, units, units === "px" ? 1 : 0.01)}
+        {field("Scale to height", shown(nh), fromHeight, units, units === "px" ? 1 : 0.01)}
+        {field(
+          "Scale by",
+          Math.round(factor * 1000) / 10,
+          (pct) => setFactor(pct / 100),
+          "%",
+          1,
+        )}
+        <p className="modal-aside">
+          Proportions are kept: a design stretched one way is not the
+          same design. A blur's radius and a stroke's width are the
+          layer's own and stay as they are.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="mask-button primary" onClick={apply} disabled={!ok}>
+            Scale
           </button>
         </div>
       </div>

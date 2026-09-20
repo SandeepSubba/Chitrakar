@@ -172,6 +172,7 @@ fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
         | Command::ResizeCanvas { .. }
         | Command::MirrorCanvas { .. }
         | Command::StraightenCanvas { .. }
+        | Command::ScaleCanvas { .. }
         | Command::TurnCanvas { .. } => None,
     }
 }
@@ -419,6 +420,7 @@ impl Session {
             | Command::Batch(_)
             | Command::ResizeCanvas { .. }
             | Command::TurnCanvas { .. }
+            | Command::ScaleCanvas { .. }
             | Command::StraightenCanvas { .. }
             | Command::MirrorCanvas { .. }
             // Guides are not artwork: nothing renders them, so nothing
@@ -676,6 +678,7 @@ impl Session {
             Command::Batch(_)
                 | Command::ResizeCanvas { .. }
                 | Command::TurnCanvas { .. }
+                | Command::ScaleCanvas { .. }
                 | Command::StraightenCanvas { .. }
                 | Command::MirrorCanvas { .. }
                 | Command::SetSwatches { .. }
@@ -853,6 +856,9 @@ impl Session {
             }
             Command::StraightenCanvas { degrees, .. } => {
                 format!("Straighten the page by {degrees:.1}°")
+            }
+            Command::ScaleCanvas { width, height, .. } => {
+                format!("Scale the page to {width}×{height}")
             }
             Command::TurnCanvas { quarters } => match quarters % 4 {
                 1 => "Turn the page right".into(),
@@ -5897,6 +5903,27 @@ impl Session {
         self.apply(Command::TurnCanvas { quarters })
     }
 
+    /// Scale the page by `factor`, the same both ways, and everything on
+    /// it with it: the same design at another size. The page's sides are
+    /// rounded to whole pixels; the artwork is scaled by the factor asked
+    /// for, so a page of 61 scaled by 0.3 is 18 wide and holds its
+    /// artwork at 0.3, a hair short of its right edge rather than
+    /// stretched to it.
+    pub fn scale_canvas(&mut self, factor: f32) -> Result<(), EngineError> {
+        if !(factor.is_finite() && factor > 0.0) {
+            return Err(EngineError::BadCommand(
+                "a scale must be a positive number".into(),
+            ));
+        }
+        let width = (self.doc.meta.width as f32 * factor).round().max(1.0) as u32;
+        let height = (self.doc.meta.height as f32 * factor).round().max(1.0) as u32;
+        self.apply(Command::ScaleCanvas {
+            factor,
+            width,
+            height,
+        })
+    }
+
     /// The page a straighten by `degrees` would leave: the largest
     /// rectangle of the page's own proportions that still fits inside it
     /// once turned, which is where the crop that follows a straighten
@@ -7558,6 +7585,98 @@ mod tests {
         let (both, _) = session.render_cached().unwrap();
         assert_eq!(both.get(5, 5).a, 1.0, "left and then right is neither");
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn scaling_the_page_scales_everything_on_it() {
+        use chitrakar_doc::Guide;
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetGuides {
+                guides: vec![Guide::Vertical(10.0), Guide::Horizontal(4.0)],
+            })
+            .unwrap();
+        let (before, _) = session.render_cached().unwrap();
+        assert_eq!(before.get(15, 15).a, 1.0, "the mark is where it was put");
+        assert_eq!(before.get(25, 25).a, 0.0, "and ends where it ends");
+
+        // Twice the size: the mark lands where the scale says, and so do
+        // the guides.
+        session.scale_canvas(2.0).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (160, 80),
+            "the page is twice the size"
+        );
+        let (scaled, _) = session.render_cached().unwrap();
+        assert_eq!((scaled.width, scaled.height), (160, 80));
+        assert_eq!(
+            scaled.get(21, 21).a,
+            1.0,
+            "the mark begins at twice where it began"
+        );
+        assert_eq!(scaled.get(38, 38).a, 1.0, "and is twice the size");
+        assert_eq!(scaled.get(41, 21).a, 0.0, "stopping where the scale says");
+        assert_eq!(scaled.get(21, 41).a, 0.0);
+        assert_eq!(scaled.get(15, 15).a, 0.0, "and is not where it was");
+        assert_eq!(
+            session.document().guides(),
+            &[Guide::Vertical(20.0), Guide::Horizontal(8.0)],
+            "the guides scaled with the artwork"
+        );
+        assert_cache_matches_fresh(&mut session);
+
+        assert!(session.undo().unwrap(), "and it undoes");
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40)
+        );
+        let (back, _) = session.render_cached().unwrap();
+        assert_eq!(back.get(15, 15).a, 1.0, "the mark is back where it was");
+        assert_eq!(back.get(25, 25).a, 0.0);
+        assert_cache_matches_fresh(&mut session);
+
+        // A scale by nothing moves nothing, and a scale by a ratio that
+        // does not come out whole rounds the page and not the artwork.
+        session.scale_canvas(1.0).unwrap();
+        let (same, _) = session.render_cached().unwrap();
+        assert_eq!(same.get(15, 15).a, 1.0, "a scale of one moves nothing");
+        session.undo().unwrap();
+        session.scale_canvas(0.3).unwrap();
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (24, 12),
+            "the page's sides are rounded to whole pixels"
+        );
+        assert!(session.undo().unwrap());
+        assert_eq!(
+            (
+                session.document().meta.width,
+                session.document().meta.height
+            ),
+            (80, 40),
+            "and it undoes to exactly the size it was, whatever the ratio"
+        );
+        assert!(
+            session.scale_canvas(0.0).is_err() && session.scale_canvas(f32::NAN).is_err(),
+            "a scale of nothing, or of no number, is refused"
+        );
     }
 
     #[test]

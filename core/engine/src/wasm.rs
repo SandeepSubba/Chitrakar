@@ -444,6 +444,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Scale the page by `factor`, the same both ways, and everything on
+    /// it with it.
+    pub fn scale_canvas(&mut self, factor: f32) -> Result<(), JsError> {
+        self.inner.scale_canvas(factor).map_err(to_js)
+    }
+
     /// Make a rectangle or an ellipse a path, so its anchors can be taken
     /// hold of. `false` when it already was one.
     pub fn as_path(&mut self, id: f64) -> Result<bool, JsError> {

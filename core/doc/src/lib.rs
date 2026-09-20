@@ -672,6 +672,7 @@ impl Document {
             | Command::SetGuides { .. }
             | Command::ResizeCanvas { .. }
             | Command::TurnCanvas { .. }
+            | Command::ScaleCanvas { .. }
             | Command::StraightenCanvas { .. }
             | Command::MirrorCanvas { .. } => Unsettled::Nothing,
         }
@@ -1020,6 +1021,31 @@ impl Document {
                 self.map_page(turn);
                 Ok(Command::TurnCanvas {
                     quarters: 4 - turns,
+                })
+            }
+            Command::ScaleCanvas {
+                factor,
+                width,
+                height,
+            } => {
+                if !canvas_fits(width, height) {
+                    return Err(DocError::BadCanvasSize(width, height));
+                }
+                if !(factor.is_finite() && factor > 0.0) {
+                    return Err(DocError::BadCanvasSize(width, height));
+                }
+                let prev = (self.meta.width, self.meta.height);
+                self.meta.width = width;
+                self.meta.height = height;
+                self.map_page(Transform {
+                    a: factor,
+                    d: factor,
+                    ..Default::default()
+                });
+                Ok(Command::ScaleCanvas {
+                    factor: 1.0 / factor,
+                    width: prev.0,
+                    height: prev.1,
                 })
             }
             Command::SetGuides { guides } => {
@@ -1565,6 +1591,26 @@ pub enum Command {
     /// end, since what a page may be is the same either way round.
     TurnCanvas {
         quarters: u8,
+    },
+    /// Scale everything on the page by `factor`, the same both ways, and
+    /// make the page `width` by `height` — Photoshop's Image Size,
+    /// Canva's Resize: the same design at another size, rather than the
+    /// same artwork on a page of another size, which is
+    /// [`Command::ResizeCanvas`]. One factor rather than one per axis
+    /// because a length carried through a transform — a brush's radius,
+    /// a shadow's blur, an edge's softness — goes by the larger scale,
+    /// and only a scale that is the same both ways can be undone to
+    /// where it started; and because a design stretched one way is not
+    /// the same design. The size is said rather than worked out, as a
+    /// straighten's is, so the inverse — the reciprocal, with the old
+    /// size — lands the page exactly where it was and everything on it
+    /// to within rounding. Layers, masks, effects and guides are carried
+    /// through; what a layer holds in its own units — a blur's radius, a
+    /// stroke's width — is not, since a transform does not reach it.
+    ScaleCanvas {
+        factor: f32,
+        width: u32,
+        height: u32,
     },
     /// Reparent/reorder a node. `index` is the position in the destination
     /// group's child list (painter's order: 0 = bottom).
