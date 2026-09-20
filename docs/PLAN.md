@@ -3136,6 +3136,56 @@ without reading anything else.*
      unambiguously, and both renderers agree with each other *and* with
      what the arithmetic says. A test whose failure you cannot explain
      is not a finding yet.
+     The twentieth shape came from the vocabulary sweep rather than from
+     a hunch — serialize the fixture, collect every string and key in it,
+     and hold that against the enum variants the crate declares — and the
+     answer was **thirteen of sixteen blend modes**. This document had
+     Normal and the Multiply on the layer inside the pair, and that looks
+     like a gap of degree until you notice that four of the thirteen are
+     not the same arithmetic at all. A separable blend is one function of
+     one channel and its opposite number, run three times. **Hue,
+     Saturation, Color and Luminosity** take one of brightness, hue and
+     saturation from the layer and the rest from what is under it: their
+     own code in both renderers (`set_lum`, `set_sat`, `clip_color` and
+     W3C's own luminosity weights), their own names in both exporters,
+     and their own case in the shader. Neither instrument had ever drawn
+     one — `BLENDS`, the list a page nobody wrote picks from, was six
+     separable ones.
+     Hue of the four in the fixture, because it is the only one that
+     reaches all of the machinery: `set_lum(set_sat(s, sat(b)), lum(b))`
+     uses the saturation transfer where Color and Luminosity use only the
+     brightness one. Laid over the pair, since a non-separable blend
+     against a grey backdrop is a blend that does nothing. And all four
+     added to `BLENDS`.
+     Every audit held, so the rule: break the code it was meant to
+     exercise. Make `set_sat` the identity and five tests fail — two that
+     were already there (the render crate's reading of the spec, the GPU
+     crate's blend-by-blend one) and **three that are new reach**: both
+     fixture audits and the random pages. So the shape adds reach rather
+     than an assertion, which is worth saying plainly.
+     What it turned up is in the other instrument, and that is the find.
+     **The resvg witness page carried no blend mode at all.** That test —
+     "the last word on export fidelity", a reader that is not us drawing
+     the whole page — had never once checked that a blend survives the
+     export. All sixteen were pinned by reading the markup back and by
+     nothing else, which is the same shape of blind spot as SVG text
+     alignment, recorded a few shapes ago as something a second witness
+     would close.
+     So the witness page has a Luminosity layer now, over the flat red
+     rect and clear of every edge and every spot check. It holds — which
+     is itself worth knowing twice over: resvg implements the
+     non-separable blends, and it agrees with the engine, which is an
+     independent check on the decision that a blend is taken in the
+     encoding a device shows rather than in linear light. Taken in linear
+     light the same pixel would be a different pink.
+     And it earns its place: export Luminosity as `normal` and **two**
+     tests fail now where one did before — the markup one and the
+     witness. Belt and braces, for blends at least; text alignment is
+     still pinned by the markup alone.
+     The spot check is written down rather than derived, at [255, 164,
+     164]: a reader that did not implement the blend would put the
+     layer's own pale yellow there, and one that took it in linear light
+     would put a different pink, so the number tells those two apart.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing

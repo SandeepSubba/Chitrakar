@@ -53,6 +53,9 @@ pub struct Fixture {
     pub own_ring: NodeId,
     /// A copy wearing a mask of its own — the one thing no copy here had.
     pub worn: NodeId,
+    /// A layer whose blend is one of the four that work on the whole
+    /// colour rather than a channel at a time.
+    pub lent: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1261,6 +1264,45 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A layer that blends *non-separably*. Sixteen blend modes, and this
+    // document held two of them: Normal, and the Multiply on the layer
+    // inside the pair. That looks like a gap of degree — twelve more of
+    // the same arithmetic — and four of the twelve are not the same
+    // arithmetic at all. The separable ones are a function of one
+    // channel and its opposite number, applied three times; Hue,
+    // Saturation, Color and Luminosity are a function of the whole
+    // colour, taking one of brightness, hue and saturation from the
+    // layer and the rest from what is under it. Different code in both
+    // renderers, different names in both exporters, and neither the
+    // shared document nor the pages nobody writes had ever carried one
+    // (`BLENDS`, which those pages draw from, was six separable ones).
+    //
+    // Hue of the four, because it is the one that uses all of the
+    // machinery: `set_lum(set_sat(source, sat(backdrop)), lum(backdrop))`
+    // reaches both the brightness transfer and the saturation one, where
+    // Color and Luminosity reach only the first.
+    //
+    // Over the pair, which is the most coloured part of this page: a
+    // non-separable blend against a grey backdrop is a blend that does
+    // nothing, since there is no hue to take and none to lend.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: rect("a hue lent to what is under it", [0.85, 0.1, 0.6, 1.0]),
+    })
+    .unwrap();
+    let lent = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: lent,
+        transform: Transform::translation(10.0, 12.0),
+    })
+    .unwrap();
+    doc.apply(Command::SetBlendMode {
+        id: lent,
+        blend: BlendMode::Hue,
+    })
+    .unwrap();
+
     doc.apply(Command::SetSelection {
         selection: Some(Box::new(Mask {
             kind: MaskKind::Vector {
@@ -1314,6 +1356,7 @@ pub fn everything() -> Fixture {
         differs,
         own_ring,
         worn,
+        lent,
         stroke,
     }
 }
@@ -1686,13 +1729,26 @@ impl Rng {
     }
 }
 
-const BLENDS: [BlendMode; 6] = [
+/// The blend modes a page nobody wrote draws from.
+///
+/// The last four are not more of the first six. A separable blend is one
+/// function of one channel and its opposite number, run three times; the
+/// non-separable ones take brightness, hue or saturation from the whole
+/// colour and the rest from what is under it, which is its own code in
+/// both renderers and its own name in both exporters. Six separable ones
+/// stood here for a long while, so these pages had never drawn one
+/// either.
+const BLENDS: [BlendMode; 10] = [
     BlendMode::Multiply,
     BlendMode::Screen,
     BlendMode::Overlay,
     BlendMode::Darken,
     BlendMode::Lighten,
     BlendMode::Difference,
+    BlendMode::Hue,
+    BlendMode::Saturation,
+    BlendMode::Color,
+    BlendMode::Luminosity,
 ];
 
 fn shape_node(name: &str, shape: VectorShape, fill: AuthoredColor) -> Box<Node> {

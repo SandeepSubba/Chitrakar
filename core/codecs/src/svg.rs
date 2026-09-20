@@ -2379,6 +2379,47 @@ mod tests {
         })
         .unwrap();
 
+        // A blended layer, which this page had never carried — and so
+        // the sharpest instrument here, a reader that is not us drawing
+        // the whole page, had never once checked that a blend mode
+        // survives the export. Sixteen of them were pinned by reading
+        // the markup back and by nothing else.
+        //
+        // Non-separable on purpose: Luminosity is a function of the
+        // whole colour rather than of a channel and its opposite number,
+        // which is different code here, a different name in the file and
+        // a different path in whatever draws it. Laid well inside the
+        // blue rect so that what it blends against is a flat colour and
+        // no edge of either is in the reading.
+        //
+        // The engine takes a blend in the encoding a device shows — the
+        // same place CSS and SVG take it — so the two have no excuse to
+        // differ here beyond the antialiasing they already disagree
+        // about at every edge.
+        let lit = place(
+            &mut doc,
+            painted(
+                "lit",
+                VectorShape::Rect {
+                    width: 22.0,
+                    height: 8.0,
+                    radius: 0.0,
+                },
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.8,
+                    b: 0.2,
+                    a: 1.0,
+                },
+            ),
+            [14.0, 30.0],
+        );
+        doc.apply(Command::SetBlendMode {
+            id: lit,
+            blend: chitrakar_doc::BlendMode::Luminosity,
+        })
+        .unwrap();
+
         let mut lettering = chitrakar_doc::TextSpec::new("Hi", 16.0, BLUE);
         // The second letter is set apart: another colour, so the page
         // exercises a block that is not all one ink.
@@ -2590,6 +2631,14 @@ mod tests {
         );
 
         assert_eq!(at(30, 25), &[255, 0, 0], "rect");
+        // Inside the blended layer, where the mean would hide it. The
+        // rect under it is red and the layer over it is a pale yellow,
+        // and Luminosity keeps the red's hue and saturation at the
+        // yellow's brightness — a pink, and one worth writing down
+        // rather than deriving, because a reader that did not implement
+        // the blend would put the yellow here and a reader that took it
+        // in linear light would put a different pink.
+        assert_eq!(at(25, 34), &[255, 164, 164], "the blend a reader draws");
         assert!(
             at(75, 8)[0] > 200 && at(75, 8)[2] < 60,
             "the ellipse's band lies outside its edge {:?}",
