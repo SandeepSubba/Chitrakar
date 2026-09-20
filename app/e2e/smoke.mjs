@@ -11544,6 +11544,93 @@ assert(
   await pickTool("Move");
 }
 
+// 9bp. The node tool: a press on a rectangle or an ellipse makes it a
+// path — the picture unmoved — so its anchors come out; a press on the
+// picked path's outline adds an anchor; alt-press takes one off; a drag
+// moves one.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Ellipse");
+  await page.mouse.move(...at(100, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 220), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Rect");
+  await page.mouse.move(...at(350, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(550, 220), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  assert((await page.locator(".anchor").count()) === 0, "nothing picked, no anchors");
+
+  await pickTool("Node");
+  // The ellipse: four anchors, and the picture where it was, read at
+  // the rim where an arc drawn wrong would show.
+  // Read on the rim, a quarter of the way round from the axes, which
+  // is where a bezier arc drawn with the wrong constant strays furthest
+  // from the true one — and where the first version of this read solid
+  // ink inside instead, and would have passed any arc at all.
+  const rim = [[271, 84], [129, 196], [271, 196]];
+  const rimBefore = [];
+  for (const [x, y] of rim) rimBefore.push(await canvasPixel(x, y));
+  await page.mouse.click(...at(200, 140));
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".anchor").count()) === 4,
+    `a press on an ellipse brings out its four anchors (${await page.locator(".anchor").count()})`,
+  );
+  const rimAfter = [];
+  for (const [x, y] of rim) rimAfter.push(await canvasPixel(x, y));
+  // Within a fifth of a pixel's coverage: both the ellipse and the path
+  // are drawn as chords — sixty-four of them — laid in different places
+  // round the rim, and that is a tenth of a pixel either way at this
+  // size. An arc drawn with the wrong constant is half a pixel out and
+  // more, which is the case the engine's own test holds against.
+  assert(
+    rimBefore.some((px) => px[3] > 0 && px[3] < 255) &&
+      rimBefore.every((px, i) => px.every((v, c) => Math.abs(v - rimAfter[i][c]) <= 50)),
+    `and the picture does not move (${rimBefore.map((p) => p.join(",")).join(" / ")} -> ${rimAfter.map((p) => p.join(",")).join(" / ")})`,
+  );
+
+  // The rectangle: four corners; a press on its top edge adds a fifth.
+  await page.mouse.click(...at(450, 140));
+  await page.waitForTimeout(250);
+  assert((await page.locator(".anchor").count()) === 4, "a press on a rectangle brings out its corners");
+  await page.mouse.click(...at(450, 60));
+  await page.waitForTimeout(250);
+  assert((await page.locator(".anchor").count()) === 5, "a press on the outline adds an anchor there");
+  // Alt-press takes it off again.
+  const added = page.locator(".anchor").nth(1);
+  await added.click({ modifiers: ["Alt"] });
+  await page.waitForTimeout(250);
+  assert((await page.locator(".anchor").count()) === 4, "alt-press takes it off");
+  // A press well inside asks nothing.
+  await page.mouse.click(...at(450, 140));
+  await page.waitForTimeout(200);
+  assert((await page.locator(".anchor").count()) === 4, "a press inside the shape adds nothing");
+  // A drag on a corner moves it: the corner's old place is bare after.
+  const corner = page.locator('.anchor[data-anchor="0"]');
+  const cb = await corner.boundingBox();
+  await page.mouse.move(cb.x + cb.width / 2, cb.y + cb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(...at(420, 130), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(355, 65))[3] === 0, "dragging a corner anchor moves it, and the corner goes with it");
+  // And a press on bare paper lets go.
+  await page.mouse.click(...at(300, 350));
+  await page.waitForTimeout(200);
+  assert((await page.locator(".anchor").count()) === 0, "a press on nothing lets go of the shape");
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

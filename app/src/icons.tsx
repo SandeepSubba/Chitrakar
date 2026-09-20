@@ -15,6 +15,7 @@ export type IconName =
   | "rect"
   | "ellipse"
   | "pen"
+  | "node"
   | "text"
   | "undo"
   | "redo"
@@ -195,6 +196,14 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
+  // A curve with its anchors showing: the node tool.
+  node: (
+    <>
+      <path d="M5 17C8 7 16 17 19 7" />
+      <rect x="3" y="15" width="4" height="4" />
+      <rect x="17" y="5" width="4" height="4" />
+    </>
+  ),
   // A box with its lines drawing apart: a ramp from dense to sparse.
   gradient: (
     <>

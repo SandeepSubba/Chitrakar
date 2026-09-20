@@ -444,6 +444,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Make a rectangle or an ellipse a path, so its anchors can be taken
+    /// hold of. `false` when it already was one.
+    pub fn as_path(&mut self, id: f64) -> Result<bool, JsError> {
+        self.inner.as_path(NodeId(id as u64)).map_err(to_js)
+    }
+
     /// Take an anchor off a path.
     pub fn remove_anchor(&mut self, id: f64, index: usize) -> Result<(), JsError> {
         self.inner

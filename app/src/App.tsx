@@ -2670,6 +2670,49 @@ export function App() {
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
+    // The node tool is for a shape's anchors, which the Move tool shows
+    // but nothing names. A press on a rectangle or an ellipse makes it a
+    // path, so its anchors come out; a press on the picked path's own
+    // outline puts an anchor there (Move wants a double-click for that);
+    // the anchors themselves answer to a drag and to alt, whatever the
+    // tool. A press on another layer picks it; on nothing, lets go.
+    if (tool === "Node") {
+      const hit = session.hit_test(x, y);
+      if (hit === undefined) {
+        setSelected(null);
+        setMultiSel([]);
+        return;
+      }
+      const k = JSON.parse(session.kind_json(hit)) as NodeKind;
+      const isPath =
+        typeof k === "object" && "Vector" in k && "Path" in k.Vector.shape;
+      if (typeof k === "object" && "Vector" in k && !isPath) {
+        if (layers.find((l) => l.id === hit)?.locked) return;
+        try {
+          session.as_path(hit);
+        } catch (err) {
+          alert(`Node: ${err}`);
+          return;
+        }
+        setSelected(hit);
+        setMultiSel([]);
+        refresh(session);
+        return;
+      }
+      if (hit === selected && isPath) {
+        try {
+          session.insert_anchor(hit, x, y, 10 / view.zoom);
+        } catch {
+          // Not near the outline: a press inside the shape asks nothing.
+          return;
+        }
+        refresh(session);
+        return;
+      }
+      setSelected(hit);
+      setMultiSel([]);
+      return;
+    }
     // The fill tool gives the layer under a press the ink in hand — a
     // shape's fill (in place of any gradient), a block of text's, a
     // frame's ground — or, with alt, a shape's stroke, adding one where
@@ -9472,6 +9515,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["F", "Frame (an artboard: a page within the page)"],
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
+      ["A", "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off"],
       ["N", "Paint (a brush that lays pixels)"],
       ["Shift+N", "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
       ["S", "Clone (paint with what is already there, as it is)"],

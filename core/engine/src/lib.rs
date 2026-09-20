@@ -2253,6 +2253,90 @@ impl Session {
         Ok(at + 1)
     }
 
+    /// Make a rectangle or an ellipse a path of its own outline, with
+    /// anchors where a hand would put them: four on an ellipse, at the
+    /// ends of its axes, and four or eight on a rectangle, one per corner
+    /// or one at each end of every rounded one. The arcs are cubic
+    /// beziers at the usual 0.5523 of the radius, which strays from a
+    /// true arc by under three parts in ten thousand — the picture does
+    /// not change, only what can be taken hold of. Already a path: `false`
+    /// and nothing done.
+    pub fn as_path(&mut self, id: NodeId) -> Result<bool, EngineError> {
+        const KAPPA: f32 = 0.552_284_8;
+        let node = self.doc.node(id)?;
+        let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("not a shape layer".into()));
+        };
+        let (points, handles): (Vec<[f32; 2]>, Vec<[f32; 4]>) = match shape {
+            chitrakar_doc::VectorShape::Path { .. } => return Ok(false),
+            chitrakar_doc::VectorShape::Ellipse { rx, ry } => {
+                let (kx, ky) = (KAPPA * rx, KAPPA * ry);
+                (
+                    // Walked the way the renderer walks the ring: from the
+                    // right end of the wide axis, round through the bottom.
+                    vec![[2.0 * rx, *ry], [*rx, 2.0 * ry], [0.0, *ry], [*rx, 0.0]],
+                    vec![
+                        [0.0, -ky, 0.0, ky],
+                        [kx, 0.0, -kx, 0.0],
+                        [0.0, ky, 0.0, -ky],
+                        [-kx, 0.0, kx, 0.0],
+                    ],
+                )
+            }
+            chitrakar_doc::VectorShape::Rect {
+                width,
+                height,
+                radius,
+            } => {
+                let (w, h) = (*width, *height);
+                let r = radius.clamp(0.0, (w / 2.0).min(h / 2.0).max(0.0));
+                if r <= 0.0 {
+                    (vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]], Vec::new())
+                } else {
+                    let k = KAPPA * r;
+                    (
+                        // Each corner is an arc between two anchors, the
+                        // sides straight runs between the arcs, in the
+                        // order the renderer's ring goes.
+                        vec![
+                            [0.0, r],
+                            [r, 0.0],
+                            [w - r, 0.0],
+                            [w, r],
+                            [w, h - r],
+                            [w - r, h],
+                            [r, h],
+                            [0.0, h - r],
+                        ],
+                        vec![
+                            [0.0, 0.0, 0.0, -k],
+                            [-k, 0.0, 0.0, 0.0],
+                            [0.0, 0.0, k, 0.0],
+                            [0.0, -k, 0.0, 0.0],
+                            [0.0, 0.0, 0.0, k],
+                            [k, 0.0, 0.0, 0.0],
+                            [0.0, 0.0, -k, 0.0],
+                            [0.0, k, 0.0, 0.0],
+                        ],
+                    )
+                }
+            }
+        };
+        self.replace_path(
+            id,
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles,
+                subpaths: Vec::new(),
+            },
+            None,
+            "Make a path",
+        )?;
+        Ok(true)
+    }
+
     /// Take an anchor off a path. Refuses to leave one that has nothing
     /// left to be a path with.
     pub fn remove_anchor(&mut self, id: NodeId, index: usize) -> Result<(), EngineError> {
@@ -10238,6 +10322,92 @@ mod tests {
     /// curve cut into more, shorter pieces lands its antialiasing a
     /// hair differently. Nothing moves by as much as a quarter of a step
     /// anywhere, which is the claim.
+    #[test]
+    fn a_shape_made_a_path_draws_the_same_picture() {
+        // The node tool brings a rectangle's or an ellipse's anchors out
+        // by making it a path; the picture must not move when it does,
+        // or a tool for editing a shape would begin by editing it.
+        for (what, shape, anchors) in [
+            (
+                "an ellipse",
+                VectorShape::Ellipse { rx: 30.0, ry: 19.0 },
+                4usize,
+            ),
+            (
+                "a rounded rectangle",
+                VectorShape::Rect {
+                    width: 56.0,
+                    height: 38.0,
+                    radius: 11.0,
+                },
+                8,
+            ),
+            (
+                "a plain rectangle",
+                VectorShape::Rect {
+                    width: 50.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                4,
+            ),
+        ] {
+            let mut s = Session::new(80, 60, ColorMode::Rgb);
+            let root = s.document().root();
+            let mut node = Node::vector("shape", shape);
+            // Filled, or there is no picture to hold still: a vector node
+            // starts with no fill and no stroke, and the first version of
+            // this test compared two blank pages and passed whatever the
+            // arcs were.
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.4,
+                    b: 0.8,
+                    a: 1.0,
+                });
+            }
+            node.transform = chitrakar_doc::Transform {
+                e: 9.0,
+                f: 8.0,
+                ..Default::default()
+            };
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = s.document().children_of(root).unwrap()[0];
+            let before = s.render().unwrap();
+            assert!(s.as_path(id).unwrap(), "{what}: was made a path");
+            let after = s.render().unwrap();
+            let (worst, x, y) = apart(&before, &after);
+            assert!(
+                worst < 0.15,
+                "{what}: making it a path moved it by {worst} at {x},{y}"
+            );
+            let NodeKind::Vector {
+                shape: VectorShape::Path { points, closed, .. },
+                ..
+            } = &s.document().node(id).unwrap().kind
+            else {
+                panic!("{what}: not a path afterwards")
+            };
+            assert_eq!(points.len(), anchors, "{what}: the anchors a hand expects");
+            assert!(*closed, "{what}: closed on itself");
+            assert!(
+                !s.as_path(id).unwrap(),
+                "{what}: already a path, nothing done twice"
+            );
+            assert_eq!(
+                s.history_labels().0.len(),
+                2,
+                "{what}: one entry for making it a path"
+            );
+        }
+    }
+
     #[test]
     fn adding_an_anchor_leaves_the_path_where_it_was() {
         let path_layer = |smooth: bool, closed: bool, handles: Vec<[f32; 4]>| {

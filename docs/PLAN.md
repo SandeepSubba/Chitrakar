@@ -879,9 +879,9 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~496),
+- **Verify before committing:** `cargo test --workspace` (~497),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1220 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1229 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5358,10 +5358,8 @@ without reading anything else.*
        out fills the region. G again, after the gradient — see *Chrome*.
      - ✅ **Eraser** and **Heal** as tools of their own (shift+N,
        shift+S), the two switches gone — see *Chrome*.
-     - **Node tool** (Affinity's A): anchors are edited by
-       double-clicking a path with Move in hand, which nobody would
-       guess. A tool that puts the anchors up on a press is a small
-       change and a large discovery.
+     - ✅ **Node tool** (A): a press brings a shape's anchors out, a
+       press on the outline adds one — see *Chrome*.
      - **Scale the page and everything on it** — Photoshop's Image
        Size, Canva's Resize. Canvas size… changes the page and leaves
        the artwork where it is; scaling a whole design to another size
@@ -5511,15 +5509,32 @@ without reading anything else.*
   and the two switches are gone, since a mode that is a tool does not
   also want a switch. Clone no longer heals by default: it is the plain
   stamp, and Heal is the one that lands in the colour of where it
-  lands. Which tools are on the rail is a preference (Preferences ›
+  lands. A **Node** tool (A) is for a shape's anchors, which Move
+  showed but nothing named: a press on a rectangle or an ellipse makes
+  it a path so its anchors come out (`Session::as_path`, four anchors
+  on an ellipse at the ends of its axes, four or eight on a rectangle,
+  the arcs cubic beziers at 0.5523 of the radius, which is under three
+  parts in ten thousand from a true arc — the picture does not move,
+  only what can be taken hold of, and
+  `a_shape_made_a_path_draws_the_same_picture` holds it to that, having
+  first been caught comparing two blank pages: a vector node starts
+  with no fill, and a test that passed any arc at all was the first
+  version); a press on the picked path's own outline puts an anchor
+  there, where Move wants a double-click; the anchors answer to a drag
+  and to alt whatever the tool. The browser block reads the ellipse's
+  rim a quarter of the way round from the axes, where a wrong arc
+  strays furthest, and allows a fifth of a pixel's coverage: both
+  pictures are sixty-four chords, laid in different places.
+  Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its
   key still picking it and the slot then showing it in hand — put away
   is not gone — and the one tool that cannot be put away is Move. The
   same page decides which of the bar's three button groups (document,
   region, zoom) show, everything on them being on a menu as well.
-  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, G, T, C, I,
-  H, Z), suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
+  Tools have single-letter shortcuts (V/M, R, E, P, A, B, N, S, G, T, C,
+  I, H, Z; shift+N, S, G, M for the tool each shares a key with),
+  suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
   there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a
