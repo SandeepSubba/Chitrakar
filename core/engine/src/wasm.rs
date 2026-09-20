@@ -1103,3 +1103,12 @@ fn to_js(e: crate::EngineError) -> JsError {
 pub fn display_p3_profile() -> Vec<u8> {
     chitrakar_color::cms::display_p3_profile_bytes()
 }
+
+/// Which engine this is, for the About window: the app and the engine
+/// are versioned together, and the window shows both so that a bundle
+/// carrying an engine from another build says so rather than looks the
+/// same.
+#[wasm_bindgen]
+pub fn engine_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}

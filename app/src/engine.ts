@@ -9,6 +9,7 @@
 import init, {
   WasmSession,
   display_p3_profile,
+  engine_version,
 } from "./wasm-pkg/chitrakar_engine";
 
 export type NodeId = number;
@@ -537,4 +538,4 @@ export function sendPreview(session: WasmSession, cmd: Command): void {
 /** The Display P3 profile's own bytes, for a screen known to be P3 —
  * most of what Apple has shipped for years — without hunting down an
  * .icc file for it. */
-export { display_p3_profile };
+export { display_p3_profile, engine_version };

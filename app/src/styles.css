@@ -35,11 +35,36 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.55rem;
   padding: 0.3rem 0.7rem;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
+  /* One row tall. A bar wider than the window scrolls the whole page
+     sideways, which slid the canvas under the tool rail; and a bar that
+     wraps never shrinks anything first, so what happens instead is
+     below: the document name gives up room, then the wordmark goes,
+     then the document's facts. The browser suite asks at the two widths
+     a laptop is, so the next thing added to the bar is told. */
   height: 2.6rem;
+}
+
+/* A laptop's window: nine menus and every group of buttons at once are
+   wider than 1440 with the wordmark on, so the wordmark is what goes —
+   the name over the door, which the window's own title bar says anyway.
+   Everything that can be pressed stays. */
+@media (max-width: 1520px) {
+  .brand {
+    display: none;
+  }
+}
+
+/* Narrower still, the facts about the document go too: its mode, size
+   and resolution are in the panel's fields. The badges beside them stay,
+   since a profile being loaded is said nowhere else on screen. */
+@media (max-width: 1380px) {
+  .doc-facts {
+    display: none;
+  }
 }
 
 .brand {
@@ -117,7 +142,7 @@ body {
   color: var(--text);
   font: inherit;
   font-size: 0.82rem;
-  padding: 0.3rem 0.6rem;
+  padding: 0.3rem 0.5rem;
   border-radius: 6px;
   cursor: pointer;
 }
@@ -2057,6 +2082,7 @@ button.fold:hover {
      the canvas under the tool rail. The name is the thing that can give
      up room without anything becoming unreachable. */
   min-width: 3rem;
+  width: 9rem;
   max-width: 14rem;
   flex: 0 1 auto;
   margin-left: auto;
@@ -2076,6 +2102,33 @@ button.fold:hover {
   border-color: var(--accent);
   outline: none;
   text-align: left;
+}
+
+/* The About window: three facts in a column. */
+.about-facts {
+  margin: 0.6rem 0 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.about-facts > div {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+}
+
+.about-facts dt {
+  color: var(--muted);
+}
+
+.about-facts dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-facts a {
+  color: var(--accent);
 }
 
 /* The sheet of keys and gestures: two columns of definition lists, the

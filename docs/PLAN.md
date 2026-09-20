@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1173 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1184 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5348,10 +5348,9 @@ without reading anything else.*
      on it a preference (all above, under *Chrome*). What the review
      found still missing, in the order it would pay, so that the next
      chunk here is a choice rather than a survey:
-     - A **Help** menu — every one of the three has one, and "Keys and
-       gestures" is the one row here that belongs on it, with an About
-       that says which version this is. Cheap, and a menu bar without
-       one reads as unfinished.
+     - ✅ A **Help** menu — every one of the three has one. Keys and
+       gestures moved onto it from View, and About says which version
+       this is, app and engine both.
      - **Gradient tool**: a gradient can be put on a fill and its
        handles dragged on the canvas, but there is no tool that drags a
        new one across a layer, which is how every editor makes one.
@@ -5433,8 +5432,8 @@ without reading anything else.*
   nobody would guess at — which is also why a gesture added without a
   line on the sheet leaves the sheet quietly wrong, and why the sheet's
   own block holds it to naming them and not only to its letters
-  working. Document actions live in an eight-menu bar — File, Edit,
-  Select, Layer, Adjust, Filter, Page, View — reviewed against
+  working. Document actions live in a nine-menu bar — File, Edit,
+  Select, Layer, Adjust, Filter, Page, View, Help — reviewed against
   Photoshop's, Affinity's and Canva's and laid out the way theirs are,
   each menu named after the one thing it holds. File is the file: new,
   open, save, what comes in (an image, a font), what goes out. Edit is
@@ -5450,10 +5449,29 @@ without reading anything else.*
   panel list, which is where nobody looks first. Page is the page's own
   properties: its size, its turns and mirrors, and the press profile it
   will be printed through, which used to sit in File under the exports.
-  View is zoom, units, guides, the grid, the before/after eye, the keys
-  sheet and the two rows that open Preferences; the monitor profile rows
-  that were there are in Preferences under Colour and nowhere else, since
-  a setting in two places is a setting that can disagree with itself.
+  View is zoom, units, guides, the grid, the before/after eye and the
+  two rows that open Preferences; the monitor profile rows that were
+  there are in Preferences under Colour and nowhere else, since a
+  setting in two places is a setting that can disagree with itself.
+  Help is the keys sheet, which had been standing in for it from the
+  wrong end of View, and About — the app's version from package.json
+  (put into the bundle by vite.config.ts) beside the engine's own
+  (`engine_version()` over the WASM boundary), one number when the
+  bundle is whole and two when it is not, which is what the About
+  window is for.
+  Nine menus and every group of buttons at once are wider than a
+  laptop's window, and the first version of this found out the hard
+  way: a bar a few pixels wider than the window scrolled the whole page
+  sideways, which slid the canvas under the tool rail, where a drag
+  from the page's corner drew nothing — one block of the suite, five
+  thousand lines from the change, was what noticed. The bar does not
+  wrap on a wide window (a bar that wraps never shrinks anything first)
+  and does not scroll: the document name gives up room first, then the
+  wordmark goes below 1520px, then the document's facts below 1380px
+  (the profile badges beside them stay, being said nowhere else). The
+  suite asks at 1440 and 1366 that the window holds the whole page and
+  the bar is one row, so the next thing added to the bar is told rather
+  than found out.
   A menu row can open a menu of its own (`MenuEntry` kind `sub`), on
   hover or on a press, and the popup is fixed to the window rather than
   to the row because the menu it sits in scrolls when tall and a popup

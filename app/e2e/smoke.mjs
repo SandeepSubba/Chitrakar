@@ -293,8 +293,8 @@ assert(
 );
 assert(
   (await page.locator(".topbar .menu-label").allTextContents()).join(",") ===
-    "File,Edit,Select,Layer,Adjust,Filter,Page,View",
-  "menu bar carries File, Edit, Select, Layer, Adjust, Filter, Page and View",
+    "File,Edit,Select,Layer,Adjust,Filter,Page,View,Help",
+  "menu bar carries File, Edit, Select, Layer, Adjust, Filter, Page, View and Help",
 );
 await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
@@ -4676,12 +4676,32 @@ assert(
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
   assert((await sheet.count()) === 0, "and Escape closes it");
-  await menuClick("View", "Keys and gestures");
+  await menuClick("Help", "Keys and gestures");
   await page.waitForTimeout(200);
-  assert((await sheet.count()) === 1, "the View menu opens it too");
+  assert((await sheet.count()) === 1, "the Help menu opens it too");
   await page.click('[aria-label="Keys and gestures"] >> text=Close');
   await page.waitForTimeout(200);
   assert((await sheet.count()) === 0, "and Close closes it");
+
+  // And what the app is: the version from the one place it is written,
+  // and the engine's own, which is the same number when the bundle is
+  // whole.
+  await menuClick("Help", "About Chitrakar…");
+  const about = page.locator('[role=dialog][aria-label="About Chitrakar"]');
+  assert((await about.count()) === 1, "Help has an About window");
+  const version = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8")).version;
+  const facts = await about.locator(".about-facts dd").allTextContents();
+  assert(
+    facts[0] === version,
+    `it says which version this is (${facts[0]} against package.json's ${version})`,
+  );
+  assert(
+    facts[1] === facts[0],
+    `and the engine is the same build (${facts[1]} against ${facts[0]})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert((await about.count()) === 0, "and Escape closes it");
 }
 
 // 9i. The paint brush: a stroke lays pixels on a layer of its own, the
@@ -10616,7 +10636,7 @@ assert(
 
   // And the sheet says so, because a key nobody can find is a key
   // nobody has.
-  await menuClick("View", "Keys and gestures");
+  await menuClick("Help", "Keys and gestures");
   await page.waitForTimeout(250);
   const sheet = await page
     .locator('[aria-label="Keys and gestures"]')
@@ -11104,6 +11124,36 @@ assert(
   );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(120);
+
+  // Nine menus and every group of buttons at once are wider than a
+  // laptop's window, and a bar wider than the window scrolled the whole
+  // page sideways — which slid the canvas under the tool rail, where a
+  // drag from the page's corner drew nothing. The bar gives things up
+  // before that happens, and if it ever runs out of things to give up it
+  // wraps rather than spills. Asked at the two widths a laptop is.
+  for (const width of [1440, 1366]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(300);
+    const spill = await page.evaluate(() => [
+      document.documentElement.scrollWidth,
+      window.innerWidth,
+    ]);
+    assert(
+      spill[0] <= spill[1],
+      `at ${width} the window holds the whole page (${spill[0]} of ${spill[1]})`,
+    );
+    const barBox = await page.locator(".topbar").boundingBox();
+    assert(
+      barBox.height < 48,
+      `and the bar is still one row tall (${barBox.height})`,
+    );
+    assert(
+      (await page.locator(".topbar .menu-label").count()) === 9,
+      "with every menu on it",
+    );
+  }
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await page.waitForTimeout(300);
 }
 
 // 9bk. Which tools are on the rail is a preference. One put away is not

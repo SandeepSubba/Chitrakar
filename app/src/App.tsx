@@ -44,6 +44,7 @@ import {
   WasmSession,
   colorToHex,
   display_p3_profile,
+  engine_version,
   effectBody,
   effectKind,
   getWasmMemory,
@@ -859,7 +860,8 @@ type MenuId =
   | "adjust"
   | "filter"
   | "page"
-  | "view";
+  | "view"
+  | "help";
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
@@ -1060,6 +1062,7 @@ export function App() {
   /** The export window, and the preferences window. */
   const [exportOpen, setExportOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   /** Which page the preferences window opens on: a row that is about
    * the tools opens it on the tools. */
   const [prefsGroup, setPrefsGroup] = useState<PrefGroup>("general");
@@ -6501,9 +6504,8 @@ export function App() {
         SEP,
         // The monitor profile rows that were here are in Preferences,
         // under Colour, and only there: a setting in two places is a
-        // setting that can disagree with itself.
-        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
-        SEP,
+        // setting that can disagree with itself. The keys sheet, which
+        // was here too, is on Help — the menu it was standing in for.
         // Last on the last menu, which is where an application's own
         // settings sit when they are not on a Mac's application menu —
         // and the desktop shell puts them there as well. The rail's own
@@ -6511,6 +6513,18 @@ export function App() {
         // which tools are on the rail.
         item("tools", "brush", "Tools on the rail…", () => openPrefs("tools")),
         item("prefs", "units", "Preferences…", () => openPrefs("general"), "Ctrl+,"),
+      ],
+    },
+    {
+      // Every editor ends its bar with this one, and the keys sheet had
+      // been standing in for it from the wrong end of View. Two rows:
+      // what the app answers to, and what the app is.
+      id: "help",
+      label: "Help",
+      entries: [
+        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
+        SEP,
+        item("about", "check", "About Chitrakar…", () => setShowAbout(true)),
       ],
     },
   ];
@@ -6855,15 +6869,20 @@ export function App() {
               Screen ✓
             </span>
           )}
-          {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
-          {units !== "px" && (
-            <>
-              {" "}
-              ({inUnits(docSize[0], units, docDpi)}×
-              {inUnits(docSize[1], units, docDpi)} {units})
-            </>
-          )}{" "}
-          · {docDpi} dpi
+          {/* The facts about the document, in a span of their own so a
+              window with no room for them can drop them and keep the
+              badges, which say something the panel does not. */}
+          <span className="doc-facts">
+            {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
+            {units !== "px" && (
+              <>
+                {" "}
+                ({inUnits(docSize[0], units, docDpi)}×
+                {inUnits(docSize[1], units, docDpi)} {units})
+              </>
+            )}{" "}
+            · {docDpi} dpi
+          </span>
         </span>
         {/* The zoom is read and set in the same place: "show me this at
             four hundred percent" is a thing people say, and a wheel
@@ -6946,6 +6965,7 @@ export function App() {
         )}
       </header>
       {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {contextAt && (
         <div
           className="menu-pop context-menu"
@@ -9413,6 +9433,71 @@ const KEY_HELP: [string, [string, string][]][] = [
 ];
 
 /** The sheet of keys and gestures. */
+/** What this is and which one: the app's version and the engine's, which
+ * are one number when the bundle is whole and two when it is not. */
+function AboutDialog({ onClose }: { onClose: () => void }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeRef.current();
+      }
+    };
+    // Before the editor's own handler, which would take Escape for the
+    // selection.
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
+  let engine = "";
+  try {
+    engine = engine_version();
+  } catch {
+    engine = "not loaded";
+  }
+  return (
+    <div className="modal-scrim" onPointerDown={onClose}>
+      <div
+        className="modal about"
+        role="dialog"
+        aria-label="About Chitrakar"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Chitrakar</h2>
+        <p className="modal-aside">
+          A non-destructive photo and vector editor. Every edit is a live
+          layer or a command that can be undone; the picture underneath is
+          never touched.
+        </p>
+        <dl className="about-facts">
+          <div>
+            <dt>Version</dt>
+            <dd>{__APP_VERSION__}</dd>
+          </div>
+          <div>
+            <dt>Engine</dt>
+            <dd>{engine}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <a href="https://github.com/SandeepSubba/Chitrakar" target="_blank" rel="noreferrer">
+                github.com/SandeepSubba/Chitrakar
+              </a>
+            </dd>
+          </div>
+        </dl>
+        <div className="modal-actions">
+          <button className="mask-button primary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function KeysDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
