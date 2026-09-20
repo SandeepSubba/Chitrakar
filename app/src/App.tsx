@@ -12,6 +12,7 @@ import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import { usePrefs } from "./prefs";
 import {
   ALWAYS_SHOWN,
+  KEY_FAMILIES,
   RAIL,
   SELECT_TOOLS,
   SHAPE_TOOLS,
@@ -1867,7 +1868,19 @@ export function App() {
         const shortcut = TOOL_KEYS[e.key.toLowerCase()];
         if (shortcut) {
           e.preventDefault();
-          setTool(shortcut);
+          // With shift, a key whose tool shares it with a family walks
+          // the family — shift+M the region tools, shift+G the gradient
+          // and the fill — which is Photoshop's convention and keeps the
+          // plain key meaning one tool, always. Read off the tool in hand
+          // at the press rather than the one this closure was built with.
+          const shifted = e.shiftKey;
+          setTool((held) => {
+            const family = KEY_FAMILIES.find((f) => f.includes(shortcut));
+            if (shifted && family && family.includes(held)) {
+              return family[(family.indexOf(held) + 1) % family.length];
+            }
+            return shortcut;
+          });
           setPenPoints([]);
         }
         // Brackets resize the brush, as they do everywhere else. By a
@@ -2648,6 +2661,57 @@ export function App() {
         setMultiSel([]);
       }
       (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    // The fill tool gives the layer under a press the ink in hand — a
+    // shape's fill (in place of any gradient), a block of text's, a
+    // frame's ground — or, with alt, a shape's stroke, adding one where
+    // there is none. A press on nothing that takes a colour, with a
+    // region picked out, fills the region instead, as a layer over it:
+    // the bucket poured into a selection, which is what a bucket is for
+    // on a photograph.
+    if (tool === "Fill") {
+      const hit = session.hit_test(x, y);
+      const ink = currentInk();
+      if (hit !== undefined && !layers.find((l) => l.id === hit)?.locked) {
+        const k = JSON.parse(session.kind_json(hit)) as NodeKind;
+        let next: NodeKind | null = null;
+        if (typeof k === "object") {
+          if ("Vector" in k) {
+            next = e.altKey
+              ? {
+                  Vector: {
+                    ...k.Vector,
+                    stroke: k.Vector.stroke
+                      ? { ...k.Vector.stroke, color: ink }
+                      : {
+                          color: ink,
+                          width: 4,
+                          widths: [],
+                          dash: [],
+                          cap: "Round",
+                          join: "Round",
+                          align: null,
+                          start_marker: "None",
+                          end_marker: "None",
+                        },
+                  },
+                }
+              : { Vector: { ...k.Vector, fill: ink, gradient: null } };
+          } else if ("Text" in k) {
+            next = { Text: { ...k.Text, fill: ink } };
+          } else if ("Artboard" in k) {
+            next = { Artboard: { ...k.Artboard, background: ink } };
+          }
+        }
+        if (next) {
+          run({ SetKind: { id: hit, kind: next } });
+          setSelected(hit);
+          setMultiSel([]);
+          return;
+        }
+      }
+      if (antRings.length > 0) fillSelection();
       return;
     }
     // Asked for a line along something level, the next drag draws it.
@@ -7816,7 +7880,9 @@ export function App() {
                   ? " zooming"
                   : tool === "Gradient"
                     ? " grading"
-                    : ""
+                    : tool === "Fill"
+                      ? " filling"
+                      : ""
           }`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
@@ -9439,6 +9505,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],
       ["G", "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
+      ["Shift+G", "Fill — give the layer under a press the ink in hand; alt for its stroke; a press on nothing fills what is picked out"],
       ["H", "Hand — drag the view about"],
       ["Z", "Zoom — click to look nearer, alt-click to step back"],
     ],
@@ -9502,7 +9569,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
       ["Ctrl+A", "Select all — the page with a marquee in hand, else every layer"],
-      ["M", "Pick a region out of the page (again for the ellipse and the lasso)"],
+      ["M", "Pick a region out of the page (shift+M for the ellipse, the lasso and the wand)"],
       ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
       ["Ctrl+Shift+I", "Pick out the rest instead"],
       [

@@ -30,6 +30,7 @@ export const TOOLS = [
   "Paint",
   "Clone",
   "Gradient",
+  "Fill",
   "Text",
   "Crop",
   "Eyedropper",
@@ -58,9 +59,18 @@ export const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as con
 export const RAIL: readonly (readonly Tool[])[] = [
   ["Move", "Select"],
   ["Frame", "Rect", "Pen", "Text"],
-  ["Brush", "Paint", "Clone", "Gradient"],
+  ["Brush", "Paint", "Clone", "Gradient", "Fill"],
   ["Crop", "Eyedropper"],
   ["Hand", "Zoom"],
+];
+
+/** Tools that share a key: with shift, the key walks the family from
+ * whichever of them is in hand — shift+M the region tools, shift+G the
+ * gradient and the bucket — Photoshop's convention, which keeps the
+ * plain key meaning one tool, always. */
+export const KEY_FAMILIES: readonly (readonly Tool[])[] = [
+  SELECT_TOOLS,
+  ["Gradient", "Fill"],
 ];
 
 /** The one tool that cannot be put away: with nothing to move things by,
@@ -109,6 +119,7 @@ export const TOOL_HINT: Record<Tool, string> = {
   Paint: "N",
   Clone: "S",
   Gradient: "G",
+  Fill: "G",
   Text: "T",
   Crop: "C",
   Eyedropper: "I",
@@ -133,6 +144,7 @@ export const TOOL_ICONS: Record<Tool, IconName> = {
   Paint: "paint",
   Clone: "clone",
   Gradient: "gradient",
+  Fill: "fill",
   Text: "text",
   Crop: "crop",
   Eyedropper: "eyedropper",
@@ -160,6 +172,7 @@ export const TOOL_ABOUT: Record<Tool, string> = {
   Paint: "a brush that lays pixels",
   Clone: "paint with what is already there, or heal with it",
   Gradient: "drag a gradient across a shape; alt for a radial one",
+  Fill: "give the layer under a press the ink in hand; alt for its stroke",
   Text: "a block of live text",
   Crop: "cut the page down",
   Eyedropper: "take the colour under the cursor",

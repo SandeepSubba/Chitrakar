@@ -1439,6 +1439,10 @@ body {
   cursor: crosshair;
 }
 
+.canvas-host.filling {
+  cursor: cell;
+}
+
 .canvas-host {
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */

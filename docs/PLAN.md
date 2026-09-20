@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1195 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1214 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5353,10 +5353,9 @@ without reading anything else.*
        this is, app and engine both.
      - ✅ **Gradient tool** (G): drags a new gradient across a shape,
        linear or (alt) radial, from the ink in hand — see *Chrome*.
-     - **Fill (bucket) tool**: press a layer to give it the ink in
-       hand. Photoshop's G, Affinity's flood fill, Canva's colour on a
-       press. `applyColour` already does the work; the tool is a
-       click.
+     - ✅ **Fill (bucket) tool**: a press gives the layer under it the
+       ink in hand, alt its stroke, and bare paper with a region picked
+       out fills the region. G again, after the gradient — see *Chrome*.
      - **Eraser** and **Heal** as tools of their own on the rail rather
        than modes of Paint and Clone (Photoshop's E and J). A mode is
        right for the engine — a heal *is* a clone stroke with one flag
@@ -5493,7 +5492,20 @@ without reading anything else.*
   keeps its stops and is only re-aimed, and a press that never moved
   changes nothing. It previews live and commits as one entry, through
   the same `SetKind` the panel's fill-type row and the on-canvas handles
-  use, so nothing new is in the document for it. Which tools are on the rail is a preference (Preferences ›
+  use, so nothing new is in the document for it. Beside it a **Fill**
+  tool, the bucket: a press gives the layer under it the ink in hand —
+  a shape's fill in place of any gradient, a block of text's, a frame's
+  ground — or with alt a shape's stroke, adding one where there is
+  none; a press on nothing that takes a colour, with a region picked
+  out, fills the region as a layer over it, which is what a bucket is
+  for on a photograph. It shares G with the gradient tool: shift with
+  the key walks its family from whichever is in hand (`KEY_FAMILIES` in
+  tools.ts), shift+M the region tools the same way — Photoshop's
+  convention, chosen over "press it again" because sixteen blocks of
+  the suite press M to mean the marquee whatever is in hand, and a
+  plain key that means one thing always is the better promise. The
+  keys sheet had said M "again" walked the family while nothing did;
+  it says shift now, and it is true. Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its
   key still picking it and the slot then showing it in hand — put away

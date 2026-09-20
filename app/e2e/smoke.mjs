@@ -236,7 +236,10 @@ const pickTool = async (name) => {
     if (await slot.count()) {
       await slot.click();
     } else {
-      await page.click('button[aria-label="More shapes"]');
+      // Which family's corner to open: the region tools share a slot the
+      // way the shapes do.
+      const region = ["Select", "Select ellipse", "Lasso", "Wand"].includes(name);
+      await page.click(`button[aria-label="${region ? "More ways to select" : "More shapes"}"]`);
       await page.waitForTimeout(80);
       await page.click(`.tool-flyout button[aria-label="${name}"]`);
     }
@@ -11388,6 +11391,124 @@ assert(
     "undo takes back the last drag whole",
   );
   await pickTool("Move");
+}
+
+// 9bn. The fill tool: a press gives the layer under it the ink in hand,
+// alt gives a shape its stroke, and a press on bare paper with a region
+// picked out fills the region. It shares G with the gradient tool —
+// shift+G walks the family, the way shift+M walks the region tools,
+// which the sheet had been promising of M (as "again") with nothing
+// doing it.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const inHand = () =>
+    page.$eval(".toolbar .tool.active", (el) => el.getAttribute("aria-label"));
+  await setColor("Fill colour", "#2040c0");
+  for (const [x0, x1] of [
+    [50, 250],
+    [350, 550],
+  ]) {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, 50));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, 250), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  }
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+
+  // With shift, the key walks its family; without, it means one tool.
+  await page.keyboard.press("g");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Gradient", "G takes up the gradient tool");
+  await page.keyboard.press("Shift+G");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Fill", "and shift+G, the fill tool");
+  await page.keyboard.press("g");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Gradient", "while G on its own is the gradient again");
+  await page.keyboard.press("m");
+  await page.keyboard.press("Shift+M");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Select ellipse", "as shift+M takes up the ellipse");
+  await page.keyboard.press("m");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Select", "and M on its own the marquee, whatever was in hand");
+  await pickTool("Fill");
+  assert(
+    (await page.locator(".canvas-host").getAttribute("class")).includes("filling"),
+    "the fill tool in hand, the cursor says so",
+  );
+
+  await setColor("Fill colour", "#e03030");
+  const history = () => page.locator(".history li button").count();
+  const entries = await history();
+  await page.mouse.click(...at(450, 150));
+  await page.waitForTimeout(250);
+  const filled = await canvasPixel(450, 150);
+  const other = await canvasPixel(150, 150);
+  assert(filled[0] > 200 && filled[2] < 80, `a press gives the shape under it the ink (${filled})`);
+  assert(other[2] > 150 && other[0] < 80, `and only that shape (${other})`);
+  assert(
+    (await page.locator(".panel ul li.selected .layer-name").textContent()).trim() === "Rect 2",
+    "which is picked by it",
+  );
+  assert((await history()) === entries + 1, "one press, one entry");
+
+  // Alt: the stroke, added where there was none.
+  await page.keyboard.down("Alt");
+  await page.mouse.click(...at(150, 150));
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(250);
+  assert(
+    await page.locator('input[aria-label="Stroke enabled"]').isChecked(),
+    "alt-press gives a shape a stroke",
+  );
+  assert(
+    (await page.locator('input[aria-label="Stroke color"]').inputValue()) === "#e03030",
+    "in the ink in hand",
+  );
+  const still = await canvasPixel(150, 150);
+  assert(still[2] > 150 && still[0] < 80, `and leaves its fill alone (${still})`);
+
+  // Bare paper with a region picked out: the region is what fills.
+  await pickTool("Select");
+  await page.mouse.move(...at(100, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 380), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Fill");
+  const rows = await page.locator(".panel ul li").count();
+  await page.mouse.click(...at(300, 340));
+  await page.waitForTimeout(300);
+  const poured = await canvasPixel(300, 340);
+  assert(poured[0] > 200 && poured[2] < 80, `a press on bare paper fills what is picked out (${poured})`);
+  assert(
+    (await page.locator(".panel ul li").count()) === rows + 1,
+    "as a layer of its own over the region",
+  );
+  const outside = await canvasPixel(300, 280);
+  assert(outside[3] === 0, `and nothing outside it (${outside})`);
+
+  // And each is one undo: two fills, a stroke, and picking the region
+  // out, which is an entry of its own. (The history panel keeps what is
+  // undone on show, so it is counted rather than watched.)
+  assert((await history()) === entries + 4, "four things done, four entries");
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(150);
+  }
+  const back = await canvasPixel(450, 150);
+  assert(back[2] > 150 && back[0] < 80, `four undos take it all back (${back})`);
+  const rectsOnly = await page.locator(".panel ul li").count();
+  assert(rectsOnly === rows, `and the fill layer with them (${rectsOnly} rows)`);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });
