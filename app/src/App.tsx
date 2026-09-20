@@ -30,6 +30,7 @@ import {
   Command,
   Effect,
   EffectKind,
+  Gradient,
   GradientStop,
   LayerInfo,
   LUMA,
@@ -1138,6 +1139,16 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const imgDataRef = useRef<ImageData | null>(null);
+  /** A gradient being dragged across a shape with the gradient tool:
+   * which shape, what it held before, how a document point lands in its
+   * unit box, and where the drag began. */
+  const gradToolRef = useRef<{
+    id: NodeId;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    unit: (x: number, y: number) => [number, number];
+    start: [number, number];
+    radial: boolean;
+  } | null>(null);
   const toolDragRef = useRef<ToolDrag | null>(null);
   const handleDragRef = useRef<HandleDrag | null>(null);
   const panDragRef = useRef<PanDrag | null>(null);
@@ -1780,6 +1791,7 @@ export function App() {
     if (!session) return;
     toolDragRef.current = null;
     handleDragRef.current = null;
+    gradToolRef.current = null;
     setPenPoints([]);
     if (session.cancel_preview()) refresh(session);
   }, [session, refresh]);
@@ -2600,6 +2612,44 @@ export function App() {
       zoomAt(hx, hy, e.altKey ? 0.8 : 1.25);
       return;
     }
+    // The gradient tool drags a ramp across a shape: the one under the
+    // press, else the one picked. The ramp runs from the ink in hand to
+    // white — the tool's colour is the colour in hand, as a brush's is —
+    // unless the shape already wears a gradient, whose stops are kept
+    // and only re-aimed. Alt makes it radial about the press; shift holds
+    // the angle to an eighth of a turn.
+    if (tool === "Gradient") {
+      const hit = session.hit_test(x, y);
+      let id: NodeId | null = null;
+      let vector: Extract<NodeKind, { Vector: unknown }>["Vector"] | null = null;
+      for (const c of [hit, selected]) {
+        if (c === undefined || c === null) continue;
+        const k = JSON.parse(session.kind_json(c)) as NodeKind;
+        if (typeof k === "object" && "Vector" in k) {
+          id = c;
+          vector = k.Vector;
+          break;
+        }
+      }
+      if (id === null || vector === null) return;
+      const lb = session.local_bounds_of(id);
+      if (lb.length !== 4) return;
+      const inv = inverseOf(toTransform(session.transform_of(id)));
+      const span = (a: number, b: number) => (Math.abs(b - a) < 1e-6 ? 1 : b - a);
+      const at = id;
+      const unit = (dx: number, dy: number): [number, number] => {
+        const [px, py] = layerPoint({ clientX: dx, clientY: dy }, at, true);
+        const [lx, ly] = inv ? inv(px, py) : [px, py];
+        return [(lx - lb[0]) / span(lb[0], lb[2]), (ly - lb[1]) / span(lb[1], lb[3])];
+      };
+      gradToolRef.current = { id, vector, unit, start: unit(x, y), radial: e.altKey };
+      if (id !== selected) {
+        setSelected(id);
+        setMultiSel([]);
+      }
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
     // Asked for a line along something level, the next drag draws it.
     if (levelling) {
       const [hx, hy] = canvasPoint(e);
@@ -3010,6 +3060,45 @@ export function App() {
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    const gradTool = gradToolRef.current;
+    if (gradTool && session) {
+      if (e.buttons === 0) return;
+      const [x, y] = docPoint(e);
+      let [u, v] = gradTool.unit(x, y);
+      const [su, sv] = gradTool.start;
+      if (e.shiftKey && !gradTool.radial) {
+        const len = Math.hypot(u - su, v - sv);
+        const eighth = Math.PI / 4;
+        const ang = Math.round(Math.atan2(v - sv, u - su) / eighth) * eighth;
+        [u, v] = [su + Math.cos(ang) * len, sv + Math.sin(ang) * len];
+      }
+      const had = gradTool.vector.gradient;
+      const white = cmyk ? hexToCmykColor("#ffffff") : hexColor("#ffffff");
+      const stops: GradientStop[] = had
+        ? "Linear" in had
+          ? had.Linear.stops
+          : had.Radial.stops
+        : [
+            { offset: 0, color: currentInk() },
+            { offset: 1, color: white },
+          ];
+      const gradient: Gradient = gradTool.radial
+        ? {
+            Radial: {
+              center: [su, sv],
+              radius: Math.max(0.02, Math.hypot(u - su, v - sv)),
+              stops,
+            },
+          }
+        : { Linear: { from: [su, sv], to: [u, v], stops } };
+      preview({
+        SetKind: {
+          id: gradTool.id,
+          kind: { Vector: { ...gradTool.vector, gradient } },
+        },
+      });
+      return;
+    }
     if (levelRef.current) {
       const [hx, hy] = canvasPoint(e);
       levelRef.current = [
@@ -3267,6 +3356,12 @@ export function App() {
   // shift adds to what is picked out, alt takes from it.
   const onCanvasPointerUp = (e?: React.PointerEvent) => {
     if (pinchRef.current) return;
+    if (gradToolRef.current && session) {
+      // A press that never moved previewed nothing, and commits nothing.
+      gradToolRef.current = null;
+      if (session.commit_preview()) refresh(session);
+      return;
+    }
     const level = levelRef.current;
     if (level) {
       levelRef.current = null;
@@ -7719,7 +7814,9 @@ export function App() {
                 ? " handing"
                 : tool === "Zoom"
                   ? " zooming"
-                  : ""
+                  : tool === "Gradient"
+                    ? " grading"
+                    : ""
           }`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
@@ -9341,6 +9438,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],
+      ["G", "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
       ["H", "Hand — drag the view about"],
       ["Z", "Zoom — click to look nearer, alt-click to step back"],
     ],

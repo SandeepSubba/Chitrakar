@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1184 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1195 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5351,9 +5351,8 @@ without reading anything else.*
      - ✅ A **Help** menu — every one of the three has one. Keys and
        gestures moved onto it from View, and About says which version
        this is, app and engine both.
-     - **Gradient tool**: a gradient can be put on a fill and its
-       handles dragged on the canvas, but there is no tool that drags a
-       new one across a layer, which is how every editor makes one.
+     - ✅ **Gradient tool** (G): drags a new gradient across a shape,
+       linear or (alt) radial, from the ink in hand — see *Chrome*.
      - **Fill (bucket) tool**: press a layer to give it the ink in
        hand. Photoshop's G, Affinity's flood fill, Canva's colour on a
        press. `applyColour` already does the work; the tool is a
@@ -5486,15 +5485,23 @@ without reading anything else.*
   changes the picture; what only looks at it — ending, as every editor's
   does, with a **Hand** (H, a drag carries the view) and a **Zoom** (Z,
   a press looks a quarter closer about the point pressed, alt steps
-  back). Which tools are on the rail is a preference (Preferences ›
+  back). The painting section ends with a **Gradient** tool (G): a drag
+  across a shape — the one under the press, else the one picked — gives
+  it a linear gradient from the ink in hand to white, aimed the way it
+  was dragged; alt makes it radial about the press, shift holds the
+  angle to an eighth of a turn, a shape already wearing a gradient
+  keeps its stops and is only re-aimed, and a press that never moved
+  changes nothing. It previews live and commits as one entry, through
+  the same `SetKind` the panel's fill-type row and the on-canvas handles
+  use, so nothing new is in the document for it. Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its
   key still picking it and the slot then showing it in hand — put away
   is not gone — and the one tool that cannot be put away is Move. The
   same page decides which of the bar's three button groups (document,
   region, zoom) show, everything on them being on a menu as well.
-  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, T, C, I, H,
-  Z), suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
+  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, G, T, C, I,
+  H, Z), suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
   there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a

@@ -1435,6 +1435,10 @@ body {
   cursor: zoom-in;
 }
 
+.canvas-host.grading {
+  cursor: crosshair;
+}
+
 .canvas-host {
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */

@@ -64,6 +64,7 @@ export type IconName =
   | "eyeOff"
   | "mask"
   | "fill"
+  | "gradient"
   | "group-layer"
   | "adjust"
   | "filter"
@@ -194,6 +195,13 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
+  // A box with its lines drawing apart: a ramp from dense to sparse.
+  gradient: (
+    <>
+      <rect x="4" y="6" width="16" height="12" rx="1.5" />
+      <path d="M7 6v12M9.5 6v12M13 6v12" />
+    </>
+  ),
   fill: (
     <>
       <path d="M4 13.5 11 6.5l6.5 6.5-7 7z" />

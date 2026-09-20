@@ -11290,6 +11290,106 @@ assert(
   await pickTool("Move");
 }
 
+// 9bm. The gradient tool: a ramp dragged across a shape, the way every
+// editor makes one — the panel's fill-type row aims a gradient by angle,
+// which is not how a hand thinks of it. From the ink in hand to white;
+// alt for a radial one about the press; shift holds the angle; and a
+// press without a drag changes nothing.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const history = () => page.locator(".history li button").count();
+  const entries = await history();
+
+  // Let go of it first: the tool finds the shape under the press.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  await pickTool("Gradient");
+  assert(
+    (await page.locator(".canvas-host").getAttribute("class")).includes("grading"),
+    "the gradient tool in hand, the cursor says so",
+  );
+  await page.mouse.move(...at(120, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(480, 200), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('select[aria-label="Fill type"]').inputValue()) === "linear",
+    "a drag across the shape gives it a linear gradient, and picks it",
+  );
+  const start = await canvasPixel(125, 200);
+  const end = await canvasPixel(475, 200);
+  assert(
+    start[2] > 150 && start[0] < 80,
+    `it begins in the ink in hand (${start})`,
+  );
+  assert(
+    end[0] > 230 && end[1] > 230 && end[2] > 230,
+    `and runs to white where the drag ended (${end})`,
+  );
+  assert(
+    (await page.locator('input[aria-label="Gradient angle"]').inputValue()) === "0",
+    "aimed the way it was dragged",
+  );
+  assert((await history()) === entries + 1, "one drag, one entry in the history");
+
+  // Shift holds the angle: a drag a little off level is level.
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(120, 180));
+  await page.mouse.down();
+  await page.mouse.move(...at(480, 230), { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('input[aria-label="Gradient angle"]').inputValue()) === "0",
+    "shift holds a drag a little off level to level",
+  );
+
+  // Alt makes it radial about the press.
+  await page.keyboard.down("Alt");
+  await page.mouse.move(...at(300, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('select[aria-label="Fill type"]').inputValue()) === "radial",
+    "alt-drag makes a radial gradient",
+  );
+  const middle = await canvasPixel(300, 200);
+  const rim = await canvasPixel(480, 200);
+  assert(
+    middle[2] > 150 && middle[0] < 80 && rim[0] > 200,
+    `about the press: ink in the middle, white at the rim (${middle} / ${rim})`,
+  );
+
+  // A press that never moved is not a gradient.
+  const before = await history();
+  await page.mouse.click(...at(300, 200));
+  await page.waitForTimeout(200);
+  assert((await history()) === before, "a press without a drag changes nothing");
+
+  // And one undo takes the whole of a drag back.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('select[aria-label="Fill type"]').inputValue()) === "linear",
+    "undo takes back the last drag whole",
+  );
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 
