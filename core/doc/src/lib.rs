@@ -138,6 +138,14 @@ pub struct DocumentMeta {
     pub color_mode: ColorMode,
 }
 
+/// Where a command made an edge, so the cycle check knows where to look.
+enum Arrived {
+    /// The layer itself — moved, or told to copy something else.
+    Node(NodeId),
+    /// The layer that has just become a child, named by where it landed.
+    Child(NodeId, usize),
+}
+
 /// The scene graph. Nodes live in a flat arena keyed by [`NodeId`]; groups
 /// hold ordered child-id lists (topmost child last, i.e. painter's order).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +169,22 @@ pub struct Document {
     /// CMYK press profile bytes (stored as profiles/cmyk.icc in the
     /// container) and the parsed transform. Authored CMYK values render
     /// through this when set; the naive preview formula otherwise.
+    /// An upper bound on how deeply the layers nest, kept so that the
+    /// commonest structural command need not walk the whole document to
+    /// find out.
+    ///
+    /// A layer added to a group adds exactly one level below it, so the
+    /// tree can grow by at most one per `AddNode` — which means that
+    /// while this is comfortably under [`MAX_DEPTH`], the next one
+    /// cannot break the limit and the walk that checks it is work
+    /// nobody needs. A walk resets it to the truth; a removal leaves it
+    /// where it was, which only ever costs an extra walk later.
+    ///
+    /// `None` is "not known", which is what a document read from a file
+    /// is until something asks: a bound that is not an upper bound would
+    /// skip a check that matters, so absence has to mean walk.
+    #[serde(skip)]
+    nesting: Option<usize>,
     #[serde(skip)]
     cmyk_profile_bytes: Option<Vec<u8>>,
     #[serde(skip)]
@@ -279,6 +303,7 @@ impl Document {
             children,
             next_id: 1,
             resources: BTreeMap::new(),
+            nesting: Some(0),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
             guides: Vec::new(),
@@ -538,15 +563,52 @@ impl Document {
                 | Command::Batch(_)
         );
         let unsettled = Self::unsettled_by(&cmd);
+        // Where a *new* edge could have been made, which is the only
+        // place a cycle can have appeared. Nothing that has been applied
+        // has one — that is the invariant this check keeps — so a cycle
+        // after a command runs through an edge that command added, and
+        // every such edge is incident to one node: the layer that
+        // arrived, moved, or was told to copy something else. Walking
+        // from it finds any cycle it is on, and there is no other kind.
+        //
+        // A batch and a restored subtree fall back to the whole walk:
+        // both can make several edges at once, and both are rare enough
+        // that narrowing them would be reasoning nobody could check.
+        let cmd_was_add = matches!(cmd, Command::AddNode { .. });
+        let touched = match &cmd {
+            Command::AddNode { parent, index, .. } => Some(Arrived::Child(*parent, *index)),
+            Command::MoveNode { id, .. } | Command::SetKind { id, .. } => Some(Arrived::Node(*id)),
+            _ => None,
+        };
         let inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
         // take the process with it rather than being refused.
-        if structural && self.depth() > MAX_DEPTH {
-            let _ = self.apply_inner(inverse);
-            return Err(DocError::TooDeep { limit: MAX_DEPTH });
+        // Only a layer arriving is bounded by what came before it: the
+        // other structural commands can move or restore a whole subtree
+        // and so deepen the document by more than one level at a time,
+        // and they are rare enough not to be worth the argument.
+        let settled = cmd_was_add && self.nesting.is_some_and(|d| d < MAX_DEPTH);
+        if settled {
+            self.nesting = self.nesting.map(|d| d + 1);
+        } else if structural {
+            let deepest = self.depth();
+            self.nesting = Some(deepest);
+            if deepest > MAX_DEPTH {
+                let _ = self.apply_inner(inverse);
+                return Err(DocError::TooDeep { limit: MAX_DEPTH });
+            }
         }
-        if structural && self.instance_cycle() {
+        let from = match touched {
+            Some(Arrived::Node(id)) => id,
+            Some(Arrived::Child(parent, index)) => self
+                .children
+                .get(&parent)
+                .and_then(|kids| kids.get(index).copied())
+                .unwrap_or(self.root),
+            None => self.root,
+        };
+        if structural && self.instance_cycle_from(from) {
             // Put it back rather than leave the document in a state
             // nothing could draw.
             let _ = self.apply_inner(inverse);
@@ -618,6 +680,18 @@ impl Document {
     /// Whether any layer can reach itself through what it holds and what
     /// it is a copy of.
     fn instance_cycle(&self) -> bool {
+        self.instance_cycle_from(self.root)
+    }
+
+    /// The same question asked from one layer rather than from the root:
+    /// is any layer reachable from `from`, by holding it or by copying
+    /// it, on a cycle?
+    ///
+    /// A whole-document walk costs a map entry per layer, which on a
+    /// document of any size is most of what applying a command costs —
+    /// and it is asked after every command that could nest anything. It
+    /// does not need to be: see the note at the call.
+    fn instance_cycle_from(&self, from: NodeId) -> bool {
         fn walk(doc: &Document, id: NodeId, state: &mut HashMap<NodeId, u8>) -> bool {
             match state.get(&id) {
                 // Already on the way down: this is the cycle.
@@ -644,7 +718,7 @@ impl Document {
             false
         }
         let mut state = HashMap::new();
-        walk(self, self.root, &mut state)
+        walk(self, from, &mut state)
     }
 
     fn apply_inner(&mut self, cmd: Command) -> Result<Command, DocError> {
@@ -2004,6 +2078,120 @@ mod tests {
             Some(DocError::InstanceCycle)
         );
         assert_eq!(doc.node_count(), before);
+    }
+
+    /// Layers may nest to `MAX_DEPTH` and not one further, and the one
+    /// that would go further changes nothing.
+    ///
+    /// This had no test at all, which mattered the day the check stopped
+    /// walking the whole document after every command: a layer arriving
+    /// adds exactly one level under the group it joins, so while the
+    /// document is known to be shallower than the limit the walk is work
+    /// nobody needs — and a bound that drifted upward would quietly stop
+    /// refusing anything. So the limit is reached here a group at a
+    /// time, which is the path that bound is on.
+    #[test]
+    fn layers_nest_to_the_limit_and_no_further() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let mut at = doc.root();
+        // The root sits at nothing, so a chain of `MAX_DEPTH` groups
+        // under it takes the document to exactly the limit and the next
+        // one is the one too many.
+        for i in 1..=MAX_DEPTH {
+            doc.apply(Command::AddNode {
+                parent: at,
+                index: 0,
+                node: Box::new(Node::group(&format!("g{i}"))),
+            })
+            .unwrap_or_else(|e| panic!("group {i} of {MAX_DEPTH} was refused: {e:?}"));
+            at = doc.children_of(at).unwrap()[0];
+        }
+        let full = doc.node_count();
+        assert_eq!(
+            doc.apply(Command::AddNode {
+                parent: at,
+                index: 0,
+                node: Box::new(Node::group("one too many")),
+            })
+            .err(),
+            Some(DocError::TooDeep { limit: MAX_DEPTH })
+        );
+        assert_eq!(doc.node_count(), full, "and nothing of it stayed");
+        // A leaf at the bottom is still a layer arriving, and it is the
+        // same answer: what the limit counts is levels, not groups.
+        assert_eq!(
+            doc.apply(Command::AddNode {
+                parent: at,
+                index: 0,
+                node: rect("leaf"),
+            })
+            .err(),
+            Some(DocError::TooDeep { limit: MAX_DEPTH })
+        );
+        assert_eq!(doc.node_count(), full);
+        // And a document that has room takes the layer, which is what
+        // says the refusals above are about the limit and not about
+        // groups having stopped accepting children.
+        let shallow = doc.children_of(doc.root()).unwrap()[0];
+        assert!(doc
+            .apply(Command::AddNode {
+                parent: shallow,
+                index: 0,
+                node: rect("beside"),
+            })
+            .is_ok());
+    }
+
+    /// A copy told to copy one of its own ancestors is refused, the same
+    /// as one moved inside what it copies.
+    ///
+    /// `SetKind` is the third way an edge between copies can be made and
+    /// the only one that makes it without moving anything, so it is the
+    /// one a cycle check that watches where layers *arrive* could miss.
+    #[test]
+    fn a_copy_retargeted_onto_its_own_ancestor_is_refused() {
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("outer")),
+        })
+        .unwrap();
+        let outer = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: outer,
+            index: 0,
+            node: rect("r"),
+        })
+        .unwrap();
+        // A copy of the rectangle, living inside the group.
+        let inner = doc.children_of(outer).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: outer,
+            index: 1,
+            node: Box::new(Node::instance("copy", inner)),
+        })
+        .unwrap();
+        let copy = doc.children_of(outer).unwrap()[1];
+        let before = doc.node_count();
+        assert_eq!(
+            doc.apply(Command::SetKind {
+                id: copy,
+                kind: Box::new(NodeKind::Instance {
+                    of: outer,
+                    replaces: Vec::new(),
+                }),
+            })
+            .err(),
+            Some(DocError::InstanceCycle)
+        );
+        assert_eq!(doc.node_count(), before);
+        // It still copies what it copied, so the refusal put the layer
+        // back rather than leaving it half changed.
+        assert!(
+            matches!(&doc.node(copy).unwrap().kind, NodeKind::Instance { of, .. } if *of == inner)
+        );
     }
 
     /// Confining a layer to the one below it is a plain switch with a

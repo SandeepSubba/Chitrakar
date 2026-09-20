@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~491),
+- **Verify before committing:** `cargo test --workspace` (~494),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3354,6 +3354,65 @@ without reading anything else.*
      it means SVG learning to rasterize through them the way PDF does,
      which is a product decision — a vector file that is partly a bitmap
      — rather than a defect to fix quietly.
+     A different question, and the first one here about **time** rather
+     than about what is drawn: how does this scale? Nothing had ever
+     asked, and the answer was that **adding a layer to a document cost
+     the whole document**. Building 1600 layers took **2.23 seconds**,
+     and 2.22 of those were two walks.
+     `Document::apply` runs two checks after any command that could nest
+     something — is there a cycle among the copies, and do the layers
+     nest past `MAX_DEPTH` — and both walked the whole tree every time.
+     N commands, O(n) each: a drawing that grows gets quadratically
+     slower to build, which is not a slow editor but one that stops
+     working as the work gets big. It is invisible on the documents a
+     test usually builds, which is why nothing had seen it.
+     Both checks still refuse exactly what they refused, and both are
+     narrowed by the same argument: *nothing that has been applied
+     breaks them* — that is what they are for — so after a command the
+     only thing that can be broken is what that command changed.
+     The **cycle** walk starts from the layer whose arrival made the
+     edge rather than from the root. Every edge a command adds is
+     incident to one node — the layer that arrived, moved, or was told
+     to copy something else — so a cycle running through a new edge runs
+     through that node, and a cycle running through no new edge existed
+     before and is ruled out by the invariant. A batch and a restored
+     subtree still take the whole walk: both can make several edges at
+     once and both are rare enough that narrowing them would be
+     reasoning nobody could check.
+     The **nesting** check is skipped while the document is known to be
+     shallow. A layer arriving adds exactly one level under the group it
+     joins, so the tree grows by at most one per `AddNode`; an upper
+     bound is kept, a walk resets it to the truth, and `None` — which is
+     what a document read from a file has — means walk, because a bound
+     that is not an upper bound would skip a check that matters.
+     Measured: 1600 layers, 2.23s to 5.91ms, and **linear** rather than
+     quadratic (801µs, 1.24ms, 3.29ms, 5.91ms for 200, 400, 800, 1600).
+     The cycle walk was 87% of it and the nesting walk the rest.
+     `adding_a_layer_costs_one_layer` guards the shape rather than the
+     speed: four times the layers may cost four times the work and not
+     sixteen, so a slow or busy machine moves both numbers together. It
+     has a floor as well as a ceiling, since a build that took no time
+     at all would satisfy any ratio.
+     And the narrowings needed watching, which is where the real gap
+     was: **`TooDeep` had no test at all**. The limit was written down,
+     the check ran after every command, and nothing anywhere asked
+     whether a document could be nested past it. So the limit is reached
+     here a group at a time, which is exactly the path the new bound is
+     on — and a leaf at the bottom is refused too, since what the limit
+     counts is levels rather than groups, and a layer beside the chain
+     is still accepted, which says the refusals are about the limit and
+     not about groups having stopped taking children. Let the bound
+     drift upward without ever forcing a walk and two tests fail.
+     The cycle check had two tests and neither covered `SetKind`, which
+     is the third way an edge between copies is made and the only one
+     that makes it without moving anything — so it is precisely the one
+     a check watching where layers *arrive* could miss. It has one now;
+     turn the detection off and four tests fail, that one among them.
+     What is **not** fixed, and is the next thing here: a `Session`'s own
+     per-command cost is still O(n). The same 1600 layers built through
+     one take 604ms where the document alone takes 5.91 — so the dirty
+     tracking is doing a walk of its own, and it is now the whole of what
+     is left.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing
