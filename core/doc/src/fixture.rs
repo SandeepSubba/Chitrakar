@@ -56,6 +56,10 @@ pub struct Fixture {
     /// A layer whose blend is one of the four that work on the whole
     /// colour rather than a channel at a time.
     pub lent: NodeId,
+    /// A filter that is a function of where a pixel is and of nothing
+    /// else, so the same page drawn twice any two ways has to grain the
+    /// same.
+    pub grain: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1303,6 +1307,53 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // Grain, which is the one thing on a page that is a function of
+    // *where a pixel is* and of nothing else. Six kinds of filter and
+    // this document held one of them, a blur — and a blur is a
+    // neighbourhood, which every audit here already asks about through
+    // the shadows. What none of them had ever asked is whether an answer
+    // that depends only on position is the *same answer every time*: a
+    // page redrawn a region at a time has to grain exactly as the page
+    // drawn whole, since a cell is a `floor` and a cell boundary read
+    // from the region's corner instead of the page's would put a speck
+    // in the wrong square. The undo runs and the file round trip ask the
+    // same question a different way.
+    //
+    // Masked rather than page-wide, and over the pair, which is the most
+    // drawn-on part of this page: grain moves a pixel by a share of its
+    // own alpha, so grain over nothing is nothing.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::filter(
+            "grain",
+            crate::Filter::Noise {
+                amount: 0.28,
+                grain: 1.75,
+                mono: false,
+                seed: 60_913,
+            },
+        )),
+    })
+    .unwrap();
+    let grain = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetMask {
+        id: grain,
+        mask: Some(Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 26.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(8.0, 10.0),
+            },
+            invert: false,
+            feather: 0.0,
+        })),
+    })
+    .unwrap();
+
     doc.apply(Command::SetSelection {
         selection: Some(Box::new(Mask {
             kind: MaskKind::Vector {
@@ -1357,6 +1408,7 @@ pub fn everything() -> Fixture {
         own_ring,
         worn,
         lent,
+        grain,
         stroke,
     }
 }

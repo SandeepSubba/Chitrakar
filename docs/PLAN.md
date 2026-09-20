@@ -3253,6 +3253,44 @@ without reading anything else.*
      stronger statement than the single number it replaces. The worst
      pixel anywhere moved 0.607 to 0.659 and it is the same page and the
      same reason.
+     The twenty-first shape was **grain in the shared document**, and it
+     is worth recording as two results rather than one, because they
+     point opposite ways.
+     What it was aimed at, it missed. Six kinds of filter and this
+     document held a blur — and a blur is a neighbourhood, which the
+     shadows already ask about. What none of these audits had asked is
+     whether an answer that depends only on *position* is the same
+     answer every time: a page redrawn a region at a time has to grain
+     exactly as the page drawn whole, since a cell is a `floor` and a
+     boundary read from the region's corner instead of the page's puts a
+     speck in the wrong square. Measured the only way that settles it —
+     make the reference renderer read the cell from the region's corner
+     — and exactly one test in the workspace fails, and it is
+     `a_region_render_padded_by_the_reach_is_the_page`, which already
+     ran every filter kind including this one over a page of its own.
+     The engine's own repaint audit does not notice, for the reason
+     already written down beside it: this document carries a filter, and
+     a filter's reach swells every dirty region to the whole page, so the
+     region-wise path is never asked a partial question here. That
+     conservatism is the right call and it swallows this whole.
+     What it earns is on the other renderer. Shift the backend's grain by
+     a single cell and **five** tests fail with the shape in, **three**
+     without it — and the two it adds are both of the fixture audits, so
+     a page with one of everything on it can now see a grain cell in the
+     wrong place, which it could not before.
+     Getting that second number right took two goes, and the first was
+     the instrument again: the shape was taken out by removing the node
+     straight after adding it, which left the `SetMask` that follows
+     pointing at nothing and changed the document not at all — so the
+     failure set came back identical and read, for a minute, as "the
+     addition earns nothing". Hiding the layer instead is what asked the
+     question. Fourth time this session that a measurement had to be
+     checked before its answer was believed.
+     One audit stopped holding on the shape alone, the usual one: the
+     file format's inventory, by the four numbers grain cannot be missing
+     — `amount`, `grain`, `mono` and `seed`, none of which has a default
+     anybody could pick, since a file missing any one of them is a file
+     that grains differently.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing

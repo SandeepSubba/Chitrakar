@@ -1050,6 +1050,14 @@ mod tests {
             "/document/nodes/*/kind/Clone/strokes/*:color",
             "/document/nodes/*/kind/Clone/strokes/*:points",
             "/document/nodes/*/kind/Clone/strokes/*:radii",
+            // Grain is a function of position and of these four numbers
+            // and of nothing else, so a file missing any one of them is
+            // a file that grains differently — which is not a default
+            // anyone could pick, and why none of them has one.
+            "/document/nodes/*/kind/Filter/Noise:amount",
+            "/document/nodes/*/kind/Filter/Noise:grain",
+            "/document/nodes/*/kind/Filter/Noise:mono",
+            "/document/nodes/*/kind/Filter/Noise:seed",
             "/document/nodes/*/kind/Instance:of",
             // A stroke laid down inside a region carries the region,
             // and a region is a mask: as required inside a stroke as it
