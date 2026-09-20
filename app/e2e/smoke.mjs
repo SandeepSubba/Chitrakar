@@ -11802,6 +11802,63 @@ assert(
   await pickTool("Move");
 }
 
+// 9bs. Brushes kept by name — width and softness — as chips over the
+// paint tools' row: three to start with, a press to take one up, + to
+// keep the numbers in hand, alt to forget, and remembered across a
+// reload since they are about the person and not the file.
+{
+  await newDocument(600, 400, "rgb");
+  // The rail is as wide with a paint tool in hand as without: the first
+  // version's row of chips was wider than the rail and widened it,
+  // which narrowed the canvas and moved the page under every
+  // coordinate the paint block had already taken.
+  await pickTool("Move");
+  const railBefore = (await page.locator('nav[aria-label="Tools"]').boundingBox()).width;
+  await pickTool("Paint");
+  const railAfter = (await page.locator('nav[aria-label="Tools"]').boundingBox()).width;
+  assert(
+    Math.abs(railAfter - railBefore) < 1,
+    `the rail keeps its width when a paint tool is picked (${railBefore} -> ${railAfter})`,
+  );
+  const chips = page.locator('[aria-label="Brushes"] .brush-chip');
+  assert((await chips.count()) === 3, `three brushes to start with (${await chips.count()})`);
+  await page.locator('input[aria-label="Paint width"]').fill("13");
+  await page.waitForTimeout(120);
+  await page.click('button[aria-label="Keep this brush"]');
+  await page.waitForTimeout(200);
+  assert((await chips.count()) === 4, "the numbers in hand go in as a brush");
+  await page.click('[aria-label="Brushes"] button[aria-label="Brush Soft"]');
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator('input[aria-label="Paint width"]').inputValue()) === "60" &&
+      (await page.locator('input[aria-label="Brush softness"]').inputValue()) === "90",
+    "a chip pressed sets the width and the softness",
+  );
+  assert(
+    (await page.locator('[aria-label="Brushes"] button[aria-label="Brush Soft"]').getAttribute("aria-pressed")) === "true",
+    "and shows it is the brush in hand",
+  );
+  await page.click('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]');
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator('input[aria-label="Paint width"]').inputValue()) === "13",
+    "the kept brush gives back what was kept",
+  );
+  // Remembered: the page reloaded, the brush is still there.
+  await page.reload();
+  await page.waitForSelector("#engine-canvas");
+  await page.waitForTimeout(600);
+  await pickTool("Paint");
+  assert(
+    (await page.locator('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]').count()) === 1,
+    "a kept brush survives a reload",
+  );
+  await page.click('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]', { modifiers: ["Alt"] });
+  await page.waitForTimeout(150);
+  assert((await chips.count()) === 3, "alt-press forgets it");
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

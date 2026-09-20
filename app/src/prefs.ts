@@ -29,6 +29,13 @@ export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
  * choice here — see `exportArtboard`. */
 export type ExportArea = "page" | "selection";
 
+/** A brush kept under a name: how wide, and how soft its edge. What
+ * Photoshop's and Affinity's brush panels are a panel of; here a row of
+ * chips over the same two numbers, since a brush is those two numbers
+ * and a name. About the person, not the file — the same brushes in
+ * every document — so it lives here. */
+export type BrushPreset = { name: string; size: number; softness: number };
+
 export type Prefs = {
   /** What the rulers and the geometry fields read in. */
   units: Units;
@@ -67,6 +74,8 @@ export type Prefs = {
   barDocument: boolean;
   barSelection: boolean;
   barZoom: boolean;
+  /** The brushes kept by name. */
+  brushes: BrushPreset[];
 };
 
 export const DEFAULTS: Prefs = {
@@ -90,6 +99,13 @@ export const DEFAULTS: Prefs = {
   barDocument: true,
   barSelection: true,
   barZoom: true,
+  // Three to start with, the way every editor's panel has a few: a
+  // fine hard one, a soft wide one, and one in between.
+  brushes: [
+    { name: "Fine", size: 4, softness: 0.1 },
+    { name: "Medium", size: 24, softness: 0.5 },
+    { name: "Soft", size: 60, softness: 0.9 },
+  ],
 };
 
 const KEY = "chitrakar:prefs";
@@ -161,6 +177,27 @@ export function clamp(p: Prefs): Prefs {
       ? p.hiddenTools.filter(
           (t, i, all) => isTool(t) && t !== ALWAYS_SHOWN && all.indexOf(t) === i,
         )
+      : [],
+    // Each brush a name and two numbers within what the brush takes,
+    // names each once; anything else on the list is dropped rather than
+    // handed to a tool.
+    brushes: Array.isArray(p.brushes)
+      ? p.brushes
+          .filter(
+            (b): b is BrushPreset =>
+              !!b &&
+              typeof b === "object" &&
+              typeof b.name === "string" &&
+              b.name.trim() !== "" &&
+              typeof b.size === "number" &&
+              typeof b.softness === "number",
+          )
+          .filter((b, i, all) => all.findIndex((o) => o.name === b.name) === i)
+          .map((b) => ({
+            name: b.name,
+            size: n(Math.round(b.size), 1, 200, 24),
+            softness: n(b.softness, 0, 1, 0.5),
+          }))
       : [],
   };
 }

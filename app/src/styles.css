@@ -470,6 +470,9 @@ body {
 }
 
 .brush-size {
+  /* As wide as a tool, border and all, so the rail is as wide with a
+     paint tool in hand as without. */
+  box-sizing: border-box;
   width: 2.4rem;
   margin-top: 0.3rem;
   border: 1px solid var(--border);
@@ -484,8 +487,10 @@ body {
 /* The paint brush's edge, from hard to all fade. Narrow, because it
    shares the tool rail with the size and the eraser. */
 .paint-softness {
-  width: 3rem;
-  margin-top: 0.35rem;
+  width: 2.4rem;
+  /* Chromium gives a range input two pixels of margin either side,
+     which made it the widest thing on the rail by four. */
+  margin: 0.35rem 0 0;
   accent-color: var(--accent);
 }
 
@@ -1344,6 +1349,32 @@ body {
   color: var(--text);
   text-shadow: 0 0 3px rgb(0 0 0 / 0.8);
   border-width: 2px;
+}
+
+/* The rail's own width is the tools', and what sits under them wraps
+   to it: a row of chips wider than the rail widened the rail, which
+   narrowed the canvas, which moved the page — so picking the paint
+   tool moved everything under the pointer. */
+.toolbar .palette {
+  max-width: 2.4rem;
+}
+
+/* A kept brush, drawn as itself: a dot the brush's width, blurred by
+   its softness. */
+.palette.brushes .brush-chip {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.palette.brushes .brush-chip.active {
+  border-color: var(--accent);
+}
+
+.brush-dot {
+  display: block;
+  border-radius: 50%;
+  background: var(--text);
 }
 
 /* A line between the rail's sections. */

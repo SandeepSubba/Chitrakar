@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~499),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1246 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1254 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5372,9 +5372,10 @@ without reading anything else.*
        second; both want a machine with the shell's toolchain.
      - ✅ **Named styles**, beside the palette and on Layer › Styles,
        kept in the document — see *Chrome*.
-     - **Brush presets**: size, softness and pressure response kept
-       under a name. Both photo editors have a panel of them; here
-       every stroke starts from the last one's numbers.
+     - ✅ **Brush presets**, chips over the paint row, kept in
+       preferences — see *Chrome*. Pressure response is not a number
+       here (it is the stroke's own, from the pen), so a brush is width
+       and softness.
      - A **shape library** beyond rect, ellipse, polygon and star:
        arrows, callouts, a rounded triangle — Canva's shapes are most
        of what its users draw. Each is a path preset, not a new kind
@@ -5563,6 +5564,25 @@ without reading anything else.*
   give, shift-press to re-keep, alt-press to forget; and Layer › Styles
   has the same by name. The browser block saves and reopens the file
   and finds the style still there.
+  **Brushes** kept by name — a width and a softness — are chips over
+  the paint tools' row (`prefs.brushes`, three to start with: Fine,
+  Medium, Soft): a press takes one up and the chip shows it is the one
+  in hand, + keeps the numbers in hand under the next free name, alt
+  forgets. About the person and not the file, so they live in
+  preferences beside the hidden tools, read back name by name and
+  clamped to what a brush takes; the browser block reloads the page
+  and finds a kept brush still there. A chip is drawn as the brush it
+  stands for, a dot the brush's width blurred by its softness, since
+  that is what a hand chooses by. The chips found a defect older than
+  they are: the rail's width was its widest child's, so a row of chips
+  wider than the tools widened the rail, which narrowed the canvas,
+  which re-fitted the page — and every coordinate the paint block had
+  taken with Move in hand was off by a page's shift once Paint was
+  picked. The softness slider had been doing the same by ten pixels
+  since it was written, tolerated only because ten was not enough to
+  move a probe off a stroke. Everything under the tools now wraps to
+  the tools' own width, and the brushes block holds the rail to the
+  same width with Move in hand and with Paint.
   Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its

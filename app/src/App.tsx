@@ -7980,6 +7980,61 @@ export function App() {
           )}
           {(painting || cloning) && (
             <>
+              {/* The brushes kept by name: a press takes one up, alt
+                  forgets it, and the + keeps the numbers in hand under
+                  the next free name. A chip is drawn as the brush it
+                  stands for — its width as a dot, its softness as the
+                  dot's edge — since that is what a hand is choosing by. */}
+              <div className="palette brushes" role="group" aria-label="Brushes">
+                {prefs.brushes.map((br) => {
+                  const inHand =
+                    br.size === paintSize && Math.abs(br.softness - paintSoftness) < 0.005;
+                  return (
+                    <button
+                      key={br.name}
+                      className={inHand ? "swatch brush-chip active" : "swatch brush-chip"}
+                      title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click to forget it`}
+                      aria-label={`Brush ${br.name}`}
+                      aria-pressed={inHand}
+                      onClick={(e) => {
+                        if (e.altKey) {
+                          setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) });
+                          return;
+                        }
+                        setPaintSize(br.size);
+                        setPaintSoftness(br.softness);
+                      }}
+                    >
+                      <span
+                        className="brush-dot"
+                        style={{
+                          width: `${Math.max(3, Math.min(20, Math.sqrt(br.size) * 1.9))}px`,
+                          height: `${Math.max(3, Math.min(20, Math.sqrt(br.size) * 1.9))}px`,
+                          filter: `blur(${(br.softness * 2.5).toFixed(1)}px)`,
+                        }}
+                      />
+                    </button>
+                  );
+                })}
+                <button
+                  className="swatch add"
+                  onClick={() => {
+                    const taken = new Set(prefs.brushes.map((o) => o.name));
+                    let n = prefs.brushes.length + 1;
+                    while (taken.has(`Brush ${n}`)) n++;
+                    setPrefs({
+                      brushes: [
+                        ...prefs.brushes,
+                        { name: `Brush ${n}`, size: paintSize, softness: paintSoftness },
+                      ],
+                    });
+                  }}
+                  title="Keep this brush — its width and softness — by name"
+                  aria-label="Keep this brush"
+                >
+                  +
+                </button>
+              </div>
               <input
                 type="number"
                 min={1}
