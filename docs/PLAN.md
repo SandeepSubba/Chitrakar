@@ -879,9 +879,9 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~498),
+- **Verify before committing:** `cargo test --workspace` (~499),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1235 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1246 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5364,11 +5364,14 @@ without reading anything else.*
        page…), one factor both ways — see *Chrome* for why not two.
      - **Open recent**, on the desktop shell where a path can be
        reopened; a browser cannot reopen a file by name, so there it
-       stays a draft.
-     - **Named styles** (Affinity's Styles panel, Photoshop's layer
-       styles): copy and paste style exist; keeping one under a name and
-       applying it by name does not. A list on the document, like the
-       palette, so it travels with the file.
+       stays a draft. Blocked behind the shell opening and saving by
+       path at all: today both go through the browser's file input and
+       download even in the shell (see "What the two windows do not do
+       yet" under Phase 5), and a Tauri build cannot be exercised
+       here. The native save panel is the first half and this the
+       second; both want a machine with the shell's toolchain.
+     - ✅ **Named styles**, beside the palette and on Layer › Styles,
+       kept in the document — see *Chrome*.
      - **Brush presets**: size, softness and pressure response kept
        under a name. Both photo editors have a panel of them; here
        every stroke starts from the last one's numbers.
@@ -5541,6 +5544,25 @@ without reading anything else.*
   for a width, a height or a percentage and keeps them one number;
   what a layer holds in its own units — a blur's radius, a stroke's
   width — does not scale, and the window says so.
+  **Styles** — looks kept by name — sit beside the palette and mirror
+  it through the whole stack: `Look` (fill, stroke, gradient, effects,
+  opacity, blend — what copying a style always copied, now a type of
+  the document's rather than the engine's own) and `KeptStyle { name,
+  look }`, a `styles` list on the document with a whole-list
+  `SetStyles`, in the shared command list and the fixture, eight
+  fields in the file inventory, `Session::keep_style`, `apply_style`
+  and `forget_style` over the same `apply_look` the paste goes
+  through. A style keeps its colours flat: it names a look, not the
+  palette entries the look was made from, so a palette change does
+  not reach it and the document need not walk its styles to settle
+  them; a layer given a style keeps the look when the style is
+  forgotten, since a style is copied onto a layer, not followed. Kept
+  under the next free name — "Style 3" — the way a colour goes into
+  the palette, since a name typed into a prompt is a name nobody
+  types; the chips show the fill, the stroke and the name; press to
+  give, shift-press to re-keep, alt-press to forget; and Layer › Styles
+  has the same by name. The browser block saves and reopens the file
+  and finds the style still there.
   Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its

@@ -247,11 +247,12 @@ mod tests {
             // On one line each: a difference is reported as the line it
             // fell on, and a pretty-printed list puts its own bracket on
             // a line of its own, which says nothing about what changed.
-            "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\nprofile {:?} bytes\n",
+            "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\nprofile {:?} bytes\n",
             doc.meta,
             doc.selection(),
             doc.guides(),
             doc.swatches(),
+            doc.styles(),
             doc.regions(),
             doc.cmyk_profile_bytes().map(<[u8]>::len)
         );
@@ -1220,6 +1221,14 @@ mod tests {
             "/document/selection/kind/Vector:transform",
             "/document/selection:invert",
             "/document/selection:kind",
+            "/document/styles/*/look/fill/Srgb:a",
+            "/document/styles/*/look/fill/Srgb:b",
+            "/document/styles/*/look/fill/Srgb:g",
+            "/document/styles/*/look/fill/Srgb:r",
+            "/document/styles/*/look:blend",
+            "/document/styles/*/look:opacity",
+            "/document/styles/*:look",
+            "/document/styles/*:name",
             "/document/swatches/*/color/Srgb:a",
             "/document/swatches/*/color/Srgb:b",
             "/document/swatches/*/color/Srgb:g",

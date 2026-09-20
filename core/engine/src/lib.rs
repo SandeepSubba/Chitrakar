@@ -154,6 +154,7 @@ fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
         } => Some(vec![Slot::Stroke(*id, *index, *on_mask)]),
         Command::SetGuides { .. } => Some(vec![Slot::Page("guides")]),
         Command::SetSwatches { .. } => Some(vec![Slot::Page("swatches")]),
+        Command::SetStyles { .. } => Some(vec![Slot::Page("styles")]),
         Command::SetRegions { .. } => Some(vec![Slot::Page("regions")]),
         Command::SetSelection { .. } => Some(vec![Slot::Page("selection")]),
         Command::Batch(cmds) => {
@@ -434,6 +435,8 @@ impl Session {
             // Nor the regions kept by name: a region put away is not on
             // the page any more than a colour in the palette is.
             | Command::SetRegions { .. }
+            // Nor the looks kept by name, until one is given to a layer.
+            | Command::SetStyles { .. }
             // Nor what is picked out of the page. The marching ants are
             // the app's to draw over the frame, not the renderer's to
             // put in it — a selection is a region to hand to a layer,
@@ -835,6 +838,13 @@ impl Session {
                     "Clear the palette".into()
                 } else {
                     format!("{} colours in the palette", swatches.len())
+                }
+            }
+            Command::SetStyles { styles } => {
+                if styles.is_empty() {
+                    "Clear the styles".into()
+                } else {
+                    format!("{} styles kept", styles.len())
                 }
             }
             Command::SetRegions { regions } => {
@@ -4860,6 +4870,12 @@ impl Session {
     /// JSON so it outlives the document it was taken from, the way the
     /// layer clipboard does.
     pub fn copy_style(&self, id: NodeId) -> Result<String, EngineError> {
+        let look = self.look_of(id)?;
+        serde_json::to_string(&look).map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A layer's look, without its shape.
+    fn look_of(&self, id: NodeId) -> Result<chitrakar_doc::Look, EngineError> {
         let node = self.doc.node(id)?;
         let (fill, stroke, gradient) = match &node.kind {
             chitrakar_doc::NodeKind::Vector {
@@ -4871,15 +4887,105 @@ impl Session {
             chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill.clone()), None, None),
             _ => (None, None, None),
         };
-        let style = Style {
+        Ok(chitrakar_doc::Look {
             fill,
             stroke,
             gradient,
             effects: node.effects.clone(),
             opacity: node.opacity,
             blend: node.blend,
+        })
+    }
+
+    /// The looks kept by name, as JSON: an array of `{name, look}`.
+    pub fn styles_json(&self) -> String {
+        serde_json::to_string(self.doc.styles()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Keep a layer's look in the document under a name, replacing a
+    /// style of that name if there is one. The look is kept with its
+    /// colours flat: a style names a look, not the palette entries the
+    /// look was made from, so a palette change does not reach it — and
+    /// the document need not walk its styles to settle them.
+    pub fn keep_style(&mut self, name: &str, id: NodeId) -> Result<(), EngineError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::BadCommand("a style needs a name".into()));
+        }
+        let mut look = self.look_of(id)?;
+        let flat = |c: &mut chitrakar_color::AuthoredColor| *c = c.flat().clone();
+        if let Some(c) = &mut look.fill {
+            flat(c);
+        }
+        if let Some(s) = &mut look.stroke {
+            flat(&mut s.color);
+        }
+        if let Some(g) = &mut look.gradient {
+            let stops = match g {
+                chitrakar_doc::Gradient::Linear { stops, .. }
+                | chitrakar_doc::Gradient::Radial { stops, .. } => stops,
+            };
+            for stop in stops {
+                flat(&mut stop.color);
+            }
+        }
+        for effect in &mut look.effects {
+            match effect {
+                chitrakar_doc::Effect::DropShadow { color, .. }
+                | chitrakar_doc::Effect::InnerShadow { color, .. }
+                | chitrakar_doc::Effect::Outline { color, .. } => flat(color),
+            }
+        }
+        let mut styles = self.doc.styles().to_vec();
+        let kept = chitrakar_doc::KeptStyle {
+            name: name.to_string(),
+            look,
         };
-        serde_json::to_string(&style).map_err(|e| EngineError::BadCommand(e.to_string()))
+        match styles.iter_mut().find(|s| s.name == name) {
+            Some(had) => *had = kept,
+            None => styles.push(kept),
+        }
+        self.apply_labeled(
+            Command::SetStyles { styles },
+            Some(format!("Keep the style {name}")),
+        )
+    }
+
+    /// Give the look kept under `name` to every layer named, in one
+    /// entry.
+    pub fn apply_style(&mut self, name: &str, ids: &[NodeId]) -> Result<(), EngineError> {
+        let look = self
+            .doc
+            .styles()
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.look.clone())
+            .ok_or_else(|| EngineError::BadCommand(format!("no style called {name}")))?;
+        let label = if ids.len() == 1 {
+            format!("Style {name}")
+        } else {
+            format!("Style {name} on {} layers", ids.len())
+        };
+        self.apply_look(&look, ids, label)
+    }
+
+    /// Take a kept style out of the document. Layers that were given it
+    /// keep the look: a style is copied onto a layer, not followed.
+    pub fn forget_style(&mut self, name: &str) -> Result<(), EngineError> {
+        let styles: Vec<_> = self
+            .doc
+            .styles()
+            .iter()
+            .filter(|s| s.name != name)
+            .cloned()
+            .collect();
+        if styles.len() == self.doc.styles().len() {
+            return Err(EngineError::BadCommand(format!("no style called {name}")));
+        }
+        self.apply_labeled(
+            Command::SetStyles { styles },
+            Some(format!("Forget the style {name}")),
+        )
     }
 
     /// Give that look to every layer named, in one entry.
@@ -4890,8 +4996,23 @@ impl Session {
     /// Nothing takes another layer's shape — that is not what a style
     /// is.
     pub fn paste_style(&mut self, json: &str, ids: &[NodeId]) -> Result<(), EngineError> {
-        let style: Style =
+        let look: chitrakar_doc::Look =
             serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let label = if ids.len() == 1 {
+            "Paste style".to_string()
+        } else {
+            format!("Paste style on {} layers", ids.len())
+        };
+        self.apply_look(&look, ids, label)
+    }
+
+    /// Give a look to every layer named, in one entry under `label`.
+    fn apply_look(
+        &mut self,
+        style: &chitrakar_doc::Look,
+        ids: &[NodeId],
+        label: String,
+    ) -> Result<(), EngineError> {
         // A look taken from a layer that has nothing to paint with — an
         // adjustment, a group, a placed photo — says nothing about how
         // to paint, so it leaves the target's own paint alone rather
@@ -4942,11 +5063,6 @@ impl Session {
         if cmds.is_empty() {
             return Ok(());
         }
-        let label = if ids.len() == 1 {
-            "Paste style".to_string()
-        } else {
-            format!("Paste style on {} layers", ids.len())
-        };
         self.apply_labeled(Command::Batch(cmds), Some(label))
     }
 
@@ -6257,17 +6373,6 @@ fn cubic_at(a: [f32; 2], ha: [f32; 4], b: [f32; 2], hb: [f32; 4], t: f32) -> [f3
         w0 * a[0] + w1 * c1[0] + w2 * c2[0] + w3 * b[0],
         w0 * a[1] + w1 * c1[1] + w2 * c2[1] + w3 * b[1],
     ]
-}
-
-/// A layer's look, without its shape — see [`Session::copy_style`].
-#[derive(Serialize, serde::Deserialize)]
-struct Style {
-    fill: Option<chitrakar_color::AuthoredColor>,
-    stroke: Option<chitrakar_doc::Stroke>,
-    gradient: Option<chitrakar_doc::Gradient>,
-    effects: Vec<chitrakar_doc::Effect>,
-    opacity: f32,
-    blend: chitrakar_doc::BlendMode,
 }
 
 /// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
@@ -7585,6 +7690,126 @@ mod tests {
         let (both, _) = session.render_cached().unwrap();
         assert_eq!(both.get(5, 5).a, 1.0, "left and then right is neither");
         assert_cache_matches_fresh(&mut session);
+    }
+
+    #[test]
+    fn a_style_kept_by_name_gives_its_look_to_another_layer() {
+        let mut s = Session::new(80, 60, ColorMode::Rgb);
+        let a = add_rect(&mut s, "a", 20.0, 20.0);
+        let b = add_rect(&mut s, "b", 20.0, 20.0);
+        // A look worth keeping: a fill reached for by name, a stroke,
+        // faded and multiplied.
+        s.apply(Command::SetSwatches {
+            swatches: vec![chitrakar_doc::Swatch {
+                name: "brick".into(),
+                color: AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.2,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            }],
+        })
+        .unwrap();
+        let mut kind = s.document().node(a).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, stroke, .. } = &mut kind {
+            *fill = Some(AuthoredColor::Named {
+                name: "brick".into(),
+                means: Box::new(AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.2,
+                    b: 0.1,
+                    a: 1.0,
+                }),
+            });
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                width: 3.0,
+                widths: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                dash: Vec::new(),
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        s.apply(Command::SetKind {
+            id: a,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+        s.apply(Command::SetOpacity {
+            id: a,
+            opacity: 0.5,
+        })
+        .unwrap();
+        s.apply(Command::SetBlendMode {
+            id: a,
+            blend: chitrakar_doc::BlendMode::Multiply,
+        })
+        .unwrap();
+
+        s.keep_style("warm", a).unwrap();
+        assert_eq!(s.document().styles().len(), 1, "the look is kept");
+        let kept = s.document().styles()[0].clone();
+        assert_eq!(kept.name, "warm");
+        assert!(
+            matches!(kept.look.fill, Some(AuthoredColor::Srgb { .. })),
+            "kept with its colours flat rather than by name: {:?}",
+            kept.look.fill
+        );
+        assert_eq!(kept.look.opacity, 0.5);
+        assert!(s.keep_style("  ", a).is_err(), "a style needs a name");
+
+        let entries = s.history_labels().0.len();
+        s.apply_style("warm", &[b]).unwrap();
+        assert_eq!(s.history_labels().0.len(), entries + 1, "one entry");
+        let node = s.document().node(b).unwrap();
+        let NodeKind::Vector { fill, stroke, .. } = &node.kind else {
+            panic!("still a shape")
+        };
+        assert_eq!(fill, &kept.look.fill, "the fill came over");
+        assert_eq!(
+            stroke.as_ref().map(|st| st.width),
+            Some(3.0),
+            "and the stroke"
+        );
+        assert_eq!(node.opacity, 0.5, "and the fade");
+        assert_eq!(
+            node.blend,
+            chitrakar_doc::BlendMode::Multiply,
+            "and the blend"
+        );
+        assert!(
+            s.apply_style("cold", &[b]).is_err(),
+            "a style that is not there"
+        );
+
+        // Kept again under the same name, it is replaced rather than
+        // doubled; forgotten, it is gone and the layer keeps its look.
+        s.apply(Command::SetOpacity {
+            id: a,
+            opacity: 0.9,
+        })
+        .unwrap();
+        s.keep_style("warm", a).unwrap();
+        assert_eq!(s.document().styles().len(), 1, "one style of that name");
+        assert_eq!(s.document().styles()[0].look.opacity, 0.9, "the newer look");
+        s.forget_style("warm").unwrap();
+        assert!(s.document().styles().is_empty(), "forgotten");
+        assert_eq!(
+            s.document().node(b).unwrap().opacity,
+            0.5,
+            "a layer given the style keeps its look"
+        );
+        assert!(s.undo().unwrap());
+        assert_eq!(s.document().styles().len(), 1, "and forgetting undoes");
     }
 
     #[test]

@@ -1332,6 +1332,20 @@ body {
   overflow-y: auto;
 }
 
+/* A kept look, as a chip: its fill for a ground, its stroke for a
+   border, and its name — a look is more than a colour can show. */
+.palette.styles .style-chip {
+  display: grid;
+  place-items: center;
+  width: auto;
+  min-width: 1.6rem;
+  padding: 0 0.3rem;
+  font-size: 0.68rem;
+  color: var(--text);
+  text-shadow: 0 0 3px rgb(0 0 0 / 0.8);
+  border-width: 2px;
+}
+
 /* A line between the rail's sections. */
 .tool-sep {
   display: block;

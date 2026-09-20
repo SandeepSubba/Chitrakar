@@ -11071,8 +11071,8 @@ assert(
   await page.waitForTimeout(120);
   const subs = await page.locator(".menu-pop:not(.sub) .menu-item.has-sub .menu-item-label").allTextContents();
   assert(
-    subs.join(",") === "Arrange,Align,Combine shapes,Mask",
-    `the Layer menu keeps four families behind a row each (${subs.join(",")})`,
+    subs.join(",") === "Arrange,Align,Combine shapes,Mask,Styles",
+    `the Layer menu keeps five families behind a row each (${subs.join(",")})`,
   );
   // A pointer on its way from the row to the popup beside it crosses
   // the rows under it, and a popup that closed the moment the pointer
@@ -11683,6 +11683,123 @@ assert(
       (await canvasPixel(400, 400))[3] === 0,
     "one undo puts the page and everything on it back",
   );
+}
+
+// 9br. Looks kept by name — styles — beside the palette: a layer's fill,
+// stroke, effects, fade and blend kept as one thing, given to another
+// layer by name, saved with the file, and forgotten again.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 0,
+    "a new document starts with no styles",
+  );
+  await setColor("Fill colour", "#e03030");
+  await pickTool("Rect");
+  await page.mouse.move(...at(50, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(250, 250), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+  await page.waitForTimeout(200);
+  const setOpacity = async (v) => {
+    await page.locator('input[aria-label="Layer opacity"]').evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    }, v);
+    await page.waitForTimeout(300);
+  };
+  await setOpacity("0.5");
+  await page.click('button[aria-label="Keep as a style"]');
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 1,
+    "the picked layer's look goes in as a style",
+  );
+  assert(
+    (await page.locator(".history li button", { hasText: "Keep the style" }).count()) === 1,
+    "as one entry that says so",
+  );
+
+  // Another shape, plain; the style, given by its chip, makes it the
+  // first's twin in everything but shape.
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Ellipse");
+  await page.mouse.move(...at(350, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(550, 250), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const plain = await canvasPixel(450, 150);
+  assert(plain[2] > 150 && plain[3] === 255, `the ellipse is blue and whole (${plain})`);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Ellipse" }).click();
+  await page.waitForTimeout(200);
+  await page.click('[aria-label="Styles"] .style-chip');
+  await page.waitForTimeout(300);
+  const styled = await canvasPixel(450, 150);
+  assert(
+    styled[0] > 200 && styled[2] < 80 && styled[3] < 200 && styled[3] > 80,
+    `given the style, it is red and half faded like the first (${styled})`,
+  );
+  assert(
+    Math.abs(Number(await page.locator('input[aria-label="Layer opacity"]').inputValue()) - 0.5) < 0.01,
+    "and the panel says so",
+  );
+  // The Layer menu has the same by name.
+  await page.click('.menu-label:text-is("Layer")');
+  await page.waitForTimeout(120);
+  await page.locator('.menu-item.has-sub:has-text("Styles")').hover();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('.menu-pop.sub .menu-item:has-text("Give Style 1")').count()) === 1,
+    "the Layer menu offers the kept style by name",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+
+  // It travels with the file.
+  const [dl] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "Save")).first().click(),
+  ]);
+  const saved = await dl.path();
+  await page.waitForTimeout(300);
+  await menuClick("File", "New document…");
+  await page.click("text=Create");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 0,
+    "a fresh document has none",
+  );
+  await page.locator('input[type="file"][accept*=".chitra"]').first().setInputFiles(saved);
+  await page.waitForTimeout(800);
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 1,
+    "opened again, the file brings its style with it",
+  );
+
+  // Alt-press forgets it; undo brings it back.
+  await page.click('[aria-label="Styles"] .style-chip', { modifiers: ["Alt"] });
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 0,
+    "alt-press forgets a style",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('[aria-label="Styles"] .style-chip').count()) === 1,
+    "and one undo keeps it again",
+  );
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

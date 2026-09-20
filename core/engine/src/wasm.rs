@@ -949,6 +949,29 @@ impl WasmSession {
         self.inner.swatches_json()
     }
 
+    /// The looks kept by name, as JSON: an array of `{name, look}`.
+    pub fn styles_json(&self) -> String {
+        self.inner.styles_json()
+    }
+
+    /// Keep a layer's look under a name.
+    pub fn keep_style(&mut self, name: &str, id: f64) -> Result<(), JsError> {
+        self.inner
+            .keep_style(name, NodeId(id as u64))
+            .map_err(to_js)
+    }
+
+    /// Give the look kept under a name to every layer named.
+    pub fn apply_style(&mut self, name: &str, ids: &[f64]) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.iter().map(|&id| NodeId(id as u64)).collect();
+        self.inner.apply_style(name, &ids).map_err(to_js)
+    }
+
+    /// Take a kept style out of the document.
+    pub fn forget_style(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.forget_style(name).map_err(to_js)
+    }
+
     /// A node's effect list as JSON.
     pub fn effects_json(&self, id: f64) -> Result<String, JsError> {
         self.inner.effects_json(NodeId(id as u64)).map_err(to_js)

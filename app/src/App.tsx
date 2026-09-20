@@ -33,6 +33,7 @@ import {
   EffectKind,
   Gradient,
   GradientStop,
+  KeptStyle,
   LayerInfo,
   LUMA,
   Mask,
@@ -1048,6 +1049,8 @@ export function App() {
   const [collapsed, setCollapsed] = useState<number[]>([]);
   /** The document's palette, re-read whenever the document changes. */
   const [swatches, setSwatches] = useState<Swatch[]>([]);
+  /** The looks kept by name in the document, beside the palette. */
+  const [styles, setStyles] = useState<KeptStyle[]>([]);
   /** Four runs of 256 counts — red, green, blue, luminance — of what the
    * picked adjustment layer sees, for the graphs drawn over them. */
   const [histogram, setHistogram] = useState<Uint32Array | null>(null);
@@ -1404,6 +1407,7 @@ export function App() {
       setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
       setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
       setSwatches(JSON.parse(s.swatches_json()) as Swatch[]);
+      setStyles(JSON.parse(s.styles_json()) as KeptStyle[]);
       // The page's size is document state like anything else — undoing a
       // crop changes it — so it is read back here rather than only being
       // written where a crop or a new document sets it.
@@ -3452,6 +3456,45 @@ export function App() {
     } catch (err) {
       alert(`Copy style: ${err}`);
     }
+  };
+
+  /** Keep the picked layer's look in the document under the next free
+   * name, the way a colour goes into the palette: named by what it is
+   * for later rather than asked for a name now, since a name typed into
+   * a prompt is a name nobody types. */
+  const keepStyle = (name?: string) => {
+    if (!session || selected === null) return;
+    const taken = new Set(styles.map((st) => st.name));
+    let n = styles.length + 1;
+    while (taken.has(`Style ${n}`)) n++;
+    try {
+      session.keep_style(name ?? `Style ${n}`, selected);
+    } catch (err) {
+      alert(`Keep style: ${err}`);
+      return;
+    }
+    refresh(session);
+  };
+  /** Give a kept look to every picked layer. */
+  const applyStyle = (name: string) => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      session.apply_style(name, new Float64Array(selectionSet));
+    } catch (err) {
+      alert(`Style: ${err}`);
+      return;
+    }
+    refresh(session);
+  };
+  const forgetStyle = (name: string) => {
+    if (!session) return;
+    try {
+      session.forget_style(name);
+    } catch (err) {
+      alert(`Forget style: ${err}`);
+      return;
+    }
+    refresh(session);
   };
 
   const pasteStyle = () => {
@@ -6593,6 +6636,21 @@ export function App() {
               ]
             : []),
         ]),
+        // The looks kept by name: the panel's strip has them as chips,
+        // and this has them as names.
+        sub("styles", "copy", "Styles", [
+          item("keep-style", "copy", "Keep this look as a style", () => keepStyle()),
+          ...(styles.length > 0
+            ? [
+                SEP,
+                ...styles.map((st) =>
+                  item(`style-${st.name}`, "paste", `Give ${st.name}`, () =>
+                    applyStyle(st.name),
+                  ),
+                ),
+              ]
+            : []),
+        ]),
         SEP,
         // Said as what pressing it will do, since a row that says
         // "Lock" over a locked layer is a row that lies.
@@ -7881,6 +7939,45 @@ export function App() {
               +
             </button>
           </div>
+          {/* The looks kept by name, as chips: pressed, one is given to
+              the picked layers; shift-pressed, it is re-kept from the
+              picked layer; alt-pressed, it is forgotten. A look is a
+              whole made of a fill, a stroke, effects, a fade and a
+              blend, and a chip can show only the first of those, so it
+              says the name as well. */}
+          {(styles.length > 0 || selected !== null) && (
+            <div className="palette styles" role="group" aria-label="Styles">
+              {styles.map((st) => (
+                <button
+                  key={st.name}
+                  className="swatch style-chip"
+                  style={{
+                    background: st.look.fill ? colorToHex(st.look.fill) : "transparent",
+                    borderColor: st.look.stroke ? colorToHex(st.look.stroke.color) : undefined,
+                  }}
+                  title={`${st.name} — give this look to what is picked; shift-click to keep the picked layer's look under this name, alt-click to forget it`}
+                  aria-label={`Style ${st.name}`}
+                  onClick={(e) => {
+                    if (e.altKey) forgetStyle(st.name);
+                    else if (e.shiftKey) keepStyle(st.name);
+                    else applyStyle(st.name);
+                  }}
+                >
+                  <span>{st.name.replace(/^Style /, "")}</span>
+                </button>
+              ))}
+              {selected !== null && (
+                <button
+                  className="swatch add"
+                  onClick={() => keepStyle()}
+                  title="Keep the picked layer's look as a style"
+                  aria-label="Keep as a style"
+                >
+                  +
+                </button>
+              )}
+            </div>
+          )}
           {(painting || cloning) && (
             <>
               <input

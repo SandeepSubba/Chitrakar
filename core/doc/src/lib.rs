@@ -198,6 +198,10 @@ pub struct Document {
     /// once and reached for rather than typed again. Additive.
     #[serde(default)]
     swatches: Vec<Swatch>,
+    /// Looks kept by name, to be given to a layer later. Additive, like
+    /// the swatches.
+    #[serde(default)]
+    styles: Vec<KeptStyle>,
     /// The part of the page that is picked out: a region in page
     /// coordinates, not a layer and not artwork.
     ///
@@ -274,6 +278,31 @@ pub struct Swatch {
     pub color: chitrakar_color::AuthoredColor,
 }
 
+/// A layer's look, without its shape: what a shape is painted with,
+/// what is cast from it, and how it is laid on the page. What copying a
+/// style copies, and what a style kept by name keeps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Look {
+    pub fill: Option<chitrakar_color::AuthoredColor>,
+    pub stroke: Option<Stroke>,
+    pub gradient: Option<Gradient>,
+    #[serde(default)]
+    pub effects: Vec<Effect>,
+    pub opacity: f32,
+    pub blend: BlendMode,
+}
+
+/// A look kept by name in the document — Affinity's styles, Photoshop's
+/// layer styles — so a look is chosen once and reached for rather than
+/// rebuilt on every layer that wants it. It travels with the file, like
+/// the palette, and unlike the palette it keeps its colours as colours:
+/// a style names a look, not the entries that look was made from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeptStyle {
+    pub name: String,
+    pub look: Look,
+}
+
 /// An immutable source image (8-bit sRGB RGBA). The original bytes a raster
 /// object points at — never edited, only referenced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,6 +337,7 @@ impl Document {
             cmyk_cms: None,
             guides: Vec::new(),
             swatches: Vec::new(),
+            styles: Vec::new(),
             regions: Vec::new(),
             selection: None,
         }
@@ -407,6 +437,11 @@ impl Document {
 
     pub fn swatches(&self) -> &[Swatch] {
         &self.swatches
+    }
+
+    /// The looks kept by name.
+    pub fn styles(&self) -> &[KeptStyle] {
+        &self.styles
     }
 
     /// The regions this document has kept by name.
@@ -670,6 +705,9 @@ impl Document {
             | Command::SetBlendMode { .. }
             | Command::SetTransform { .. }
             | Command::SetGuides { .. }
+            // A kept style holds its colours flat, so a palette change
+            // does not reach it and it cannot disagree with one.
+            | Command::SetStyles { .. }
             | Command::ResizeCanvas { .. }
             | Command::TurnCanvas { .. }
             | Command::ScaleCanvas { .. }
@@ -1055,6 +1093,10 @@ impl Document {
             Command::SetRegions { regions } => {
                 let prev = std::mem::replace(&mut self.regions, regions);
                 Ok(Command::SetRegions { regions: prev })
+            }
+            Command::SetStyles { styles } => {
+                let prev = std::mem::replace(&mut self.styles, styles);
+                Ok(Command::SetStyles { styles: prev })
             }
             Command::SetSwatches { swatches } => {
                 let prev = std::mem::replace(&mut self.swatches, swatches);
@@ -1535,6 +1577,10 @@ pub enum Command {
     /// Replace the document's palette, the same whole-list way.
     SetSwatches {
         swatches: Vec<Swatch>,
+    },
+    /// Replace the looks kept by name, the same whole-list way.
+    SetStyles {
+        styles: Vec<KeptStyle>,
     },
     /// Replace the regions kept by name, the same whole-list way:
     /// keeping one, renaming one and forgetting one are then the same

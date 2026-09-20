@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~498)
+cargo test --workspace                      # engine tests (~499)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1235 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1246 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -122,6 +122,14 @@ as good as `Node::each_color_mut` is complete, which is why that walk
 matches every `NodeKind` and `Effect` exhaustively rather than falling
 through — a new kind of layer will not compile until it says whether it
 holds a colour.
+
+Styles (`Document::styles`, `Command::SetStyles`, a `KeptStyle` holding
+a `Look`) are the palette's shape for a whole look — fill, stroke,
+gradient, effects, opacity, blend — kept by name and given to layers by
+name through `Session::apply_style`. A style keeps its colours *flat*
+(`keep_style` reads past every name), so it is outside the settling
+above by design: it names a look, not the entries the look was made
+from.
 
 ## Settings, and getting a picture out
 

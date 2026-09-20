@@ -318,6 +318,20 @@ export interface Swatch {
   color: AuthoredColor;
 }
 
+/** A layer's look without its shape, and one kept by name. */
+export interface Look {
+  fill: AuthoredColor | null;
+  stroke: Stroke | null;
+  gradient: Gradient | null;
+  effects: Effect[];
+  opacity: number;
+  blend: BlendMode;
+}
+export interface KeptStyle {
+  name: string;
+  look: Look;
+}
+
 export type NodeKind =
   | "Group"
   | {

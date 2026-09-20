@@ -10,9 +10,9 @@
 
 use crate::{Adjustment, Filter};
 use crate::{
-    BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
-    Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke, StrokeAlign, StyleRun,
-    Swatch, TextSpec, Transform, VectorShape,
+    BlendMode, Command, Document, Effect, Gradient, GradientStop, Guide, KeptStyle, Look, Marker,
+    Mask, MaskKind, Node, NodeId, NodeKind, PaintStroke, Pin, Pinning, RasterRef, Stroke,
+    StrokeAlign, StyleRun, Swatch, TextSpec, Transform, VectorShape,
 };
 use chitrakar_color::{AuthoredColor, ColorMode};
 
@@ -283,6 +283,28 @@ pub fn everything() -> Fixture {
                 g: 0.45,
                 b: 0.8,
                 a: 1.0,
+            },
+        }],
+    })
+    .unwrap();
+    // And a look kept by name, so a file written from this has a style
+    // in it to read back, and every audit is asked of a document that
+    // holds one.
+    doc.apply(Command::SetStyles {
+        styles: vec![KeptStyle {
+            name: "warm".into(),
+            look: Look {
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.5,
+                    b: 0.2,
+                    a: 1.0,
+                }),
+                stroke: None,
+                gradient: None,
+                effects: Vec::new(),
+                opacity: 0.8,
+                blend: BlendMode::Multiply,
             },
         }],
     })
@@ -2099,6 +2121,24 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             width: 120,
             height: 90,
         },
+        Command::SetStyles {
+            styles: vec![KeptStyle {
+                name: "cool".into(),
+                look: Look {
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.3,
+                        b: 0.9,
+                        a: 1.0,
+                    }),
+                    stroke: None,
+                    gradient: None,
+                    effects: Vec::new(),
+                    opacity: 1.0,
+                    blend: BlendMode::Normal,
+                },
+            }],
+        },
         Command::MoveNode {
             id: under,
             parent: root,
@@ -2245,6 +2285,7 @@ pub fn variant_name(cmd: &Command) -> &'static str {
         Command::SetEffects { .. } => "SetEffects",
         Command::SetGuides { .. } => "SetGuides",
         Command::SetSwatches { .. } => "SetSwatches",
+        Command::SetStyles { .. } => "SetStyles",
         Command::SetSelection { .. } => "SetSelection",
         Command::SetRegions { .. } => "SetRegions",
         Command::ResizeCanvas { .. } => "ResizeCanvas",
@@ -2284,6 +2325,7 @@ pub const EVERY_VARIANT: &[&str] = &[
     "SetEffects",
     "SetGuides",
     "SetSwatches",
+    "SetStyles",
     "SetSelection",
     "SetRegions",
     "ResizeCanvas",
