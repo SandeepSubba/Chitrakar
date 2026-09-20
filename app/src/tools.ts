@@ -28,7 +28,9 @@ export const TOOLS = [
   "Pen",
   "Brush",
   "Paint",
+  "Eraser",
   "Clone",
+  "Heal",
   "Gradient",
   "Fill",
   "Text",
@@ -59,7 +61,7 @@ export const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as con
 export const RAIL: readonly (readonly Tool[])[] = [
   ["Move", "Select"],
   ["Frame", "Rect", "Pen", "Text"],
-  ["Brush", "Paint", "Clone", "Gradient", "Fill"],
+  ["Brush", "Paint", "Eraser", "Clone", "Heal", "Gradient", "Fill"],
   ["Crop", "Eyedropper"],
   ["Hand", "Zoom"],
 ];
@@ -70,6 +72,8 @@ export const RAIL: readonly (readonly Tool[])[] = [
  * plain key meaning one tool, always. */
 export const KEY_FAMILIES: readonly (readonly Tool[])[] = [
   SELECT_TOOLS,
+  ["Paint", "Eraser"],
+  ["Clone", "Heal"],
   ["Gradient", "Fill"],
 ];
 
@@ -117,7 +121,9 @@ export const TOOL_HINT: Record<Tool, string> = {
   Pen: "P",
   Brush: "B",
   Paint: "N",
+  Eraser: "N",
   Clone: "S",
+  Heal: "S",
   Gradient: "G",
   Fill: "G",
   Text: "T",
@@ -142,7 +148,9 @@ export const TOOL_ICONS: Record<Tool, IconName> = {
   Pen: "pen",
   Brush: "brush",
   Paint: "paint",
+  Eraser: "eraser",
   Clone: "clone",
+  Heal: "heal",
   Gradient: "gradient",
   Fill: "fill",
   Text: "text",
@@ -170,7 +178,9 @@ export const TOOL_ABOUT: Record<Tool, string> = {
   Pen: "a path, straight or smooth, one point at a time",
   Brush: "a freehand stroke that lands as a path",
   Paint: "a brush that lays pixels",
-  Clone: "paint with what is already there, or heal with it",
+  Eraser: "rub paint out; on any other layer, take a piece out of it",
+  Clone: "paint with what is already there, as it is",
+  Heal: "paint with what is already there, in the colour of where it lands",
   Gradient: "drag a gradient across a shape; alt for a radial one",
   Fill: "give the layer under a press the ink in hand; alt for its stroke",
   Text: "a block of live text",

@@ -4793,7 +4793,7 @@ assert(
   assert((await canvasPixel(280, 320))[3] === 0, "the line and the dab undo away");
 
   // The eraser takes paint off this layer and leaves the page bare.
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Eraser");
   await page.waitForTimeout(100);
   await page.mouse.move(...at(280, 200));
   await page.mouse.down();
@@ -4812,7 +4812,7 @@ assert(
   await page.waitForTimeout(250);
   assert((await canvasPixel(280, 260))[3] === 0, "the next takes the second stroke");
   assert((await canvasPixel(280, 200))[3] > 200, "and leaves the first");
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Paint");
 
   // The ring shows how big the brush is and follows the pointer; the
   // brackets resize it, and both rings resize with it.
@@ -4866,7 +4866,7 @@ assert(
   await page.waitForTimeout(200);
   const beforeRub = await page.locator(".panel ul li").count();
   await pickTool("Paint");
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Eraser");
   await page.waitForTimeout(150);
   await page.mouse.move(...at(300, 340));
   await page.mouse.down();
@@ -4882,7 +4882,7 @@ assert(
     (await page.locator(".panel ul li").count()) === beforeRub,
     "through a mask on the rect, not a new paint layer",
   );
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Paint");
   await page.waitForTimeout(150);
   await page.mouse.move(...at(300, 340));
   await page.mouse.down();
@@ -4986,8 +4986,9 @@ assert(
     await page.waitForTimeout(250);
     return px;
   };
+  await pickTool("Heal");
   const healed = await dab();
-  await page.click('button[aria-label="Heal"]');
+  await pickTool("Clone");
   await page.waitForTimeout(150);
   const stamped = await dab();
   assert(
@@ -4999,7 +5000,6 @@ assert(
       stamped.slice(0, 3).some((v, i) => Math.abs(v - pale[i]) > 30),
     `and with it off the source comes over as it is (${source} -> ${stamped})`,
   );
-  await page.click('button[aria-label="Heal"]');
   // Take the whole trial back — the strokes and the layers they made —
   // by undoing until the stack is where it was, rather than by counting
   // entries, which is easy to get wrong and hard to notice.
@@ -10165,7 +10165,7 @@ assert(
 
   // Rub clear across the whole shape.
   await pickTool("Paint");
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Eraser");
   await page.waitForTimeout(150);
   await page.mouse.move(...at(40, 150));
   await page.mouse.down();
@@ -10200,7 +10200,7 @@ assert(
     (await covered(80, 150)) && (await covered(320, 150)),
     "undone, the whole shape is back",
   );
-  await page.click('button[aria-label="Erase"]');
+  await pickTool("Paint");
   await page.waitForTimeout(150);
 }
 
@@ -11509,6 +11509,39 @@ assert(
   assert(rectsOnly === rows, `and the fill layer with them (${rectsOnly} rows)`);
   await pickTool("Move");
   await page.keyboard.press("Escape");
+}
+
+// 9bo. The eraser and the heal are tools of their own, where a person
+// looks for them, rather than switches on the paint and the clone: N and
+// S each name one, and shift walks to the other.
+{
+  const rail = page.locator('nav[aria-label="Tools"]');
+  for (const name of ["Eraser", "Heal"]) {
+    assert(
+      (await rail.locator(`> button[aria-label="${name}"]`).count()) === 1,
+      `${name} is on the rail`,
+    );
+  }
+  assert(
+    (await page.locator('button[aria-label="Erase"]').count()) === 0 &&
+      (await page.locator('button[aria-label="Heal"][aria-pressed]').count()) === 0,
+    "and the switches they replaced are gone",
+  );
+  const inHand = () =>
+    page.$eval(".toolbar .tool.active", (el) => el.getAttribute("aria-label"));
+  await page.keyboard.press("n");
+  await page.keyboard.press("Shift+N");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Eraser", "shift+N is the eraser");
+  assert(
+    (await page.locator(".canvas-host").getAttribute("class")).includes("painting"),
+    "which is a brush, and says so",
+  );
+  await page.keyboard.press("s");
+  await page.keyboard.press("Shift+S");
+  await page.waitForTimeout(80);
+  assert((await inHand()) === "Heal", "and shift+S the heal");
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

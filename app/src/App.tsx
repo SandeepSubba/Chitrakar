@@ -1016,10 +1016,17 @@ export function App() {
     window.addEventListener("pointerup", up);
   };
   const [paintSoftness, setPaintSoftness] = useState(0.5);
-  const [erasing, setErasing] = useState(false);
+  /** Rubbing out is the eraser tool rather than a switch on the paint
+   * tool, and healing the heal tool rather than a switch on the clone:
+   * a person looks for the eraser on the rail, as in every editor, and
+   * a mode that is a tool does not also want a switch. The engine is
+   * told the same thing it always was. */
+  const erasing = tool === "Eraser";
+  const painting = tool === "Paint" || tool === "Eraser";
+  const cloning = tool === "Clone" || tool === "Heal";
   /** Whether the clone brush heals: laying the source's texture down in
    * the colour of the place it lands, rather than as it found it. */
-  const [healing, setHealing] = useState(true);
+  const healing = tool === "Heal";
   /** Where the brush is hovering, in the canvas's own coordinates, so the
    * ring that shows how big it is can sit under the pointer. Null when the
    * pointer is not over the canvas, or the brush is not the tool in hand. */
@@ -2397,7 +2404,7 @@ export function App() {
         return;
       }
     }
-    if ((tool === "Paint" || tool === "Clone") && canvasRef.current) {
+    if ((painting || cloning) && canvasRef.current) {
       const rect = canvasRef.current.getBoundingClientRect();
       setBrushAt([e.clientX - rect.left, e.clientY - rect.top]);
     }
@@ -2462,7 +2469,7 @@ export function App() {
    * left behind by a tool change or a pointer leaving the canvas would
    * read as a brush that is still there. */
   useEffect(() => {
-    if (tool !== "Paint" && tool !== "Clone") setBrushAt(null);
+    if (!painting && !cloning) setBrushAt(null);
   }, [tool]);
 
   /** Commit the guide list, as one history entry. */
@@ -2722,7 +2729,7 @@ export function App() {
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
-    if (tool === "Clone") {
+    if (cloning) {
       // Alt sets where the clone reads from, which is what that key does
       // in every editor that has this tool.
       if (e.altKey) {
@@ -2757,7 +2764,7 @@ export function App() {
       refresh(session);
       return;
     }
-    if (tool === "Paint") {
+    if (painting) {
       // Alt takes the colour under the brush rather than laying any: the
       // sampling every paint tool puts under that key, so the brush does
       // not have to be put down to pick a colour up.
@@ -7805,7 +7812,7 @@ export function App() {
               +
             </button>
           </div>
-          {(tool === "Paint" || tool === "Clone") && (
+          {(painting || cloning) && (
             <>
               <input
                 type="number"
@@ -7831,28 +7838,6 @@ export function App() {
                 aria-label="Brush softness"
                 className="paint-softness"
               />
-              {tool === "Clone" && (
-                <button
-                  className={`icon-button${healing ? " active" : ""}`}
-                  onClick={() => setHealing((on) => !on)}
-                  title="Heal: lay the texture down in the colour of the place it lands"
-                  aria-label="Heal"
-                  aria-pressed={healing}
-                >
-                  <Icon name="heal" />
-                </button>
-              )}
-              {tool === "Paint" && (
-              <button
-                className={`icon-button${erasing ? " active" : ""}`}
-                onClick={() => setErasing((on) => !on)}
-                title="Rub paint out — on a paint layer its own paint, on any other layer a piece out of the layer itself"
-                aria-label="Erase"
-                aria-pressed={erasing}
-              >
-                <Icon name="eraser" />
-              </button>
-              )}
             </>
           )}
           {tool === "Brush" && (
@@ -7872,7 +7857,7 @@ export function App() {
         </nav>
         <main
           className={`canvas-host${
-            tool === "Paint" || tool === "Clone"
+            painting || cloning
               ? " painting"
               : tool === "Hand"
                 ? " handing"
@@ -8161,7 +8146,7 @@ export function App() {
               outer ring is where it stops, the inner one where its solid
               core ends. An eraser's ring is dashed, since what it does to
               the canvas is the opposite of what the colour says. */}
-          {tool === "Clone" && cloneFrom && (
+          {cloning && cloneFrom && (
             <svg className="brush-ring clone-source" aria-hidden="true">
               <circle
                 cx={view.x + cloneFrom[0] * view.zoom}
@@ -8177,7 +8162,7 @@ export function App() {
               />
             </svg>
           )}
-          {(tool === "Paint" || tool === "Clone") && brushAt && (
+          {(painting || cloning) && brushAt && (
             <svg
               className={`brush-ring${erasing ? " erasing" : ""}`}
               aria-hidden="true"
@@ -9488,19 +9473,13 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["R, E", "Rectangle, ellipse"],
       ["P, B", "Pen, brush"],
       ["N", "Paint (a brush that lays pixels)"],
-      ["S", "Clone (paint with what is already there)"],
-      ["Alt-click (clone)", "Set the place to clone from"],
-      [
-        "Heal (clone)",
-        "Lay the texture down in the colour of the place it lands",
-      ],
+      ["Shift+N", "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
+      ["S", "Clone (paint with what is already there, as it is)"],
+      ["Shift+S", "Heal — the same, laid down in the colour of the place it lands"],
+      ["Alt-click (clone, heal)", "Set the place to clone from"],
       ["[  ]", "Thinner, thicker brush"],
       ["Alt-click (brush)", "Take the colour under the brush"],
       ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
-      [
-        "Erase + drag",
-        "On a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)",
-      ],
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],

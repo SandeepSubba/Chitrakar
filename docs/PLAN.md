@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1214 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1220 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5356,10 +5356,8 @@ without reading anything else.*
      - ✅ **Fill (bucket) tool**: a press gives the layer under it the
        ink in hand, alt its stroke, and bare paper with a region picked
        out fills the region. G again, after the gradient — see *Chrome*.
-     - **Eraser** and **Heal** as tools of their own on the rail rather
-       than modes of Paint and Clone (Photoshop's E and J). A mode is
-       right for the engine — a heal *is* a clone stroke with one flag
-       — and wrong for a rail, where a person looks for the eraser.
+     - ✅ **Eraser** and **Heal** as tools of their own (shift+N,
+       shift+S), the two switches gone — see *Chrome*.
      - **Node tool** (Affinity's A): anchors are edited by
        double-clicking a path with Move in hand, which nobody would
        guess. A tool that puts the anchors up on a press is a small
@@ -5505,7 +5503,15 @@ without reading anything else.*
   the suite press M to mean the marquee whatever is in hand, and a
   plain key that means one thing always is the better promise. The
   keys sheet had said M "again" walked the family while nothing did;
-  it says shift now, and it is true. Which tools are on the rail is a preference (Preferences ›
+  it says shift now, and it is true. The **Eraser** and the **Heal**
+  are tools of their own on the rail, where a person looks for them,
+  rather than switches on the paint and the clone: shift+N and shift+S
+  from the tool each shares a key with. The engine is told what it
+  always was — `erasing` and `healing` are read off the tool in hand —
+  and the two switches are gone, since a mode that is a tool does not
+  also want a switch. Clone no longer heals by default: it is the plain
+  stamp, and Heal is the one that lands in the colour of where it
+  lands. Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its
   key still picking it and the slot then showing it in hand — put away
