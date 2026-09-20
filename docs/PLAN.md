@@ -3291,6 +3291,69 @@ without reading anything else.*
      — `amount`, `grain`, `mono` and `seed`, none of which has a default
      anybody could pick, since a file missing any one of them is a file
      that grains differently.
+     Then the question the filters raised: **what do the exporters say
+     about one?** They disagree, and had always disagreed. PDF, meeting
+     an adjustment or a filter, renders everything up to and including it
+     into one picture and places that — so the grade is in the file. SVG
+     wrote an XML comment and left the layer out, so the same document
+     exported the other way came out *ungraded*. A wrong picture in a
+     file that reads perfectly well, which is the shape of defect this
+     roadmap has recorded twice before.
+     It was a decision rather than an accident — there is a test
+     asserting the comment — and the reason given is true of five of the
+     six filters and of all thirteen adjustments: SVG has no way to say
+     them that composites the way this does. It is not true of a **blur**.
+     `feGaussianBlur` is the same two-dimensional gaussian on the same
+     premultiplied values in the same linear light, and "changes what is
+     under it" is, in SVG, a `filter` on a group holding the siblings the
+     layer follows. So a plain blur is exported now — and plain means
+     plain: faded, masked, held to the layer below, blended or wearing an
+     effect of its own and it is a comment again, because there is no
+     primitive that means *half* of this.
+     Two things had to be got right and the second is the interesting
+     one. The filter region: SVG's default is a box a tenth larger than
+     what is filtered, which cuts a blur off well inside its own spread,
+     and `userSpaceOnUse` is the *current* space, which inside a group is
+     that group's own — so the region is worked out from the bounds of
+     what is being softened, in the space it is placed in, grown by how
+     far the blur reaches.
+     And the number: **`stdDeviation` is not the sigma the document
+     asks for.** Both ends approximate a gaussian by three box passes and
+     neither chooses its box the same way — the W3C runs two boxes of `d`
+     and one of `d + 1` where `d` is even, this renderer halves `d` and
+     runs three of `2r + 1` — so a sigma written through unchanged is a
+     blur of the right name and the wrong width: at sigma 2 this renderer
+     spreads by 2.449 and a reader by 2.121, and the pages do not match.
+     What travels instead is the spread this renderer *actually has*:
+     three boxes of width `w` have variance `3(w² − 1)/12`, so the blur it
+     performs is one of `√(w² − 1)/2`. That lands right on both kinds of
+     reader — one doing the spec's box passes picks `d = w`, odd, which
+     is three boxes of `w`; one doing a true gaussian does the amount of
+     blurring this actually is.
+     What is left after that is irreducible and is written into the
+     witness rather than glossed: a box-cubed and a true gaussian are
+     different *shapes* at the same spread, so the softened patch lands
+     **7.27 channel levels** from the engine's own where the rest of the
+     page is inside one. The page mean went 3.30 to 3.75 and its ceiling
+     3.5 to 4.5. That loosening is exactly what that instrument's own
+     note says will happen, and it is not left to carry the claim: the
+     softened patch has a reading of its own, taken first, and it is the
+     one that bites — with the blur omitted again it reads 15.76 against
+     a ceiling of 9, where the page mean only goes to 4.56, a hair over
+     rather than an answer.
+     Both numbers were measured in both directions before being written
+     down, which is worth saying because the first draft of that comment
+     guessed "fifty" for what turned out to be 15.76.
+     And the markup is pinned beside the picture, as the blends now are:
+     that a blur is not omitted, that its `stdDeviation` is √24⁄2 rather
+     than 2, that it is applied to a group holding what it softens, and
+     that half a blur is still a comment.
+     What is *not* closed is the asymmetry that started this: an
+     adjustment layer, and five of the six filters, still leave an SVG
+     export ungraded where a PDF export carries them as pixels. Closing
+     it means SVG learning to rasterize through them the way PDF does,
+     which is a product decision — a vector file that is partly a bitmap
+     — rather than a defect to fix quietly.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing
