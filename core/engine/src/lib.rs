@@ -325,6 +325,24 @@ pub struct Session {
     /// looked up: the dirty region has to ask on every command, and the
     /// answer is no for almost every document.
     has_copies: bool,
+    /// Whether anything in the document reads a neighbourhood — a filter
+    /// or a clone layer. `filter_reach` is a walk of every layer and is
+    /// asked on every command, so a document with none of them should
+    /// not pay for the question. Kept the way `has_copies` is: a command
+    /// that can only make it true says so itself, and one that could
+    /// have taken the last one away sends the session to look.
+    reaches: bool,
+}
+
+/// What a command says about a fact the session keeps about the whole
+/// document, without the session having to go and read it.
+enum Told {
+    /// Nothing it can have changed: the fact stands.
+    Keep,
+    /// It made the fact true, whatever it was before.
+    Yes,
+    /// It may have made the fact false, and only the document knows.
+    Ask,
 }
 
 impl Session {
@@ -350,6 +368,7 @@ impl Session {
         // screen: drag the original and the copies of it keep the paint
         // they had.
         session.note_copies();
+        session.note_reach();
         session
     }
 
@@ -375,6 +394,7 @@ impl Session {
             gamut_warn: false,
             showing: chitrakar_render::Showing::Everything,
             has_copies: false,
+            reaches: false,
         }
     }
 
@@ -559,6 +579,79 @@ impl Session {
 
     /// Apply a command to the document, computing the dirty region from the
     /// target's bounds before and after. Returns the inverse.
+    /// What a command says about whether the document still holds a
+    /// copy, without looking at the document.
+    ///
+    /// A layer arriving can only make the answer yes: it is a copy or it
+    /// is not, and whatever was there is there still. Only something
+    /// that can take a copy *away* — a removal, a kind replaced, a batch
+    /// — has to go and look, and those are not what a drawing is built
+    /// out of.
+    fn copies_after(cmd: &Command) -> Told {
+        fn any_copy(node: &chitrakar_doc::Node) -> bool {
+            matches!(node.kind, NodeKind::Instance { .. })
+        }
+        match cmd {
+            Command::AddNode { node, .. } => {
+                if any_copy(node) {
+                    Told::Yes
+                } else {
+                    Told::Keep
+                }
+            }
+            // A subtree coming back can bring copies with it, and what
+            // it holds is the document's to say rather than the
+            // command's. It is an undo of a delete, so it is rare beside
+            // the layers a drawing is built out of.
+            Command::RestoreSubtree { .. } => Told::Ask,
+            Command::SetKind { kind, .. } => {
+                if matches!(**kind, NodeKind::Instance { .. }) {
+                    Told::Yes
+                } else {
+                    // It may have been the last copy: only the document
+                    // knows now.
+                    Told::Ask
+                }
+            }
+            Command::RemoveNode { .. } | Command::Batch(_) => Told::Ask,
+            _ => Told::Keep,
+        }
+    }
+
+    /// The same question about the layers that read a neighbourhood: a
+    /// filter, or a clone layer, which paints with what is a fixed
+    /// distance away.
+    fn reach_after(cmd: &Command) -> Told {
+        fn reads_around(kind: &NodeKind) -> bool {
+            matches!(kind, NodeKind::Filter(_) | NodeKind::Clone { .. })
+        }
+        match cmd {
+            Command::AddNode { node, .. } => {
+                if reads_around(&node.kind) {
+                    Told::Yes
+                } else {
+                    Told::Keep
+                }
+            }
+            Command::SetKind { kind, .. } => {
+                if reads_around(kind) {
+                    Told::Yes
+                } else {
+                    Told::Ask
+                }
+            }
+            Command::RemoveNode { .. } | Command::RestoreSubtree { .. } | Command::Batch(_) => {
+                Told::Ask
+            }
+            _ => Told::Keep,
+        }
+    }
+
+    /// Re-read whether anything in the document reads a neighbourhood.
+    fn note_reach(&mut self) {
+        self.reaches = chitrakar_render::filter_reach(&self.doc) > 0;
+    }
+
     /// Re-read whether the document holds any live copies. Cheap, and
     /// only worth doing when a command could have changed the answer.
     fn note_copies(&mut self) {
@@ -592,18 +685,26 @@ impl Session {
             .stroke_bounds(&cmd)
             .unwrap_or_else(|| self.bounds_of_target(target))
             .union(self.copies_bounds(target));
-        let structural = matches!(
-            cmd,
-            Command::AddNode { .. }
-                | Command::RemoveNode { .. }
-                | Command::SetKind { .. }
-                | Command::RestoreSubtree { .. }
-                | Command::Batch(_)
-        );
+        // Whether the document still holds a copy is a question about
+        // the whole document, and asking it that way after every
+        // structural command is what made building one cost the square
+        // of its size. A layer *arriving* answers it by itself — it is
+        // either a copy or it is not, and either way nothing that was
+        // there has gone — so only a command that can take the last one
+        // away has to look at everything.
+        let copies = Self::copies_after(&cmd);
+        let reaching = Self::reach_after(&cmd);
         let was_sized = (self.doc.meta.width, self.doc.meta.height);
         let inverse = self.doc.apply(cmd)?;
-        if structural {
-            self.note_copies();
+        match copies {
+            Told::Keep => {}
+            Told::Yes => self.has_copies = true,
+            Told::Ask => self.note_copies(),
+        }
+        match reaching {
+            Told::Keep => {}
+            Told::Yes => self.reaches = true,
+            Told::Ask => self.note_reach(),
         }
         // A page that changed size changed what the surface is showing,
         // not just what is on it. "Everything" is the *new* page, and
@@ -630,7 +731,11 @@ impl Session {
             // render_cached additionally computes a padded margin so the
             // reported region's own values are correct.
             let mut bounds = pre.union(post);
-            let reach = chitrakar_render::filter_reach(&self.doc) as f32;
+            let reach = if self.reaches {
+                chitrakar_render::filter_reach(&self.doc) as f32
+            } else {
+                0.0
+            };
             if reach > 0.0 {
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - reach, y0 - reach, x1 + reach, y1 + reach);
@@ -6002,6 +6107,7 @@ impl Session {
         // An opened file can already hold copies; the flag is only kept
         // in step by the commands that could change it.
         session.note_copies();
+        session.note_reach();
         Ok(session)
     }
 }
@@ -6572,6 +6678,89 @@ mod tests {
     /// walk that stopped early would leave the second copy showing what
     /// the layer used to be — on the screen, since only the cache would
     /// be wrong, which is why this asks the cache rather than the render.
+    /// A copy that has just arrived is a copy, and moving what it copies
+    /// repaints it.
+    ///
+    /// Whether the document holds a copy used to be re-read from the
+    /// whole document after every structural command, which is what made
+    /// building one cost the square of its size. It is read from the
+    /// *command* now — a layer arriving says whether it is a copy — and
+    /// the question that leaves is whether the saying is believed
+    /// straight away.
+    ///
+    /// The audit below does not ask it: it changes the original with a
+    /// `SetKind`, which is one of the commands that still goes and looks,
+    /// so a session that had missed the copy arriving would have been put
+    /// right by the very next thing it was asked. A move is not one of
+    /// those, and it is what a person does first.
+    #[test]
+    fn a_copy_that_has_just_arrived_is_repainted_with_what_it_copies() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let shape = add_rect(&mut session, "shape", 30.0, 20.0);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::instance("a copy", shape)),
+            })
+            .unwrap();
+        let copy = *session
+            .document()
+            .children_of(root)
+            .unwrap()
+            .last()
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: chitrakar_doc::Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        // Drawn once, so there is a cache that can be left stale.
+        let at =
+            |s: &chitrakar_render::Surface| (s.get(10, 10).to_srgb8(), s.get(70, 10).to_srgb8());
+        let (before_here, before_there) = {
+            let (s, _) = session.render_cached().unwrap();
+            at(s)
+        };
+        assert_eq!(
+            before_here, before_there,
+            "the copy draws the shape where it was put"
+        );
+
+        // Fade the original. A copy draws what the original draws, so
+        // this changes the copy too — and nothing about `SetOpacity`
+        // goes and looks at the document, so the copy is repainted only
+        // if the session took the word of the command that added it.
+        //
+        // A *move* would not do: the original's own placement is undone
+        // before a copy draws it, which is what makes moving the
+        // original move only the original.
+        session
+            .apply(Command::SetOpacity {
+                id: shape,
+                opacity: 0.35,
+            })
+            .unwrap();
+        let (s, dirty) = session.render_cached().unwrap();
+        let (after_here, after_there) = at(s);
+        assert_ne!(after_here, before_here, "the original faded");
+        assert_ne!(
+            after_there, before_there,
+            "and so did what the copy draws — left as it was, the copy is \
+             a picture of how the shape used to look"
+        );
+        // The region the app is told to upload has to hold it too: a
+        // pixel drawn right into a buffer nobody reads is still wrong on
+        // screen.
+        let dirty = dirty.expect("something was repainted");
+        assert!(
+            dirty.x0 <= 70 && dirty.x1 > 70 && dirty.y0 <= 10 && dirty.y1 > 10,
+            "the copy's own pixels are inside the region reported: {dirty:?}"
+        );
+    }
+
     #[test]
     fn changing_a_layer_repaints_the_copy_of_the_copy_of_it() {
         let mut session = Session::new(120, 60, ColorMode::Rgb);

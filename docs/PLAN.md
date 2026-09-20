@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~494),
+- **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3413,6 +3413,46 @@ without reading anything else.*
      one take 604ms where the document alone takes 5.91 — so the dirty
      tracking is doing a walk of its own, and it is now the whole of what
      is left.
+     Which is what the next round did, and the session's two walks came
+     off for the same reason the document's did: both are questions
+     about the *whole document* that the command can answer by itself.
+     Does anything here read a neighbourhood — a filter, a clone layer —
+     and is there a copy on the page? A layer arriving says whether it
+     is one, and whatever was there is there still, so only a command
+     that can take the *last* one away has to go and look: a removal, a
+     kind replaced, a batch, a subtree restored. Those are not what a
+     drawing is built out of.
+     1600 layers through a session: **584ms to 47**, and the walk that
+     asked about copies was 85% of it.
+     What is left is smaller, still superlinear, and now *named*: about
+     three times per doubling rather than two, and it is
+     `Document::parent_of`. It scans every group's child list to find one
+     layer's parent, so `ancestor_space` — what space is this layer drawn
+     in — is a walk of the document wearing a different hat, and the
+     dirty region asks for it twice a command. A **parent map** fixes it
+     everywhere at once, and it is its own piece of work: five places
+     mutate the child lists, a document read from a file has to build one,
+     and the thing that keeps it honest is an invariant asked after every
+     command in the shared list. That is the next chunk here.
+     Both scaling tests take a ratio rather than a time, with a floor as
+     well as a ceiling, so a slow or busy machine moves both numbers
+     together. The session's ceiling is 12 rather than 5 and the gap is
+     the parent map rather than slack: four times the layers costs about
+     nine times the work, where linear is four, the walks taken out made
+     it sixty-four, and a true quadratic is sixteen.
+     And the guard needed a test that was not there. Making a copy's
+     arrival go unnoticed broke *nothing* in the suite, which looked for
+     a minute like the flag not mattering. It matters; the audit that
+     covers it changes the original with a `SetKind`, which is one of
+     the commands that still goes and looks, so a session that had
+     missed the copy arriving was put right by the very next thing it
+     was asked. A fade is not one of those, and it is nearer what a
+     person does — so that is the test now, and it asks the dirty
+     *region* as well as the pixels, since a pixel drawn into a buffer
+     nobody reads is still wrong on screen. A move would not have done:
+     a copy draws what the original draws with the original's own
+     placement undone, which is what makes moving the original move only
+     the original.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing
