@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~490),
+- **Verify before committing:** `cargo test --workspace` (~491),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3186,6 +3186,73 @@ without reading anything else.*
      164]: a reader that did not implement the blend would put the
      layer's own pale yellow there, and one that took it in linear light
      would put a different pink, so the number tells those two apart.
+     The next item off that same sweep was **five of six filters**, and
+     it paid the way the method says it should: a page nobody wrote drew
+     one of the four missing ones and two renderers stopped agreeing.
+     `BLENDS`' neighbour in that generator offered a blur or a pixelate
+     and nothing else, so a sharpen, a smear, a vignette and grain had
+     never been drawn by either instrument. All six now, and each is a
+     different shape of question — a sharpen gives back more than it was
+     given and so is the one that can put a value above white; a smear
+     reads along a line rather than across the axes; a vignette and grain
+     are functions of *where a pixel is* rather than of what is under it.
+     **A pointwise filter was measured from the surface rather than from
+     the layer's own space.** The reference renderer asks
+     `Inverse::of(view).at(x + 0.5, y + 0.5)` and the backend read the
+     page pixel, and while the view is the identity those are the same
+     number — which is why this stood. A **copy** is where they part
+     company: it draws what it copies somewhere else entirely, so the
+     view it is drawn under carries the copy's placement. Seed 617 is a
+     copy of a noise filter, and the reference moved the grain with the
+     copy while the backend left it pinned to the page: 0.075 mean,
+     0.363 at the worst pixel, where the ceiling is 0.004.
+     The inverse travels on the quad now and is read in the shader the
+     way `Inverse::at` reads it, arithmetic for arithmetic, because a
+     grain cell is a `floor` and a last bit rounding the other way puts a
+     whole speck in the next cell. It cost a little packing: the quad's
+     four spare numbers went to the inverse, so the seed's low half moved
+     into the third of the `extra` slots and *mono* stopped being a flag
+     and became the kind — a page's grain being one colour or three is as
+     much a different filter as a vignette is. And the page uniform's
+     spare `vec2` now carries the document's own size, which neither the
+     surface nor the page rectangle says once a view scales anything, and
+     which a vignette needs: it is placed from the page's middle in page
+     units.
+     The other half of the same defect had no instrument at all. The view
+     audit's page held no pointwise filter, so a viewport — the thing
+     this backend exists to serve one day — had never once been asked
+     whether a filter lands where the reference puts it. It has a
+     vignette now, and measuring it from the surface fails that audit and
+     nothing else in the workspace.
+     `a_copy_of_a_filter_carries_where_the_filter_is_measured_from` pins
+     the copy half, and its sharp assertion is not that the two renderers
+     agree — they would agree on the grain being pinned if both pinned
+     it. It is that **on the reference renderer the copy's patch is the
+     original's patch moved**, which is what a copy means, and then that
+     the backend draws that same page. Grain in one colour, grain in
+     three and a vignette, each with a floor saying the copy really put
+     something on a page that had nothing there.
+     One threshold moved and the honest account is that it had to.
+     Extending the generator reshuffles every page it makes — a `Noise`
+     draws more numbers than a `GaussianBlur` — so these are two thousand
+     *new* pages, and exactly one of them, seed 1529, sits over the page
+     mean's 0.004, at 0.00737. Run to ground rather than tolerated: it
+     holds a self-intersecting path whose long thin wedge is nearly all
+     edge, under a Difference blend against a strongly contrasting
+     ground, then sharpened — which multiplies a difference by one and a
+     half — and then given more contrast. That path *alone* on the same
+     ground reads 0.00103. So the number is four samples a pixel against
+     an exact area, put through three amplifiers, and the interiors
+     reading — the one that tells a drawing apart from its antialiasing —
+     is clean on all two thousand, with nothing over its point threshold
+     anywhere.
+     What makes the move safe is that the **count** is now held rather
+     than the level alone: at most two pages of two thousand may sit over
+     0.004. A change that makes twenty pages drift a little is caught
+     there even though each stays well inside the ceiling, which is a
+     stronger statement than the single number it replaces. The worst
+     pixel anywhere moved 0.607 to 0.659 and it is the same page and the
+     same reason.
      The **render cache** answered the same way, and the answer is one
      page: exactly one surface after a render, after twenty-one renders,
      and after fifty rounds of edit-then-repaint. No growth, nothing

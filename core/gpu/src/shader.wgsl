@@ -25,7 +25,12 @@ struct Page {
     /// stops, since it is handed the page's rectangle to work in.
     lo: vec2f,
     hi: vec2f,
-    pad: vec2f,
+    /// The document's own size, in the document's own units. Neither of
+    /// the two above says it once a view scales anything, and a filter
+    /// measured on the *picture* rather than on the surface needs it: a
+    /// vignette is placed from the page's middle in page units, so
+    /// panning slides the picture under the darkening.
+    doc: vec2f,
 };
 
 @group(0) @binding(0) var<uniform> page: Page;
@@ -872,7 +877,7 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     }
     let kind = i32(in.mode);
     if kind >= 14 {
-        return filtered(kind, in.params, in.grad, in.page, was, weight);
+        return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
     // adjustments are stated.
@@ -893,16 +898,27 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
 // mixing the result against the original. That is what the CPU does,
 // and the two are not the same reading: a grain shift that clips is
 // clipped after it has been weakened, not before.
-fn filtered(kind: i32, p: vec4f, g: vec4f, at: vec2f, was: vec4f, weight: f32) -> vec4f {
+fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weight: f32) -> vec4f {
+    // Where this pixel is in the space the layer lives in. `g` is the
+    // inverse of the view's linear part and `e.xy` is the view's own
+    // translation, laid out and read exactly as `Inverse::of` and
+    // `Inverse::at` lay out and read theirs — a grain cell is a `floor`,
+    // and a last bit rounding the other way puts a speck in the next
+    // cell. While the view is the identity this is the page pixel; under
+    // a view, or inside a copy that draws what it copies somewhere else,
+    // it is not, and a filter anchored to the surface stops being
+    // anchored to the picture.
+    let rel = at - vec2f(e.x, e.y);
+    let here = vec2f(g.x * rel.x + g.z * rel.y, g.y * rel.x + g.w * rel.y);
     if kind == 14 {
         // Measured from the page's own middle in the page's own units,
         // so panning slides the picture under the darkening rather than
         // carrying the darkening along with it.
-        let mid = page.size * 0.5;
+        let mid = page.doc * 0.5;
         let far = max(length(mid), 1e-3);
         let inner = clamp(p.z, 0.0, 0.999);
         let ease = clamp(p.w, 0.0, 1.0);
-        let d = length(at - mid) / far;
+        let d = length(here - mid) / far;
         let t = clamp((d - inner) / (1.0 - inner), 0.0, 1.0);
         // Softness eases the shoulder: none of it is a straight ramp
         // from where it begins, all of it a curve with no edge anywhere.
@@ -919,13 +935,15 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, at: vec2f, was: vec4f, weight: f32) -
     // carried from the pixel before — which is what lets it be a live
     // layer rather than something baked once.
     let w = p.y * weight;
-    let cell = vec2i(floor(at / max(p.z, 1e-3)));
-    let seed = u32(g.x) + u32(g.y) * 65536u;
+    let cell = vec2i(floor(here / max(p.z, 1e-3)));
+    let seed = u32(e.z) + u32(p.w) * 65536u;
     let one = (speck(cell, seed) - 0.5) * w;
     // Every channel moved together is film grain; each moved on its own
-    // is a sensor's noise.
+    // is a sensor's noise. Which of the two is the kind rather than a
+    // flag on it: the four numbers a flag would have ridden are spoken
+    // for by the inverse above.
     var shift = vec3f(one, one, one);
-    if p.w == 0.0 {
+    if kind == 16 {
         shift = vec3f(one, (speck(cell, seed + 1u) - 0.5) * w, (speck(cell, seed + 2u) - 0.5) * w);
     }
     // Premultiplied, so a shift is a share of the pixel's own alpha and

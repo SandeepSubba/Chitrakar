@@ -1574,14 +1574,46 @@ impl Rng {
                     },
                 },
             )),
+            // All six filters rather than two. The four that were
+            // missing are each a different shape of question and none of
+            // them was being asked here: a sharpen reads a
+            // neighbourhood and gives back more than it was given, so it
+            // is the one that can put a value above white on the page; a
+            // smear reads along a line rather than across the axes; a
+            // vignette is a function of where a pixel is on the *page*
+            // rather than of what is under it, so a group's transform
+            // does not carry it; and noise is a function of position and
+            // of nothing else, which makes it the one whose answer has
+            // to be the same answer every time it is asked — by a second
+            // renderer, by a page redrawn a region at a time, and by an
+            // undo.
             5 => Box::new(Node::filter(
                 &name,
-                match self.upto(2) {
+                match self.upto(6) {
                     0 => Filter::GaussianBlur {
                         sigma: self.between(0.5, 2.5),
                     },
-                    _ => Filter::Pixelate {
+                    1 => Filter::Pixelate {
                         size: self.between(2.0, 6.0),
+                    },
+                    2 => Filter::Sharpen {
+                        sigma: self.between(0.5, 2.0),
+                        amount: self.between(0.2, 1.5),
+                    },
+                    3 => Filter::MotionBlur {
+                        distance: self.between(1.0, 6.0),
+                        degrees: self.between(0.0, 180.0),
+                    },
+                    4 => Filter::Vignette {
+                        amount: self.between(-0.8, 0.8),
+                        radius: self.between(0.1, 0.8),
+                        softness: self.between(0.1, 1.0),
+                    },
+                    _ => Filter::Noise {
+                        amount: self.between(0.05, 0.4),
+                        grain: self.between(0.8, 3.0),
+                        mono: self.chance(2),
+                        seed: self.upto(1 << 16) as u32,
                     },
                 },
             )),
