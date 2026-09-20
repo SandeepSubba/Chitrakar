@@ -25,11 +25,30 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
 import { DEFAULTS, type ExportFormat, type Prefs, type Units } from "./prefs";
+import {
+  ALWAYS_SHOWN,
+  RAIL,
+  SELECT_TOOLS,
+  SHAPE_TOOLS,
+  TOOL_ABOUT,
+  TOOL_HINT,
+  TOOL_ICONS,
+  type Tool,
+} from "./tools";
 
-type Group = "general" | "guides" | "selection" | "colour" | "new" | "export";
+export type PrefGroup =
+  | "general"
+  | "tools"
+  | "guides"
+  | "selection"
+  | "colour"
+  | "new"
+  | "export";
+type Group = PrefGroup;
 
 const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "units" },
+  { id: "tools", label: "Tools", icon: "brush" },
   { id: "guides", label: "Guides & grid", icon: "fit" },
   { id: "selection", label: "Selection", icon: "marquee" },
   { id: "colour", label: "Colour", icon: "proof" },
@@ -51,7 +70,16 @@ const FORMAT_NAMES: Record<ExportFormat, string> = {
   tiff: "TIFF (CMYK)",
 };
 
+/** The rail's sections as the window lists them: the shared slots
+ * opened out into the tools they hold, so each tool is its own row. */
+const RAIL_ROWS: readonly (readonly Tool[])[] = RAIL.map((section) =>
+  section.flatMap((t) =>
+    t === "Select" ? [...SELECT_TOOLS] : t === "Rect" ? [...SHAPE_TOOLS] : [t],
+  ),
+);
+
 export function PreferencesDialog({
+  initialGroup,
   prefs,
   setPrefs,
   resetPrefs,
@@ -61,6 +89,7 @@ export function PreferencesDialog({
   onClearScreenIcc,
   onClose,
 }: {
+  initialGroup?: PrefGroup;
   prefs: Prefs;
   setPrefs: (p: Partial<Prefs>) => void;
   resetPrefs: () => void;
@@ -70,7 +99,7 @@ export function PreferencesDialog({
   onClearScreenIcc: () => void;
   onClose: () => void;
 }) {
-  const [group, setGroup] = useState<Group>("general");
+  const [group, setGroup] = useState<Group>(initialGroup ?? "general");
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -188,6 +217,63 @@ export function PreferencesDialog({
                   prefs.keepDraft,
                   (v) => setPrefs({ keepDraft: v }),
                   "offered back next visit",
+                )}
+              </>
+            )}
+
+            {group === "tools" && (
+              <>
+                <p className="modal-aside">
+                  Which tools are on the rail. One put away is not gone:
+                  its key still picks it, and it waits behind the slot at
+                  the end of the rail with the others put away.
+                </p>
+                {RAIL_ROWS.map((section, i) => (
+                  <div className="prefs-tools" key={i} role="group">
+                    {section.map((t) => {
+                      const hidden = prefs.hiddenTools.includes(t);
+                      const fixed = t === ALWAYS_SHOWN;
+                      return (
+                        <label
+                          className="row prefs-check prefs-tool"
+                          key={t}
+                          title={fixed ? "The one tool the rail cannot do without" : TOOL_ABOUT[t]}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!hidden}
+                            disabled={fixed}
+                            onChange={(e) =>
+                              setPrefs({
+                                hiddenTools: e.target.checked
+                                  ? prefs.hiddenTools.filter((h) => h !== t)
+                                  : [...prefs.hiddenTools, t],
+                              })
+                            }
+                            aria-label={`${t} on the rail`}
+                          />
+                          <Icon name={TOOL_ICONS[t]} size={16} />
+                          <span>{t}</span>
+                          <span className="hint">{TOOL_HINT[t]}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                ))}
+                <p className="modal-aside">
+                  And which groups of buttons the bar along the top shows.
+                  Everything on them is on a menu as well.
+                </p>
+                {check("Document actions on the bar", prefs.barDocument, (v) =>
+                  setPrefs({ barDocument: v }),
+                  "new, open, place, save, export",
+                )}
+                {check("Region actions on the bar", prefs.barSelection, (v) =>
+                  setPrefs({ barSelection: v }),
+                  "pick out, invert, subject, feather",
+                )}
+                {check("Zoom on the bar", prefs.barZoom, (v) =>
+                  setPrefs({ barZoom: v }),
                 )}
               </>
             )}

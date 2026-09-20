@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~496),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1138 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1173 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5341,6 +5341,65 @@ without reading anything else.*
      does the covering properly. But that is the shape to distrust on
      sight, and this is the second time in this document that reading a
      `>=` as a cover has been the mistake.
+  4. **The chrome, against Canva, Affinity and Photoshop.** The menus
+     and the rail were reviewed against all three in September 2026 and
+     brought into line — eight menus, submenus, Adjust and Filter, a
+     rail in sections with a hand and a zoom at its end, and the tools
+     on it a preference (all above, under *Chrome*). What the review
+     found still missing, in the order it would pay, so that the next
+     chunk here is a choice rather than a survey:
+     - A **Help** menu — every one of the three has one, and "Keys and
+       gestures" is the one row here that belongs on it, with an About
+       that says which version this is. Cheap, and a menu bar without
+       one reads as unfinished.
+     - **Gradient tool**: a gradient can be put on a fill and its
+       handles dragged on the canvas, but there is no tool that drags a
+       new one across a layer, which is how every editor makes one.
+     - **Fill (bucket) tool**: press a layer to give it the ink in
+       hand. Photoshop's G, Affinity's flood fill, Canva's colour on a
+       press. `applyColour` already does the work; the tool is a
+       click.
+     - **Eraser** and **Heal** as tools of their own on the rail rather
+       than modes of Paint and Clone (Photoshop's E and J). A mode is
+       right for the engine — a heal *is* a clone stroke with one flag
+       — and wrong for a rail, where a person looks for the eraser.
+     - **Node tool** (Affinity's A): anchors are edited by
+       double-clicking a path with Move in hand, which nobody would
+       guess. A tool that puts the anchors up on a press is a small
+       change and a large discovery.
+     - **Scale the page and everything on it** — Photoshop's Image
+       Size, Canva's Resize. Canvas size… changes the page and leaves
+       the artwork where it is; scaling a whole design to another size
+       is a different ask and the one Canva is built around. One
+       command over every top-level transform plus the page.
+     - **Open recent**, on the desktop shell where a path can be
+       reopened; a browser cannot reopen a file by name, so there it
+       stays a draft.
+     - **Named styles** (Affinity's Styles panel, Photoshop's layer
+       styles): copy and paste style exist; keeping one under a name and
+       applying it by name does not. A list on the document, like the
+       palette, so it travels with the file.
+     - **Brush presets**: size, softness and pressure response kept
+       under a name. Both photo editors have a panel of them; here
+       every stroke starts from the last one's numbers.
+     - A **shape library** beyond rect, ellipse, polygon and star:
+       arrows, callouts, a rounded triangle — Canva's shapes are most
+       of what its users draw. Each is a path preset, not a new kind
+       of layer.
+     - A **Text** menu (Affinity) or Type menu (Photoshop) is *not*
+       wanted yet: everything about text is on the panel where the
+       text is, and a menu of the same controls would be the
+       duplication the View menu just lost.
+     - Already there, so not on the list, though a survey would have
+       guessed otherwise: text on a path, smart guides, rulers and
+       guides, a grid, a history panel, artboards with export scale,
+       components with overrides, booleans, live effects, blend modes,
+       masks of three kinds, a palette with named colours, soft
+       proofing, a preferences window, an export window that shows the
+       file's size. What is deliberately not planned: warp, liquify and
+       perspective distortion of pixels, and content-aware fill — the
+       first three are destructive by nature and the last is a model
+       this editor does not ship.
 - **What the view shows of the document** is one setting
   (`chitrakar_render::Showing`) rather than a growing pile of flags: the
   page, one layer on its own, or the picture before the work. Both of
@@ -5374,16 +5433,50 @@ without reading anything else.*
   nobody would guess at — which is also why a gesture added without a
   line on the sheet leaves the sheet quietly wrong, and why the sheet's
   own block holds it to naming them and not only to its letters
-  working. Document actions live in a File/Edit/Page/View menu bar — Edit
-  carries cut/copy/paste/duplicate/delete and select-all beside undo, Page
-  the page's own size, its turns and its mirrors, View
-  fit/zoom/actual-size/zoom-to-selection and the guide toggles, so
-  none of it depends on knowing the shortcut; the tool
+  working. Document actions live in an eight-menu bar — File, Edit,
+  Select, Layer, Adjust, Filter, Page, View — reviewed against
+  Photoshop's, Affinity's and Canva's and laid out the way theirs are,
+  each menu named after the one thing it holds. File is the file: new,
+  open, save, what comes in (an image, a font), what goes out. Edit is
+  the verbs every application has. Select is picking layers and picking
+  a region out of the page, with a rule between the two. Layer keeps its
+  four families — Arrange, Align, Combine shapes, Mask — behind a row
+  each, since eight alignments in a flat list are a wall, and carries
+  lock, hide and rename as well as group, clip and the live copy.
+  **Adjust** and **Filter** are the two menus a photo editor is
+  incomplete without: every adjustment and every filter as a row, and a
+  second list behind "Only on *layer*" scoped to the picked layer the
+  way the panel's "+FX" offers it — before this they were only on that
+  panel list, which is where nobody looks first. Page is the page's own
+  properties: its size, its turns and mirrors, and the press profile it
+  will be printed through, which used to sit in File under the exports.
+  View is zoom, units, guides, the grid, the before/after eye, the keys
+  sheet and the two rows that open Preferences; the monitor profile rows
+  that were there are in Preferences under Colour and nowhere else, since
+  a setting in two places is a setting that can disagree with itself.
+  A menu row can open a menu of its own (`MenuEntry` kind `sub`), on
+  hover or on a press, and the popup is fixed to the window rather than
+  to the row because the menu it sits in scrolls when tall and a popup
+  inside a scrolling box is cut at the box's edge; the desktop shell
+  builds the same description into native submenus. The tool
   rail, layer actions and top-bar toggles are icons from `app/src/icons.tsx`
   (one stroke weight, one 24-unit grid, drawn in currentColor). Accent is
   reserved for state — active tool, open menu, live toggle, selected layer.
-  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, T), suppressed while
-  typing. Layer rows carry a picture of the layer (a kind glyph where
+  The rail (`app/src/tools.ts`, which the rail, the keys and the
+  preferences window all read) is five sections with a line between —
+  what picks and moves; what makes things; what paints on them; what
+  changes the picture; what only looks at it — ending, as every editor's
+  does, with a **Hand** (H, a drag carries the view) and a **Zoom** (Z,
+  a press looks a quarter closer about the point pressed, alt steps
+  back). Which tools are on the rail is a preference (Preferences ›
+  Tools, or View › Tools on the rail…): a tool unticked leaves the rail
+  and waits behind a "…" slot at its end with the others put away, its
+  key still picking it and the slot then showing it in hand — put away
+  is not gone — and the one tool that cannot be put away is Move. The
+  same page decides which of the bar's three button groups (document,
+  region, zoom) show, everything on them being on a menu as well.
+  Tools have single-letter shortcuts (V/M, R, E, P, B, N, S, T, C, I, H,
+  Z), suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
   there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling
   the verification gate, status, ship, the engine conventions skill, and a
@@ -5495,9 +5588,14 @@ without reading anything else.*
   The old keys are read once so a grid and a unit chosen before any of
   this existed survive it; a preferences window that silently resets
   what you had is worse than none.
-  `PreferencesDialog.tsx` is a rail of six groups, which is Photoshop's
-  shape and Affinity's both, and earns the furniture at six — a flat
-  list of eighteen controls is a search problem. What is deliberately
+  `PreferencesDialog.tsx` is a rail of seven groups, which is Photoshop's
+  shape and Affinity's both, and earns the furniture at seven — a flat
+  list of eighteen controls is a search problem. The seventh is Tools:
+  a checkbox per tool, in the rail's own sections, and one per group of
+  buttons on the bar; `hiddenTools` is a list of what is *hidden* rather
+  than what is shown, so a tool a later version adds appears for someone
+  whose settings predate it, and it is checked name by name on the way
+  in since `typeof []` and `typeof null` are both "object". What is deliberately
   not in it: anything the document owns. Its size, its press profile and
   its guides travel with the file; a preference is about the person and
   stays on this machine. The one place they touch is "New documents",
@@ -5689,7 +5787,9 @@ chitrakar/
   with a channel picker and the untouched channels drawn behind).
 - Vector styling ✅ first pass: fill and inner stroke (color + width),
   editable on existing objects; stroke-only shapes hit-test on the band.
-  Gradients pending. Layer rename ✅ (SetName command, inline edit).
+  Gradients ✅ (a fill can be a gradient, with its stops on the panel and
+  its ends as handles on the canvas; this line said "pending" long after
+  it landed). Layer rename ✅ (SetName command, inline edit).
 - Filter effects: gaussian blur ✅ and sharpen (unsharp mask) ✅ as
   non-destructive layers — CPU path uses three iterated box blurs
   (O(pixels) per pass, W3C feGaussianBlur approximation) in premultiplied
@@ -5969,7 +6069,19 @@ chitrakar/
   single-palette throughout, so a light mode is a token pass over
   ~2,000 lines of CSS rather than a switch, and worth doing as its own
   piece of work.
-- Live effects (drop shadow, outline), styles.
+- Live effects ✅ (drop shadow, inner shadow, outline — on a layer, a
+  group, a copy, drawn by both renderers and carried to SVG and PDF).
+  Copy and paste of a layer's look ✅; *named* styles are not yet, and
+  are on the list in §0 "Next up" item 4.
+- **Reviewed against Canva, Affinity and Photoshop (September 2026):**
+  the menus and the rail are theirs in shape now — see §0 *Chrome* —
+  and what each of them has that this does not is listed, in the order
+  it would pay, in §0 "Next up" item 4: a Help menu, a gradient tool, a
+  fill tool, eraser and heal as tools of their own, a node tool, scaling
+  the whole design, open recent, named styles, brush presets, a shape
+  library. That list is the roadmap for the chrome; nothing on it is a
+  new kind of layer, which is the measure of how far the document model
+  already reaches.
 - Later bets enabled by the architecture: collaboration (serializable commands),
   plugin API (WASM sandboxed), web build (engine already compiles to WASM).
 

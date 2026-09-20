@@ -5,6 +5,9 @@
 
 export type IconName =
   | "move"
+  | "hand"
+  | "zoom"
+  | "more"
   | "marquee"
   | "marqueeEllipse"
   | "lasso"
@@ -163,6 +166,33 @@ const PATHS: Record<IconName, JSX.Element> = {
     </>
   ),
   move: <path d="M5 3l14 8-6 1.6L10.5 19z" />,
+  // A hand, open: the tool that carries the view rather than anything on
+  // it.
+  hand: (
+    <>
+      <path d="M8 12.5V6.5a1.5 1.5 0 0 1 3 0V11" />
+      <path d="M11 11V4.5a1.5 1.5 0 0 1 3 0V11" />
+      <path d="M14 11V6a1.5 1.5 0 0 1 3 0v6.5" />
+      <path d="M17 12.5V9a1.5 1.5 0 0 1 3 0v6a6 6 0 0 1-6 6h-2.2a5 5 0 0 1-4.2-2.3L4.6 14a1.4 1.4 0 0 1 2.3-1.6L8 14" />
+    </>
+  ),
+  // A glass with nothing in it: the zoom-in and zoom-out glyphs carry a
+  // plus and a minus, and this is the tool that does either.
+  zoom: (
+    <>
+      <circle cx="11" cy="11" r="6" />
+      <path d="M15.5 15.5L20 20" />
+    </>
+  ),
+  // Three dots: the slot at the end of the rail that holds the tools put
+  // away from it.
+  more: (
+    <>
+      <circle cx="6" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="18" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    </>
+  ),
   rect: <rect x="4" y="6" width="16" height="12" rx="1.5" />,
   fill: (
     <>

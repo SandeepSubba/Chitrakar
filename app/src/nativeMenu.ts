@@ -19,6 +19,16 @@ export type MenuEntry =
       label: string;
       hint?: string;
       run: () => void;
+    }
+  | {
+      /** A row that opens a menu of its own beside it. What every editor
+       * does with a family of eight alignments or four ways to combine
+       * shapes: one row on the menu, the family behind it. */
+      kind: "sub";
+      id: string;
+      icon: string;
+      label: string;
+      entries: MenuEntry[];
     };
 
 /** One menu on the bar. */
@@ -34,15 +44,34 @@ export const isTauri = () =>
  * rebuilds when this changes. Labels and hints carry the state that shows
  * — a tick beside the current units, "Hide guides" against "Show
  * guides" — so they are what the signature is made of. */
-export const menuSignature = (menus: MenuSpec[]) =>
-  menus
-    .map(
-      (m) =>
-        `${m.label}:${m.entries
-          .map((e) => (e.kind === "sep" ? "-" : `${e.id}|${e.label}|${e.hint ?? ""}`))
-          .join(",")}`,
+const entriesSignature = (entries: MenuEntry[]): string =>
+  entries
+    .map((e) =>
+      e.kind === "sep"
+        ? "-"
+        : e.kind === "sub"
+          ? `${e.id}|${e.label}[${entriesSignature(e.entries)}]`
+          : `${e.id}|${e.label}|${e.hint ?? ""}`,
     )
-    .join(";");
+    .join(",");
+
+export const menuSignature = (menus: MenuSpec[]) =>
+  menus.map((m) => `${m.label}:${entriesSignature(m.entries)}`).join(";");
+
+/** The row with this id, wherever in the menus it sits. */
+export function findEntry(
+  entries: MenuEntry[],
+  id: string,
+): Extract<MenuEntry, { kind: "item" }> | undefined {
+  for (const e of entries) {
+    if (e.kind === "item" && e.id === id) return e;
+    if (e.kind === "sub") {
+      const inside = findEntry(e.entries, id);
+      if (inside) return inside;
+    }
+  }
+  return undefined;
+}
 
 /** Build the menu bar and hand it to the OS. `dispatch` is called with
  * the id of whatever was picked; the caller routes it to a handler that
@@ -84,26 +113,27 @@ export async function setNativeMenu(
     ]),
   });
 
+  type Row = Awaited<ReturnType<typeof MenuItem.new>> | Awaited<ReturnType<typeof Submenu.new>> | Awaited<ReturnType<typeof sep>>;
+  const rows = (entries: MenuEntry[]): Promise<Row[]> =>
+    Promise.all(
+      entries.map(async (e) =>
+        e.kind === "sep"
+          ? sep()
+          : e.kind === "sub"
+            ? Submenu.new({ text: e.label, items: await rows(e.entries) })
+            : MenuItem.new({
+                id: e.id,
+                // The hint is the tick or the note the in-window row
+                // puts on its right; a native row has one column, so it
+                // rides along in the text.
+                text: e.hint && e.hint !== "✓" ? `${e.label} (${e.hint})` : e.hint ? `✓ ${e.label}` : e.label,
+                action: () => dispatch(e.id),
+              }),
+      ),
+    );
+
   const submenus = await Promise.all(
-    menus.map(async (m) =>
-      Submenu.new({
-        text: m.label,
-        items: await Promise.all(
-          m.entries.map((e) =>
-            e.kind === "sep"
-              ? sep()
-              : MenuItem.new({
-                  id: e.id,
-                  // The hint is the tick or the note the in-window row
-                  // puts on its right; a native row has one column, so it
-                  // rides along in the text.
-                  text: e.hint && e.hint !== "✓" ? `${e.label} (${e.hint})` : e.hint ? `✓ ${e.label}` : e.label,
-                  action: () => dispatch(e.id),
-                }),
-          ),
-        ),
-      }),
-    ),
+    menus.map(async (m) => Submenu.new({ text: m.label, items: await rows(m.entries) })),
   );
 
   // A Window menu, so the window can be minimised and closed the way

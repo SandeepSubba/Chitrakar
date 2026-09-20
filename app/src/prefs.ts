@@ -20,6 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { ALWAYS_SHOWN, isTool, type Tool } from "./tools";
 
 export type Units = "px" | "mm" | "in";
 export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
@@ -56,6 +57,16 @@ export type Prefs = {
   feather: number;
   /** How readily the subject pick lets go of a colour, 0–1. */
   subjectTolerance: number;
+  /** The tools put away from the rail. They are still there — behind
+   * the slot at the rail's end, and on their keys — but not in the way.
+   * A list of what is *hidden* rather than what is shown, so a tool
+   * this version adds appears for someone whose settings predate it. */
+  hiddenTools: Tool[];
+  /** Which of the bar's groups of buttons are shown. Everything on them
+   * is on a menu as well, so a group put away costs nothing but reach. */
+  barDocument: boolean;
+  barSelection: boolean;
+  barZoom: boolean;
 };
 
 export const DEFAULTS: Prefs = {
@@ -75,6 +86,10 @@ export const DEFAULTS: Prefs = {
   jpegQuality: 92,
   feather: 0,
   subjectTolerance: 0.5,
+  hiddenTools: [],
+  barDocument: true,
+  barSelection: true,
+  barZoom: true,
 };
 
 const KEY = "chitrakar:prefs";
@@ -138,6 +153,15 @@ export function clamp(p: Prefs): Prefs {
     jpegQuality: n(Math.round(p.jpegQuality), 1, 100, 92),
     feather: n(p.feather, 0, 500, 0),
     subjectTolerance: n(p.subjectTolerance, 0, 1, 0.5),
+    // Only names that are tools, each once, and never the one tool the
+    // rail cannot do without. `typeof []` is "object" and so is
+    // `typeof null`, which is why the field-by-field read above is not
+    // enough here.
+    hiddenTools: Array.isArray(p.hiddenTools)
+      ? p.hiddenTools.filter(
+          (t, i, all) => isTool(t) && t !== ALWAYS_SHOWN && all.indexOf(t) === i,
+        )
+      : [],
   };
 }
 

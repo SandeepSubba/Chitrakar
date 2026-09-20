@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Icon, IconName } from "./icons";
 import {
+  findEntry,
   isTauri,
   menuSignature,
   setNativeMenu,
@@ -9,8 +10,19 @@ import {
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import { usePrefs } from "./prefs";
+import {
+  ALWAYS_SHOWN,
+  RAIL,
+  SELECT_TOOLS,
+  SHAPE_TOOLS,
+  TOOL_HINT,
+  TOOL_ICONS,
+  TOOL_KEYS,
+  TOOLS,
+  type Tool,
+} from "./tools";
 import { ExportDialog } from "./ExportDialog";
-import { PreferencesDialog } from "./PreferencesDialog";
+import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
   Adjustment,
   BlendMode,
@@ -144,36 +156,6 @@ function seedHandles(
   });
 }
 
-const TOOLS = [
-  "Move",
-  "Select",
-  "Select ellipse",
-  "Lasso",
-  "Wand",
-  "Frame",
-  "Rect",
-  "Ellipse",
-  "Line",
-  "Polygon",
-  "Star",
-  "Pen",
-  "Brush",
-  "Paint",
-  "Clone",
-  "Text",
-  "Crop",
-  "Eyedropper",
-] as const;
-
-/** The tools that draw a shape, which share one slot in the rail: the
- * one last used sits in it and the rest are a press away, the way a
- * rail with more tools than room has always done it. */
-const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star"] as const;
-/** The tools that pick a region out of the page rather than draw
- * anything, sharing one slot the way the shapes do. What they make is a
- * selection: not a layer, not artwork — a region to hand to a layer as
- * the part of it that shows. */
-const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as const;
 /** What each of them asks the engine for. */
 const REGION_KIND: Record<string, string> = {
   Select: "rect",
@@ -182,28 +164,6 @@ const REGION_KIND: Record<string, string> = {
   // The wand asks the engine to work the region out from the page
   // itself, so it has no shape of its own to send.
   Wand: "",
-};
-/** One letter per tool, the convention every editor shares. `v` for Move
- * because that is where the muscle memory is; `m` too, since the tool is
- * called Move here. */
-const TOOL_KEYS: Record<string, (typeof TOOLS)[number]> = {
-  v: "Move",
-  // `m` for the marquee, which is where that muscle memory is; Move
-  // keeps `v`, which is where its own is.
-  m: "Select",
-  f: "Frame",
-  r: "Rect",
-  e: "Ellipse",
-  l: "Line",
-  y: "Polygon",
-  k: "Star",
-  p: "Pen",
-  b: "Brush",
-  n: "Paint",
-  s: "Clone",
-  t: "Text",
-  c: "Crop",
-  i: "Eyedropper",
 };
 
 /** What a layer can be pinned to inside a frame, named for the axis so
@@ -254,48 +214,6 @@ const KIND_ICONS: Record<string, IconName> = {
   clone: "clone",
 };
 
-const TOOL_HINT: Record<(typeof TOOLS)[number], string> = {
-  Move: "V",
-  Select: "M",
-  "Select ellipse": "M",
-  Lasso: "M",
-  Wand: "M",
-  Frame: "F",
-  Rect: "R",
-  Ellipse: "E",
-  Line: "L",
-  Polygon: "Y",
-  Star: "K",
-  Pen: "P",
-  Brush: "B",
-  Paint: "N",
-  Clone: "S",
-  Text: "T",
-  Crop: "C",
-  Eyedropper: "I",
-};
-
-const TOOL_ICONS: Record<(typeof TOOLS)[number], IconName> = {
-  Move: "move",
-  Select: "marquee",
-  "Select ellipse": "marqueeEllipse",
-  Lasso: "lasso",
-  Wand: "wand",
-  Frame: "frame",
-  Rect: "rect",
-  Ellipse: "ellipse",
-  Line: "line",
-  Polygon: "polygon",
-  Star: "star",
-  Pen: "pen",
-  Brush: "brush",
-  Paint: "paint",
-  Clone: "clone",
-  Text: "text",
-  Crop: "crop",
-  Eyedropper: "eyedropper",
-};
-type Tool = (typeof TOOLS)[number];
 /** The blend modes, grouped the way every editor groups them: the plain
  * one, the ones that darken, the ones that lighten, the ones that work on
  * contrast, the ones that compare, and the four that take one part of a
@@ -925,8 +843,23 @@ const item = (
   run: () => void,
   hint?: string,
 ): MenuEntry => ({ kind: "item", id, icon, label, run, hint });
-/** Which menu is open, and what the four of them are called. */
-type MenuId = "file" | "edit" | "select" | "layer" | "page" | "view";
+/** A row that opens a menu of its own beside it. */
+const sub = (
+  id: string,
+  icon: IconName,
+  label: string,
+  entries: MenuEntry[],
+): MenuEntry => ({ kind: "sub", id, icon, label, entries });
+/** Which menu is open, and what the eight of them are called. */
+type MenuId =
+  | "file"
+  | "edit"
+  | "select"
+  | "layer"
+  | "adjust"
+  | "filter"
+  | "page"
+  | "view";
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
@@ -986,6 +919,7 @@ export function App() {
   const [selectTool, setSelectTool] =
     useState<(typeof SELECT_TOOLS)[number]>("Select");
   const [selectsOpen, setSelectsOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   useEffect(() => {
     if (SELECT_TOOLS.includes(tool as never)) {
       setSelectTool(tool as (typeof SELECT_TOOLS)[number]);
@@ -1126,6 +1060,13 @@ export function App() {
   /** The export window, and the preferences window. */
   const [exportOpen, setExportOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  /** Which page the preferences window opens on: a row that is about
+   * the tools opens it on the tools. */
+  const [prefsGroup, setPrefsGroup] = useState<PrefGroup>("general");
+  const openPrefs = (group: PrefGroup) => {
+    setPrefsGroup(group);
+    setPrefsOpen(true);
+  };
   const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
   /** Whether the softness of what is picked is being chosen in its own
    * window. The number is also in the rail, where a hand already on the
@@ -1157,6 +1098,30 @@ export function App() {
    * The names below are bound so the call sites that used to hold their
    * own state read exactly as they did. */
   const { prefs, set: setPrefs, reset: resetPrefs } = usePrefs();
+  /** Which tools are on the rail. Put away in Preferences is not gone:
+   * the tool keeps its key and sits behind the slot at the rail's end.
+   * The one tool that cannot be put away is the one that moves things. */
+  const shown = (t: Tool) => t === ALWAYS_SHOWN || !prefs.hiddenTools.includes(t);
+  const hiddenTools = TOOLS.filter((t) => !shown(t));
+  const shownShapes = SHAPE_TOOLS.filter(shown);
+  const shownSelects = SELECT_TOOLS.filter(shown);
+  /** What sits in the shared slots: the tool last used if it is still on
+   * the rail, else the first of its family that is. */
+  const shapeSlot: Tool = shown(shapeTool) ? shapeTool : (shownShapes[0] ?? "Rect");
+  const selectSlot: Tool = shown(selectTool) ? selectTool : (shownSelects[0] ?? "Select");
+  /** The rail's sections with the put-away tools taken out, and any
+   * section that is then empty taken out with them. `Select` and `Rect`
+   * stand for their families' shared slots, which stay while any of the
+   * family does. */
+  const railSections = RAIL.map((section) =>
+    section.filter((t) =>
+      t === "Select"
+        ? shownSelects.length > 0
+        : t === "Rect"
+          ? shownShapes.length > 0
+          : shown(t),
+    ),
+  ).filter((section) => section.length > 0);
   const units = prefs.units;
   const setUnits = (u: Units) => setPrefs({ units: u });
   /** The viewport's size in CSS pixels. The canvas covers it, and the
@@ -1453,6 +1418,16 @@ export function App() {
       const zoom = Math.min(8, Math.max(0.05, v.zoom * factor));
       const k = zoom / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+    });
+  }, []);
+
+  /** Zoom about a point of the canvas, the way the wheel does: the
+   * document point under it stays under it. */
+  const zoomAt = useCallback((cx: number, cy: number, factor: number) => {
+    setView((v) => {
+      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
+      const k = zoom / v.zoom;
       return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
     });
   }, []);
@@ -2291,7 +2266,10 @@ export function App() {
   }, [contextAt]);
 
   const isPanTrigger = (e: React.PointerEvent) =>
-    e.button === 1 || (e.button === 0 && spaceRef.current);
+    e.button === 1 ||
+    // The hand is the space bar made into a tool: for a finger, which
+    // has no space bar, and for a hand that would rather not hold one.
+    (e.button === 0 && (spaceRef.current || tool === "Hand"));
 
   /** Where a pointer is in the canvas's own coordinates — the space the
    * view's own offset is written in, which is what a pinch has to work
@@ -2610,6 +2588,13 @@ export function App() {
     // and nothing else happens — the tool in hand waits its turn.
     if (pickingNeutral) {
       pickNeutral(x, y);
+      return;
+    }
+    // The zoom tool looks closer at where it is pressed, and steps back
+    // from there with alt held — the convention every editor shares.
+    if (tool === "Zoom") {
+      const [hx, hy] = canvasPoint(e);
+      zoomAt(hx, hy, e.altKey ? 0.8 : 1.25);
       return;
     }
     // Asked for a line along something level, the next drag draws it.
@@ -6178,6 +6163,44 @@ export function App() {
   /** Every menu as data, so the bar in the window and the desktop
    * shell's native bar are two renderings of one list rather than two
    * lists that drift. */
+  /** Whether a preset is an adjustment (a change to colour and tone) or
+   * a filter (a change to the pixels' neighbourhood). The panel's one
+   * list holds both; the two menus hold one each, since that is how
+   * every editor divides them and where a hand goes looking. */
+  const presetIs = (kind: NodeKind, what: "Adjustment" | "Filter") =>
+    typeof kind === "object" && kind !== null && what in kind;
+  const presetRows = (what: "Adjustment" | "Filter", icon: IconName) => {
+    const rows = Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) =>
+      presetIs(p.kind, what),
+    );
+    const over = rows.map(([key, p]) =>
+      item(`${what}-${key}`, icon, p.name, () => addAdjustment(key)),
+    );
+    // The same list again, scoped to the picked layer — which the
+    // engine does by grouping the two, a group being what isolates.
+    // Not offered on an adjustment or a filter, which have nothing of
+    // their own to be scoped to.
+    const scoped =
+      selectedLayer &&
+      selectedLayer.kind !== "adjustment" &&
+      selectedLayer.kind !== "filter"
+        ? [
+            SEP,
+            sub(
+              `${what}-only`,
+              icon,
+              `Only on ${selectedLayer.name}`,
+              rows.map(([key, p]) =>
+                item(`${what}-only-${key}`, icon, p.name, () =>
+                  addAdjustment(`only:${key}`),
+                ),
+              ),
+            ),
+          ]
+        : [];
+    return [...over, ...scoped];
+  };
+
   const menus: (MenuSpec & { id: MenuId })[] = [
     {
       id: "file",
@@ -6240,18 +6263,9 @@ export function App() {
               ),
             ]
           : []),
-        SEP,
-        // The press profile is the document's own — what it will be
-        // printed through — so it belongs with the document. How this
-        // screen shows colour is not about the document at all, and has
-        // gone to View with the other things that are only about
-        // looking.
-        item(
-          "press-profile",
-          hasIcc ? "check" : "profile",
-          hasIcc ? "Replace press profile…" : "Load press profile…",
-          () => pick(iccInputRef),
-        ),
+        // The press profile used to sit here, under the exports. It is
+        // the document's own — what the page will be printed through —
+        // and is on the Page menu now, with the page's other properties.
       ],
     },
     {
@@ -6317,16 +6331,36 @@ export function App() {
       id: "layer",
       label: "Layer",
       entries: [
-        // Grouping, clipping and making a live copy were on the panel's
-        // own buttons and nowhere else — five unlabelled icons, and no
-        // way to find out what they did but to press one. They have
-        // names here.
-        item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
-        item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
+        // Four families, each behind one row, the way Photoshop's and
+        // Affinity's Layer menus hold theirs: a flat list of eight
+        // alignments and four ways to combine shapes is a wall, and a
+        // wall is not read. Every one of these was on the panel and
+        // nowhere else — an unlabelled icon, found by pressing it.
+        sub("arrange", "raise", "Arrange", [
+          item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
+          item("bring-forward", "raise", "Bring forward", () => reorderSelected(1)),
+          item("send-backward", "lower", "Send backward", () => reorderSelected(-1)),
+          item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
+        ]),
+        sub(
+          "align",
+          "alignLeft",
+          "Align",
+          ALIGN_BUTTONS.map(([mode, icon, label]) =>
+            item(`align-${mode}`, icon, label, () => alignSelection(mode)),
+          ),
+        ),
+        sub(
+          "combine",
+          "union",
+          "Combine shapes",
+          BOOLEAN_BUTTONS.map(([op, icon, label]) =>
+            item(`combine-${op}`, icon, label, () => combineSelection(op)),
+          ),
+        ),
         SEP,
         item("group", "group", "Group", groupSelection, "Ctrl+G"),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, "Ctrl+Shift+G"),
-        SEP,
         // The hint here is a shortcut that already exists and was
         // advertised nowhere. Group and ungroup get none, because they
         // have none: a menu that names a key the app does not answer to
@@ -6334,9 +6368,55 @@ export function App() {
         item("clip", "clip", "Clip to the layer below", clipSelection, "Ctrl+Alt+G"),
         item("instance", "instance", "Make a live copy", instanceSelected),
         SEP,
+        sub("mask", "mask", "Mask", [
+          item("mask-rect", "mask", "Rectangle mask", () => addMask("rect")),
+          item("mask-ellipse", "mask", "Ellipse mask", () => addMask("ellipse")),
+          ...(selectedLayer && selectedMask !== null
+            ? [
+                SEP,
+                item("mask-remove", "trash", "Remove the mask", () =>
+                  run({ SetMask: { id: selectedLayer.id, mask: null } }),
+                ),
+              ]
+            : []),
+        ]),
+        SEP,
+        // Said as what pressing it will do, since a row that says
+        // "Lock" over a locked layer is a row that lies.
+        item(
+          "lock",
+          selectedLayer?.locked ? "unlock" : "lock",
+          selectedLayer?.locked ? "Unlock" : "Lock",
+          () => setLockedAll(!selectedLayer?.locked),
+        ),
+        item(
+          "hide",
+          selectedLayer && !selectedLayer.visible ? "eye" : "eyeOff",
+          selectedLayer && !selectedLayer.visible ? "Show" : "Hide",
+          () => setVisibleAll(!(selectedLayer?.visible ?? true)),
+        ),
+        item("rename", "text", "Rename…", () => {
+          if (selectedLayer) setRenaming({ id: selectedLayer.id, value: selectedLayer.name });
+        }),
+        SEP,
         item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
         item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
       ],
+    },
+    {
+      // Photoshop keeps these under Image > Adjustments and Affinity
+      // under Layer > New Adjustment; both are two menus deep for the
+      // first thing anyone does to a photograph. Here they were only on
+      // the panel's "+FX" list, which is no menus deep and nowhere a
+      // person looks. One menu, named after what it holds.
+      id: "adjust",
+      label: "Adjust",
+      entries: presetRows("Adjustment", "adjust"),
+    },
+    {
+      id: "filter",
+      label: "Filter",
+      entries: presetRows("Filter", "filter"),
     },
     {
       id: "page",
@@ -6355,6 +6435,18 @@ export function App() {
         SEP,
         item("mirror-h", "flipH", "Mirror left to right", () => mirrorPage(true)),
         item("mirror-v", "flipV", "Mirror top to bottom", () => mirrorPage(false)),
+        SEP,
+        // The press profile is the document's own — what it will be
+        // printed through — so it belongs with the document's other
+        // properties. How this screen shows colour is not about the
+        // document at all, and is in Preferences with the other things
+        // that are only about looking.
+        item(
+          "press-profile",
+          hasIcc ? "check" : "profile",
+          hasIcc ? "Replace press profile…" : "Load press profile…",
+          () => pick(iccInputRef),
+        ),
       ],
     },
     {
@@ -6362,10 +6454,6 @@ export function App() {
       label: "View",
       entries: [
         // Zoom first, together and in the order a hand thinks of them.
-        // "Keys and gestures" used to sit between Fit and Zoom in, which
-        // is nobody's idea of where it belongs; it is at the end now,
-        // with the other thing that is about the app rather than the
-        // picture.
         item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), "Ctrl++"),
         item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), "Ctrl+-"),
         item("actual-size", "actualSize", "Actual size", () => zoomTo(1), "Ctrl+1"),
@@ -6397,35 +6485,32 @@ export function App() {
           ),
         ),
         SEP,
-        // How this screen shows colour: nothing to do with the document,
-        // everything to do with looking at it. These were in File,
-        // under the exports, where nobody would think to look.
+        // The picture as it was before the work: the bar's eye, named.
         item(
-          "monitor-profile",
-          hasScreenIcc ? "check" : "proof",
-          hasScreenIcc ? "Replace monitor profile…" : "Load monitor profile…",
-          () => pick(screenIccInputRef),
-        ),
-        item("display-p3", "proof", "Show as Display P3", () => {
-          if (!session) return;
-          try {
-            session.set_display_profile(display_p3_profile());
-            setHasScreenIcc(true);
+          "before",
+          untouched ? "check" : "eye",
+          "Before the adjustments and filters",
+          () => {
+            if (!session) return;
+            session.set_untouched(!untouched);
+            setUntouched(!untouched);
             refresh(session);
-          } catch (err) {
-            alert(`Could not use monitor profile: ${err}`);
-          }
-        }),
-        ...(hasScreenIcc
-          ? [item("clear-screen-profile", "profile", "Show sRGB as it is", clearScreenProfile)]
-          : []),
+          },
+          untouched ? "✓" : undefined,
+        ),
         SEP,
+        // The monitor profile rows that were here are in Preferences,
+        // under Colour, and only there: a setting in two places is a
+        // setting that can disagree with itself.
         item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
         SEP,
         // Last on the last menu, which is where an application's own
         // settings sit when they are not on a Mac's application menu —
-        // and the desktop shell puts them there as well.
-        item("prefs", "units", "Preferences…", () => setPrefsOpen(true), "Ctrl+,"),
+        // and the desktop shell puts them there as well. The rail's own
+        // row beside it opens the same window on the page that decides
+        // which tools are on the rail.
+        item("tools", "brush", "Tools on the rail…", () => openPrefs("tools")),
+        item("prefs", "units", "Preferences…", () => openPrefs("general"), "Ctrl+,"),
       ],
     },
   ];
@@ -6447,11 +6532,10 @@ export function App() {
       menusRef.current,
       (id) => {
         for (const m of menusRef.current) {
-          for (const e of m.entries) {
-            if (e.kind === "item" && e.id === id) {
-              e.run();
-              return;
-            }
+          const row = findEntry(m.entries, id);
+          if (row) {
+            row.run();
+            return;
           }
         }
       },
@@ -6503,20 +6587,7 @@ export function App() {
                 onHover={() => openMenu && setOpenMenu(m.id)}
                 onClose={() => setOpenMenu(null)}
               >
-                {m.entries.map((e, i) =>
-                  e.kind === "sep" ? (
-                    <hr key={`sep${i}`} />
-                  ) : (
-                    <MenuItem
-                      key={e.id}
-                      icon={e.icon as IconName}
-                      onClick={e.run}
-                      hint={e.hint}
-                    >
-                      {e.label}
-                    </MenuItem>
-                  ),
-                )}
+                <MenuRows entries={m.entries} />
               </MenuButton>
             ))}
           </nav>
@@ -6534,6 +6605,7 @@ export function App() {
             wordmark and the document chip and for the same reason: the
             bar has to stay short enough to leave a canvas, and the
             menus still hold all of it. */}
+        {prefs.barDocument && (
         <div className="chrome-group wide-only" role="group" aria-label="Document">
           <button
             className="chrome-button icon-only"
@@ -6580,6 +6652,7 @@ export function App() {
             <Icon name="export" />
           </button>
         </div>
+        )}
 
         {/* What is picked out of the page. These were on the Select
             menu and nowhere else, and picking a region is not a thing
@@ -6592,6 +6665,7 @@ export function App() {
             button has nothing: an ellipse marquee standing for "the
             rest instead", or a lasso for "nothing", says the wrong
             thing outright once the words are gone. */}
+        {prefs.barSelection && (
         <div className="chrome-group wide-only" role="group" aria-label="Selection">
           <button
             className="chrome-button icon-only"
@@ -6634,7 +6708,9 @@ export function App() {
             <Icon name="feather" />
           </button>
         </div>
+        )}
 
+        {prefs.barZoom && (
         <div className="chrome-group wide-only" role="group" aria-label="Zoom">
           <button
             className="chrome-button icon-only"
@@ -6669,6 +6745,7 @@ export function App() {
             <Icon name="zoomIn" />
           </button>
         </div>
+        )}
 
         <span className="spacer" />
 
@@ -7048,6 +7125,7 @@ export function App() {
       )}
       {prefsOpen && (
         <PreferencesDialog
+          initialGroup={prefsGroup}
           prefs={prefs}
           setPrefs={setPrefs}
           resetPrefs={resetPrefs}
@@ -7096,100 +7174,160 @@ export function App() {
           >
             <Icon name="grip" size={20} />
           </button>
-          {/* Every tool but the shapes, which share the one slot that
-              Rect's place in the list marks out. */}
-          {TOOLS.filter(
-            (t) =>
-              t === "Rect" ||
-              t === "Select" ||
-              !(
-                SHAPE_TOOLS.includes(t as never) || SELECT_TOOLS.includes(t as never)
-              ),
-          ).map((t) =>
-            t === "Select" ? (
-              // The three that pick a region share this slot, the way
-              // the shapes share theirs.
-              <div className="tool-group" key="selects">
-                <button
-                  className={
-                    SELECT_TOOLS.includes(tool as never) ? "tool active" : "tool"
-                  }
-                  onClick={() => {
-                    setTool(selectTool);
-                    setPenPoints([]);
-                  }}
-                  title={`${selectTool} (${TOOL_HINT[selectTool]})`}
-                  aria-label={selectTool}
-                >
-                  <Icon name={TOOL_ICONS[selectTool]} size={20} />
-                </button>
-                <button
-                  className="tool-more"
-                  aria-label="More ways to select"
-                  aria-expanded={selectsOpen}
-                  title="The other ways to pick a region"
-                  onClick={() => setSelectsOpen((open) => !open)}
-                />
-                {selectsOpen && (
-                  <div
-                    className="tool-flyout"
-                    role="group"
-                    aria-label="Ways to select"
+          {/* The rail, in sections with a line between them, less the
+              tools put away in Preferences. A section with nothing left
+              in it goes, and so does its line. */}
+          {railSections.map((section, i) => (
+            <Fragment key={i}>
+              {i > 0 && <span className="tool-sep" role="separator" />}
+              {section.map((t) =>
+                t === "Select" ? (
+                  // The four that pick a region share this slot, the way
+                  // the shapes share theirs.
+                  <div className="tool-group" key="selects">
+                    <button
+                      className={
+                        SELECT_TOOLS.includes(tool as never) && shown(tool)
+                          ? "tool active"
+                          : "tool"
+                      }
+                      onClick={() => {
+                        setTool(selectSlot);
+                        setPenPoints([]);
+                      }}
+                      title={`${selectSlot} (${TOOL_HINT[selectSlot]})`}
+                      aria-label={selectSlot}
+                    >
+                      <Icon name={TOOL_ICONS[selectSlot]} size={20} />
+                    </button>
+                    {shownSelects.length > 1 && (
+                      <button
+                        className="tool-more"
+                        aria-label="More ways to select"
+                        aria-expanded={selectsOpen}
+                        title="The other ways to pick a region"
+                        onClick={() => setSelectsOpen((open) => !open)}
+                      />
+                    )}
+                    {selectsOpen && (
+                      <div
+                        className="tool-flyout"
+                        role="group"
+                        aria-label="Ways to select"
+                      >
+                        {shownSelects.map((s) => (
+                          <button
+                            key={s}
+                            className={s === tool ? "tool active" : "tool"}
+                            onClick={() => {
+                              setSelectTool(s);
+                              setTool(s);
+                              setPenPoints([]);
+                              setSelectsOpen(false);
+                            }}
+                            title={`${s} (${TOOL_HINT[s]})`}
+                            aria-label={s}
+                          >
+                            <Icon name={TOOL_ICONS[s]} size={20} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : t === "Rect" ? (
+                  // The shape tools share this slot: the one last used sits
+                  // in it, and the rest are behind the corner.
+                  <div className="tool-group" key="shapes">
+                    <button
+                      className={
+                        SHAPE_TOOLS.includes(tool as never) && shown(tool)
+                          ? "tool active"
+                          : "tool"
+                      }
+                      onClick={() => {
+                        setTool(shapeSlot);
+                        setPenPoints([]);
+                      }}
+                      title={`${shapeSlot} (${TOOL_HINT[shapeSlot]})`}
+                      aria-label={shapeSlot}
+                    >
+                      <Icon name={TOOL_ICONS[shapeSlot]} size={20} />
+                    </button>
+                    {shownShapes.length > 1 && (
+                      <button
+                        className="tool-more"
+                        aria-label="More shapes"
+                        aria-expanded={shapesOpen}
+                        title="The other shapes"
+                        onClick={() => setShapesOpen((open) => !open)}
+                      />
+                    )}
+                    {shapesOpen && (
+                      <div className="tool-flyout" role="group" aria-label="Shapes">
+                        {shownShapes.map((s) => (
+                          <button
+                            key={s}
+                            className={s === tool ? "tool active" : "tool"}
+                            onClick={() => {
+                              setShapeTool(s);
+                              setTool(s);
+                              setPenPoints([]);
+                              setShapesOpen(false);
+                            }}
+                            title={`${s} (${TOOL_HINT[s]})`}
+                            aria-label={s}
+                          >
+                            <Icon name={TOOL_ICONS[s]} size={20} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    key={t}
+                    className={t === tool ? "tool active" : "tool"}
+                    onClick={() => {
+                      setTool(t);
+                      setPenPoints([]);
+                    }}
+                    title={`${t} (${TOOL_HINT[t]})`}
+                    aria-label={t}
                   >
-                    {SELECT_TOOLS.map((s) => (
-                      <button
-                        key={s}
-                        className={s === tool ? "tool active" : "tool"}
-                        onClick={() => {
-                          setSelectTool(s);
-                          setTool(s);
-                          setPenPoints([]);
-                          setSelectsOpen(false);
-                        }}
-                        title={`${s} (${TOOL_HINT[s]})`}
-                        aria-label={s}
-                      >
-                        <Icon name={TOOL_ICONS[s]} size={20} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : t === "Rect" ? (
-              // The shape tools share this slot: the one last used sits
-              // in it, and the rest are behind the corner.
-              <div className="tool-group" key="shapes">
+                    <Icon name={TOOL_ICONS[t]} size={20} />
+                  </button>
+                ),
+              )}
+            </Fragment>
+          ))}
+          {/* The tools put away, behind one slot at the end — the way
+              Photoshop keeps its own. Put away is not gone: a key still
+              picks one, and the slot then shows it in hand. */}
+          {hiddenTools.length > 0 && (
+            <>
+              <span className="tool-sep" role="separator" />
+              <div className="tool-group" key="more">
                 <button
                   className={
-                    SHAPE_TOOLS.includes(tool as never) ? "tool active" : "tool"
+                    hiddenTools.includes(tool) ? "tool active" : "tool"
                   }
-                  onClick={() => {
-                    setTool(shapeTool);
-                    setPenPoints([]);
-                  }}
-                  title={`${shapeTool} (${TOOL_HINT[shapeTool]})`}
-                  aria-label={shapeTool}
+                  onClick={() => setMoreOpen((open) => !open)}
+                  aria-expanded={moreOpen}
+                  title="The tools put away from the rail"
+                  aria-label="More tools"
                 >
-                  <Icon name={TOOL_ICONS[shapeTool]} size={20} />
+                  <Icon name={hiddenTools.includes(tool) ? TOOL_ICONS[tool] : "more"} size={20} />
                 </button>
-                <button
-                  className="tool-more"
-                  aria-label="More shapes"
-                  aria-expanded={shapesOpen}
-                  title="The other shapes"
-                  onClick={() => setShapesOpen((open) => !open)}
-                />
-                {shapesOpen && (
-                  <div className="tool-flyout" role="group" aria-label="Shapes">
-                    {SHAPE_TOOLS.map((s) => (
+                {moreOpen && (
+                  <div className="tool-flyout" role="group" aria-label="Tools put away">
+                    {hiddenTools.map((s) => (
                       <button
                         key={s}
                         className={s === tool ? "tool active" : "tool"}
                         onClick={() => {
-                          setShapeTool(s);
                           setTool(s);
                           setPenPoints([]);
-                          setShapesOpen(false);
+                          setMoreOpen(false);
                         }}
                         title={`${s} (${TOOL_HINT[s]})`}
                         aria-label={s}
@@ -7200,20 +7338,7 @@ export function App() {
                   </div>
                 )}
               </div>
-            ) : (
-              <button
-                key={t}
-                className={t === tool ? "tool active" : "tool"}
-                onClick={() => {
-                  setTool(t);
-                  setPenPoints([]);
-                }}
-                title={`${t} (${TOOL_HINT[t]})`}
-                aria-label={t}
-              >
-                <Icon name={TOOL_ICONS[t]} size={20} />
-              </button>
-            ),
+            </>
           )}
           {/* How far the edge of what is picked is softened over. Shown
               while a region-picking tool is in hand, since that is when
@@ -7568,7 +7693,13 @@ export function App() {
         </nav>
         <main
           className={`canvas-host${
-            tool === "Paint" || tool === "Clone" ? " painting" : ""
+            tool === "Paint" || tool === "Clone"
+              ? " painting"
+              : tool === "Hand"
+                ? " handing"
+                : tool === "Zoom"
+                  ? " zooming"
+                  : ""
           }`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
@@ -9190,6 +9321,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["T", "Text"],
       ["C", "Crop"],
       ["I", "Eyedropper — take the colour under the cursor"],
+      ["H", "Hand — drag the view about"],
+      ["Z", "Zoom — click to look nearer, alt-click to step back"],
     ],
   ],
   [
@@ -9837,6 +9970,132 @@ function MenuButton({
       {open && (
         <div className="menu-pop" role="menu" onClick={onClose}>
           {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The rows of a menu, from the description the native bar is built
+ * from too: a rule, a row, or a row that opens a menu of its own. */
+function MenuRows({ entries }: { entries: MenuEntry[] }) {
+  return (
+    <>
+      {entries.map((e, i) =>
+        e.kind === "sep" ? (
+          <hr key={`sep${i}`} />
+        ) : e.kind === "sub" ? (
+          <SubMenu key={e.id} entry={e} />
+        ) : (
+          <MenuItem key={e.id} icon={e.icon as IconName} onClick={e.run} hint={e.hint}>
+            {e.label}
+          </MenuItem>
+        ),
+      )}
+    </>
+  );
+}
+
+/** A row with a menu behind it. It opens beside the row on hover, the
+ * way every desktop menu does, and on a press as well, since a finger
+ * cannot hover. The popup is fixed to the window rather than to the
+ * row: the menu it sits in scrolls when it is taller than the window,
+ * and a popup placed inside a scrolling box is cut off at the box's
+ * edge. Placed to the right of the row where there is room and to the
+ * left where there is not, and never past the bottom of the window. */
+function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
+  const [open, setOpen] = useState(false);
+  const [at, setAt] = useState<[number, number]>([0, 0]);
+  const rowRef = useRef<HTMLButtonElement>(null);
+  /** The pointer on its way from the row to the popup crosses the rows
+   * under it, and a popup that closed the moment the pointer left its
+   * row would close before it could be reached. So it waits a beat,
+   * the way every desktop menu does. */
+  const closing = useRef<number | null>(null);
+  /** And it waits a shorter beat before opening, so a pointer passing
+   * over this row on its way to a popup already open beside the row
+   * above does not open a second one over it. A press does not wait. */
+  const opening = useRef<number | null>(null);
+  const clear = (timer: { current: number | null }) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(
+    () => () => {
+      clear(closing);
+      clear(opening);
+    },
+    [],
+  );
+  const place = () => {
+    const row = rowRef.current?.getBoundingClientRect();
+    if (!row) return;
+    const width = 15 * 16;
+    const height = Math.min(window.innerHeight - 16, 24 + entry.entries.length * 30);
+    // Flush with the row's edge rather than beside it: a gap between
+    // the two is a strip of the menu's own padding, and a pointer
+    // crossing it has left the row and not yet reached the popup.
+    const left =
+      row.right + width + 8 <= window.innerWidth
+        ? row.right
+        : Math.max(8, row.left - width);
+    const top = Math.max(8, Math.min(row.top - 5, window.innerHeight - height - 8));
+    setAt([left, top]);
+  };
+  const show = () => {
+    clear(closing);
+    clear(opening);
+    place();
+    setOpen(true);
+  };
+  const hide = () => {
+    clear(opening);
+    clear(closing);
+    closing.current = window.setTimeout(() => {
+      closing.current = null;
+      setOpen(false);
+    }, 250);
+  };
+  return (
+    <div
+      className={open ? "menu-sub open" : "menu-sub"}
+      onPointerEnter={() => {
+        clear(closing);
+        if (open) return;
+        clear(opening);
+        opening.current = window.setTimeout(show, 120);
+      }}
+      onPointerLeave={hide}
+    >
+      <button
+        ref={rowRef}
+        className="menu-item has-sub"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(e) => {
+          // A press on the row is for the row, not for the menu it is
+          // in: the menu closes on any click inside it, and this one
+          // has not chosen anything yet.
+          e.stopPropagation();
+          if (open) setOpen(false);
+          else show();
+        }}
+      >
+        <Icon name={entry.icon as IconName} size={16} />
+        <span className="menu-item-label">{entry.label}</span>
+        <span className="menu-item-hint menu-sub-mark" aria-hidden="true">
+          ▸
+        </span>
+      </button>
+      {open && (
+        <div
+          className="menu-pop sub"
+          role="menu"
+          aria-label={entry.label}
+          style={{ left: at[0], top: at[1] }}
+        >
+          <MenuRows entries={entry.entries} />
         </div>
       )}
     </div>

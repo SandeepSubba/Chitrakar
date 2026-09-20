@@ -205,6 +205,28 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* A row with a menu behind it, and that menu. The popup is fixed to the
+   window rather than to the row — see SubMenu for why — so its place
+   comes in as a style of its own. */
+.menu-sub {
+  position: relative;
+}
+
+.menu-sub.open > .menu-item {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.menu-sub-mark {
+  font-size: 0.7rem;
+}
+
+.menu-pop.sub {
+  position: fixed;
+  top: auto;
+  left: auto;
+  z-index: 25;
+}
+
 /* Chrome buttons: the few actions that stay out of the menus because they
    are toggled mid-edit rather than chosen once. */
 .chrome-group {
@@ -1285,6 +1307,14 @@ body {
   overflow-y: auto;
 }
 
+/* A line between the rail's sections. */
+.tool-sep {
+  display: block;
+  height: 1px;
+  margin: 0.15rem 0.4rem;
+  background: var(--border);
+}
+
 .tool.grip {
   height: 1.5rem;
   color: var(--muted);
@@ -1368,6 +1398,18 @@ body {
   color: var(--accent);
 }
 
+.canvas-host.handing {
+  cursor: grab;
+}
+
+.canvas-host.handing:active {
+  cursor: grabbing;
+}
+
+.canvas-host.zooming {
+  cursor: zoom-in;
+}
+
 .canvas-host {
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */
@@ -1414,6 +1456,10 @@ body {
      and puts every one of them where there is room. */
   .menubar {
     position: relative;
+    /* Eight labels are wider than a phone; they go onto a second row
+       rather than pushing the whole page sideways, and the bar grows to
+       hold them the way it already does for anything else that wraps. */
+    flex-wrap: wrap;
   }
 
   .menu {
@@ -1494,6 +1540,14 @@ body {
   /* Nothing to pick it up by: down here it has one place to be. */
   .toolbar .tool.grip {
     display: none;
+  }
+
+  /* The lines between sections stand up when the rail lies down. */
+  .tool-sep {
+    width: 1px;
+    height: auto;
+    align-self: stretch;
+    margin: 0.4rem 0.15rem;
   }
 
   /* The rail scrolls; the tools keep their size. A tool squeezed to a
@@ -1997,8 +2051,14 @@ button.fold:hover {
 
 /* The document's name, typed in the bar beside its size. */
 .doc-name {
-  min-width: 6rem;
+  /* It shrinks before the bar overflows: eight menu labels and every
+     chrome group at once come close to a wide window's width, and a bar
+     a few pixels too wide scrolls the whole page sideways — which slides
+     the canvas under the tool rail. The name is the thing that can give
+     up room without anything becoming unreachable. */
+  min-width: 3rem;
   max-width: 14rem;
+  flex: 0 1 auto;
   margin-left: auto;
   padding: 0.15rem 0.4rem;
   border: 1px solid transparent;
@@ -2308,6 +2368,25 @@ button.fold:hover {
 
 .prefs-pane .row.prefs-check .hint {
   margin-left: auto;
+}
+
+/* The tools, a section of the rail per box, two to a row. */
+.prefs-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.1rem 0.75rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.prefs-tools .prefs-tool {
+  font-size: 0.78rem;
+}
+
+.prefs-tools .prefs-tool svg {
+  color: var(--muted);
+  flex: none;
 }
 
 /* A phone has no room for a rail beside the settings, so it goes above

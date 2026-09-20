@@ -190,7 +190,28 @@ process.on("unhandledRejection", bail);
 const menuItem = async (menu, item) => {
   await page.click(`.menu-label:text-is("${menu}")`);
   await page.waitForTimeout(120);
+  const direct = page.locator(".menu-pop:not(.sub) > .menu-item", { hasText: item });
+  if (await direct.count()) return direct;
+  // Behind a row of its own — Arrange, Align, Mask — which opens on
+  // hover the way a person opens it.
+  for (const row of await page.locator(".menu-pop:not(.sub) .menu-item.has-sub").all()) {
+    await row.hover();
+    await page.waitForTimeout(120);
+    const inside = page.locator(".menu-pop.sub .menu-item", { hasText: item });
+    if (await inside.count()) return inside;
+  }
   return page.locator(".menu-item", { hasText: item });
+};
+
+/** How this screen shows colour is a preference, and lives only there. */
+const screenProfile = async (label) => {
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Colour")');
+  await page.click(`.prefs-pane .mask-button:text-is("${label}")`);
+  await page.waitForTimeout(150);
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
 };
 /** Create a document through the New-document dialog. */
 const newDocument = async (w, h, mode, dpi) => {
@@ -272,8 +293,8 @@ assert(
 );
 assert(
   (await page.locator(".topbar .menu-label").allTextContents()).join(",") ===
-    "File,Edit,Select,Layer,Page,View",
-  "menu bar carries File, Edit, Select, Layer, Page and View",
+    "File,Edit,Select,Layer,Adjust,Filter,Page,View",
+  "menu bar carries File, Edit, Select, Layer, Adjust, Filter, Page and View",
 );
 await page.click('.menu-label:text-is("File")');
 await page.waitForTimeout(120);
@@ -7016,7 +7037,7 @@ assert(
     `pure red on a screen taken for sRGB (${plain})`,
   );
 
-  await menuClick("View", "Show as Display P3");
+  await screenProfile("Display P3");
   await page.waitForTimeout(400);
   const shown = await canvasPixel(200, 150);
   assert(
@@ -7049,7 +7070,7 @@ assert(
     `the export is the picture, not the screen (${exported})`,
   );
 
-  await menuClick("View", "Show sRGB as it is");
+  await screenProfile("Show sRGB as it is");
   await page.waitForTimeout(400);
   const back = await canvasPixel(200, 150);
   assert(
@@ -10909,7 +10930,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   assert(
     (await page.locator(".prefs-tab").allTextContents()).join(",") ===
-      "General,Guides & grid,Selection,Colour,New documents,Export",
+      "General,Tools,Guides & grid,Selection,Colour,New documents,Export",
     "the settings are grouped rather than listed",
   );
 
@@ -10961,6 +10982,262 @@ assert(
     !(await page.isVisible('[role=dialog][aria-label="Preferences"]')),
     "escape closes it",
   );
+}
+
+// 9bj. The menus, after Photoshop's and Affinity's: an Adjust menu and a
+// Filter menu, since the first thing anyone does to a photograph should
+// not be only on a panel's "+FX" list; and the Layer menu's families
+// behind one row each, the way every editor keeps eight alignments.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#4060c0");
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 200), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const names = async () =>
+    (await page.locator(".panel ul li .layer-name").allTextContents()).map((n) => n.trim());
+
+  await menuClick("Adjust", "Exposure");
+  assert((await names()).includes("Exposure"), "the Adjust menu adds an adjustment layer");
+  await menuClick("Filter", "Gaussian Blur");
+  assert((await names()).includes("Gaussian Blur"), "and the Filter menu a filter layer");
+  // Neither is offered "only on" itself: an adjustment has nothing of
+  // its own to be scoped to.
+  await page.click('.menu-label:text-is("Adjust")');
+  await page.waitForTimeout(120);
+  assert(
+    (await page.locator('.menu-item.has-sub:has-text("Only on")').count()) === 0,
+    "an adjustment picked, the Adjust menu offers no scoping to it",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  // A shape picked, the same menu offers the list again, scoped to it.
+  await page.locator('.layer-name:text-is("Rect 1")').click();
+  await page.waitForTimeout(150);
+  await page.click('.menu-label:text-is("Adjust")');
+  await page.waitForTimeout(120);
+  const scoped = page.locator('.menu-item.has-sub:has-text("Only on")');
+  assert((await scoped.count()) === 1, "a shape picked, it offers the list scoped to the shape");
+  await scoped.hover();
+  await page.waitForTimeout(150);
+  const subPop = page.locator(".menu-pop.sub");
+  assert(await subPop.isVisible(), "hovering the row opens the list beside it");
+  const subBox = await subPop.boundingBox();
+  assert(
+    subBox.x >= 0 && subBox.x + subBox.width <= 1400 && subBox.y + subBox.height <= 900,
+    `and the list stays inside the window (${subBox.x},${subBox.y} ${subBox.width}x${subBox.height})`,
+  );
+  await subPop.locator(".menu-item", { hasText: "Vibrance" }).click();
+  await page.waitForTimeout(250);
+  assert(
+    (await names()).includes("Vibrance"),
+    "and a row picked there adds the layer",
+  );
+  assert(
+    (await page.locator(".menu-pop").count()) === 0,
+    "with the whole menu closing behind it",
+  );
+
+  // The Layer menu's families: Arrange, Align, Combine and Mask.
+  await page.click('.menu-label:text-is("Layer")');
+  await page.waitForTimeout(120);
+  const subs = await page.locator(".menu-pop:not(.sub) .menu-item.has-sub .menu-item-label").allTextContents();
+  assert(
+    subs.join(",") === "Arrange,Align,Combine shapes,Mask",
+    `the Layer menu keeps four families behind a row each (${subs.join(",")})`,
+  );
+  // A pointer on its way from the row to the popup beside it crosses
+  // the rows under it, and a popup that closed the moment the pointer
+  // left its row could never be reached by a hand — only by a test
+  // that teleports. So the pointer is walked there, in steps, over the
+  // two rows between, and the popup has to still be there when it
+  // arrives, and be the one it set out for.
+  const arrange = page.locator('.menu-item.has-sub:has-text("Arrange")');
+  await arrange.hover();
+  await page.waitForTimeout(250);
+  const arrangePop = page.locator(".menu-pop.sub");
+  assert(await arrangePop.isVisible(), "Arrange opens beside its row");
+  const toBack = arrangePop.locator(".menu-item", { hasText: "Send to back" });
+  const target = await toBack.boundingBox();
+  const from = await arrange.boundingBox();
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2, {
+    steps: 12,
+  });
+  await page.waitForTimeout(350);
+  assert(
+    (await page.locator(".menu-pop.sub").count()) === 1 &&
+      (await page.locator(".menu-pop.sub .menu-item", { hasText: "Send to back" }).count()) === 1,
+    "walked there over the rows between, the pointer arrives at the popup it set out for, and no other",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  // A row two deep is reached the way a person reaches it, and does
+  // what it says: the rect sits under the vibrance in the group the
+  // scoped adjustment made, and "bring forward" lifts it over it.
+  await page.locator('.layer-name:text-is("Rect 1")').click();
+  await page.waitForTimeout(150);
+  const before = await names();
+  await menuClick("Layer", "Bring forward");
+  const after = await names();
+  assert(
+    before.indexOf("Rect 1") - after.indexOf("Rect 1") === 1,
+    `bring forward lifts the picked layer one row (${before.indexOf("Rect 1")} to ${after.indexOf("Rect 1")})`,
+  );
+  // The press profile is the page's own, and on its menu.
+  await page.click('.menu-label:text-is("Page")');
+  await page.waitForTimeout(120);
+  assert(
+    await page.isVisible("text=Load press profile…"),
+    "the press profile is on the Page menu with the page's other properties",
+  );
+  await page.hover('.menu-label:text-is("View")');
+  await page.waitForTimeout(120);
+  assert(
+    !(await page.isVisible("text=Show as Display P3")),
+    "and the monitor profile is not on View, only in Preferences",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+}
+
+// 9bk. Which tools are on the rail is a preference. One put away is not
+// gone: its key still picks it, and it waits behind a slot at the end
+// of the rail. The one that moves things cannot be put away.
+{
+  const rail = page.locator('nav[aria-label="Tools"]');
+  const onRail = (name) => rail.locator(`> button[aria-label="${name}"]`);
+  assert((await onRail("Crop").count()) === 1, "crop is on the rail to begin with");
+  assert((await onRail("Hand").count()) === 1, "and so is the hand");
+  assert(
+    (await rail.locator(".tool-sep").count()) === 4,
+    `the rail is five sections with a line between each (${await rail.locator(".tool-sep").count()} lines)`,
+  );
+  assert((await onRail("More tools").count()) === 0, "and nothing is put away yet");
+
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Tools")');
+  await page.waitForTimeout(120);
+  assert(
+    await page.locator('input[aria-label="Move on the rail"]').isDisabled(),
+    "the move tool cannot be put away",
+  );
+  await page.locator('input[aria-label="Crop on the rail"]').uncheck();
+  await page.locator('input[aria-label="Star on the rail"]').uncheck();
+  await page.waitForTimeout(200);
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+  assert((await onRail("Crop").count()) === 0, "a tool unticked leaves the rail");
+  const more = rail.locator('button[aria-label="More tools"]');
+  assert((await more.count()) === 1, "and a slot appears at the end to hold it");
+  await more.click();
+  await page.waitForTimeout(120);
+  const putAway = await rail.locator(".tool-flyout button").allTextContents();
+  const putAwayNames = await rail
+    .locator(".tool-flyout button")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+  assert(
+    putAwayNames.join(",") === "Star,Crop",
+    `the slot holds what was put away (${putAwayNames.join(",")}, ${putAway.length} buttons)`,
+  );
+  await rail.locator('.tool-flyout button[aria-label="Crop"]').click();
+  await page.waitForTimeout(120);
+  assert(
+    (await more.getAttribute("class")).includes("active"),
+    "picking one from there puts it in hand, and the slot shows it",
+  );
+  // Its key still works, with the rail showing it in hand at the slot.
+  await pickTool("Move");
+  await page.keyboard.press("k");
+  await page.waitForTimeout(120);
+  assert(
+    (await more.getAttribute("class")).includes("active") &&
+      (await rail.locator('.tool-group > button[aria-label="Rect"]').getAttribute("class")) === "tool",
+    "a put-away shape picked by its key is in hand at the slot, not in the shapes' own",
+  );
+  assert(
+    (await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).hiddenTools)).join(",") ===
+      "Crop,Star",
+    "and the choice is written down",
+  );
+  // Back again.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Tools")');
+  await page.locator('input[aria-label="Crop on the rail"]').check();
+  await page.locator('input[aria-label="Star on the rail"]').check();
+  await page.waitForTimeout(200);
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+  assert((await onRail("Crop").count()) === 1, "ticked again, it is back");
+  assert((await more.count()) === 0, "and the slot goes when nothing is put away");
+  await pickTool("Move");
+}
+
+// 9bl. The hand and the zoom, the two tools every editor ends its rail
+// with. The hand drags the view; the zoom looks closer where it is
+// pressed, and steps back with alt held.
+{
+  await menuClick("View", "Fit document to window");
+  const pageBox = () => page.locator("#engine-page").boundingBox();
+  const was = await pageBox();
+  const at = (x, y) => [was.x + (x / 600) * was.width, was.y + (y / 400) * was.height];
+  const rows = await page.locator(".panel ul li").count();
+  await pickTool("Hand");
+  assert(
+    (await page.locator(".canvas-host").getAttribute("class")).includes("handing"),
+    "the hand in hand, the cursor says so",
+  );
+  await page.mouse.move(...at(300, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(380, 250), { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const moved = await pageBox();
+  const [dx, dy] = [at(380, 250)[0] - at(300, 200)[0], at(380, 250)[1] - at(300, 200)[1]];
+  assert(
+    Math.abs(moved.x - was.x - dx) < 2 && Math.abs(moved.y - was.y - dy) < 2,
+    `a drag with the hand carries the view by the drag (${moved.x - was.x}, ${moved.y - was.y} for ${dx}, ${dy})`,
+  );
+  assert(
+    (await page.locator(".panel ul li").count()) === rows,
+    "and draws nothing",
+  );
+
+  await pickTool("Zoom");
+  // Pressed well away from the middle of the window, where zooming
+  // about the window and zooming about the press would look the same.
+  await page.mouse.click(...at(100, 80));
+  await page.waitForTimeout(200);
+  const closer = await pageBox();
+  assert(
+    Math.abs(closer.width / moved.width - 1.25) < 0.01,
+    `a press with the zoom looks a quarter closer (${(closer.width / moved.width).toFixed(3)})`,
+  );
+  // The point pressed stays under the pointer.
+  const [px, py] = at(100, 80);
+  const before = [(px - moved.x) / moved.width, (py - moved.y) / moved.height];
+  const after = [(px - closer.x) / closer.width, (py - closer.y) / closer.height];
+  assert(
+    Math.abs(before[0] - after[0]) < 0.005 && Math.abs(before[1] - after[1]) < 0.005,
+    `about the point pressed (${before.map((v) => v.toFixed(3))} → ${after.map((v) => v.toFixed(3))})`,
+  );
+  await page.keyboard.down("Alt");
+  await page.mouse.click(...at(100, 80));
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(200);
+  const back = await pageBox();
+  assert(
+    Math.abs(back.width - moved.width) < 1,
+    `and alt steps back to where it was (${back.width} against ${moved.width})`,
+  );
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });
