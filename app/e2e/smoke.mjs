@@ -12088,6 +12088,104 @@ assert(
   await pickTool("Move");
 }
 
+// 9bu. The key a tool answers to is a preference. Press the key shown
+// beside a tool and the next key pressed is its; a key another tool
+// holds changes hands, so nothing is left unreachable; Backspace puts
+// it back. The rail's tooltips and the keys sheet say the keys as they
+// stand, not as they shipped.
+{
+  const rail = page.locator('nav[aria-label="Tools"]');
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Tools")');
+  await page.waitForTimeout(120);
+  const keyOf = (t) => page.locator(`button[aria-label="${t} key"]`);
+  assert((await keyOf("Crop").textContent()) === "C", "the crop's key is shown beside it");
+  assert(
+    (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "shift+M",
+    "a family member's is a shift away from the family's",
+  );
+  // A key nobody holds is simply taken.
+  await keyOf("Crop").click();
+  assert(
+    (await keyOf("Crop").textContent()) === "press…",
+    "pressed, the button waits for a key",
+  );
+  await page.keyboard.press("j");
+  await page.waitForTimeout(120);
+  assert((await keyOf("Crop").textContent()) === "J", "and the key pressed is the tool's");
+  // A key another tool holds changes hands, and the swap leaves both
+  // with a key.
+  await keyOf("Star").click();
+  await page.keyboard.press("j");
+  await page.waitForTimeout(120);
+  assert(
+    (await keyOf("Star").textContent()) === "J" && (await keyOf("Crop").textContent()) === "K",
+    `a key already held changes hands, and the other tool takes the key this one had (${await keyOf("Star").textContent()}, ${await keyOf("Crop").textContent()})`,
+  );
+  // Escape leaves a key as it is, and the window open.
+  await keyOf("Hand").click();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  assert(
+    (await keyOf("Hand").textContent()) === "H" &&
+      (await page.isVisible('[role=dialog][aria-label="Preferences"]')),
+    "escape leaves a key as it was, and the window open",
+  );
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+  // The keys as they stand are what the keyboard answers to, and what
+  // the tooltips and the sheet say.
+  await pickTool("Move");
+  await page.keyboard.press("k");
+  await page.waitForTimeout(120);
+  assert(
+    (await rail.locator('> button[aria-label="Crop"]').getAttribute("class")).includes("active"),
+    "the crop answers to its new key",
+  );
+  await page.keyboard.press("c");
+  await page.waitForTimeout(120);
+  assert(
+    (await rail.locator('> button[aria-label="Crop"]').getAttribute("class")).includes("active"),
+    "and no longer to its old one",
+  );
+  assert(
+    (await rail.locator('> button[aria-label="Crop"]').getAttribute("title")) === "Crop (K)",
+    "the rail's tooltip says the key as it stands",
+  );
+  assert(
+    JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).toolKeys)) ===
+      JSON.stringify({ Crop: "k", Star: "j" }),
+    "only what differs from the defaults is written down",
+  );
+  await pickTool("Move");
+  await menuClick("Help", "Keys and gestures");
+  await page.waitForSelector('[role=dialog][aria-label="Keys and gestures"]');
+  const sheet = await page.textContent('[role=dialog][aria-label="Keys and gestures"]');
+  assert(sheet.includes("KCrop") || /K\s*Crop/.test(sheet), "the keys sheet lists the crop under its new key");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  // Backspace puts a key back to what it shipped as.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Tools")');
+  await page.waitForTimeout(120);
+  await keyOf("Star").click();
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(120);
+  assert(
+    (await keyOf("Star").textContent()) === "K" && (await keyOf("Crop").textContent()) === "C",
+    `back to its default, the star takes K, and the crop, whose rebinding was K, falls back to its own (${await keyOf("Star").textContent()}, ${await keyOf("Crop").textContent()})`,
+  );
+  assert(
+    JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).toolKeys)) === "{}",
+    "with nothing rebound, nothing is written",
+  );
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

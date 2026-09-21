@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~500),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1280 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1293 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5616,7 +5616,21 @@ without reading anything else.*
   it says shift now, and it is true. The **Eraser** and the **Heal**
   are tools of their own on the rail, where a person looks for them,
   rather than switches on the paint and the clone: shift+N and shift+S
-  from the tool each shares a key with. The engine is told what it
+  from the tool each shares a key with. The tool keys are the person's
+  to change: the Tools page of the preferences shows each tool's key
+  as a button, press it and the next key pressed is the tool's
+  (`prefs.toolKeys`, only what differs from the defaults; `boundKeys`
+  in tools.ts lays the rebindings over `TOOL_KEYS` and is what the
+  keyboard handler, the rail's tooltips and the keys sheet read, so
+  the sheet lists a rebound tool under the key it now answers to). A
+  key another tool holds changes hands — that tool takes the key this
+  one had, so the swap leaves nobody unreachable — and Backspace puts a
+  key back to what it shipped as, taking it back from any rebinding
+  that held it. A family's key is held by its first member and the
+  rest are a shift away, so rebinding the marquee moves the lasso and
+  the wand with it. What is *not* rebindable is the command keys —
+  Ctrl+S, Ctrl+G, the brackets — which are still literals in the
+  handlers. The engine is told what it
   always was — `erasing` and `healing` are read off the tool in hand —
   and the two switches are gone, since a mode that is a tool does not
   also want a switch. Clone no longer heals by default: it is the plain
@@ -6316,9 +6330,11 @@ chitrakar/
   preview is in ✅ (the file itself, decoded, beside the settings; a
   PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
   set ✅ (three files in one press). There is still no slice export and
-  no remembering more than one export setup. The preferences window has no
-  keyboard-shortcut editor — the keys are still literals in the keydown
-  handler — and no theme: the stylesheet is `color-scheme: dark` and
+  no remembering more than one export setup. The preferences window
+  lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*)
+  but not the command keys — Ctrl+S, Ctrl+G, the brackets are still
+  literals in the keydown handlers — and has no theme: the stylesheet
+  is `color-scheme: dark` and
   single-palette throughout, so a light mode is a token pass over
   ~2,000 lines of CSS rather than a switch, and worth doing as its own
   piece of work.

@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1280 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1293 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -151,7 +151,11 @@ away keeps its key and waits behind a "…" slot at the rail's end) and
 which button groups the bar shows; `prefs.brushes` is the brushes kept
 by name, shown as chips over the paint tools' row. `app/src/tools.ts` is the one table
 of tools — names, keys, icons, the rail's five sections — that the rail,
-the keyboard handler and that page all read. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
+the keyboard handler and that page all read; the keys are defaults, and
+`boundKeys(prefs.toolKeys)` is what is read at run time, so a tool key
+rebound on the Tools page (press its key button, then the key; a key
+another tool holds changes hands; Backspace restores) reaches the
+handler, the tooltips and the keys sheet alike. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
 rows with format × area × scale, and shows the file's real size — it
 encodes the bytes rather than estimating, and the same encode is what
 gets written, and is decoded again for the picture beside the settings

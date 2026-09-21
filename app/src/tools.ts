@@ -84,7 +84,9 @@ export const KEY_FAMILIES: readonly (readonly Tool[])[] = [
 export const ALWAYS_SHOWN: Tool = "Move";
 
 /** One letter per tool, the convention every editor shares. `v` for Move
- * because that is where the muscle memory is. */
+ * because that is where the muscle memory is. These are the *defaults*:
+ * a person's own rebindings sit over them in `prefs.toolKeys`, and
+ * `boundKeys` is what everything reads at run time. */
 export const TOOL_KEYS: Record<string, Tool> = {
   v: "Move",
   // `m` for the marquee, which is where that muscle memory is; Move
@@ -110,6 +112,52 @@ export const TOOL_KEYS: Record<string, Tool> = {
   z: "Zoom",
 };
 
+/** The tools that hold a key of their own. A family's key is held by
+ * its first member and the rest are a shift away, so only the first can
+ * be rebound — and rebinding it moves the whole family. */
+export const KEYED_TOOLS: ReadonlySet<Tool> = new Set(Object.values(TOOL_KEYS));
+
+/** A person's rebindings: the key each named tool answers to instead of
+ * its default. Only tools in `KEYED_TOOLS`, one character each. */
+export type ToolKeys = Partial<Record<Tool, string>>;
+
+/** The keys as they stand with the rebindings over the defaults: which
+ * tool each key picks, and what each tool's key is called (a family
+ * member's is its family's; a tool whose default key a rebinding took
+ * has none, and says so with an empty hint). A rebinding always wins
+ * the key it asks for. */
+export function boundKeys(rebound: ToolKeys): {
+  byKey: Record<string, Tool>;
+  hint: Record<Tool, string>;
+} {
+  const held = new Map<Tool, string>();
+  for (const [k, t] of Object.entries(TOOL_KEYS)) held.set(t, k);
+  for (const [t, k] of Object.entries(rebound)) {
+    if (isTool(t) && KEYED_TOOLS.has(t) && k) held.set(t, k.toLowerCase());
+  }
+  // Defaults first and rebindings after, so a rebinding takes its key
+  // from whoever held it.
+  const order = [...held.keys()].sort(
+    (a, b) => Number(a in rebound) - Number(b in rebound),
+  );
+  const byKey: Record<string, Tool> = {};
+  const hint: Partial<Record<Tool, string>> = {};
+  for (const t of order) {
+    const k = held.get(t)!;
+    const loser = byKey[k];
+    if (loser) hint[loser] = "";
+    byKey[k] = t;
+    hint[t] = k.toUpperCase();
+  }
+  for (const t of TOOLS) {
+    if (t in hint) continue;
+    const family = KEY_FAMILIES.find((f) => f.includes(t));
+    hint[t] = family ? (hint[family[0]] ?? "") : "";
+  }
+  return { byKey, hint: hint as Record<Tool, string> };
+}
+
+/** What each tool's key is called with nothing rebound. */
 export const TOOL_HINT: Record<Tool, string> = {
   Move: "V",
   Select: "M",

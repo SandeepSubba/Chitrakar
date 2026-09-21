@@ -2567,6 +2567,39 @@ button.fold:hover {
   flex: none;
 }
 
+/* The key a tool answers to, as a button: press it and the next key
+   pressed is the tool's. Sized like the hint it replaced, so the rows
+   line up whether a tool's key can be changed or not. */
+.prefs-tools .prefs-key {
+  margin-left: auto;
+  min-width: 2.2rem;
+  padding: 0.1rem 0.4rem;
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.prefs-tools .prefs-key:hover {
+  color: var(--text);
+}
+
+.prefs-tools .prefs-key.listening {
+  color: var(--text);
+  border-color: var(--accent);
+  animation: prefs-key-blink 1s steps(2) infinite;
+}
+
+@keyframes prefs-key-blink {
+  to {
+    border-color: var(--border);
+  }
+}
+
 /* A phone has no room for a rail beside the settings, so it goes above
    them and scrolls sideways. */
 @media (max-width: 560px) {

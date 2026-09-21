@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon, IconName } from "./icons";
 import {
   findEntry,
@@ -17,10 +17,9 @@ import {
   RAIL,
   SELECT_TOOLS,
   SHAPE_TOOLS,
-  TOOL_HINT,
   TOOL_ICONS,
-  TOOL_KEYS,
   TOOLS,
+  boundKeys,
   type Tool,
 } from "./tools";
 import { ExportDialog } from "./ExportDialog";
@@ -1118,6 +1117,11 @@ export function App() {
    * The names below are bound so the call sites that used to hold their
    * own state read exactly as they did. */
   const { prefs, set: setPrefs, reset: resetPrefs } = usePrefs();
+  /** The tool keys as they stand, the person's rebindings over the
+   * defaults: what the keyboard handler, the rail's tooltips and the
+   * keys sheet all read. */
+  const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
+  const TOOL_HINT = keys.hint;
   /** Which tools are on the rail. Put away in Preferences is not gone:
    * the tool keeps its key and sits behind the slot at the rail's end.
    * The one tool that cannot be put away is the one that moves things. */
@@ -1881,7 +1885,7 @@ export function App() {
       const typing =
         isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
       if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const shortcut = TOOL_KEYS[e.key.toLowerCase()];
+        const shortcut = keys.byKey[e.key.toLowerCase()];
         if (shortcut) {
           e.preventDefault();
           // With shift, a key whose tool shares it with a family walks
@@ -2007,6 +2011,7 @@ export function App() {
     zoomBy,
     zoomTo,
     fitView,
+    keys,
   ]);
 
   // Keep the viewport measurement in step with the element it describes.
@@ -7257,7 +7262,7 @@ export function App() {
           </button>
         )}
       </header>
-      {showKeys && <KeysDialog onClose={() => setShowKeys(false)} />}
+      {showKeys && <KeysDialog hint={TOOL_HINT} onClose={() => setShowKeys(false)} />}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {contextAt && (
         <div
@@ -9732,33 +9737,41 @@ function topLevelCount(layers: LayerInfo[]): number {
 
 /** What this editor answers to, in the order someone would meet it.
  * Gestures sit beside keys because most of these are gestures. */
-const KEY_HELP: [string, [string, string][]][] = [
-  [
-    "Tools",
+/** The sheet of keys. The tool rows are written from the keys as they
+ * stand rather than as they were shipped, so a rebound tool is listed
+ * under the key it now answers to; a tool with no key left says so. */
+const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => {
+  const k = (t: Tool) => hint[t] || "(no key)";
+  const shifted = (t: Tool) => (hint[t] ? `Shift+${hint[t]}` : "(no key)");
+  return [
     [
-      ["V, M", "Move"],
-      ["F", "Frame (an artboard: a page within the page)"],
-      ["R, E", "Rectangle, ellipse"],
-      ["U", "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
-      ["P, B", "Pen, brush"],
-      ["A", "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off"],
-      ["N", "Paint (a brush that lays pixels)"],
-      ["Shift+N", "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
-      ["S", "Clone (paint with what is already there, as it is)"],
-      ["Shift+S", "Heal — the same, laid down in the colour of the place it lands"],
-      ["Alt-click (clone, heal)", "Set the place to clone from"],
-      ["[  ]", "Thinner, thicker brush"],
-      ["Alt-click (brush)", "Take the colour under the brush"],
-      ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
-      ["T", "Text"],
-      ["C", "Crop"],
-      ["I", "Eyedropper — take the colour under the cursor"],
-      ["G", "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
-      ["Shift+G", "Fill — give the layer under a press the ink in hand; alt for its stroke; a press on nothing fills what is picked out"],
-      ["H", "Hand — drag the view about"],
-      ["Z", "Zoom — click to look nearer, alt-click to step back"],
+      "Tools",
+      [
+        [k("Move"), "Move"],
+        [k("Select"), "Select a region; with shift, the region tools in turn"],
+        [k("Frame"), "Frame (an artboard: a page within the page)"],
+        [`${k("Rect")}, ${k("Ellipse")}`, "Rectangle, ellipse"],
+        [`${k("Line")}, ${k("Polygon")}, ${k("Star")}`, "Line, polygon, star"],
+        [k("Shape"), "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
+        [`${k("Pen")}, ${k("Brush")}`, "Pen, brush"],
+        [k("Node"), "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off"],
+        [k("Paint"), "Paint (a brush that lays pixels)"],
+        [shifted("Paint"), "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
+        [k("Clone"), "Clone (paint with what is already there, as it is)"],
+        [shifted("Clone"), "Heal — the same, laid down in the colour of the place it lands"],
+        ["Alt-click (clone, heal)", "Set the place to clone from"],
+        ["[  ]", "Thinner, thicker brush"],
+        ["Alt-click (brush)", "Take the colour under the brush"],
+        ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
+        [k("Text"), "Text"],
+        [k("Crop"), "Crop"],
+        [k("Eyedropper"), "Eyedropper — take the colour under the cursor"],
+        [k("Gradient"), "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
+        [shifted("Gradient"), "Fill — give the layer under a press the ink in hand; alt for its stroke; a press on nothing fills what is picked out"],
+        [k("Hand"), "Hand — drag the view about"],
+        [k("Zoom"), "Zoom — click to look nearer, alt-click to step back"],
+      ],
     ],
-  ],
   [
     "Picking",
     [
@@ -9844,7 +9857,8 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["?", "This sheet"],
     ],
   ],
-];
+  ];
+};
 
 /** The sheet of keys and gestures. */
 /** What this is and which one: the app's version and the engine's, which
@@ -9912,7 +9926,14 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function KeysDialog({ onClose }: { onClose: () => void }) {
+function KeysDialog({
+  hint,
+  onClose,
+}: {
+  hint: Record<Tool, string>;
+  onClose: () => void;
+}) {
+  const KEY_HELP = keyHelp(hint);
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
       <div

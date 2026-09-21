@@ -22,18 +22,21 @@
  * which is not the document's size but the size the next one starts at.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
 import { DEFAULTS, type ExportFormat, type Prefs, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
+  KEYED_TOOLS,
   RAIL,
   SELECT_TOOLS,
   SHAPE_TOOLS,
   TOOL_ABOUT,
-  TOOL_HINT,
   TOOL_ICONS,
+  TOOL_KEYS,
+  boundKeys,
   type Tool,
+  type ToolKeys,
 } from "./tools";
 
 export type PrefGroup =
@@ -110,6 +113,60 @@ export function PreferencesDialog({
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
   }, []);
+
+  /** The tool keys as they stand, and which tool is waiting for a key
+   * to be pressed for it. */
+  const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
+  const [listening, setListening] = useState<Tool | null>(null);
+  useEffect(() => {
+    if (!listening) return;
+    const tool = listening;
+    // On the window and ahead of everyone else, so the letter pressed
+    // rebinds the tool rather than picking one, and Escape ends the
+    // listening rather than the window.
+    const key = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setListening(null);
+        return;
+      }
+      const pressed = e.key.toLowerCase();
+      const next: ToolKeys = { ...prefs.toolKeys };
+      if (e.key === "Backspace" || e.key === "Delete") {
+        // Back to the default — which is what was asked for, so a
+        // rebinding of another tool that holds that key gives it up
+        // and falls back to its own default.
+        delete next[tool];
+        const shipped = Object.entries(TOOL_KEYS).find(([, t]) => t === tool)?.[0];
+        for (const t of Object.keys(next) as Tool[]) {
+          if (next[t] === shipped) delete next[t];
+        }
+      } else if (/^[a-z0-9]$/.test(pressed)) {
+        // A key another tool holds changes hands: that tool gets the
+        // key this one had, so nothing is left unreachable by the
+        // swap. A key nobody holds is simply taken.
+        const holder = keys.byKey[pressed];
+        const had = keys.hint[tool].toLowerCase();
+        if (holder && holder !== tool) {
+          if (had) next[holder] = had;
+          else delete next[holder];
+        }
+        next[tool] = pressed;
+      } else {
+        // A modifier or an arrow is not a tool key; keep listening.
+        return;
+      }
+      // A rebinding that only says the default again is not kept.
+      for (const t of Object.keys(next) as Tool[]) {
+        if (next[t] && TOOL_KEYS[next[t]!] === t) delete next[t];
+      }
+      setPrefs({ toolKeys: next });
+      setListening(null);
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [listening, keys, prefs.toolKeys, setPrefs]);
 
   /** A whole number typed into a field. The value is only taken when it
    * is one: a field cleared to type a new number reads as NaN for a
@@ -224,9 +281,12 @@ export function PreferencesDialog({
             {group === "tools" && (
               <>
                 <p className="modal-aside">
-                  Which tools are on the rail. One put away is not gone:
-                  its key still picks it, and it waits behind the slot at
-                  the end of the rail with the others put away.
+                  Which tools are on the rail, and the key each answers
+                  to. One put away is not gone: its key still picks it,
+                  and it waits behind the slot at the end of the rail
+                  with the others put away. Press a key to change it;
+                  a key another tool holds changes hands, and Backspace
+                  puts a key back to what it shipped as.
                 </p>
                 {RAIL_ROWS.map((section, i) => (
                   <div className="prefs-tools" key={i} role="group">
@@ -254,7 +314,32 @@ export function PreferencesDialog({
                           />
                           <Icon name={TOOL_ICONS[t]} size={16} />
                           <span>{t}</span>
-                          <span className="hint">{TOOL_HINT[t]}</span>
+                          {KEYED_TOOLS.has(t) ? (
+                            <button
+                              type="button"
+                              className={
+                                listening === t ? "prefs-key listening" : "prefs-key"
+                              }
+                              aria-label={`${t} key`}
+                              title={
+                                listening === t
+                                  ? "Press the key for it; Escape leaves it as it is"
+                                  : `The key that picks ${t}: press to change it${
+                                      t in prefs.toolKeys ? " (rebound)" : ""
+                                    }`
+                              }
+                              onClick={(e) => {
+                                e.preventDefault();
+                                setListening(listening === t ? null : t);
+                              }}
+                            >
+                              {listening === t ? "press…" : keys.hint[t] || "none"}
+                            </button>
+                          ) : (
+                            <span className="hint" title="A shift away from its family's key">
+                              {keys.hint[t] ? `shift+${keys.hint[t]}` : "—"}
+                            </span>
+                          )}
                         </label>
                       );
                     })}

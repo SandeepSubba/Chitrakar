@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { ALWAYS_SHOWN, isTool, type Tool } from "./tools";
+import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
 export type Units = "px" | "mm" | "in";
 export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
@@ -69,6 +69,10 @@ export type Prefs = {
    * A list of what is *hidden* rather than what is shown, so a tool
    * this version adds appears for someone whose settings predate it. */
   hiddenTools: Tool[];
+  /** The tool keys rebound: the key each named tool answers to instead
+   * of its default. Only what differs from the defaults is kept, so a
+   * default that changes reaches everyone who did not rebind it. */
+  toolKeys: ToolKeys;
   /** Which of the bar's groups of buttons are shown. Everything on them
    * is on a menu as well, so a group put away costs nothing but reach. */
   barDocument: boolean;
@@ -96,6 +100,7 @@ export const DEFAULTS: Prefs = {
   feather: 0,
   subjectTolerance: 0.5,
   hiddenTools: [],
+  toolKeys: {},
   barDocument: true,
   barSelection: true,
   barZoom: true,
@@ -180,6 +185,23 @@ export function clamp(p: Prefs): Prefs {
           (t, i, all) => isTool(t) && t !== ALWAYS_SHOWN && all.indexOf(t) === i,
         )
       : [],
+    // Only tools that hold a key, one character each, each key once,
+    // and nothing that only says the default again.
+    toolKeys: (() => {
+      const out: ToolKeys = {};
+      const raw = p.toolKeys;
+      if (!raw || typeof raw !== "object") return out;
+      const seen = new Set<string>();
+      for (const [t, k] of Object.entries(raw as Record<string, unknown>)) {
+        if (!isTool(t) || !KEYED_TOOLS.has(t) || typeof k !== "string") continue;
+        const key = k.toLowerCase();
+        if (!/^[a-z0-9]$/.test(key) || seen.has(key)) continue;
+        if (TOOL_KEYS[key] === t) continue;
+        seen.add(key);
+        out[t] = key;
+      }
+      return out;
+    })(),
     // Each brush a name and two numbers within what the brush takes,
     // names each once; anything else on the list is dropped rather than
     // handed to a tool.
