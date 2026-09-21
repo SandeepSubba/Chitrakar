@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~500),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1264 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1280 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5801,6 +5801,23 @@ without reading anything else.*
   (`and weighs what the window said`). Above four megapixels it waits to
   be asked rather than re-encoding a print-sized page on every drag of a
   slider, which would freeze the very control being dragged.
+  Beside the settings is the picture, and it is the same bytes again:
+  the encode that gave the size is handed to the browser to decode, so
+  a JPEG at quality 5 shows its blocks before it is taken — the one
+  thing the number cannot say — and a PNG shows its transparency over a
+  checkerboard where the JPEG shows white. The suite reads the picture
+  back rather than trusting that it is there: down a rectangle's edge,
+  the colour strays from a clean step at quality 5 and not at 100
+  (`the picture shows what the quality does to an edge`), which a
+  preview drawn from the page instead of the file could not do. A PDF
+  and a TIFF the browser cannot show; for those the page stands in,
+  drawn as the engine draws it, and the caption says so.
+  The set an asset pipeline wants is one press too: `Set` beside the
+  scales writes `@1x`, `@2x` and `@3x` together, the size shown is all
+  three files, and the ceiling counts all fourteen page-areas of
+  encoding, so on a 640 by 480 page the window already waits to be
+  asked. Kept in the preference as a scale of zero, which is not a
+  scale and never reaches the engine as one.
   Two exports stayed rows on the menu, and the reason is worth writing
   down: a frame carries the multiple it wants to come out at as a
   property of the *document* (`export_scale`, saved with the file), and
@@ -6295,12 +6312,11 @@ chitrakar/
 - **What the two windows do not do yet.** The export window writes
   through the browser's download, so the desktop shell gets no native
   save panel and no choice of folder — Tauri's dialog plugin is already
-  a dependency, so this is plumbing rather than a decision. There is no
-  export *preview* (Affinity and Photoshop both show the picture beside
-  the settings, and a JPEG at quality 5 is a thing you want to see
-  before you take it), no batch or slice export (several sizes in one
-  press, the `@1x/@2x/@3x` set an asset pipeline wants), and no
-  remembering more than one export setup. The preferences window has no
+  a dependency, so this is plumbing rather than a decision. The export
+  preview is in ✅ (the file itself, decoded, beside the settings; a
+  PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
+  set ✅ (three files in one press). There is still no slice export and
+  no remembering more than one export setup. The preferences window has no
   keyboard-shortcut editor — the keys are still literals in the keydown
   handler — and no theme: the stylesheet is `color-scheme: dark` and
   single-palette throughout, so a light mode is a token pass over
@@ -6308,8 +6324,9 @@ chitrakar/
   piece of work.
 - Live effects ✅ (drop shadow, inner shadow, outline — on a layer, a
   group, a copy, drawn by both renderers and carried to SVG and PDF).
-  Copy and paste of a layer's look ✅; *named* styles are not yet, and
-  are on the list in §0 "Next up" item 4.
+  Copy and paste of a layer's look ✅; named styles ✅ (`Session::keep_style`,
+  `apply_style`; chips in the rail's palette and rows on the Layer menu's
+  Styles submenu).
 - **Reviewed against Canva, Affinity and Photoshop (September 2026):**
   the menus and the rail are theirs in shape now — see §0 *Chrome* —
   and what each of them has that this does not is listed, in the order

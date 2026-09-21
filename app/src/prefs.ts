@@ -165,7 +165,9 @@ export function clamp(p: Prefs): Prefs {
     newWidth: n(Math.round(p.newWidth), 1, 8192, 1024),
     newHeight: n(Math.round(p.newHeight), 1, 8192, 768),
     newDpi: n(Math.round(p.newDpi), 1, 2400, 72),
-    exportScale: n(p.exportScale, 0.05, 16, 1),
+    // Zero is not a scale but the set — 1×, 2× and 3× in one press —
+    // and the window never hands it to the engine as one.
+    exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
     jpegQuality: n(Math.round(p.jpegQuality), 1, 100, 92),
     feather: n(p.feather, 0, 500, 0),
     subjectTolerance: n(p.subjectTolerance, 0, 1, 0.5),

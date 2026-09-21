@@ -10864,6 +10864,61 @@ assert(
     "and so is what it will be called",
   );
 
+  /** The picture beside the settings, once the browser has decoded it:
+   * its size in pixels and what kind of file it was decoded from. The
+   * image loads after the size is shown, so this waits for a picture
+   * that is not the one before. */
+  let lastPreview = null;
+  const previewShown = async () => {
+    await page.waitForFunction(
+      (was) => {
+        const img = document.querySelector(".export-preview img");
+        return !!img && img.complete && img.naturalWidth > 0 && img.src !== was;
+      },
+      lastPreview,
+      { timeout: 20000 },
+    );
+    // Read while the picture's URL is still live: a new preview takes
+    // the old one's bytes with it, so anything wanted from the picture
+    // is taken now. `stray` is how far the colour wanders from a clean
+    // step down the first rectangle's right edge, on rows the other two
+    // do not cross — the blocks a low JPEG quality leaves, in a number.
+    return page.locator(".export-preview img").evaluate(async (img) => {
+      const blob = await (await fetch(img.src)).blob();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const g = c.getContext("2d");
+      g.drawImage(img, 0, 0);
+      const k = img.naturalWidth / 640;
+      let stray = 0;
+      for (let y = 50; y < 110; y++) {
+        const px = (x) => g.getImageData(Math.round(x * k), Math.round(y * k), 1, 1).data;
+        const [r0, g0, b0] = px(296);
+        const [r1, g1, b1] = px(304);
+        const [rm, gm, bm] = px(300);
+        const near = (a, b) => Math.abs(a - b);
+        stray += Math.min(
+          near(rm, r0) + near(gm, g0) + near(bm, b0),
+          near(rm, r1) + near(gm, g1) + near(bm, b1),
+        );
+      }
+      return { w: img.naturalWidth, h: img.naturalHeight, type: blob.type, src: img.src, stray };
+    }).then((r) => {
+      lastPreview = r.src;
+      return r;
+    });
+  };
+  const pngShown = await previewShown();
+  assert(
+    pngShown.w === 640 && pngShown.h === 480 && pngShown.type === "image/png",
+    `the picture beside the settings is the file itself (${pngShown.w}x${pngShown.h} ${pngShown.type})`,
+  );
+  assert(
+    (await page.textContent(".export-preview figcaption")).includes("file itself"),
+    "and says so",
+  );
+
   // A scale is a real re-render, not an upsample, and the window says
   // what it comes to in pixels.
   await page.click('.export-scales .preset:text-is("2\u00d7")');
@@ -10873,7 +10928,14 @@ assert(
   );
   const twoPng = await weight();
   assert(twoPng > onePng, `and weighs more than one to one (${twoPng} vs ${onePng} kB)`);
+  const twoShown = await previewShown();
+  assert(
+    twoShown.w === 1280 && twoShown.h === 960,
+    `and the picture shown is the doubled one (${twoShown.w}x${twoShown.h})`,
+  );
   await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await weight();
+  await previewShown();
 
   // The number is the real encode, not a guess from the pixel count:
   // move the quality and it moves with it. This is the whole reason the
@@ -10890,10 +10952,23 @@ assert(
     return weight();
   };
   const low = await atQuality(5);
+  const lowShown = await previewShown();
+  assert(
+    lowShown.type === "image/jpeg" && lowShown.w === 640,
+    `a JPEG is shown as the JPEG it will be (${lowShown.type} ${lowShown.w} wide)`,
+  );
   const high = await atQuality(100);
+  const highShown = await previewShown();
   assert(
     high > low,
     `the size shown is the real encode — quality moves it (${low} \u2192 ${high} kB)`,
+  );
+  // The picture is the encode too: the blocks a low quality leaves are
+  // in it, read at an edge where a JPEG at 5 cannot hold a clean step
+  // and one at 100 nearly can.
+  assert(
+    lowShown.stray > highShown.stray,
+    `and the picture shows what the quality does to an edge (${lowShown.stray} strays at 5, ${highShown.stray} at 100)`,
   );
 
   // A format that carries shapes has nothing to say about a scale, and
@@ -10902,6 +10977,23 @@ assert(
   assert(
     await page.isDisabled('select[aria-label="Area"]'),
     "an SVG carries the whole page, so the area is not a question",
+  );
+  const svgShown = await previewShown();
+  assert(
+    svgShown.type === "image/svg+xml" && svgShown.w === 640,
+    `an SVG is shown as the markup the browser draws (${svgShown.type} ${svgShown.w} wide)`,
+  );
+  // A PDF the browser cannot show, so the page stands in and the
+  // caption says it is the page rather than the file.
+  await page.click('.export-formats .preset:text-is("PDF")');
+  const pdfShown = await previewShown();
+  assert(
+    pdfShown.type === "image/png" && pdfShown.w === 640,
+    `a PDF shows the page as it draws (${pdfShown.type})`,
+  );
+  assert(
+    (await page.textContent(".export-preview figcaption")).includes("As the page draws"),
+    "and says that it is the page standing in",
   );
   assert(
     await page.locator(".export-scales .preset").first().isDisabled(),
@@ -10941,6 +11033,64 @@ assert(
     !(await page.isVisible('[role=dialog][aria-label="Export"]')),
     "the window closes once it has done what it was opened for",
   );
+
+  // The set an asset pipeline wants: one press, three files, at one,
+  // two and three times the page, named for their multiple.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("Set")');
+  assert(
+    (await page.textContent('[aria-label="Scale"] .hint')).includes("\u00d72, \u00d73"),
+    "the set says what it comes to",
+  );
+  // Three files of this page come to more than four megapixels, so the
+  // window waits to be asked for the size rather than encoding them on
+  // every press of a control.
+  await page.waitForSelector(".export-size .mask-button", { timeout: 5000 });
+  assert(true, "and, past four megapixels of it, waits to be asked how much");
+  await page.click(".export-size .mask-button");
+  const setWeight = await weight();
+  assert(
+    setWeight > twoPng + onePng,
+    `and weighs all three files together (${setWeight} vs ${onePng} + ${twoPng} kB and a 3\u00d7)`,
+  );
+  assert(
+    (await page.textContent(".export-size span")).includes("@1x.png, @2x, @3x"),
+    "and names the three",
+  );
+  // Three downloads from one press: gathered as they come rather than
+  // waited for one at a time, since one wait answers to the first.
+  const arrived = [];
+  const gather = (d) => arrived.push(d);
+  page.on("download", gather);
+  await page.click(".modal-actions .primary");
+  for (let i = 0; i < 50 && arrived.length < 3; i++) await page.waitForTimeout(100);
+  page.off("download", gather);
+  assert(arrived.length === 3, `three files land from one press (${arrived.length})`);
+  const named = arrived.map((d) => d.suggestedFilename()).sort();
+  assert(
+    named.every((n, i) => n.endsWith(`@${i + 1}x.png`)),
+    `named for their multiple (${named.join(", ")})`,
+  );
+  const widths = await Promise.all(
+    arrived.map(async (d) => (await readFile(await d.path())).readUInt32BE(16)),
+  );
+  assert(
+    [...widths].sort((a, b) => a - b).join(",") === "640,1280,1920",
+    `and are the page at one, two and three times (${widths.join(",")})`,
+  );
+  await page.waitForTimeout(200);
+  assert(
+    !(await page.isVisible('[role=dialog][aria-label="Export"]')),
+    "and the window closes behind them",
+  );
+  // Put the window back to one file, for whoever opens it next.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
 }
 
 // 9bi. How you like to work, in one window. These settings existed

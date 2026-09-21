@@ -2342,7 +2342,66 @@ button.fold:hover {
    the width is a `min()` against the viewport, so a phone gets the
    whole screen and nothing hangs off the ends. */
 .export-modal {
-  width: min(26rem, calc(100vw - 2rem));
+  width: min(40rem, calc(100vw - 2rem));
+}
+
+/* The picture beside the settings. The two sit side by side while there
+   is room and stack when there is not, the picture first: it is what the
+   window is about. */
+.export-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.export-settings {
+  flex: 1 1 16rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.export-preview {
+  flex: 0 0 13rem;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* A checkerboard under the picture, so that what is transparent reads as
+   transparent rather than as the panel — a PNG keeps its alpha and a
+   JPEG flattens it onto white, and the difference is the point. */
+.export-preview img,
+.export-preview > span {
+  display: block;
+  width: 13rem;
+  height: 13rem;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: #8a8a8a;
+  background-image:
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%),
+    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+.export-preview > span {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 0.5rem;
+  box-sizing: border-box;
+}
+
+.export-preview figcaption {
+  font-size: 0.7rem;
+  line-height: 1.3;
+  white-space: normal;
 }
 
 /* The formats, as a row rather than a column: five of them, each a

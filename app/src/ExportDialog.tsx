@@ -14,6 +14,13 @@
  * bytes that will land on the disk, which is what makes a quality
  * slider worth dragging.
  *
+ * Beside the settings is the picture, and it is the same bytes again:
+ * the encode that gives the size is handed to the browser to decode, so
+ * a JPEG at quality 5 shows its blocks before it is taken, which is the
+ * one thing a number cannot tell you. A PDF and a TIFF the browser
+ * cannot show, and for those the page is drawn as the engine draws it,
+ * labelled as such — the picture, not the file.
+ *
  * Three things decide an export and they are asked in the order that
  * matters: what form it takes, how much of the page goes, and how big.
  * Everything a format cannot do is disabled rather than hidden, so the
@@ -42,6 +49,9 @@ const FORMATS: Record<
     scales: boolean;
     /** Whether it can carry less than the whole page. */
     area: boolean;
+    /** Whether a browser can show the file itself, so the preview can
+     * be the very bytes that will be written. */
+    shows: boolean;
     note: string;
   }
 > = {
@@ -51,6 +61,7 @@ const FORMATS: Record<
     mime: "image/png",
     scales: true,
     area: true,
+    shows: true,
     note: "Lossless, keeps transparency.",
   },
   jpeg: {
@@ -59,6 +70,7 @@ const FORMATS: Record<
     mime: "image/jpeg",
     scales: true,
     area: true,
+    shows: true,
     note: "Lossy, and transparency flattens onto white.",
   },
   pdf: {
@@ -67,6 +79,7 @@ const FORMATS: Record<
     mime: "application/pdf",
     scales: false,
     area: false,
+    shows: false,
     note: "Vectors stay vectors.",
   },
   svg: {
@@ -75,6 +88,7 @@ const FORMATS: Record<
     mime: "image/svg+xml",
     scales: false,
     area: false,
+    shows: true,
     note: "Markup. Adjustment layers cannot go this way.",
   },
   tiff: {
@@ -83,11 +97,16 @@ const FORMATS: Record<
     mime: "image/tiff",
     scales: false,
     area: false,
+    shows: false,
     note: "CMYK, separated through the press profile.",
   },
 };
 
 const SCALES = [0.5, 1, 2, 3];
+/** The set an asset pipeline wants: one press, three files, named
+ * `@1x`, `@2x` and `@3x`. Kept in the preference as a scale of zero,
+ * which is not a scale, and never reaches the engine as one. */
+const SET = [1, 2, 3];
 
 /** A count of bytes as a person reads it. */
 function inBytes(n: number): string {
@@ -132,7 +151,13 @@ export function ExportDialog({
   const format = prefs.exportFormat;
   const spec = FORMATS[format];
   const area: ExportArea = spec.area ? prefs.exportArea : "page";
-  const scale = spec.scales ? prefs.exportScale : 1;
+  /** Whether the set is asked for rather than one size. */
+  const set = spec.scales && prefs.exportScale === 0;
+  /** The one scale everything shown is worked out at; the set's other
+   * two are multiples of it. */
+  const scale = spec.scales && !set ? prefs.exportScale : 1;
+  /** Every scale that will be written. */
+  const scales = set ? SET : [scale];
 
   /** The page's own size, which everything shown is worked out from. */
   const [pageW, pageH] = [session.width, session.height];
@@ -175,7 +200,7 @@ export function ExportDialog({
   /** The bytes, made once and used for both the size shown and the file
    * written — so what the window says and what lands are the same
    * encode, not two that might differ. */
-  const encode = useCallback((): Uint8Array => {
+  const encodeAt = useCallback((scale: number): Uint8Array => {
     switch (format) {
       case "pdf":
         return session.export_pdf();
@@ -220,18 +245,28 @@ export function ExportDialog({
     }
   }, [
     format,
-    scale,
     area,
     hasRegion,
     prefs.jpegQuality,
     session,
     selectionBounds,
   ]);
+  /** The bytes at the one scale shown — the set's first. */
+  const encode = useCallback(() => encodeAt(scale), [encodeAt, scale]);
 
   /** How big the file comes out. `null` while it is being worked out,
    * `-1` when it is too big to work out without being asked. */
   const [size, setSize] = useState<number | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  /** The picture beside the settings: a URL the browser can show, and
+   * whether it is the file itself or the page standing in for one the
+   * browser cannot decode. */
+  const [preview, setPreview] = useState<{ url: string; standIn: boolean } | null>(null);
+  // A blob URL holds its bytes until it is let go of, so the last one is
+  // revoked whenever a new one takes its place, and when the window goes.
+  useEffect(() => () => {
+    if (preview) URL.revokeObjectURL(preview.url);
+  }, [preview]);
   /** Bumped to ask for a size that was too big to take automatically. */
   const [measure, setMeasure] = useState(0);
 
@@ -239,12 +274,16 @@ export function ExportDialog({
     if (refusal) {
       setSize(null);
       setFailed(null);
+      setPreview(null);
       return;
     }
-    const big = outW * outH > AUTO_LIMIT;
+    // The set is one, four and nine times the page — `outW` by `outH`
+    // is its first — and the ceiling counts all of it.
+    const big = outW * outH * (set ? SET.reduce((n, s) => n + s * s, 0) : 1) > AUTO_LIMIT;
     if (big && measure === 0) {
       setSize(-1);
       setFailed(null);
+      setPreview(null);
       return;
     }
     setSize(null);
@@ -252,41 +291,69 @@ export function ExportDialog({
     // encode the page once a frame.
     const timer = setTimeout(() => {
       try {
-        setSize(encode().length);
+        const bytes = encode();
+        setSize(
+          set
+            ? SET.slice(1).reduce((n, s) => n + encodeAt(s).length, bytes.length)
+            : bytes.length,
+        );
         setFailed(null);
+        // The browser shows a PNG, a JPEG or an SVG as it is; a PDF or
+        // a TIFF it cannot, so the page stands in, drawn as the engine
+        // draws it.
+        const shown = spec.shows
+          ? { bytes, mime: spec.mime, standIn: false }
+          : {
+              bytes: session.export_png_at(1, 0, 0, 0, 0),
+              mime: "image/png",
+              standIn: true,
+            };
+        setPreview({
+          url: URL.createObjectURL(
+            new Blob([shown.bytes as BlobPart], { type: shown.mime }),
+          ),
+          standIn: shown.standIn,
+        });
       } catch (err) {
         setSize(null);
+        setPreview(null);
         setFailed(String(err));
       }
     }, 350);
     return () => clearTimeout(timer);
-  }, [encode, refusal, outW, outH, measure]);
+  }, [encode, encodeAt, set, refusal, outW, outH, measure, spec.shows, spec.mime, session]);
 
   // Asking for a size is about the export as it now stands, so changing
   // any of it puts the question back.
   useEffect(() => setMeasure(0), [format, area, scale, prefs.jpegQuality]);
 
-  const name = `${fileName()}${area === "selection" ? "-selection" : ""}${
-    scale !== 1 ? `@${scale}x` : ""
-  }.${spec.ext}`;
+  const nameAt = (s: number) =>
+    `${fileName()}${area === "selection" ? "-selection" : ""}${
+      s !== 1 || set ? `@${s}x` : ""
+    }.${spec.ext}`;
+  const name = set ? `${nameAt(1)}, @2x, @3x` : nameAt(scale);
 
   const run = useCallback(() => {
     if (refusal) return;
     try {
-      const bytes = encode();
-      const url = URL.createObjectURL(
-        new Blob([bytes as BlobPart], { type: spec.mime }),
-      );
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      a.click();
-      URL.revokeObjectURL(url);
+      for (const s of scales) {
+        const bytes = encodeAt(s);
+        const url = URL.createObjectURL(
+          new Blob([bytes as BlobPart], { type: spec.mime }),
+        );
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = nameAt(s);
+        a.click();
+        URL.revokeObjectURL(url);
+      }
       onClose();
     } catch (err) {
       setFailed(String(err));
     }
-  }, [encode, name, spec.mime, refusal, onClose]);
+    // `scales` and `nameAt` are made afresh each render from what the
+    // dependencies below say.
+  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, onClose]);
 
   const runRef = useRef(run);
   runRef.current = run;
@@ -308,6 +375,28 @@ export function ExportDialog({
         onPointerDown={(e) => e.stopPropagation()}
       >
         <h2>Export</h2>
+
+        <div className="export-body">
+        <figure className="export-preview" aria-label="Preview">
+          {preview ? (
+            <img
+              src={preview.url}
+              alt={preview.standIn ? "The page as it draws" : "The file as it will be written"}
+            />
+          ) : (
+            <span className="hint">
+              {refusal ? "" : size === -1 ? "Too big to show unasked" : "…"}
+            </span>
+          )}
+          <figcaption className="hint">
+            {preview
+              ? preview.standIn
+                ? `As the page draws — a ${spec.label} carries what the browser cannot show`
+                : "The file itself, decoded"
+              : "\u00a0"}
+          </figcaption>
+        </figure>
+        <div className="export-settings">
 
         <div className="export-formats" role="group" aria-label="Format">
           {(Object.keys(FORMATS) as ExportFormat[]).map((f) => (
@@ -349,17 +438,30 @@ export function ExportDialog({
             {SCALES.map((s) => (
               <button
                 key={s}
-                className={s === scale ? "preset active" : "preset"}
+                className={!set && s === scale ? "preset active" : "preset"}
                 disabled={!spec.scales}
-                aria-pressed={s === scale}
+                aria-pressed={!set && s === scale}
                 onClick={() => setPrefs({ exportScale: s })}
               >
                 {s === 1 ? "1×" : `${s}×`}
               </button>
             ))}
+            <button
+              className={set ? "preset active" : "preset"}
+              disabled={!spec.scales}
+              aria-pressed={set}
+              title="1×, 2× and 3×: three files in one press, named @1x, @2x and @3x"
+              onClick={() => setPrefs({ exportScale: 0 })}
+            >
+              Set
+            </button>
           </div>
           <span className="hint">
-            {spec.scales ? `${outW} × ${outH} px` : "as drawn"}
+            {!spec.scales
+              ? "as drawn"
+              : set
+                ? `${outW} × ${outH} px, ×2, ×3`
+                : `${outW} × ${outH} px`}
           </span>
         </div>
 
@@ -379,6 +481,9 @@ export function ExportDialog({
             <span className="hint">{prefs.jpegQuality}</span>
           </label>
         )}
+
+        </div>
+        </div>
 
         <p className="export-size" role="status">
           {refusal ? (
