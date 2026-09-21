@@ -1114,6 +1114,10 @@ mod tests {
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
             "/document/nodes/*/kind/Raster:width",
+            // A guide text is set along: the two fields a path cannot be
+            // missing, the same two its own path wants.
+            "/document/nodes/*/kind/Text/along/Path:closed",
+            "/document/nodes/*/kind/Text/along/Path:points",
             "/document/nodes/*/kind/Text/fill/Srgb:a",
             "/document/nodes/*/kind/Text/fill/Srgb:b",
             "/document/nodes/*/kind/Text/fill/Srgb:g",

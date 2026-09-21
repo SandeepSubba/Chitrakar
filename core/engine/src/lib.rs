@@ -9355,6 +9355,10 @@ mod tests {
             ("a paint layer", f.painted, true),
             ("a picture", f.picture, true),
             ("a block of text", f.words, true),
+            // Set along a guide rather than in lines: the guide is a
+            // shape inside the spec, and the box the glyphs land in is
+            // taken from where they land rather than from the origin.
+            ("text along a guide", f.arc, true),
             ("a frame", f.frame, true),
             // The four that draw by reading what is under them have no
             // picture of their own to hold against anything: drawn on
@@ -9578,6 +9582,7 @@ mod tests {
             ("a paint layer", f.painted, false),
             ("a picture", f.picture, false),
             ("a block of text", f.words, false),
+            ("text along a guide", f.arc, false),
             ("a frame", f.frame, false),
             ("an adjustment", f.lifted, true),
             ("a filter", f.softened, true),

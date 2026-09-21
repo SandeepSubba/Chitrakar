@@ -73,6 +73,8 @@ pub struct Fixture {
     /// is a list of colours, and this is four lists of points read
     /// through a table.
     pub graded: NodeId,
+    /// Text set along a guide: an open arc, smoothed.
+    pub arc: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1352,6 +1354,51 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // Text set along a guide rather than in lines. Every text block this
+    // document had held sat in lines from its origin, so the whole of
+    // the other way of setting type — a guide flattened to a polyline
+    // and its arc length tabulated, each glyph turned to the direction
+    // there, an offset along it, and the box the glyphs land in taken
+    // from where they land rather than from the origin — had never gone
+    // through the file, the clipboard, the undo runs, the dirty region
+    // or the exporters here, where the SVG is a textPath over a path in
+    // the defs and the PDF sets each glyph with a matrix of its own. An
+    // open arc, smoothed, with the text short enough to fit along it:
+    // what runs off an open guide's end is not drawn, and a block that
+    // shows nothing would be asking nothing.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::text("arc", {
+            let mut spec = TextSpec::new(
+                "curve",
+                7.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.05,
+                    g: 0.35,
+                    b: 0.3,
+                    a: 1.0,
+                },
+            );
+            spec.along = Some(VectorShape::Path {
+                points: vec![[0.0, 8.0], [12.0, 0.0], [24.0, 8.0]],
+                closed: false,
+                smooth: true,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            });
+            spec.along_offset = 2.0;
+            spec
+        })),
+    })
+    .unwrap();
+    let arc = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: arc,
+        transform: Transform::translation(3.0, 44.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1543,6 +1590,7 @@ pub fn everything() -> Fixture {
         grain,
         pierced,
         graded,
+        arc,
         stroke,
     }
 }
@@ -1992,6 +2040,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         frame,
         pierced,
         graded,
+        arc,
         stroke,
         ..
     } = f;
@@ -2147,6 +2196,32 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetOpacity {
             id: *graded,
             opacity: 0.7,
+        },
+        // The guided text: its guide closed into a ring, which is the
+        // other branch of the walk — a closed guide wraps what runs off
+        // its end rather than dropping it — and the text slid further
+        // along; and faded.
+        Command::SetKind {
+            id: *arc,
+            kind: Box::new(NodeKind::Text({
+                let mut spec = TextSpec::new(
+                    "curve",
+                    7.0,
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.05,
+                        g: 0.35,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                );
+                spec.along = Some(VectorShape::Ellipse { rx: 9.0, ry: 7.0 });
+                spec.along_offset = 5.0;
+                spec
+            })),
+        },
+        Command::SetOpacity {
+            id: *arc,
+            opacity: 0.8,
         },
         Command::AddStroke {
             id: painted,

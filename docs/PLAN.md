@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its twenty-eight is
+     cross-renderer audits can run: every one of its twenty-nine is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's twenty-eight layers can be removed outright without moving
+     fixture's twenty-nine layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3741,6 +3741,36 @@ without reading anything else.*
      and 1600, because at two milliseconds a full parallel run of the
      workspace — the GPU's tests among it — moved a reading past any
      ceiling that was not slack.
+     The twenty-second was **text set along a guide** (`arc`): a short
+     word on an open, smoothed arc, two pixels in from its start. Every
+     text block here had sat in lines from its origin, so the other way
+     of setting type — a guide flattened and its arc length tabulated,
+     each glyph turned to the direction there, an offset along it, and
+     a box taken from where the glyphs land rather than from the origin
+     — had never gone through the file, the clipboard, the undo runs or
+     the wire. Its two edits close the guide into a ring, which is the
+     other branch of the walk (a closed guide wraps what an open one
+     drops), slide the text along it, and fade it. One audit stopped
+     holding, the file inventory, by the guide path's two required
+     fields. Then the code was broken three ways. Glyphs left unturned:
+     two tests fail, the renderer's own and the PDF's quarter-turn
+     matrix, both written for the feature, and no fixture audit. The
+     box taken from the origin for guided text: two more written for it
+     fail, and again no fixture audit — and the reason is worth having.
+     The box is at once the dirty region and the rectangle the raster
+     is drawn through, and both renderers read the one raster; so a
+     wrong box clips the glyphs to exactly the region that is
+     repainted, the CPU and the GPU agree about the cut, and nothing
+     over this document knows where the letters should have been. The
+     picture of guided text is held by tests that know, and only by
+     them. The guide kept out of the file altogether: four fixture
+     audits fail — the file round trip, the stand-in file, the
+     inventory and the wire — which is the shape's reach, measured.
+     Not the clipboard, whose every-kind walk is a fixed list of one
+     layer per kind rather than the document's layers, so a guided
+     block had never been sent through it; it and the group round trip
+     carry one now, and the clipboard's comparison of the kind written
+     out is exact, so a guide that did not travel would be named.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
