@@ -1002,7 +1002,14 @@ mod tests {
             // a vector's own gradient wants, in the one adjustment that
             // is stated by a list rather than by numbers.
             "/document/nodes/*/kind/Adjustment/Curves:points",
-            "/document/nodes/*/kind/Adjustment/Curves:points",
+            // A levels adjustment: all five numbers are required, as the
+            // curves' points are — an adjustment written before it existed
+            // never held one, so nothing old is refused.
+            "/document/nodes/*/kind/Adjustment/Levels:gamma",
+            "/document/nodes/*/kind/Adjustment/Levels:in_black",
+            "/document/nodes/*/kind/Adjustment/Levels:in_white",
+            "/document/nodes/*/kind/Adjustment/Levels:out_black",
+            "/document/nodes/*/kind/Adjustment/Levels:out_white",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:color",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:offset",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named:means",

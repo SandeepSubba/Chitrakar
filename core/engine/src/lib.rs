@@ -10266,6 +10266,18 @@ mod tests {
     /// Deleted rather than merely compared to itself, because the claim
     /// is the strong one — that the page is what it would be if the layer
     /// had never been added.
+    ///
+    /// With one care. A layer that others are *held to* is not the same
+    /// page gone as hidden, and neither is wrong: hidden, the run held
+    /// to it has nothing to be held to and draws nothing; deleted, the
+    /// run falls to the layer beneath and grades that instead, which is
+    /// what every editor does with a clipping group whose base is
+    /// deleted. So "gone" here takes the held run with the layer, which
+    /// is the page an invisible layer is being held against. This was
+    /// found by the levels adjustment held to the fixture's picture: the
+    /// picture hidden, the page differed from the picture deleted by an
+    /// eighth of a channel somewhere else entirely, where the levels had
+    /// landed on whatever was under the picture.
     #[test]
     fn a_layer_that_cannot_be_seen_is_the_same_as_no_layer() {
         let f = chitrakar_doc::fixture::everything();
@@ -10298,9 +10310,24 @@ mod tests {
             ("a copy of another layer", f.copy),
         ] {
             // The page with the layer gone. A group takes its children
-            // with it, which is what deleting a group means.
+            // with it, which is what deleting a group means; and a layer
+            // takes the run held to it, for the reason above.
             let gone = {
                 let mut s = Session::from_document(f.doc.clone());
+                let held: Vec<NodeId> = {
+                    let doc = s.document();
+                    let parent = doc.parent_of(id).expect("a fixture layer has a parent");
+                    let siblings = doc.children_of(parent).unwrap();
+                    let at = siblings.iter().position(|&n| n == id).unwrap();
+                    siblings[at + 1..]
+                        .iter()
+                        .copied()
+                        .take_while(|&n| doc.node(n).unwrap().clipped)
+                        .collect()
+                };
+                for n in held {
+                    s.apply(Command::RemoveNode { id: n }).unwrap();
+                }
                 s.apply(Command::RemoveNode { id }).unwrap();
                 s.render().unwrap()
             };

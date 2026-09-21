@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its twenty-nine is
+     cross-renderer audits can run: every one of its thirty is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's twenty-nine layers can be removed outright without moving
+     fixture's thirty layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3771,6 +3771,35 @@ without reading anything else.*
      block had never been sent through it; it and the group round trip
      carry one now, and the clipboard's comparison of the kind written
      out is exact, so a guide that did not travel would be named.
+     The twenty-third was **a levels adjustment** (`leveled`), held to
+     the picture: an input black and white point, a gamma between them
+     and an output pair — five numbers where every adjustment here had
+     been one, a ramp, or the curves' four lists — right above the
+     raster in the stack, since a run of held layers is held to the
+     first unheld one beneath it, and over the one layer with tones
+     enough for a black point and a gamma to be told apart on. Two
+     audits stopped holding. The file inventory, by the five numbers a
+     levels cannot be missing (and it turned out to be carrying the
+     curves' `points` twice, which a set did not mind; once now). And
+     `a_layer_that_cannot_be_seen_is_the_same_as_no_layer`, on the
+     picture hidden — by an eighth of a channel somewhere else
+     entirely. Not a defect but the audit's premise, narrower than it
+     read: a layer that others are *held to* is not the same page gone
+     as hidden, and neither is wrong. Hidden, the run held to it has
+     nothing to be held to and draws nothing; deleted, the run falls to
+     the layer beneath and grades that instead, which is what every
+     editor does with a clipping group whose base is deleted. The
+     audit's "gone" takes the held run with the layer now, which is the
+     page an invisible layer was always being held against. Then the
+     sabotages. The CPU forgetting the gamma fails three: its own
+     levels test, the GPU's adjustment table, and the whole-fixture
+     cross-renderer audit. The GPU forgetting the output black failed
+     *only* its own table at first — at 0.05 the shift was a dozen
+     levels on the picture's dark squares, inside the fixture audits'
+     tolerance — so the black point was raised to 0.2, where the same
+     sabotage fails both fixture audits. The twentieth's lesson again,
+     and worth having twice: the shape is placed where a wrong answer
+     has room to show, or it is merely held.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this

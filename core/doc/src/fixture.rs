@@ -75,6 +75,9 @@ pub struct Fixture {
     pub graded: NodeId,
     /// Text set along a guide: an open arc, smoothed.
     pub arc: NodeId,
+    /// A levels adjustment held to the picture: input black and white
+    /// points, a gamma, and an output pair.
+    pub leveled: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1399,6 +1402,36 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A levels adjustment held to the picture: an input black and white
+    // point, a gamma between them, and an output pair — five numbers
+    // where every adjustment here had been one, a ramp, or the curves'
+    // four lists. Above the raster, which is the one layer with tones
+    // enough for a black point and a gamma to be told apart on; held
+    // to it so a grade over the whole page does not move every pixel
+    // the other audits read. Right above it in the stack, since a run
+    // of held layers is held to the first unheld one beneath the run.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: 3,
+        node: Box::new(Node::adjustment(
+            "levelled",
+            crate::Adjustment::Levels {
+                in_black: 0.1,
+                in_white: 0.85,
+                gamma: 1.4,
+                out_black: 0.2,
+                out_white: 0.9,
+            },
+        )),
+    })
+    .unwrap();
+    let leveled = doc.children_of(root).unwrap()[3];
+    doc.apply(Command::SetClipped {
+        id: leveled,
+        clipped: true,
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1591,6 +1624,7 @@ pub fn everything() -> Fixture {
         pierced,
         graded,
         arc,
+        leveled,
         stroke,
     }
 }
@@ -2041,6 +2075,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         pierced,
         graded,
         arc,
+        leveled,
         stroke,
         ..
     } = f;
@@ -2222,6 +2257,22 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetOpacity {
             id: *arc,
             opacity: 0.8,
+        },
+        // The levels re-pointed: every one of the five moved, the gamma
+        // across one — a lift where there was a drop.
+        Command::SetKind {
+            id: *leveled,
+            kind: Box::new(NodeKind::Adjustment(crate::Adjustment::Levels {
+                in_black: 0.0,
+                in_white: 0.7,
+                gamma: 0.8,
+                out_black: 0.15,
+                out_white: 1.0,
+            })),
+        },
+        Command::SetOpacity {
+            id: *leveled,
+            opacity: 0.6,
         },
         Command::AddStroke {
             id: painted,
