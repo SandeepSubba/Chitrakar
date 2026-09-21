@@ -1122,6 +1122,19 @@ export function App() {
    * keys sheet all read. */
   const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
   const TOOL_HINT = keys.hint;
+  // The theme, resolved to one of the two and put on the root for the
+  // stylesheet: "system" follows the machine, and follows it *live*, so
+  // a machine that goes dark at dusk takes the chrome with it.
+  useEffect(() => {
+    const system = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      document.documentElement.dataset.theme =
+        prefs.theme === "system" ? (system.matches ? "light" : "dark") : prefs.theme;
+    };
+    apply();
+    system.addEventListener("change", apply);
+    return () => system.removeEventListener("change", apply);
+  }, [prefs.theme]);
   /** Which tools are on the rail. Put away in Preferences is not gone:
    * the tool keeps its key and sits behind the slot at the rail's end.
    * The one tool that cannot be put away is the one that moves things. */

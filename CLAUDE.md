@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1293 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1302 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -146,7 +146,11 @@ panel's width and the toolbar's position deliberately stay on their own
 keys: they are written on every frame of a drag.
 
 `PreferencesDialog.tsx` (Ctrl+,) is a rail of seven groups over that
-object; its Tools page decides which tools are on the rail (a tool put
+object; its General page picks the theme (`prefs.theme`: system, dark
+or light — every chrome colour is a token on `:root` in `styles.css`,
+the light set sits under `:root[data-theme="light"]`, and the app
+resolves "system" before setting the attribute; what is drawn over the
+picture keeps its own colours); its Tools page decides which tools are on the rail (a tool put
 away keeps its key and waits behind a "…" slot at the rail's end) and
 which button groups the bar shows; `prefs.brushes` is the brushes kept
 by name, shown as chips over the paint tools' row. `app/src/tools.ts` is the one table

@@ -23,6 +23,9 @@ import { useCallback, useEffect, useState } from "react";
 import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
 export type Units = "px" | "mm" | "in";
+/** How the chrome is coloured: as the system says, or dark or light
+ * whatever it says. */
+export type Theme = "system" | "dark" | "light";
 export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
 /** A frame exports at the multiple the *frame* asks for, under a name
  * the frame gives it, so it stays a row on the menu rather than a
@@ -39,6 +42,9 @@ export type BrushPreset = { name: string; size: number; softness: number };
 export type Prefs = {
   /** What the rulers and the geometry fields read in. */
   units: Units;
+  /** The chrome's colours: the system's choice, or one of the two
+   * outright. The page is the page under either. */
+  theme: Theme;
   /** How far apart the grid's lines are, in document pixels; 0 for none. */
   grid: number;
   /** Whether guides are drawn. */
@@ -84,6 +90,7 @@ export type Prefs = {
 
 export const DEFAULTS: Prefs = {
   units: "px",
+  theme: "system",
   grid: 0,
   showGuides: true,
   snap: 6,
@@ -163,6 +170,7 @@ export function clamp(p: Prefs): Prefs {
     // A value written by a version that offered more than these two
     // must not reach the window as an area it cannot show.
     exportArea: p.exportArea === "selection" ? "selection" : "page",
+    theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),
     nudge: n(p.nudge, 0.1, 100, 1),

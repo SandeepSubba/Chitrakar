@@ -1,3 +1,11 @@
+/* The chrome's colours, all of them, as tokens: the dark set here and
+   the light set below it, chosen by `data-theme` on the root, which the
+   app sets from the theme preference (system, dark or light — "system"
+   is resolved to one of the other two in the app, so the stylesheet
+   never has to say the light set twice). What is drawn *over the
+   picture* — handles, anchors, ants, the crop's frame, the brush ring —
+   keeps its own white and black: it sits on the page, not on the
+   chrome, and a page can be any colour under either theme. */
 :root {
   --bg: #1e1e22;
   --panel: #2a2a30;
@@ -5,7 +13,50 @@
   --text: #e8e8ec;
   --muted: #8a8a94;
   --accent: #6c8cff;
+  /* What sits on the accent: a button's label. */
+  --on-accent: #10101a;
+  /* A hairline where a border would be too much. */
+  --line: rgb(255 255 255 / 0.08);
+  /* The rulers, the area behind the page, and a mask's thumbnail. */
+  --rule: #1c1c20;
+  --canvas: #141416;
+  --thumb: #111;
+  /* A field's quiet ground, and a note in a window. */
+  --field: rgba(127, 127, 127, 0.08);
+  --note: #ffd9a0;
+  /* Shadows under what floats, and the scrim behind a window. */
+  --shadow: rgb(0 0 0 / 0.45);
+  --shadow-deep: rgb(0 0 0 / 0.5);
+  --scrim: rgb(0 0 0 / 0.5);
+  /* The checkerboard that says "transparent": under a layer's
+     thumbnail and under the export preview. */
+  --thumb-check: rgba(255, 255, 255, 0.08);
+  --check-a: #8a8a8a;
+  --check-b: #6a6a6a;
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f2f2f5;
+  --panel: #ffffff;
+  --border: #d4d4dc;
+  --text: #1b1b22;
+  --muted: #6b6b78;
+  --accent: #3b5bdb;
+  --on-accent: #ffffff;
+  --line: rgb(0 0 0 / 0.08);
+  --rule: #e9e9ee;
+  --canvas: #d6d6dc;
+  --thumb: #e4e4e8;
+  --field: rgba(127, 127, 127, 0.12);
+  --note: #7a4f00;
+  --shadow: rgb(0 0 0 / 0.16);
+  --shadow-deep: rgb(0 0 0 / 0.22);
+  --scrim: rgb(0 0 0 / 0.28);
+  --thumb-check: rgba(0, 0, 0, 0.08);
+  --check-a: #c9c9ce;
+  --check-b: #adadb4;
+  color-scheme: light;
 }
 
 * {
@@ -166,7 +217,7 @@ body {
   background: color-mix(in srgb, var(--panel) 92%, #000);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  box-shadow: 0 12px 32px var(--shadow);
   /* A menu can be taller than the room under it, and one that is went on
      past the bottom of the window with no way to reach what was down
      there: on a phone held sideways, fourteen of Edit's twenty-four items
@@ -306,7 +357,7 @@ body {
   z-index: 50;
   display: grid;
   place-items: center;
-  background: rgb(0 0 0 / 0.5);
+  background: var(--scrim);
 }
 
 .modal {
@@ -323,7 +374,7 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  box-shadow: 0 20px 50px rgb(0 0 0 / 0.5);
+  box-shadow: 0 20px 50px var(--shadow-deep);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -437,7 +488,7 @@ body {
 .mask-button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #10101a;
+  color: var(--on-accent);
   font-weight: 600;
 }
 
@@ -766,12 +817,12 @@ body {
   height: 18px;
   border-radius: 3px;
   object-fit: contain;
-  background-color: var(--panel-2, #2a2a30);
+  background-color: var(--panel);
   background-image:
-    linear-gradient(45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
-    linear-gradient(-45deg, rgba(255, 255, 255, 0.08) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%),
-    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.08) 75%);
+    linear-gradient(45deg, var(--thumb-check) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--thumb-check) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--thumb-check) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--thumb-check) 75%);
   background-size: 8px 8px;
   background-position:
     0 0,
@@ -785,7 +836,7 @@ body {
 .mask-thumb {
   width: 15px;
   height: 15px;
-  background-color: #111;
+  background-color: var(--thumb);
   background-image: none;
 }
 
@@ -818,8 +869,8 @@ body {
 .ruler {
   position: absolute;
   z-index: 2;
-  background: #1c1c20;
-  color: var(--muted, #9aa0aa);
+  background: var(--rule);
+  color: var(--muted);
   touch-action: none;
   cursor: crosshair;
   overflow: hidden;
@@ -830,7 +881,7 @@ body {
   left: 0;
   right: 0;
   height: 18px;
-  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+  border-bottom: 1px solid var(--line);
 }
 
 .ruler-left {
@@ -838,7 +889,7 @@ body {
   left: 0;
   bottom: 0;
   width: 18px;
-  border-right: 1px solid rgb(255 255 255 / 0.08);
+  border-right: 1px solid var(--line);
 }
 
 .ruler svg {
@@ -866,9 +917,9 @@ body {
   width: 18px;
   height: 18px;
   z-index: 3;
-  background: #1c1c20;
-  border-right: 1px solid rgb(255 255 255 / 0.08);
-  border-bottom: 1px solid rgb(255 255 255 / 0.08);
+  background: var(--rule);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 /* The grid: under the artwork's own overlays and quiet enough to draw
@@ -930,7 +981,7 @@ body {
   align-items: center;
   gap: 0.25rem;
   font-size: 0.75rem;
-  color: var(--muted, #9aa0aa);
+  color: var(--muted);
 }
 
 /* The chain between the two sides, sized like a field so the row still
@@ -964,7 +1015,7 @@ body {
   flex-direction: column;
   gap: 0.35rem;
   padding-top: 0.4rem;
-  border-top: 1px solid var(--line, rgb(255 255 255 / 0.08));
+  border-top: 1px solid var(--line);
 }
 
 .effect-head span {
@@ -987,7 +1038,7 @@ body {
   background: color-mix(in srgb, var(--panel) 94%, #000);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  box-shadow: 0 12px 32px var(--shadow);
 }
 
 .straighten-panel h2 {
@@ -1332,7 +1383,7 @@ body {
   z-index: 40;
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 0.45);
+  box-shadow: 0 12px 32px var(--shadow);
   max-height: calc(100vh - 2rem);
   overflow-y: auto;
 }
@@ -1444,7 +1495,7 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 10px 24px rgb(0 0 0 / 0.45);
+  box-shadow: 0 10px 24px var(--shadow);
 }
 
 .tool-number {
@@ -1508,7 +1559,7 @@ body {
   flex: 1;
   position: relative;
   overflow: hidden;
-  background: #141416;
+  background: var(--canvas);
 }
 
 #engine-canvas {
@@ -1522,7 +1573,7 @@ body {
 #engine-page {
   position: absolute;
   background: #fff;
-  box-shadow: 0 4px 24px rgb(0 0 0 / 0.5);
+  box-shadow: 0 4px 24px var(--shadow-deep);
   pointer-events: none;
 }
 
@@ -1592,7 +1643,7 @@ body {
     z-index: 15;
     max-width: 80vw;
     overflow-y: auto;
-    box-shadow: -12px 0 32px rgb(0 0 0 / 0.45);
+    box-shadow: -12px 0 32px var(--shadow);
   }
 }
 
@@ -1769,7 +1820,7 @@ body {
   aspect-ratio: 1;
   border: 1px solid var(--border);
   border-radius: 4px;
-  background: rgba(127, 127, 127, 0.08);
+  background: var(--field);
   touch-action: none;
   cursor: crosshair;
 }
@@ -1890,7 +1941,7 @@ body {
   margin: 0.1rem 0 0.3rem;
   font-size: 0.78rem;
   line-height: 1.35;
-  color: #ffd9a0;
+  color: var(--note);
 }
 
 /* The lock sits beside the eye and is built like it; an unlocked one is
@@ -1933,7 +1984,7 @@ body {
    by name has to look different from the same colour typed in, since only
    one of them follows the palette. */
 .palette .swatch[aria-pressed="true"] {
-  outline: 2px solid var(--accent, #4a9eff);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 .palette .swatch.add {
@@ -2382,10 +2433,10 @@ button.fold:hover {
   object-fit: contain;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background-color: #8a8a8a;
+  background-color: var(--check-a);
   background-image:
-    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%),
-    linear-gradient(45deg, #6a6a6a 25%, transparent 25%, transparent 75%, #6a6a6a 75%);
+    linear-gradient(45deg, var(--check-b) 25%, transparent 25%, transparent 75%, var(--check-b) 75%),
+    linear-gradient(45deg, var(--check-b) 25%, transparent 25%, transparent 75%, var(--check-b) 75%);
   background-size: 12px 12px;
   background-position: 0 0, 6px 6px;
 }

@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~500),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1293 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1302 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5630,7 +5630,24 @@ without reading anything else.*
   rest are a shift away, so rebinding the marquee moves the lasso and
   the wand with it. What is *not* rebindable is the command keys —
   Ctrl+S, Ctrl+G, the brackets — which are still literals in the
-  handlers. The engine is told what it
+  handlers. The chrome has a **light theme** as well as the dark one,
+  and which is shown is the person's (`prefs.theme`: as the system,
+  dark, or light; the General page). Every colour of the chrome is a
+  token on `:root` now — the six that were, and a dozen more that had
+  been literals down the sheet: the hairline, the rulers, the area
+  behind the page, the shadows, the scrim, the checkerboards, a note's
+  amber, the label on the accent — and the light set is one block
+  under `:root[data-theme="light"]`. The app resolves "system" to one
+  of the two before putting it on the root, following the machine
+  live, so the sheet never says the light set twice. What is drawn
+  *over the picture* — handles, anchors, ants, the crop's frame, the
+  brush ring — keeps its own white and black on purpose: it sits on
+  the page, and a page can be any colour under either theme. The
+  suite pins the browser to a dark machine, since Playwright's own
+  default prefers light and every chrome pixel it reads was authored
+  against the dark set; the light set is tried in a block of its own
+  (`asked for light, the chrome is light`), which also moves the
+  machine's preference both ways and watches the chrome follow. The engine is told what it
   always was — `erasing` and `healing` are read off the tool in hand —
   and the two switches are gone, since a mode that is a tool does not
   also want a switch. Clone no longer heals by default: it is the plain
@@ -6333,8 +6350,11 @@ chitrakar/
   no remembering more than one export setup. The preferences window
   lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*)
   but not the command keys — Ctrl+S, Ctrl+G, the brackets are still
-  literals in the keydown handlers — and has no theme: the stylesheet
-  is `color-scheme: dark` and
+  literals in the keydown handlers. A light theme is in ✅ (see §0
+  *Chrome*: every colour of the chrome is a token on the root, the
+  light set is one attribute away, and `prefs.theme` is the system's
+  choice or one of the two outright). Before that the stylesheet
+  was `color-scheme: dark` and
   single-palette throughout, so a light mode is a token pass over
   ~2,000 lines of CSS rather than a switch, and worth doing as its own
   piece of work.

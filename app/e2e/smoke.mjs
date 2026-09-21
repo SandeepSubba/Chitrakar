@@ -41,7 +41,15 @@ const browser = await chromium.launch({
   executablePath: process.env.CHITRAKAR_CHROMIUM || undefined,
   args: ["--no-sandbox"],
 });
-const page = await browser.newPage({ viewport: { width: 1400, height: 900 }, acceptDownloads: true });
+// A dark machine, said outright: Playwright's default is a machine
+// that prefers light, and the theme follows the machine unless told
+// otherwise, so without this every chrome pixel below would be read
+// off the light set. The light set is tried on its own, in its block.
+const page = await browser.newPage({
+  viewport: { width: 1400, height: 900 },
+  acceptDownloads: true,
+  colorScheme: "dark",
+});
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !m.text().includes("404") && errors.push(m.text()));
@@ -12184,6 +12192,70 @@ assert(
   await page.click('.modal-actions .primary:text-is("Done")');
   await page.waitForTimeout(200);
   await pickTool("Move");
+}
+
+// 9bv. The chrome has a light set of colours as well as the dark one,
+// and which is shown is a preference: the system's choice, or one of
+// the two outright. Every colour of the chrome is a token on the root,
+// so the switch is one attribute — and the page is the page under
+// either, since what is drawn over it keeps its own colours.
+{
+  /** The lightness of an element's background, 0 to 1. */
+  const lightness = async (selector) =>
+    page.locator(selector).first().evaluate((el) => {
+      const [r, g, b] = getComputedStyle(el)
+        .backgroundColor.match(/[\d.]+/g)
+        .map(Number);
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    });
+  const theme = () => page.evaluate(() => document.documentElement.dataset.theme);
+  assert(
+    (await theme()) === "dark" && (await lightness(".panel")) < 0.3,
+    `on a machine that prefers dark, the chrome is dark (${await theme()})`,
+  );
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.selectOption('select[aria-label="Theme"]', "light");
+  await page.waitForTimeout(150);
+  assert(
+    (await theme()) === "light" && (await lightness(".panel")) > 0.9,
+    `asked for light, the chrome is light (${await theme()}, ${(await lightness(".panel")).toFixed(2)})`,
+  );
+  assert(
+    (await lightness(".modal")) > 0.9 && (await lightness(".canvas-host")) > 0.7,
+    "the windows and the area behind the page go with it",
+  );
+  assert(
+    (await page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)) === "light",
+    "and the browser's own controls are told",
+  );
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(150);
+  // The page is the page: what is drawn over it keeps its own colours.
+  assert(
+    (await page.locator(".handle").count()) === 0 ||
+      (await page.locator(".handle").first().evaluate((el) => getComputedStyle(el).borderColor)) ===
+        "rgb(255, 255, 255)",
+    "a handle on the page is still white",
+  );
+  assert(
+    JSON.parse(await page.evaluate(() => localStorage.getItem("chitrakar:prefs"))).theme === "light",
+    "and the choice is written down",
+  );
+  // "As the system" follows the machine, live.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.selectOption('select[aria-label="Theme"]', "system");
+  await page.waitForTimeout(150);
+  assert((await theme()) === "dark", "as the system, on a dark machine, it is dark again");
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.waitForTimeout(150);
+  assert((await theme()) === "light", "and follows the machine when the machine changes");
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.waitForTimeout(150);
+  assert((await theme()) === "dark", "both ways");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(150);
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

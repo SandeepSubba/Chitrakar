@@ -24,7 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
-import { DEFAULTS, type ExportFormat, type Prefs, type Units } from "./prefs";
+import { DEFAULTS, type ExportFormat, type Prefs, type Theme, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
   KEYED_TOOLS,
@@ -256,6 +256,19 @@ export function PreferencesDialog({
                     ))}
                   </select>
                   <span className="hint">rulers and geometry fields</span>
+                </label>
+                <label className="row">
+                  Theme
+                  <select
+                    value={prefs.theme}
+                    onChange={(e) => setPrefs({ theme: e.target.value as Theme })}
+                    aria-label="Theme"
+                  >
+                    <option value="system">As the system</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                  </select>
+                  <span className="hint">the windows and panels; the page is the page</span>
                 </label>
                 {num("Arrow key moves", prefs.nudge, (v) => setPrefs({ nudge: v }), {
                   min: 0.1,
