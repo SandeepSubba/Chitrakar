@@ -60,6 +60,13 @@ pub struct Fixture {
     /// else, so the same page drawn twice any two ways has to grain the
     /// same.
     pub grain: NodeId,
+    /// A closed path with bezier handles of its own, filled, with a
+    /// second ring inside it that is a hole — the two things a path can
+    /// hold that no path in this document held: every path here was
+    /// straight-sided or smoothed by rule, and none had a subpath. A
+    /// hole is what a boolean leaves behind, and handles are what the
+    /// pen draws and the node tool takes hold of.
+    pub pierced: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1242,6 +1249,49 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A path with curves of its own and a hole through it. Every path
+    // in this document was straight-sided, or smoothed by rule with no
+    // handles written down, and none had a second ring — so the bezier
+    // flattening, the even-odd fill, both exporters' path data for
+    // curves and holes, and the anchor arithmetic on handles had never
+    // been asked of by anything here. A lens: two anchors on a line,
+    // with handles long enough that the curves between them bulge well
+    // past the anchors — so anything that takes a path's extent from
+    // its anchors, rather than from where its curves go, is wrong about
+    // this one by half its height — and a square hole through it.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector(
+                "pierced",
+                VectorShape::Path {
+                    points: vec![[0.0, 8.0], [20.0, 8.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: vec![[0.0, 10.0, 0.0, -10.0], [0.0, -10.0, 0.0, 10.0]],
+                    subpaths: vec![vec![[7.0, 5.0], [13.0, 5.0], [13.0, 11.0], [7.0, 11.0]]],
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.55,
+                    b: 0.15,
+                    a: 1.0,
+                });
+            }
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let pierced = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: pierced,
+        transform: Transform::translation(54.0, 40.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1431,6 +1481,7 @@ pub fn everything() -> Fixture {
         worn,
         lent,
         grain,
+        pierced,
         stroke,
     }
 }
@@ -1878,6 +1929,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         picture,
         words,
         frame,
+        pierced,
         stroke,
         ..
     } = f;
@@ -1981,6 +2033,38 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     g: 0.5,
                     b: 1.0,
                     a: 0.75,
+                }),
+                stroke: None,
+                gradient: None,
+            }),
+        },
+        // The pierced path: moved, so its dirty region has to cover where
+        // its curves bulge past its anchors; faded; and given handles of
+        // another length, which is the one edit that changes a curve
+        // without moving an anchor.
+        Command::SetTransform {
+            id: *pierced,
+            transform: Transform::translation(48.0, 36.0),
+        },
+        Command::SetOpacity {
+            id: *pierced,
+            opacity: 0.6,
+        },
+        Command::SetKind {
+            id: *pierced,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Path {
+                    points: vec![[0.0, 8.0], [20.0, 8.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: vec![[0.0, 4.0, 0.0, -4.0], [0.0, -4.0, 0.0, 4.0]],
+                    subpaths: vec![vec![[7.0, 5.0], [13.0, 5.0], [13.0, 11.0], [7.0, 11.0]]],
+                },
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.55,
+                    b: 0.15,
+                    a: 1.0,
                 }),
                 stroke: None,
                 gradient: None,

@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its twenty-six is
+     cross-renderer audits can run: every one of its twenty-seven is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's twenty-six layers can be removed outright without moving
+     fixture's twenty-seven layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3671,6 +3671,32 @@ without reading anything else.*
      would have passed on the very defect that prompted it. With that in,
      breaking the walk back fails on the shared fixture, which nothing
      else in the workspace does.
+     The nineteenth was **a path with curves of its own and a hole
+     through it** (`pierced`): every path in this document had been
+     straight-sided or smoothed by rule with no handles written down,
+     and none had a second ring, so the bezier flattening, the even-odd
+     fill, and the arithmetic on handles had never been asked of by
+     anything here. A lens rather than a blob, on purpose: two anchors
+     on a line with handles long enough that the curves bulge well past
+     them, so anything that took a path's extent from its anchors would
+     be wrong about it by half its height. Every audit held, with the
+     lens moved, faded and re-handled by the shared list — the bounds
+     flatten before they measure — so the code the shape was meant to
+     exercise was broken to see who would notice, and the answer was
+     exact in both directions. Drop the second ring from the rings the
+     GPU stencils, and both fixture audits fail
+     (`every_layer_of_the_fixture_puts_down_what_the_cpu_puts_down`,
+     `whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does`):
+     the hole bites through the fixture. Make the flattening ignore
+     handles everywhere, and *no* fixture audit fails — the CPU, the GPU
+     and the bounds share the one flattening, so they agree with each
+     other about the wrong curve — while both exporter witnesses, three
+     anchor tests and the renderer's own bezier test fail on pages of
+     their own. Worth knowing rather than fixing: the curve's
+     correctness is held by tests that draw against another program,
+     which is the only kind that can hold it, and the fixture's reach
+     for this shape is the file round trip, the clipboard, the undo
+     runs, the dirty region and the two renderers' agreement.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
