@@ -1278,10 +1278,27 @@ fn draw_layer(
                 );
             }
         }
+        // Applied where it stands and mixed back by its cover — and the
+        // question is what the layer *draws*, not what kind it is, which
+        // is the same reading `effected` and `blended` take above and the
+        // third time this file has had to learn it. A copy of an
+        // adjustment or a filter rewrites the page exactly as the layer
+        // it copies does, so a cover handed to one belongs to the work
+        // it stands for. Matching on the kind alone, a copy went to the
+        // generic path below and the cover was spent on the way: one
+        // copy deep was right, because the copy's own mask is turned
+        // into the cover here and the *filter* receives it, but a copy
+        // *of a copy* handed that cover on to something this branch did
+        // not recognise, and the work was done at full strength
+        // wherever it stood. So a mask that hides nothing changed the
+        // page — by a twentieth of a channel over eleven hundred pixels
+        // on a page nobody wrote, and by seven tenths on one of the
+        // random pages, which is where it was found.
         if matches!(
             node.kind,
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
-        ) {
+        ) || (cover.is_some() && rewrites_what_is_under_it(doc, child))
+        {
             if let Some(c) = cover {
                 let region = clip.intersect(c.rect());
                 if region.is_empty() {
@@ -17440,6 +17457,313 @@ mod tests {
     /// masked two layers a page, lowest-numbered first, and a copy is
     /// rarely the lowest — it passed with both of the fixes it was
     /// written for taken out.
+    /// A copy of a copy of a filter, masked or faded, draws what it
+    /// drew unmasked.
+    ///
+    /// The cover a copy hands down — its mask and fade turned into a
+    /// coverage, or the alpha of the layer it is held to — was applied
+    /// by the branch that asks whether a layer *is* an adjustment, a
+    /// filter or a clone. One copy deep that was enough: the copy turns
+    /// its own mask into the cover and the filter itself receives it.
+    /// Two deep, the cover was handed to another copy, which that branch
+    /// did not recognise, and the work was done at full strength wherever
+    /// it stood. So a mask that hides nothing changed the page.
+    ///
+    /// Found by the random pages once they began turning layers — not
+    /// because of the turn, which reshuffles every page, but because a
+    /// page with two copies deep on it came up inside the first six
+    /// hundred. Asked here without a seed.
+    #[test]
+    fn a_mask_that_hides_nothing_is_no_mask_however_deep_the_copies_go() {
+        use chitrakar_doc::{Filter, Node};
+        let wide = Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 4800.0,
+                    height: 3600.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(-2400.0, -1800.0),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let rect = |name: &str, w: f32, h: f32, c: [f32; 3]| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
+                    a: 1.0,
+                });
+            }
+            Box::new(n)
+        };
+        for depth in [1usize, 2, 3] {
+            let mut doc = Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            // An edge under it, so the blur has something to do and the
+            // question is not vacuous: a blur of one flat colour is that
+            // colour, and this passed for a while on a page like that.
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: rect("ground", 40.0, 30.0, [0.2, 0.6, 0.9]),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect("bar", 14.0, 30.0, [0.95, 0.3, 0.1]),
+            })
+            .unwrap();
+            let bar = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: bar,
+                transform: Transform::translation(13.0, 0.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter("f", Filter::GaussianBlur { sigma: 2.5 })),
+            })
+            .unwrap();
+            let mut last = doc.children_of(root).unwrap()[2];
+            for k in 0..depth {
+                let mut copy = Node::vector(
+                    "c",
+                    VectorShape::Rect {
+                        width: 1.0,
+                        height: 1.0,
+                        radius: 0.0,
+                    },
+                );
+                copy.kind = NodeKind::Instance {
+                    of: last,
+                    replaces: Vec::new(),
+                };
+                copy.transform = Transform::translation(3.0 + 2.0 * k as f32, 2.0);
+                let n = doc.children_of(root).unwrap().len();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: n,
+                    node: Box::new(copy),
+                })
+                .unwrap();
+                last = *doc.children_of(root).unwrap().last().unwrap();
+            }
+            let want = render(&doc).unwrap();
+            // Non-vacuity: the copies have to be drawing something.
+            let mut bare = doc.clone();
+            bare.apply(Command::SetVisible {
+                id: last,
+                visible: false,
+            })
+            .unwrap();
+            let hidden = render(&bare).unwrap();
+            let shows = want
+                .pixels
+                .iter()
+                .zip(&hidden.pixels)
+                .map(|(a, b)| (a.r - b.r).abs().max((a.g - b.g).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(
+                shows > 0.01,
+                "{depth} copies deep draws something to begin with ({shows})"
+            );
+            for (how, cmd) in [
+                (
+                    "masked by a mask that hides nothing",
+                    Command::SetMask {
+                        id: last,
+                        mask: Some(Box::new(wide.clone())),
+                    },
+                ),
+                (
+                    "faded by a thousandth",
+                    Command::SetOpacity {
+                        id: last,
+                        opacity: 0.999,
+                    },
+                ),
+            ] {
+                let mut doc = doc.clone();
+                doc.apply(cmd).unwrap();
+                let got = render(&doc).unwrap();
+                let (mut n, mut worst) = (0usize, 0.0f32);
+                for (a, b) in got.pixels.iter().zip(&want.pixels) {
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    if d > 0.01 {
+                        n += 1;
+                        worst = worst.max(d);
+                    }
+                }
+                assert!(
+                    n == 0,
+                    "{depth} copies deep, {how}: {n} pixels changed, the worst \
+                     by {worst:.4}"
+                );
+            }
+        }
+    }
+
+    /// A copy of an adjustment held to the layer below works inside it,
+    /// as the adjustment itself would.
+    ///
+    /// Being held to something reaches the renderer as a coverage, the
+    /// same pass a mask on such a copy takes. The copy did not recognise
+    /// it, so the cover was spent on the way and the copy was drawn on a
+    /// surface of its own — where what it copies was handed a
+    /// transparent page to change and came back with nothing. A copy of
+    /// an adjustment held to a shape *vanished*: not wrong by a little,
+    /// gone. The GPU backend lost it the same way, which is why the two
+    /// agreed and neither was right; it declines such a page now.
+    #[test]
+    fn a_copy_of_an_adjustment_held_to_a_shape_works_inside_it() {
+        use chitrakar_doc::{Adjustment, Node};
+        let rect = |name: &str, w: f32, h: f32, c: [f32; 3]| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
+                    a: 1.0,
+                });
+            }
+            Box::new(n)
+        };
+        // The same page twice: once with the adjustment itself held to
+        // the shape, once with a copy of one held to it. An adjustment
+        // at the very bottom of the stack changes nothing — there is
+        // nothing under it — so the copy is the only one working.
+        let mut answers = Vec::new();
+        for copy_of in [false, true] {
+            let mut doc = Document::new(60, 30, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "the original",
+                    Adjustment::BrightnessContrast {
+                        brightness: 0.25,
+                        contrast: 0.09,
+                    },
+                )),
+            })
+            .unwrap();
+            let orig = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect("under", 60.0, 30.0, [0.3, 0.5, 0.8]),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: rect("base", 20.0, 20.0, [0.9, 0.4, 0.2]),
+            })
+            .unwrap();
+            let held: Box<Node> = if copy_of {
+                let mut c = Node::vector(
+                    "a copy of it",
+                    VectorShape::Rect {
+                        width: 1.0,
+                        height: 1.0,
+                        radius: 0.0,
+                    },
+                );
+                c.kind = NodeKind::Instance {
+                    of: orig,
+                    replaces: Vec::new(),
+                };
+                c.clipped = true;
+                Box::new(c)
+            } else {
+                let mut a = Node::adjustment(
+                    "it again",
+                    Adjustment::BrightnessContrast {
+                        brightness: 0.25,
+                        contrast: 0.09,
+                    },
+                );
+                a.clipped = true;
+                Box::new(a)
+            };
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: held,
+            })
+            .unwrap();
+            let with = render(&doc).unwrap();
+            let mut without = doc.clone();
+            let last = *without.children_of(root).unwrap().last().unwrap();
+            without.apply(Command::RemoveNode { id: last }).unwrap();
+            let plain = render(&without).unwrap();
+            let (mut inside, mut outside, mut worst_out) = (0usize, 0usize, 0.0f32);
+            for y in 0..30u32 {
+                for x in 0..60u32 {
+                    let i = (y * 60 + x) as usize;
+                    let (p, q) = (with.pixels[i], plain.pixels[i]);
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs());
+                    if d > 0.002 {
+                        if x < 20 && y < 20 {
+                            inside += 1;
+                        } else {
+                            outside += 1;
+                            worst_out = worst_out.max(d);
+                        }
+                    }
+                }
+            }
+            let what = if copy_of {
+                "a copy of an adjustment"
+            } else {
+                "an adjustment"
+            };
+            assert!(
+                inside > 300,
+                "{what} held to a shape works inside it ({inside} pixels of 400)"
+            );
+            assert!(
+                outside == 0,
+                "{what} held to a shape works nowhere else ({outside} pixels, \
+                 the worst by {worst_out:.4})"
+            );
+            answers.push(inside);
+        }
+        assert_eq!(
+            answers[0], answers[1],
+            "a copy of an adjustment reaches exactly as far as the adjustment"
+        );
+    }
+
     #[test]
     fn a_mask_that_hides_nothing_is_no_mask() {
         const SEEDS: u64 = 600;

@@ -2372,10 +2372,20 @@ fn one(
     // …and not one wearing a blend of its own: there the reference
     // renderer keeps the surface too, and spends the copied blend on it,
     // so both draw the same picture and there is nothing to decline.
+    //
+    // Being *held to* the layer below is the third of these and was
+    // missing. A held layer is confined to that layer's alpha, which
+    // reaches this backend as a coverage — the same pass a mask or a
+    // fade on such a copy already goes back for. Drawn alone instead,
+    // what the copy copies was handed a transparent page to change and
+    // came back with nothing, so a copy of an adjustment held to a
+    // shape *vanished* — and the reference renderer lost it the same
+    // way, which is why the two agreed and neither was right. It is
+    // fixed there and declined here.
     if (rewrites
         || (chitrakar_render::copies_a_blend(doc, child) && node.blend == BlendMode::Normal))
         && matches!(node.kind, NodeKind::Instance { .. })
-        && (node.mask.is_some() || node.opacity < 1.0)
+        && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
     {
         return None;
     }
@@ -11295,6 +11305,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A copy of an adjustment held to the layer below goes back to the
+    /// reference renderer.
+    ///
+    /// Being held to something is a coverage, and this backend's masks
+    /// ride the one coverage slot a layer already uses, so there is no
+    /// pass here for it — the same reason a mask or a fade on such a
+    /// copy is handed back. Drawn anyway, what the copy copies was given
+    /// a transparent page to change and came back with nothing, so the
+    /// copy vanished; and the reference renderer lost it the same way,
+    /// so the two agreed and the cross-renderer audits said nothing. It
+    /// is fixed there and declined here.
+    #[test]
+    fn a_copy_of_an_adjustment_held_to_a_shape_goes_back() {
+        use chitrakar_doc::{Adjustment, Command, Node, Transform, VectorShape};
+        let rect = |name: &str, w: f32, h: f32| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.6,
+                    g: 0.5,
+                    b: 0.4,
+                    a: 1.0,
+                });
+            }
+            Box::new(n)
+        };
+        let page = |held_copy: bool| {
+            let mut doc = chitrakar_doc::Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "the original",
+                    Adjustment::BrightnessContrast {
+                        brightness: 0.25,
+                        contrast: 0.09,
+                    },
+                )),
+            })
+            .unwrap();
+            let orig = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: rect("base", 20.0, 20.0),
+            })
+            .unwrap();
+            let mut c = Node::vector(
+                "a copy of it",
+                VectorShape::Rect {
+                    width: 1.0,
+                    height: 1.0,
+                    radius: 0.0,
+                },
+            );
+            c.kind = NodeKind::Instance {
+                of: orig,
+                replaces: Vec::new(),
+            };
+            c.clipped = held_copy;
+            c.transform = Transform::translation(2.0, 2.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(c),
+            })
+            .unwrap();
+            doc
+        };
+        assert!(
+            !GpuRenderer::can_render(&page(true)),
+            "a copy of an adjustment held to a shape goes back"
+        );
+        // And the same page with the copy not held is still drawn, so
+        // this is not declining copies of adjustments wholesale.
+        assert!(
+            GpuRenderer::can_render(&page(false)),
+            "one that is not held is still drawn"
+        );
     }
 
     #[test]

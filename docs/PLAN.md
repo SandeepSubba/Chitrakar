@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~500),
+- **Verify before committing:** `cargo test --workspace` (~503),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3845,6 +3845,50 @@ without reading anything else.*
      together there and the commands' rotations reach it. So the shape
      earns one audit outright, and the honest account of the rest is
      that rotation was already held elsewhere.
+     **Two defects about copies, found by asking the pages nobody wrote
+     to turn things.** The twenty-fifth shape's entry ends by noting
+     that those pages place every layer by translation alone. Teaching
+     the generator to turn a third of them — an angle that is not a
+     quarter of anything, a scale either side of one — broke three
+     invariants at once, and the first thing each needed was the
+     question *is this the turn, or a page that was always going to
+     fail once the shapes moved*. Adding a draw to the random stream
+     reshuffles every seed, so a new failure is not evidence of
+     anything until that is asked. Both of the two below answered
+     "not the turn": each reproduces with every layer upright, and
+     each is written down as a page built by hand rather than a seed.
+     The first: **a mask that hides nothing changed the page, two
+     copies deep.** The cover a copy hands down — its mask and fade
+     turned into a coverage — was applied by the branch that asks
+     whether a layer *is* an adjustment, a filter or a clone. One copy
+     deep that was enough, since the copy turns its own mask into the
+     cover and the filter itself receives it; two deep, the cover was
+     handed to another copy, which that branch did not recognise, and
+     the work was done at full strength wherever it stood. The branch
+     asks what the layer *draws* now, which is the third time this file
+     has had to learn that and the first time it has been written into
+     a test that says so
+     (`a_mask_that_hides_nothing_is_no_mask_however_deep_the_copies_go`).
+     The second is worse and was under it: **a copy of an adjustment
+     held to the layer below vanished.** Being held to something is a
+     coverage too, the same pass a mask on such a copy already takes;
+     unrecognised, the copy went on a surface of its own, where what it
+     copies was handed a transparent page to change and came back with
+     nothing. Not wrong by a little — gone. The GPU backend lost it the
+     same way, which is exactly why nothing had ever said so: the two
+     renderers agreed, and the cross-renderer audits are the only thing
+     that would have looked. It is fixed in the reference renderer and
+     declined in the backend, each with a test of its own, and the
+     lesson is that two renderers agreeing is not two witnesses when
+     they share the mistake.
+     The generator's turn is **not committed yet**: with it in, two
+     failures remain, and both look like further defects rather than
+     noise — the backend draws a turned *stroked path* with a wedge of
+     wrong colour a few pixels across (it needs the turn and the stroke
+     together, and is indifferent to the stroke's width, alignment,
+     join and to the fill), and a repainted rectangle leaves a
+     nine-pixel seam on a page with turned layers on it. Those are the
+     next two things to find, and the turn goes in with them.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
