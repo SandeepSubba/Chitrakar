@@ -78,6 +78,8 @@ pub struct Fixture {
     /// A levels adjustment held to the picture: input black and white
     /// points, a gamma, and an output pair.
     pub leveled: NodeId,
+    /// An ellipse in soft light over the group.
+    pub soft: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1432,6 +1434,39 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A layer in soft light. Ten of the sixteen blend modes stood in
+    // this document and on the pages nobody wrote, and the six that did
+    // not were all separable — one function of a channel and its
+    // opposite number, run three times — so a soft light's curve, a
+    // dodge's division and a burn's had been drawn by nothing here. A
+    // warm ellipse over the group, where there is something under it
+    // for the blend to read; its edit swaps it to a colour dodge, the
+    // second of the missing six.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector("soft", VectorShape::Ellipse { rx: 7.0, ry: 5.0 });
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.85,
+                    g: 0.6,
+                    b: 0.3,
+                    a: 1.0,
+                });
+            }
+            node.blend = BlendMode::SoftLight;
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let soft = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: soft,
+        transform: Transform::translation(16.0, 20.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1625,6 +1660,7 @@ pub fn everything() -> Fixture {
         graded,
         arc,
         leveled,
+        soft,
         stroke,
     }
 }
@@ -2037,14 +2073,21 @@ impl Rng {
 /// colour and the rest from what is under it, which is its own code in
 /// both renderers and its own name in both exporters. Six separable ones
 /// stood here for a long while, so these pages had never drawn one
-/// either.
-const BLENDS: [BlendMode; 10] = [
+/// either; and five more separable ones — a dodge, a burn, the two
+/// lights and an exclusion — stood nowhere at all until the shared
+/// fixture took a soft light, so they are here now too.
+const BLENDS: [BlendMode; 15] = [
     BlendMode::Multiply,
     BlendMode::Screen,
     BlendMode::Overlay,
     BlendMode::Darken,
     BlendMode::Lighten,
     BlendMode::Difference,
+    BlendMode::ColorDodge,
+    BlendMode::ColorBurn,
+    BlendMode::HardLight,
+    BlendMode::SoftLight,
+    BlendMode::Exclusion,
     BlendMode::Hue,
     BlendMode::Saturation,
     BlendMode::Color,
@@ -2076,6 +2119,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         graded,
         arc,
         leveled,
+        soft,
         stroke,
         ..
     } = f;
@@ -2273,6 +2317,16 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetOpacity {
             id: *leveled,
             opacity: 0.6,
+        },
+        // The soft light swapped for a colour dodge — a division where
+        // there was a curve — and faded.
+        Command::SetBlendMode {
+            id: *soft,
+            blend: BlendMode::ColorDodge,
+        },
+        Command::SetOpacity {
+            id: *soft,
+            opacity: 0.7,
         },
         Command::AddStroke {
             id: painted,

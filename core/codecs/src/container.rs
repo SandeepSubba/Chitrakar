@@ -1116,6 +1116,9 @@ mod tests {
             "/document/nodes/*/kind/Vector/gradient/Radial:center",
             "/document/nodes/*/kind/Vector/gradient/Radial:radius",
             "/document/nodes/*/kind/Vector/gradient/Radial:stops",
+            // An ellipse drawn as a layer, not only as a mask.
+            "/document/nodes/*/kind/Vector/shape/Ellipse:rx",
+            "/document/nodes/*/kind/Vector/shape/Ellipse:ry",
             "/document/nodes/*/kind/Vector/shape/Path:closed",
             "/document/nodes/*/kind/Vector/shape/Path:points",
             "/document/nodes/*/kind/Raster:height",

@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its thirty is
+     cross-renderer audits can run: every one of its thirty-one is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's thirty layers can be removed outright without moving
+     fixture's thirty-one layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3800,6 +3800,21 @@ without reading anything else.*
      sabotage fails both fixture audits. The twentieth's lesson again,
      and worth having twice: the shape is placed where a wrong answer
      has room to show, or it is merely held.
+     The twenty-fourth was **a layer in soft light** (`soft`), a warm
+     ellipse over the group, its edit swapping it for a colour dodge.
+     Ten of the sixteen blend modes stood in this document and on the
+     pages nobody wrote, and the six that did not were all separable —
+     a dodge, a burn, the two lights, an exclusion — so a soft light's
+     curve and a dodge's division had been drawn by nothing here; the
+     five join the random pages' list too. One audit stopped holding,
+     and it was a surprise worth having: the file inventory, by an
+     ellipse's two radii — no vector ellipse had ever stood in this
+     document as a *layer*, only as masks and the region. Then the
+     sabotages. The CPU drawing soft light as hard light fails five:
+     its own two blend tests, both fixture audits and the random pages.
+     The GPU pointing soft light at hard light's slot fails four, the
+     same less the CPU's own. Both renderers, both fixture audits, the
+     random pages: earned rather than held, first try.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
