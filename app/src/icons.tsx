@@ -47,6 +47,7 @@ export type IconName =
   | "line"
   | "polygon"
   | "star"
+  | "shapes"
   | "grip"
   | "layers"
   | "turnRight"
@@ -139,6 +140,13 @@ const PATHS: Record<IconName, JSX.Element> = {
   line: <path d="M4 20L20 4" />,
   polygon: <path d="M12 3l7.8 5.7-3 9.2H7.2l-3-9.2z" />,
   star: <path d="M12 3l2.6 6.1 6.6.5-5 4.3 1.5 6.4L12 17l-5.7 3.3 1.5-6.4-5-4.3 6.6-.5z" />,
+  // A triangle over a circle: the library of shapes.
+  shapes: (
+    <>
+      <path d="M4 15l5-9 5 9z" />
+      <circle cx="15.5" cy="15.5" r="4.5" />
+    </>
+  ),
   // Two short rows of dots: what a thing that can be picked up and
   // carried has looked like for as long as there have been palettes.
   grip: (

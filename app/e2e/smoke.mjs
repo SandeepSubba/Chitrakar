@@ -11859,6 +11859,85 @@ assert(
   await pickTool("Move");
 }
 
+// 9bt. The shape library: one tool in the shapes' slot, drawing
+// whichever of the library's shapes is chosen — a path scaled to the
+// box dragged out, like the polygon — so an arrow points where it was
+// dragged and a heart's lobes are curves.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Shape");
+  const chips = page.locator('[aria-label="Shapes"] .shape-chip');
+  assert((await chips.count()) === 6, `the library has six shapes (${await chips.count()})`);
+  assert(
+    (await page.locator('[aria-label="Shapes"] button[aria-label="Shape Triangle"]').getAttribute("aria-pressed")) === "true",
+    "the triangle is the one to begin with",
+  );
+  // A triangle: its apex at the top middle, its top corners bare.
+  await page.mouse.move(...at(50, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(250, 250), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(150, 60))[3] === 255 && (await canvasPixel(150, 240))[3] === 255,
+    "a triangle fills from its apex to its base",
+  );
+  assert(
+    (await canvasPixel(60, 60))[3] === 0 && (await canvasPixel(240, 60))[3] === 0,
+    "and its top corners are bare",
+  );
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Shape 1" }).first().click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".anchor").count()) === 3,
+    `it is a path of three anchors (${await page.locator(".anchor").count()})`,
+  );
+  await page.keyboard.press("Escape");
+  await pickTool("Shape");
+  // An arrow, pointing the way it was dragged: the tip at the right
+  // middle, the shaft's top corner bare.
+  await page.click('[aria-label="Shapes"] button[aria-label="Shape Arrow"]');
+  await page.mouse.move(...at(300, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(550, 250), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(540, 150))[3] === 255 && (await canvasPixel(320, 150))[3] === 255,
+    "an arrow has a tip on the right and a shaft on the left",
+  );
+  assert(
+    (await canvasPixel(320, 60))[3] === 0 && (await canvasPixel(540, 60))[3] === 0,
+    "and nothing above the shaft or beside the tip",
+  );
+  // A heart is curves: bare between the lobes, filled in each.
+  await page.click('[aria-label="Shapes"] button[aria-label="Shape Heart"]');
+  await page.mouse.move(...at(50, 270));
+  await page.mouse.down();
+  await page.mouse.move(...at(250, 390), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(100, 290))[3] === 255 && (await canvasPixel(200, 290))[3] === 255,
+    "a heart has two lobes",
+  );
+  assert(
+    (await canvasPixel(150, 275))[3] === 0 && (await canvasPixel(60, 380))[3] === 0,
+    "bare between them and at the bottom corners",
+  );
+  // The lobes are curves, not chords: a point above the straight line
+  // from a lobe's side to its top is inside the curve.
+  assert(
+    (await canvasPixel(80, 284))[3] === 255,
+    `and each lobe bulges past the chord between its anchors (${await canvasPixel(80, 284)})`,
+  );
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

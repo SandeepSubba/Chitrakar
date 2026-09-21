@@ -25,6 +25,7 @@ export const TOOLS = [
   "Line",
   "Polygon",
   "Star",
+  "Shape",
   "Pen",
   "Node",
   "Brush",
@@ -46,7 +47,7 @@ export type Tool = (typeof TOOLS)[number];
 /** The tools that draw a shape, which share one slot in the rail: the
  * one last used sits in it and the rest are a press away, the way a
  * rail with more tools than room has always done it. */
-export const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star"] as const;
+export const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star", "Shape"] as const;
 /** The tools that pick a region out of the page rather than draw
  * anything, sharing one slot the way the shapes do. What they make is a
  * selection: not a layer, not artwork — a region to hand to a layer as
@@ -95,6 +96,7 @@ export const TOOL_KEYS: Record<string, Tool> = {
   l: "Line",
   y: "Polygon",
   k: "Star",
+  u: "Shape",
   p: "Pen",
   a: "Node",
   b: "Brush",
@@ -120,6 +122,7 @@ export const TOOL_HINT: Record<Tool, string> = {
   Line: "L",
   Polygon: "Y",
   Star: "K",
+  Shape: "U",
   Pen: "P",
   Node: "A",
   Brush: "B",
@@ -148,6 +151,7 @@ export const TOOL_ICONS: Record<Tool, IconName> = {
   Line: "line",
   Polygon: "polygon",
   Star: "star",
+  Shape: "shapes",
   Pen: "pen",
   Node: "node",
   Brush: "brush",
@@ -179,6 +183,7 @@ export const TOOL_ABOUT: Record<Tool, string> = {
   Line: "a straight line",
   Polygon: "a regular polygon",
   Star: "a star",
+  Shape: "one of the library's shapes — an arrow, a callout, a heart — as a path",
   Pen: "a path, straight or smooth, one point at a time",
   Node: "take hold of a shape's anchors; press its outline to add one, alt-press one to take it off",
   Brush: "a freehand stroke that lands as a path",

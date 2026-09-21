@@ -10,6 +10,7 @@ import {
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import { usePrefs } from "./prefs";
+import { SHAPE_PRESETS, presetPath } from "./shapes";
 import {
   ALWAYS_SHOWN,
   KEY_FAMILIES,
@@ -413,6 +414,7 @@ const BOX_TOOLS = new Set<string>([
   "Ellipse",
   "Polygon",
   "Star",
+  "Shape",
   "Frame",
   "Crop",
 ]);
@@ -886,6 +888,8 @@ export function App() {
    * two, since a five-sided thing and a five-pointed one are the same
    * ask made twice. */
   const [sides, setSides] = useState(5);
+  /** Which of the library's shapes the Shape tool draws. */
+  const [preset, setPreset] = useState(SHAPE_PRESETS[0].name);
   /** What the crop is held to, by name. */
   const [cropRatio, setCropRatio] = useState("Free");
   /** Waiting for a click to say which pixel of the picture is meant to
@@ -3774,6 +3778,23 @@ export function App() {
       case "Star":
         shape = path(polygonPoints(sides, lw, lh, true), true);
         break;
+      case "Shape": {
+        // One of the library's shapes, scaled to the box: a path like
+        // the polygon, with handles where the shape has curves.
+        const chosen =
+          SHAPE_PRESETS.find((p) => p.name === preset) ?? SHAPE_PRESETS[0];
+        const scaled = presetPath(chosen, lw, lh);
+        shape = {
+          Path: {
+            points: scaled.points,
+            closed: true,
+            smooth: false,
+            handles: scaled.handles,
+            subpaths: [],
+          },
+        };
+        break;
+      }
       // A line is the drag itself, from end to end, rather than the box
       // around it — and it is stroked, since an open line has no inside.
       default: {
@@ -7834,6 +7855,32 @@ export function App() {
           )}
           {/* How many sides, or points, the next one has. Only while one
               of the two tools that asks is in hand. */}
+          {/* The library, while the Shape tool is in hand: each shape
+              drawn small as itself, the one chosen marked. */}
+          {tool === "Shape" && (
+            <div className="palette shape-library" role="group" aria-label="Shapes">
+              {SHAPE_PRESETS.map((p) => {
+                const d =
+                  p.points
+                    .map(([u, v], i) => `${i === 0 ? "M" : "L"}${(u * 14 + 1).toFixed(1)} ${(v * 14 + 1).toFixed(1)}`)
+                    .join(" ") + " Z";
+                return (
+                  <button
+                    key={p.name}
+                    className={p.name === preset ? "swatch shape-chip active" : "swatch shape-chip"}
+                    onClick={() => setPreset(p.name)}
+                    title={p.name}
+                    aria-label={`Shape ${p.name}`}
+                    aria-pressed={p.name === preset}
+                  >
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                      <path d={d} fill="currentColor" />
+                    </svg>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {(tool === "Polygon" || tool === "Star") && (
             <input
               type="number"
@@ -9692,6 +9739,7 @@ const KEY_HELP: [string, [string, string][]][] = [
       ["V, M", "Move"],
       ["F", "Frame (an artboard: a page within the page)"],
       ["R, E", "Rectangle, ellipse"],
+      ["U", "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
       ["P, B", "Pen, brush"],
       ["A", "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off"],
       ["N", "Paint (a brush that lays pixels)"],

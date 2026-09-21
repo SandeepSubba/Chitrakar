@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~499),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1254 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1264 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5376,10 +5376,11 @@ without reading anything else.*
        preferences — see *Chrome*. Pressure response is not a number
        here (it is the stroke's own, from the pen), so a brush is width
        and softness.
-     - A **shape library** beyond rect, ellipse, polygon and star:
-       arrows, callouts, a rounded triangle — Canva's shapes are most
-       of what its users draw. Each is a path preset, not a new kind
-       of layer.
+     - ✅ A **shape library** (the Shape tool, U): triangle, diamond,
+       arrow, chevron, callout, heart, each a path preset — see
+       *Chrome*. That was the last item on this list: everything the
+       September review found worth doing is done except Open recent,
+       which waits on the shell.
      - A **Text** menu (Affinity) or Type menu (Photoshop) is *not*
        wanted yet: everything about text is on the panel where the
        text is, and a menu of the same controls would be the
@@ -5583,6 +5584,16 @@ without reading anything else.*
   move a probe off a stroke. Everything under the tools now wraps to
   the tools' own width, and the brushes block holds the rail to the
   same width with Move in hand and with Paint.
+  A **Shape** tool (U) shares the shapes' slot and draws whichever of
+  the library's shapes is chosen on its own row of chips
+  (`app/src/shapes.ts`: triangle, diamond, arrow, chevron, callout,
+  heart — the ones a survey of the three editors found in all of
+  them): each a path in a unit box scaled to the box dragged out, the
+  way the polygon and the star already land as paths, so every anchor
+  is draggable the moment it is drawn and every exporter already knows
+  what it is; the heart carries bezier handles, and the browser block
+  reads a point inside a lobe's curve that a straight chord would leave
+  bare. Each is a path preset, not a new kind of layer.
   Which tools are on the rail is a preference (Preferences ›
   Tools, or View › Tools on the rail…): a tool unticked leaves the rail
   and waits behind a "…" slot at its end with the others put away, its
@@ -5590,8 +5601,8 @@ without reading anything else.*
   is not gone — and the one tool that cannot be put away is Move. The
   same page decides which of the bar's three button groups (document,
   region, zoom) show, everything on them being on a menu as well.
-  Tools have single-letter shortcuts (V/M, R, E, P, A, B, N, S, G, T, C,
-  I, H, Z; shift+N, S, G, M for the tool each shares a key with),
+  Tools have single-letter shortcuts (V/M, R, E, U, P, A, B, N, S, G, T,
+  C, I, H, Z; shift+N, S, G, M for the tool each shares a key with),
   suppressed while typing. Layer rows carry a picture of the layer (a kind glyph where
   there is nothing to picture) and a mask marker.
 - **Tooling:** `tools/chitrakar-plugin/` is a Claude Code plugin bundling

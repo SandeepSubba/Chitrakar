@@ -1359,6 +1359,19 @@ body {
   max-width: 2.4rem;
 }
 
+/* The shape library's chips: each shape drawn small as itself. */
+.palette.shape-library .shape-chip {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.palette.shape-library .shape-chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* A kept brush, drawn as itself: a dot the brush's width, blurred by
    its softness. */
 .palette.brushes .brush-chip {
