@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~500),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1302 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5849,6 +5849,12 @@ without reading anything else.*
   encoding, so on a 640 by 480 page the window already waits to be
   asked. Kept in the preference as a scale of zero, which is not a
   scale and never reaches the engine as one.
+  Exports kept by name are chips above the formats (`prefs.exportSetups`,
+  the same shape as the brushes): + keeps the window's four answers
+  under a name made from them — `JPEG 2× q80`, `PNG set`, a plain
+  `PNG` for one file at one to one — a press gives all four back, and
+  alt-press forgets one. The format preference is validated on the way
+  in now too; it had been taken on its type alone.
   Two exports stayed rows on the menu, and the reason is worth writing
   down: a frame carries the multiple it wants to come out at as a
   property of the *document* (`export_scale`, saved with the file), and
@@ -6346,8 +6352,8 @@ chitrakar/
   a dependency, so this is plumbing rather than a decision. The export
   preview is in ✅ (the file itself, decoded, beside the settings; a
   PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
-  set ✅ (three files in one press). There is still no slice export and
-  no remembering more than one export setup. The preferences window
+  set ✅ (three files in one press), and exports kept by name ✅ (chips
+  above the formats). There is still no slice export. The preferences window
   lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*)
   but not the command keys — Ctrl+S, Ctrl+G, the brackets are still
   literals in the keydown handlers. A light theme is in ✅ (see §0

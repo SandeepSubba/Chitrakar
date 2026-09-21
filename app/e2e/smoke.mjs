@@ -12258,6 +12258,72 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9bw. Exports kept by name, as chips above the formats: a press
+// answers all four of the window's questions at once, + keeps what the
+// window says now under a name made from it, alt-press forgets one.
+{
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  const chips = page.locator('[aria-label="Setups"] .setup:not(.add)');
+  assert((await chips.count()) === 0, "nothing is kept to begin with");
+  await page.click('.export-formats .preset:text-is("JPEG")');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.click('.export-scales .preset:text-is("2\u00d7")');
+  await page.locator('input[aria-label="Quality"]').evaluate((node) => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(node, "80");
+    node.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForTimeout(100);
+  await page.click('button[aria-label="Keep this setup"]');
+  await page.waitForTimeout(100);
+  assert(
+    (await chips.count()) === 1 && (await chips.first().textContent()) === "JPEG 2\u00d7 q80",
+    `what the window says is kept under a name made from it (${await chips.first().textContent()})`,
+  );
+  assert(
+    (await chips.first().getAttribute("aria-pressed")) === "true",
+    "and is marked as what is in hand",
+  );
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.waitForTimeout(100);
+  assert(
+    (await chips.first().getAttribute("aria-pressed")) === "false",
+    "changed away from, it is not",
+  );
+  await page.click('button[aria-label="Keep this setup"]');
+  await page.waitForTimeout(100);
+  assert(
+    (await chips.nth(1).textContent()) === "PNG",
+    `a plain PNG at one to one is kept as just that (${await chips.nth(1).textContent()})`,
+  );
+  await page.click('[aria-label="Setups"] button[aria-label="Setup JPEG 2\u00d7 q80"]');
+  await page.waitForTimeout(100);
+  assert(
+    (await page.locator('.export-formats .preset:text-is("JPEG")').getAttribute("aria-pressed")) === "true" &&
+      (await page.locator('.export-scales .preset:text-is("2\u00d7")').getAttribute("aria-pressed")) === "true" &&
+      (await page.locator('input[aria-label="Quality"]').inputValue()) === "80",
+    "a chip pressed answers all four questions at once",
+  );
+  assert(
+    (await page.locator('[aria-label="Setups"] button[aria-label="Setup PNG"]').getAttribute("aria-pressed")) === "false",
+    "and the other chip is not in hand",
+  );
+  assert(
+    JSON.parse(await page.evaluate(() => localStorage.getItem("chitrakar:prefs"))).exportSetups.length === 2,
+    "both are written down",
+  );
+  await page.click('[aria-label="Setups"] button[aria-label="Setup JPEG 2\u00d7 q80"]', { modifiers: ["Alt"] });
+  await page.click('[aria-label="Setups"] button[aria-label="Setup PNG"]', { modifiers: ["Alt"] });
+  await page.waitForTimeout(100);
+  assert((await chips.count()) === 0, "alt-press forgets them");
+  // Back to one file at one to one for whoever opens the window next.
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

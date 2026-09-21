@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1302 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1311 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -164,7 +164,8 @@ rows with format × area × scale, and shows the file's real size — it
 encodes the bytes rather than estimating, and the same encode is what
 gets written, and is decoded again for the picture beside the settings
 (a PDF or TIFF shows the page standing in); `Set` writes @1x, @2x and
-@3x in one press. Above four megapixels it waits to be asked. Two exports
+@3x in one press; `prefs.exportSetups` keeps a window's answers by name
+as chips above the formats. Above four megapixels it waits to be asked. Two exports
 are still menu rows and should stay that way: a frame's export multiple
 and its name are the *document's* (`export_scale`), which the window's
 own scale cannot express.

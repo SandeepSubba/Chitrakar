@@ -39,6 +39,19 @@ export type ExportArea = "page" | "selection";
  * every document — so it lives here. */
 export type BrushPreset = { name: string; size: number; softness: number };
 
+/** An export kept by name: the four answers the export window asks
+ * for, so a setup reached for often — the JPEG at 80 for the web, the
+ * PNG set for an app — is one press rather than four. */
+export type ExportSetup = {
+  name: string;
+  format: ExportFormat;
+  area: ExportArea;
+  scale: number;
+  jpegQuality: number;
+};
+
+export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "pdf", "svg", "tiff"];
+
 export type Prefs = {
   /** What the rulers and the geometry fields read in. */
   units: Units;
@@ -86,6 +99,8 @@ export type Prefs = {
   barZoom: boolean;
   /** The brushes kept by name. */
   brushes: BrushPreset[];
+  /** The exports kept by name. */
+  exportSetups: ExportSetup[];
 };
 
 export const DEFAULTS: Prefs = {
@@ -108,6 +123,7 @@ export const DEFAULTS: Prefs = {
   subjectTolerance: 0.5,
   hiddenTools: [],
   toolKeys: {},
+  exportSetups: [],
   barDocument: true,
   barSelection: true,
   barZoom: true,
@@ -170,6 +186,7 @@ export function clamp(p: Prefs): Prefs {
     // A value written by a version that offered more than these two
     // must not reach the window as an area it cannot show.
     exportArea: p.exportArea === "selection" ? "selection" : "page",
+    exportFormat: EXPORT_FORMATS.includes(p.exportFormat) ? p.exportFormat : "png",
     theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),
@@ -210,6 +227,29 @@ export function clamp(p: Prefs): Prefs {
       }
       return out;
     })(),
+    // Each setup a name and four answers the window can take; names
+    // each once; anything else is dropped rather than offered.
+    exportSetups: Array.isArray(p.exportSetups)
+      ? p.exportSetups
+          .filter(
+            (e): e is ExportSetup =>
+              !!e &&
+              typeof e === "object" &&
+              typeof e.name === "string" &&
+              e.name.trim() !== "" &&
+              EXPORT_FORMATS.includes(e.format) &&
+              typeof e.scale === "number" &&
+              typeof e.jpegQuality === "number",
+          )
+          .filter((e, i, all) => all.findIndex((o) => o.name === e.name) === i)
+          .map((e) => ({
+            name: e.name,
+            format: e.format,
+            area: e.area === "selection" ? "selection" : "page",
+            scale: e.scale === 0 ? 0 : n(e.scale, 0.05, 16, 1),
+            jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
+          }))
+      : [],
     // Each brush a name and two numbers within what the brush takes,
     // names each once; anything else on the list is dropped rather than
     // handed to a tool.

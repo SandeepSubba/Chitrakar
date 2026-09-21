@@ -30,7 +30,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
-import type { ExportArea, ExportFormat, Prefs } from "./prefs";
+import type { ExportArea, ExportFormat, ExportSetup, Prefs } from "./prefs";
 
 /** What each format is called, what it writes, and what it can do.
  *
@@ -397,6 +397,75 @@ export function ExportDialog({
           </figcaption>
         </figure>
         <div className="export-settings">
+
+        {/* The exports kept by name: a press answers all four questions
+            at once, alt forgets one, and + keeps what the window says
+            now under a name made from it. What is in hand is marked. */}
+        <div className="export-setups" role="group" aria-label="Setups">
+          {prefs.exportSetups.map((st) => {
+            const inHand =
+              st.format === format &&
+              st.area === area &&
+              st.scale === (set ? 0 : scale) &&
+              (format !== "jpeg" || st.jpegQuality === prefs.jpegQuality);
+            return (
+              <button
+                key={st.name}
+                className={inHand ? "preset setup active" : "preset setup"}
+                aria-pressed={inHand}
+                aria-label={`Setup ${st.name}`}
+                title={`${st.name} — alt-click to forget it`}
+                onClick={(e) => {
+                  if (e.altKey) {
+                    setPrefs({
+                      exportSetups: prefs.exportSetups.filter((o) => o.name !== st.name),
+                    });
+                    return;
+                  }
+                  setPrefs({
+                    exportFormat: st.format,
+                    exportArea: st.area,
+                    exportScale: st.scale,
+                    jpegQuality: st.jpegQuality,
+                  });
+                }}
+              >
+                {st.name}
+              </button>
+            );
+          })}
+          <button
+            className="preset setup add"
+            aria-label="Keep this setup"
+            title="Keep what the window says now — format, area, size, quality — by name"
+            onClick={() => {
+              // Named for what it is: the format, the size when it is not
+              // one to one, the quality when it is a JPEG, the area when
+              // it is not the page — and a number when that name is taken.
+              const base = [
+                spec.label,
+                set ? "set" : scale !== 1 && spec.scales ? `${scale}×` : "",
+                format === "jpeg" ? `q${prefs.jpegQuality}` : "",
+                area === "selection" ? "picked" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              const taken = new Set(prefs.exportSetups.map((o) => o.name));
+              let name = base;
+              for (let n = 2; taken.has(name); n++) name = `${base} ${n}`;
+              const kept: ExportSetup = {
+                name,
+                format,
+                area,
+                scale: set ? 0 : scale,
+                jpegQuality: prefs.jpegQuality,
+              };
+              setPrefs({ exportSetups: [...prefs.exportSetups, kept] });
+            }}
+          >
+            +
+          </button>
+        </div>
 
         <div className="export-formats" role="group" aria-label="Format">
           {(Object.keys(FORMATS) as ExportFormat[]).map((f) => (

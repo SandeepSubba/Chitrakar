@@ -2463,6 +2463,30 @@ button.fold:hover {
   gap: 0.25rem;
 }
 
+/* The exports kept by name, a row of chips above the formats. Empty
+   but for the + until one is kept, and small enough then to be passed
+   over. */
+.export-setups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.export-setups .setup {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.export-setups .setup.add {
+  color: var(--muted);
+  min-width: 1.6rem;
+}
+
+.export-setups .setup.add:hover {
+  color: var(--text);
+}
+
 .export-formats .preset,
 .export-scales .preset {
   text-align: center;
