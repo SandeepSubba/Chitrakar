@@ -80,6 +80,8 @@ pub struct Fixture {
     pub leveled: NodeId,
     /// An ellipse in soft light over the group.
     pub soft: NodeId,
+    /// A stroked rectangle standing at an angle.
+    pub tilted: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1467,6 +1469,72 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A layer that *stands* at an angle. Every transform in this
+    // document was a translation or an axis-aligned scale — two
+    // commands turn things, so the undo and repaint runs had seen a
+    // rotation, but no layer had ever been *saved*, copied, exported or
+    // drawn by the second renderer while turned. Stroked as well as
+    // filled, because a stroke's reach is a length in the layer's own
+    // space and the box it needs on the page is that length carried
+    // through the turn: the one piece of arithmetic that a rotation
+    // makes different rather than merely harder.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector(
+                "tilted",
+                VectorShape::Rect {
+                    width: 14.0,
+                    height: 8.0,
+                    radius: 1.0,
+                },
+            );
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.35,
+                    g: 0.7,
+                    b: 0.55,
+                    a: 1.0,
+                });
+                *stroke = Some(Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.25,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                    width: 2.0,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    align: None,
+                    start_marker: Marker::None,
+                    end_marker: Marker::None,
+                });
+            }
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let tilted = *doc.children_of(root).unwrap().last().unwrap();
+    // Thirty degrees and a fifth again as large: an angle that is not a
+    // quarter turn, so the turned box is wider *and* taller than the
+    // shape and no axis is left alone.
+    doc.apply(Command::SetTransform {
+        id: tilted,
+        transform: Transform {
+            a: 1.039_230_5,
+            b: 0.6,
+            c: -0.6,
+            d: 1.039_230_5,
+            e: 30.0,
+            f: 28.0,
+        },
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1661,6 +1729,7 @@ pub fn everything() -> Fixture {
         arc,
         leveled,
         soft,
+        tilted,
         stroke,
     }
 }
@@ -2120,6 +2189,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         arc,
         leveled,
         soft,
+        tilted,
         stroke,
         ..
     } = f;
@@ -2327,6 +2397,21 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetOpacity {
             id: *soft,
             opacity: 0.7,
+        },
+        // The tilted rectangle turned further and stretched unevenly:
+        // a forty-five degree turn with the two axes scaled apart, so
+        // the largest and smallest a length can come out at differ and
+        // anything taking one for the other is wrong about the stroke.
+        Command::SetTransform {
+            id: *tilted,
+            transform: Transform {
+                a: 1.131_37,
+                b: 1.131_37,
+                c: -0.565_685,
+                d: 0.565_685,
+                e: 28.0,
+                f: 26.0,
+            },
         },
         Command::AddStroke {
             id: painted,

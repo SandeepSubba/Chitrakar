@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its thirty-one is
+     cross-renderer audits can run: every one of its thirty-two is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's thirty-one layers can be removed outright without moving
+     fixture's thirty-two layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3815,6 +3815,36 @@ without reading anything else.*
      The GPU pointing soft light at hard light's slot fails four, the
      same less the CPU's own. Both renderers, both fixture audits, the
      random pages: earned rather than held, first try.
+     The twenty-fifth was **a layer that stands at an angle**
+     (`tilted`), a stroked rectangle turned thirty degrees and a fifth
+     again as large, its edit turning it to forty-five with the two
+     axes scaled apart. Every transform in this document had been a
+     translation or an axis-aligned scale. Two *commands* turn things,
+     so the undo and repaint runs had seen a rotation — but no layer
+     had ever been saved, copied, exported or drawn by the second
+     renderer while turned, and the pages nobody wrote place every
+     layer by translation alone, so they had not either. Stroked as
+     well as filled, since a stroke's reach is a length in the layer's
+     own space and the box it needs on the page is that length carried
+     through the turn.
+     Every audit held, so the code was broken, and the first two
+     sabotages said the same thing: the turned box read off one
+     diagonal instead of four corners fails eleven tests, and a length
+     carried through a turn read off the axes alone (`Transform::
+     max_scale`) fails nine — both already well pinned, by tests
+     written for rotation and by the undo invariants that carry a
+     feather between spaces. What the shape is worth had to be
+     *measured* rather than argued, the way the frame's was: the
+     one-diagonal sabotage was run twice, once against this document
+     and once against it with the tilted layer taken back out.
+     `every_layer_of_the_fixture_puts_down_what_the_cpu_puts_down`
+     **passes without the layer and fails with it** — the per-layer
+     cross-renderer audit had no turned layer to be wrong about, and
+     has one now. `whatever_the_gpu_agrees_to_draw_it_draws_the_way_
+     the_cpu_does` fails either way, since the whole page is drawn
+     together there and the commands' rotations reach it. So the shape
+     earns one audit outright, and the honest account of the rest is
+     that rotation was already held elsewhere.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
