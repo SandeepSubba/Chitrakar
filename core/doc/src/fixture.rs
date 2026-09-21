@@ -67,6 +67,12 @@ pub struct Fixture {
     /// hole is what a boolean leaves behind, and handles are what the
     /// pen draws and the node tool takes hold of.
     pub pierced: NodeId,
+    /// A curves adjustment held to the pierced path: a master curve and
+    /// a curve per channel, which is what a colour grade is made of and
+    /// what no adjustment here had — an exposure is one number, a ramp
+    /// is a list of colours, and this is four lists of points read
+    /// through a table.
+    pub graded: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1292,6 +1298,41 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A curves adjustment: a master curve and a curve per channel, read
+    // through tables the renderer builds once a pass. Every adjustment
+    // here was a single number or a list of colours; four lists of
+    // points, one of them empty, had never gone through the file, the
+    // clipboard, the undo runs or the two renderers' agreement. Held to
+    // the pierced path, as the ramp is held to its layer, so a grade
+    // over the whole page does not move every pixel the other audits
+    // read. The master lifts the middle, red lifts its shadows, blue
+    // lifts its shadows further still — the path is orange, with next to
+    // no blue, so a curve that pulled blue's *highlights* moved it by
+    // less than the audits' tolerance and a GPU that forgot the blue
+    // curve went unnoticed; lifted from the bottom, blue has room to
+    // move — and green is left empty on purpose, the identity said by an
+    // empty list being a case of its own.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::adjustment(
+            "a grade",
+            crate::Adjustment::Curves {
+                points: vec![[0.0, 0.0], [0.5, 0.62], [1.0, 1.0]],
+                red: vec![[0.0, 0.12], [1.0, 1.0]],
+                green: Vec::new(),
+                blue: vec![[0.0, 0.5], [1.0, 1.0]],
+            },
+        )),
+    })
+    .unwrap();
+    let graded = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetClipped {
+        id: graded,
+        clipped: true,
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1482,6 +1523,7 @@ pub fn everything() -> Fixture {
         lent,
         grain,
         pierced,
+        graded,
         stroke,
     }
 }
@@ -1930,6 +1972,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         words,
         frame,
         pierced,
+        graded,
         stroke,
         ..
     } = f;
@@ -2069,6 +2112,22 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 stroke: None,
                 gradient: None,
             }),
+        },
+        // The grade re-pointed: the master straightened, green given a
+        // curve where it had none, blue's list emptied — every list of
+        // the four changed in a different way.
+        Command::SetKind {
+            id: *graded,
+            kind: Box::new(NodeKind::Adjustment(crate::Adjustment::Curves {
+                points: vec![[0.0, 0.0], [1.0, 1.0]],
+                red: vec![[0.0, 0.12], [1.0, 1.0]],
+                green: vec![[0.0, 0.0], [0.5, 0.4], [1.0, 1.0]],
+                blue: Vec::new(),
+            })),
+        },
+        Command::SetOpacity {
+            id: *graded,
+            opacity: 0.7,
         },
         Command::AddStroke {
             id: painted,

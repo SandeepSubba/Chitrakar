@@ -1001,6 +1001,7 @@ mod tests {
             // missing where it sits or what colour it is. The same twelve
             // a vector's own gradient wants, in the one adjustment that
             // is stated by a list rather than by numbers.
+            "/document/nodes/*/kind/Adjustment/Curves:points",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:color",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:offset",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named:means",

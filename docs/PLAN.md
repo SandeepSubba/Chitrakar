@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its twenty-seven is
+     cross-renderer audits can run: every one of its twenty-eight is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's twenty-seven layers can be removed outright without moving
+     fixture's twenty-eight layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3697,6 +3697,28 @@ without reading anything else.*
      which is the only kind that can hold it, and the fixture's reach
      for this shape is the file round trip, the clipboard, the undo
      runs, the dirty region and the two renderers' agreement.
+     The twentieth was **a curves adjustment** (`graded`), held to the
+     pierced path as the ramp is held to its layer: a master curve and a
+     curve per channel, four lists of points where every adjustment
+     here had been one number or a list of colours, and one of the four
+     left empty on purpose, the identity said by an empty list being a
+     case of its own. One audit stopped holding, and it was the right
+     one: the file format's inventory of fields a `.chitra` cannot be
+     missing grew by one, the curves' `points` (the three channels
+     carry `#[serde(default)]` and are not required, which is what a
+     file written before channels existed needs). Everything else held,
+     so the two renderers' tables were broken in turn. The CPU
+     forgetting the red curve fails the table test and the whole-fixture
+     audit. The GPU forgetting the *blue* curve failed nothing at first
+     — the path the grade is held to is orange, with next to no blue,
+     and a curve that pulled blue's highlights moved it by less than the
+     audits' tolerance. That is the shape being placed rather than the
+     audit being loose: lifted from the shadows instead, where orange
+     has room to move, the same sabotage fails both fixture audits. A
+     third try, making an empty channel list tabulate rather than stand
+     for the identity, changed nothing, because an empty list already
+     tabulates to the identity; a sabotage that cannot fail is not one,
+     and it is recorded here so it is not tried twice.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
