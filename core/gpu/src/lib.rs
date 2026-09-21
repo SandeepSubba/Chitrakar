@@ -3124,12 +3124,33 @@ fn one(
         }
         // The surface already holds the mask; laying it down is not the
         // place to take the coverage a second time.
+        //
+        // Not *all* of the coverage, though, and that distinction is the
+        // whole of a defect. A layer's own mask belongs to its drawing:
+        // the effects are built from the silhouette the mask left, and a
+        // shadow of a masked shape falls outside the mask, as it should.
+        // What a layer is **held to** is the other thing: it cuts what
+        // the layer lays down, its effects with it — that is what a
+        // clipping group means, and it is what the reference renderer
+        // does. Riding the same slot, the two were folded into the one
+        // texture and then cleared together here, so a layer held to the
+        // one below it drew its outline outside that layer, where the
+        // reference renderer draws none. The same slot carries a frame's
+        // bound, which leaked the same way.
+        //
+        // So the lay-down keeps a coverage of its own, built from what
+        // holds it back and not from its mask.
         if let Some((from, draws)) = laid {
+            let (over, box_over) = if held_to.is_some() || coverage.is_some() {
+                mask_texture(doc, child, None, held_to, coverage, parent, out)?
+            } else {
+                (None, NO_MASK)
+            };
             for v in &mut out.vertices[from..] {
-                v.mask = NO_MASK;
+                v.mask = box_over;
             }
             for item in &mut out.draws[draws..] {
-                item.mask = None;
+                item.mask = over;
             }
         }
     }
@@ -3346,10 +3367,28 @@ fn mask_texture(
     };
     // A pixel of margin: the quads are grown by a device pixel so an
     // edge is not cut short, and the coverage has to reach as far.
-    let x0 = (bx0.floor() as i64 - 1).clamp(0, page.0 as i64) as u32;
-    let y0 = (by0.floor() as i64 - 1).clamp(0, page.1 as i64) as u32;
-    let x1 = (bx1.ceil() as i64 + 1).clamp(0, page.0 as i64) as u32;
-    let y1 = (by1.ceil() as i64 + 1).clamp(0, page.1 as i64) as u32;
+    //
+    // And as far as the layer's *effects* reach, which is further. A
+    // coverage is read off this texture and a fragment outside it is
+    // read as uncovered-by-nothing — let through — so an outline or a
+    // shadow standing beyond the layer's own box was held back by
+    // nothing at all. A layer held to the one below it drew its outline
+    // outside that layer, where the reference renderer draws none: the
+    // clip cut the layer and let its effects escape. The same texture
+    // carries a mask and a frame's bound, so all three leaked the same
+    // way and for the same reason.
+    let reach = doc
+        .node(id)
+        .ok()?
+        .effects
+        .iter()
+        .map(chitrakar_doc::Effect::reach)
+        .fold(0.0f32, f32::max);
+    let pad = 1 + (reach * parent.max_scale()).ceil().max(0.0) as i64;
+    let x0 = (bx0.floor() as i64 - pad).clamp(0, page.0 as i64) as u32;
+    let y0 = (by0.floor() as i64 - pad).clamp(0, page.1 as i64) as u32;
+    let x1 = (bx1.ceil() as i64 + pad).clamp(0, page.0 as i64) as u32;
+    let y1 = (by1.ceil() as i64 + pad).clamp(0, page.1 as i64) as u32;
     let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
     if w == 0 || h == 0 {
         // Nothing of the layer is on the page; a box of no width says
@@ -11393,6 +11432,143 @@ mod tests {
         assert!(
             GpuRenderer::can_render(&page(false)),
             "one that is not held is still drawn"
+        );
+    }
+
+    /// A layer held to the one below it keeps its *effects* inside it
+    /// too.
+    ///
+    /// A layer's own mask and what it is held to ride the one coverage
+    /// slot here, and both were folded into the drawing and then left
+    /// off the pass that lays the surface down — right for a mask,
+    /// whose job is to shape what the effects grow from (a shadow of a
+    /// masked shape falls outside the mask, as it should), and wrong
+    /// for a clip, which cuts what the layer lays down with its effects
+    /// in it. So a held layer drew its outline outside the layer it was
+    /// held to, where the reference renderer draws none. The lay-down
+    /// keeps a coverage of its own now, built from what holds the layer
+    /// back and not from its mask.
+    ///
+    /// Found on a page nobody wrote, once those pages began turning
+    /// layers — though nothing here is turned: the turn only reshuffled
+    /// the seeds until a held layer with an effect on it came up.
+    #[test]
+    fn a_held_layer_keeps_its_effects_inside_what_holds_it() {
+        use chitrakar_doc::{Command, Effect, Transform, VectorShape};
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = chitrakar_doc::Document::new(60, 40, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        let rect = |name: &str, w: f32, h: f32, c: [f32; 3]| {
+            let mut n = chitrakar_doc::Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
+                    a: 1.0,
+                });
+            }
+            Box::new(n)
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: rect("ground", 60.0, 40.0, [0.1, 0.1, 0.12]),
+        })
+        .unwrap();
+        // A base at x 10..30, and a layer held to it running x 20..40, so
+        // half of what is held hangs off the side of what holds it.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: rect("base", 20.0, 24.0, [0.2, 0.35, 0.8]),
+        })
+        .unwrap();
+        let base = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: base,
+            transform: Transform::translation(10.0, 8.0),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: rect("held", 20.0, 12.0, [0.95, 0.85, 0.2]),
+        })
+        .unwrap();
+        let held = doc.children_of(root).unwrap()[2];
+        doc.apply(Command::SetTransform {
+            id: held,
+            transform: Transform::translation(20.0, 14.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: held,
+            effects: vec![Effect::Outline {
+                width: 3.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.9,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "this backend draws a held layer with an effect"
+        );
+        let mine = gpu.render(&doc).expect("can_render said it would");
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let green = |s: &Surface, x: u32, y: u32| {
+            let p = s.pixels[(y * s.width + x) as usize];
+            p.g > 0.4 && p.r < 0.3
+        };
+        // Non-vacuity: the outline has to be drawn at all, and inside
+        // what holds the layer, or the question below asks nothing.
+        assert!(
+            (8..32).any(|y| green(&reference, 21, y)) || green(&reference, 21, 20),
+            "the outline is drawn inside what holds the layer"
+        );
+        for (name, surf) in [
+            ("the reference renderer", &reference),
+            ("this backend", &mine),
+        ] {
+            for (x, y) in [(31u32, 20u32), (33, 20), (31, 26), (35, 20)] {
+                assert!(
+                    !green(surf, x, y),
+                    "{name} keeps the outline inside what holds the layer, and \
+                     does not draw it at {x},{y}"
+                );
+            }
+        }
+        // And the page at large, read the way the audits over these two
+        // renderers read one: the mean, and the inside of every shape,
+        // where neither side has an edge to disagree about. A hard clip
+        // edge is a pixel the two antialias their own way, which is what
+        // the interior measure exists to look past.
+        let (mean, _) = difference(&mine, &reference);
+        let (_, in_worst, over, at) = interiors(&mine, &reference);
+        assert!(
+            mean < 0.002 && over == 0,
+            "and draws the page the reference renderer draws (mean {mean:.5}, \
+             {over} interior points off, the worst by {in_worst:.3} at {at:?})"
         );
     }
 

@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~503),
+- **Verify before committing:** `cargo test --workspace` (~504),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3881,14 +3881,33 @@ without reading anything else.*
      declined in the backend, each with a test of its own, and the
      lesson is that two renderers agreeing is not two witnesses when
      they share the mistake.
-     The generator's turn is **not committed yet**: with it in, two
-     failures remain, and both look like further defects rather than
-     noise — the backend draws a turned *stroked path* with a wedge of
-     wrong colour a few pixels across (it needs the turn and the stroke
-     together, and is indifferent to the stroke's width, alignment,
-     join and to the fill), and a repainted rectangle leaves a
-     nine-pixel seam on a page with turned layers on it. Those are the
-     next two things to find, and the turn goes in with them.
+     A third defect came out of the same run, in the backend: **a held
+     layer's effects escaped what held it.** A layer's own mask and what
+     it is held to ride the one coverage slot there, and both were
+     folded into the layer's drawing and then left off the pass that
+     lays the surface down. For a mask that is right, and deliberately:
+     the mask shapes what the effects grow from, and a shadow of a
+     masked shape falls outside the mask. For a clip it is wrong — a
+     clip cuts what the layer lays down, its effects with it — so a
+     held layer drew its outline outside the layer it was held to,
+     where the reference renderer draws none. The lay-down keeps a
+     coverage of its own now, built from what holds the layer back and
+     not from its mask
+     (`a_held_layer_keeps_its_effects_inside_what_holds_it`). The first
+     guess was wrong and is worth recording: the coverage texture is
+     sized to the layer's own box, so an effect standing outside it
+     looked like a fragment reading past the texture's edge. Growing
+     the texture by the effects' reach changed nothing, because the
+     effects were not reading that texture at all.
+     The generator's turn is **still not committed**: two failures
+     remain with it in. The backend draws one page's turned *stroked
+     path* with a wedge of wrong colour a few pixels across — every
+     ingredient is needed (the turn, the stroke, a copy of a masked
+     group held to it, that copy's outline and its blend), and the
+     synthetic pages built from those ingredients so far are all clean,
+     so it is not yet understood. And a repainted rectangle leaves a
+     nine-pixel seam on a page with turned layers on it. Those two are
+     next, and the turn goes in with them.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
