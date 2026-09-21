@@ -69,16 +69,20 @@ fn build(n: usize) -> Duration {
 fn adding_a_layer_costs_one_layer() {
     // Warm: the first run of anything pays for pages the allocator has
     // not asked the system for yet.
-    let _ = build(200);
-    let small = build(400);
-    let large = build(1600);
+    // Sizes large enough that the timer is measuring the work rather
+    // than itself: at 400 the build is two milliseconds, and a full
+    // parallel run of the workspace — the GPU's tests among it — moved
+    // a two-millisecond reading past any ceiling that was not slack.
+    let _ = build(400);
+    let small = build(800);
+    let large = build(3200);
     // Four times the layers. Linear is four times the work; the walks
     // this replaced made it sixteen, and measured they made it more —
     // 17.8ms against 300ms with one of the two still in.
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
     assert!(
         ratio < 6.0,
-        "1600 layers cost {large:.2?} against {small:.2?} for 400 — {ratio:.1} times, \
+        "3200 layers cost {large:.2?} against {small:.2?} for 800 — {ratio:.1} times, \
          where four times the layers should be about four times the work"
     );
     // And it measured something: a build that took no time at all would

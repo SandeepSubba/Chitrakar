@@ -3156,33 +3156,56 @@ mod tests {
     /// here rather than merely held: break the colour walk back to
     /// `Adjustment(_) => {}` and this fails on the shared document, which
     /// nothing else in the workspace does.
+    ///
+    /// *Every* entry is moved, not one. This once moved `ink` alone and
+    /// asked what still meant ink's old colour — and the fixture's
+    /// second frame, whose ground stands for `lilac`, could be skipped
+    /// by the walk without this noticing, because lilac had not moved
+    /// and its old meaning was still the right one. A colour that
+    /// stands for an entry the test never touches is a colour the test
+    /// never asks about; so the whole palette moves, and nothing may
+    /// still mean what any of it said.
     #[test]
     fn a_palette_change_leaves_nothing_meaning_the_old_colour() {
         let f = crate::fixture::everything();
         let mut doc = f.doc;
-        // What the fixture's one entry says today, and what nothing may
-        // still mean once it has been moved.
-        let was = doc
+        // What every entry says today, and what nothing may still mean
+        // once the palette has moved.
+        let before: Vec<serde_json::Value> = doc
             .swatches
             .iter()
-            .find(|s| s.name == "ink")
-            .map(|s| s.color.clone())
-            .expect("the fixture keeps a swatch called ink");
-        let serde_json::Value::Object(before) = serde_json::to_value(&was).unwrap() else {
-            panic!("a colour serializes as an object")
-        };
-        doc.apply(Command::SetSwatches {
-            swatches: vec![Swatch {
-                name: "ink".into(),
+            .map(|s| serde_json::to_value(&s.color).unwrap())
+            .collect();
+        assert!(
+            before.len() >= 2,
+            "the fixture has to keep at least two swatches for this to ask \
+             about more than one name: {} kept",
+            before.len()
+        );
+        // Each moved to a colour of its own that none of them was.
+        let moved: Vec<Swatch> = doc
+            .swatches
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Swatch {
+                name: s.name.clone(),
                 color: chitrakar_color::AuthoredColor::Srgb {
-                    r: 0.97,
-                    g: 0.13,
+                    r: 0.97 - 0.1 * i as f32,
+                    g: 0.13 + 0.1 * i as f32,
                     b: 0.51,
                     a: 1.0,
                 },
-            }],
-        })
-        .unwrap();
+            })
+            .collect();
+        for s in &moved {
+            let now = serde_json::to_value(&s.color).unwrap();
+            assert!(
+                !before.contains(&now),
+                "{} moved to a colour the palette already had",
+                s.name
+            );
+        }
+        doc.apply(Command::SetSwatches { swatches: moved }).unwrap();
         // Every `means` under a `Named`, wherever it sits in the tree.
         fn meanings(v: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
             match v {
@@ -3214,15 +3237,7 @@ mod tests {
              to ask anything: {} found",
             found.len()
         );
-        let stale: Vec<&serde_json::Value> = found
-            .iter()
-            .filter(|m| {
-                m.as_object()
-                    .and_then(|o| o.get("Srgb"))
-                    .zip(before.get("Srgb"))
-                    .is_some_and(|(a, b)| a == b)
-            })
-            .collect();
+        let stale: Vec<&serde_json::Value> = found.iter().filter(|m| before.contains(m)).collect();
         assert!(
             stale.is_empty(),
             "{} named colours still mean what the palette said before it \

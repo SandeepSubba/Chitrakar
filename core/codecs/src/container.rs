@@ -1002,6 +1002,7 @@ mod tests {
             // a vector's own gradient wants, in the one adjustment that
             // is stated by a list rather than by numbers.
             "/document/nodes/*/kind/Adjustment/Curves:points",
+            "/document/nodes/*/kind/Adjustment/Curves:points",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:color",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*:offset",
             "/document/nodes/*/kind/Adjustment/GradientMap/stops/*/color/Named:means",
@@ -1039,6 +1040,12 @@ mod tests {
             "/document/nodes/*/effects/*/Outline:color",
             "/document/nodes/*/effects/*/Outline:opacity",
             "/document/nodes/*/effects/*/Outline:width",
+            "/document/nodes/*/kind/Artboard/background/Named/means/Srgb:a",
+            "/document/nodes/*/kind/Artboard/background/Named/means/Srgb:b",
+            "/document/nodes/*/kind/Artboard/background/Named/means/Srgb:g",
+            "/document/nodes/*/kind/Artboard/background/Named/means/Srgb:r",
+            "/document/nodes/*/kind/Artboard/background/Named:means",
+            "/document/nodes/*/kind/Artboard/background/Named:name",
             "/document/nodes/*/kind/Artboard/background/Srgb:a",
             "/document/nodes/*/kind/Artboard/background/Srgb:b",
             "/document/nodes/*/kind/Artboard/background/Srgb:g",

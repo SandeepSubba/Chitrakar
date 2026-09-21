@@ -289,15 +289,27 @@ pub fn everything() -> Fixture {
     // palette recolours a layer; a file written from this has a name in
     // it to read back.
     doc.apply(Command::SetSwatches {
-        swatches: vec![Swatch {
-            name: "ink".into(),
-            color: chitrakar_color::AuthoredColor::Srgb {
-                r: 0.2,
-                g: 0.45,
-                b: 0.8,
-                a: 1.0,
+        swatches: vec![
+            Swatch {
+                name: "ink".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.45,
+                    b: 0.8,
+                    a: 1.0,
+                },
             },
-        }],
+            // What the second frame's ground stands for.
+            Swatch {
+                name: "lilac".into(),
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.85,
+                    b: 0.95,
+                    a: 1.0,
+                },
+            },
+        ],
     })
     .unwrap();
     // And a look kept by name, so a file written from this has a style
@@ -1000,12 +1012,19 @@ pub fn everything() -> Fixture {
             "second frame",
             16.0,
             10.0,
-            Some(chitrakar_color::AuthoredColor::Srgb {
-                r: 0.9,
-                g: 0.85,
-                b: 0.95,
-                a: 1.0,
-            }),
+            // A ground that stands for a palette entry: every named
+            // colour in this document had been on a shape, in text or
+            // in a ramp, and a frame's ground is the one other place a
+            // colour lives — so the palette walk had never reached one.
+            Some(
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.85,
+                    b: 0.95,
+                    a: 1.0,
+                }
+                .standing_for("lilac"),
+            ),
         )),
     })
     .unwrap();

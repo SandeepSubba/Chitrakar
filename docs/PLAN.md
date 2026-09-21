@@ -3719,6 +3719,28 @@ without reading anything else.*
      for the identity, changed nothing, because an empty list already
      tabulates to the identity; a sabotage that cannot fail is not one,
      and it is recorded here so it is not tried twice.
+     The twenty-first was **a ground that stands for a palette entry**:
+     the second frame's ground is `lilac` by name, a second swatch
+     beside `ink`. Every named colour in this document had been on a
+     shape, in text or in a ramp, and a frame's ground is the one other
+     place a colour lives, so the walk that keeps colours in step with
+     the palette had never been asked about one. Every audit held, and
+     then the walk was made to skip a frame's ground — and *nothing*
+     failed, five hundred tests green. That was not the ground's fault
+     but the palette audit's: it moved `ink` alone and asked what still
+     meant ink's old colour, so a colour standing for an entry the test
+     never touched was a colour it never asked about; a second name
+     was invisible to it by construction. The audit moves every entry
+     now, each to a colour none of them was, and asks that nothing
+     still mean what any of it said — and with that, the same sabotage
+     fails on exactly one colour, the lilac ground. Alongside: the file
+     format's inventory grew by six (a named ground's name, its
+     meaning, and the four numbers of that meaning) and by the curves'
+     `points` the twentieth had earned and not yet written down; and
+     the doc-scaling probe measures 800 and 3200 layers rather than 400
+     and 1600, because at two milliseconds a full parallel run of the
+     workspace — the GPU's tests among it — moved a reading past any
+     ceiling that was not slack.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
