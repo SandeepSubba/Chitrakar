@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~499),
+- **Verify before committing:** `cargo test --workspace` (~500),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1264 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3424,22 +3424,32 @@ without reading anything else.*
      drawing is built out of.
      1600 layers through a session: **584ms to 47**, and the walk that
      asked about copies was 85% of it.
-     What is left is smaller, still superlinear, and now *named*: about
-     three times per doubling rather than two, and it is
-     `Document::parent_of`. It scans every group's child list to find one
+     What was left after that was smaller, still superlinear, and named:
+     `Document::parent_of` scanned every group's child list to find one
      layer's parent, so `ancestor_space` — what space is this layer drawn
-     in — is a walk of the document wearing a different hat, and the
-     dirty region asks for it twice a command. A **parent map** fixes it
-     everywhere at once, and it is its own piece of work: five places
-     mutate the child lists, a document read from a file has to build one,
-     and the thing that keeps it honest is an invariant asked after every
-     command in the shared list. That is the next chunk here.
+     in — was a walk of the document wearing a different hat, and the
+     dirty region asked for it twice a command. The document keeps a
+     **parent map** now (`parents`, child to group, `#[serde(skip)]`):
+     a file carries none, so a document read from one builds it on the
+     first question, and the five places that change a child list —
+     add, remove (and the subtree it detaches), restore, move — keep it
+     in step. `parents_match_the_child_lists_after_every_command` holds
+     them to it: after every command in the shared list and after its
+     inverse, the map is the child lists read the other way, and *once
+     built, exactly* — a stale entry for a layer that has gone is
+     invisible to a check that walks only the live layers, and the first
+     version of the test passed a removal that left one behind. It is
+     not harmless either: it puts the count off, which reads as "never
+     built", which rebuilds the map on every question — the walk this
+     map exists to end, back again and silent. Held exactly, a move that
+     forgets the map and a removal that forgets it are each caught.
+     1600 layers through a session: **47ms to 19**, and four times the
+     layers costs 4.4 times the work, where linear is four; it was nine.
      Both scaling tests take a ratio rather than a time, with a floor as
      well as a ceiling, so a slow or busy machine moves both numbers
-     together. The session's ceiling is 12 rather than 5 and the gap is
-     the parent map rather than slack: four times the layers costs about
-     nine times the work, where linear is four, the walks taken out made
-     it sixty-four, and a true quadratic is sixteen.
+     together, and both ceilings are six now — margin for a noisy
+     machine and nothing else, where the session's was twelve with the
+     gap named.
      And the guard needed a test that was not there. Making a copy's
      arrival go unnoticed broke *nothing* in the suite, which looked for
      a minute like the flag not mattering. It matters; the audit that

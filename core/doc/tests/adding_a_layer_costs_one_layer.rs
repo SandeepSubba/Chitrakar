@@ -77,7 +77,7 @@ fn adding_a_layer_costs_one_layer() {
     // 17.8ms against 300ms with one of the two still in.
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
     assert!(
-        ratio < 8.0,
+        ratio < 6.0,
         "1600 layers cost {large:.2?} against {small:.2?} for 400 — {ratio:.1} times, \
          where four times the layers should be about four times the work"
     );

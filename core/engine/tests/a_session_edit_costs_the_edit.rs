@@ -1,30 +1,19 @@
-//! Building a document through a `Session` costs the layers, not the
-//! square of them.
+//! Adding a layer to a session costs the layer, not the document.
 //!
-//! The document itself was made to stop walking everything after every
-//! command; the session in front of it was still doing two walks of its
-//! own on top. Both are questions about the whole document that a
-//! command can answer by itself — does anything here read a
-//! neighbourhood, and is there a copy on the page — and both are now
-//! asked of the command rather than of the document, except where a
-//! command could have taken the last one away.
+//! The session works out a dirty region for every command, which asks
+//! the document what space the layer is drawn in, and the document
+//! used to answer that by scanning every group's child list for the
+//! layer — so every edit cost the whole document, and four times the
+//! layers cost nine times the work. The document keeps a parent map
+//! now, and the answer is a lookup: four times the layers costs four
+//! times the work, give or take the noise of a timer.
 //!
-//! Measured on the same 1600 layers: 584ms to 47.
-//!
-//! A test of shape rather than of speed, like its neighbour in
-//! `core/doc`: a slow or busy machine moves both numbers together, so
-//! what is read is the ratio between them.
-//!
-//! The ceiling is 12 and not 5, and the gap is a thing still to fix
-//! rather than slack. Four times the layers costs about nine times the
-//! work here, where linear would be four and the walks this replaced
-//! made it sixteen. What is left is `Document::parent_of`, which scans
-//! every group's child list to find one layer's parent — so anything
-//! that asks what space a layer is in, which the dirty region does
-//! twice per command, is a walk of the document wearing a different
-//! hat. A parent map fixes it everywhere at once and is its own piece
-//! of work; until then this guards against the return of the walks that
-//! were taken out, which took the ratio to sixty-four.
+//! Read as a ratio between two sizes rather than as a time, so a slow
+//! machine moves both numbers together; the ceiling is six where linear
+//! is four, which is margin for a noisy machine and nothing else — the
+//! walks that were taken out one by one made it sixty-four, then nine.
+//! And a floor on the larger build, since a build too quick to time
+//! would satisfy any ratio.
 
 use chitrakar_doc::{Command, Node, NodeKind, Transform, VectorShape};
 use chitrakar_engine::Session;
@@ -82,10 +71,10 @@ fn a_session_edit_costs_the_edit() {
     let large = build(1600);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
     assert!(
-        ratio < 12.0,
+        ratio < 6.0,
         "1600 layers cost {large:.2?} against {small:.2?} for 400 — {ratio:.1} times, \
-         where the walks this replaced made it sixty-four and what is left \
-         to take out makes it nine"
+         where linear is four and the walks this replaced made it nine, then \
+         sixty-four"
     );
     assert!(
         large > Duration::from_micros(200),

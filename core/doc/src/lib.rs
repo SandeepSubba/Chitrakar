@@ -185,6 +185,19 @@ pub struct Document {
     /// skip a check that matters, so absence has to mean walk.
     #[serde(skip)]
     nesting: Option<usize>,
+    /// Which group each layer is in — the child lists read the other
+    /// way, kept so that asking a layer's parent is a lookup rather than
+    /// a scan of every group's list. The session asks it twice per
+    /// command (the space a layer is drawn in, on the way to its dirty
+    /// region), which made every edit cost the whole document.
+    ///
+    /// Derived, so a file does not carry it: a document read from one
+    /// has an empty map and builds it the first time it is asked, and
+    /// the five places that change a child list keep it in step after
+    /// that. `parents_match_the_child_lists_after_every_command` is what
+    /// holds them to it.
+    #[serde(skip)]
+    parents: HashMap<NodeId, NodeId>,
     #[serde(skip)]
     cmyk_profile_bytes: Option<Vec<u8>>,
     #[serde(skip)]
@@ -333,6 +346,7 @@ impl Document {
             next_id: 1,
             resources: BTreeMap::new(),
             nesting: Some(0),
+            parents: HashMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
             guides: Vec::new(),
@@ -421,14 +435,48 @@ impl Document {
     }
 
     fn parent_and_index(&self, id: NodeId) -> Option<(NodeId, usize)> {
-        self.children
-            .iter()
-            .find_map(|(p, kids)| kids.iter().position(|k| *k == id).map(|i| (*p, i)))
+        let parent = self.parent_of(id)?;
+        let index = self.children.get(&parent)?.iter().position(|k| *k == id)?;
+        Some((parent, index))
     }
 
     /// The group containing a node; None for the root (or an unknown id).
     pub fn parent_of(&self, id: NodeId) -> Option<NodeId> {
-        self.parent_and_index(id).map(|(p, _)| p)
+        if self.parents_stale() {
+            // A document read from a file: the map is not in the file,
+            // so it is built here, once, from the child lists. Interior
+            // mutability rather than `&mut self`, since asking a parent
+            // is a read.
+            return self.parents_from_children().get(&id).copied();
+        }
+        self.parents.get(&id).copied()
+    }
+
+    /// Whether the parent map has yet to be built: every layer but the
+    /// root has a parent, so a map with fewer entries than that is one
+    /// that was never filled in.
+    fn parents_stale(&self) -> bool {
+        self.parents.len() + 1 != self.nodes.len()
+    }
+
+    /// The parent map as the child lists say it is.
+    fn parents_from_children(&self) -> HashMap<NodeId, NodeId> {
+        let mut out = HashMap::with_capacity(self.nodes.len());
+        for (p, kids) in &self.children {
+            for k in kids {
+                out.insert(*k, *p);
+            }
+        }
+        out
+    }
+
+    /// Bring the parent map up to date with the child lists, when a
+    /// document has come from a file. Called before any change to a
+    /// child list, so that what the change keeps in step is the truth.
+    fn settle_parents(&mut self) {
+        if self.parents_stale() {
+            self.parents = self.parents_from_children();
+        }
     }
 
     pub fn guides(&self) -> &[Guide] {
@@ -780,11 +828,13 @@ impl Document {
                 }
                 let id = NodeId(self.next_id);
                 self.next_id += 1;
+                self.settle_parents();
                 if node.kind.holds_children() {
                     self.children.insert(id, Vec::new());
                 }
                 self.nodes.insert(id, *node);
                 self.children.get_mut(&parent).unwrap().insert(index, id);
+                self.parents.insert(id, parent);
                 Ok(Command::RemoveNode { id })
             }
             Command::RemoveNode { id } => {
@@ -792,11 +842,8 @@ impl Document {
                     return Err(DocError::CannotRemoveRoot);
                 }
                 self.node(id)?;
-                let (parent, index) = self
-                    .children
-                    .iter()
-                    .find_map(|(p, kids)| kids.iter().position(|k| *k == id).map(|i| (*p, i)))
-                    .ok_or(DocError::UnknownNode(id))?;
+                self.settle_parents();
+                let (parent, index) = self.parent_and_index(id).ok_or(DocError::UnknownNode(id))?;
                 self.children.get_mut(&parent).unwrap().remove(index);
                 // Removing a group takes its subtree with it; restore is a
                 // whole-subtree re-add.
@@ -816,13 +863,18 @@ impl Document {
                     .get(&parent)
                     .ok_or(DocError::UnknownNode(parent))?;
                 let id = subtree.root_id;
+                self.settle_parents();
                 for (nid, node) in subtree.nodes {
                     self.nodes.insert(nid, node);
                 }
                 for (nid, kids) in subtree.children {
+                    for k in &kids {
+                        self.parents.insert(*k, nid);
+                    }
                     self.children.insert(nid, kids);
                 }
                 self.children.get_mut(&parent).unwrap().insert(index, id);
+                self.parents.insert(id, parent);
                 Ok(Command::RemoveNode { id })
             }
             Command::SetOpacity { id, opacity } => {
@@ -1125,6 +1177,7 @@ impl Document {
                 if self.is_descendant(id, parent) {
                     return Err(DocError::MoveIntoOwnSubtree(id));
                 }
+                self.settle_parents();
                 let (old_parent, old_index) =
                     self.parent_and_index(id).ok_or(DocError::UnknownNode(id))?;
                 self.children
@@ -1133,6 +1186,7 @@ impl Document {
                     .remove(old_index);
                 let dest = self.children.get_mut(&parent).unwrap();
                 dest.insert(index.min(dest.len()), id);
+                self.parents.insert(id, parent);
                 Ok(Command::MoveNode {
                     id,
                     parent: old_parent,
@@ -1432,6 +1486,7 @@ impl Document {
             if let Some(node) = self.nodes.remove(&nid) {
                 subtree.nodes.push((nid, node));
             }
+            self.parents.remove(&nid);
             if let Some(kids) = self.children.remove(&nid) {
                 stack.extend(kids.iter().copied());
                 subtree.children.push((nid, kids));
@@ -1797,6 +1852,95 @@ mod tests {
     /// comparison is the serialized document, so a field that quietly
     /// fails to come back is caught rather than a field somebody
     /// remembered to look at.
+    /// The parent map is derived from the child lists and kept in step
+    /// by hand at every place a child list changes; this asks, after
+    /// every command there is and after its inverse, that the two still
+    /// say the same thing — and that a document read back from a file,
+    /// which carries no map, answers the same as the one that wrote it.
+    #[test]
+    fn parents_match_the_child_lists_after_every_command() {
+        let f = fixture::everything();
+        let each = fixture::every_command(&f);
+        let doc = f.doc;
+        let check = |doc: &Document, what: &str| {
+            let truth = doc.parents_from_children();
+            for (id, parent) in &truth {
+                assert_eq!(
+                    doc.parent_of(*id),
+                    Some(*parent),
+                    "{what}: {id:?} is in {parent:?}'s list and the map says {:?}",
+                    doc.parent_of(*id)
+                );
+            }
+            assert_eq!(
+                doc.parent_of(doc.root),
+                None,
+                "{what}: the root has no parent"
+            );
+            for id in doc.nodes.keys() {
+                if *id != doc.root {
+                    assert!(
+                        truth.contains_key(id),
+                        "{what}: {id:?} is in no child list at all"
+                    );
+                }
+            }
+            // Once built, the map is exactly the child lists — no entry
+            // for a layer that has gone. A stale entry is invisible to
+            // the checks above, and it is not harmless: it puts the
+            // count off, which reads as "never built", which rebuilds
+            // the map on every question — the whole-document walk this
+            // map exists to end, back again and silent about it.
+            if !doc.parents.is_empty() {
+                assert_eq!(
+                    doc.parents, truth,
+                    "{what}: the map is exactly the child lists"
+                );
+            }
+        };
+        check(&doc, "the fixture as it stands");
+        let mut checked = 0;
+        for cmd in each {
+            let mut copy = doc.clone();
+            let label = format!("{cmd:?}");
+            let short: String = label.chars().take(60).collect();
+            let inverse = match copy.apply(cmd) {
+                Ok(inv) => inv,
+                Err(_) => continue,
+            };
+            check(&copy, &format!("after {short}"));
+            copy.apply(inverse).unwrap();
+            check(&copy, &format!("after undoing {short}"));
+            checked += 1;
+        }
+        assert!(checked > 40, "the list was walked ({checked})");
+
+        // Read back from a file, the map is empty and is built on the
+        // first question; and a change made before any question keeps
+        // it right too, since the change builds it first.
+        let text = serde_json::to_string(&doc).unwrap();
+        let read: Document = serde_json::from_str(&text).unwrap();
+        assert!(read.parents.is_empty(), "a file carries no parent map");
+        check(&read, "read from a file");
+        let mut changed: Document = serde_json::from_str(&text).unwrap();
+        let root = changed.root();
+        changed
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::vector(
+                    "new",
+                    VectorShape::Rect {
+                        width: 4.0,
+                        height: 4.0,
+                        radius: 0.0,
+                    },
+                )),
+            })
+            .unwrap();
+        check(&changed, "read from a file and changed before being asked");
+    }
+
     #[test]
     fn every_command_undoes_to_exactly_where_it_started() {
         let f = fixture::everything();
