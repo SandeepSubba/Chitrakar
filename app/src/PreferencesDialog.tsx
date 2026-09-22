@@ -24,6 +24,16 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
+import {
+  COMMANDS,
+  COMMAND_GROUPS,
+  boundChords,
+  chordFromEvent,
+  chordLabel,
+  isChord,
+  type CommandId,
+  type CommandKeys,
+} from "./commands";
 import { DEFAULTS, type ExportFormat, type Prefs, type Theme, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
@@ -42,6 +52,7 @@ import {
 export type PrefGroup =
   | "general"
   | "tools"
+  | "keys"
   | "guides"
   | "selection"
   | "colour"
@@ -52,6 +63,7 @@ type Group = PrefGroup;
 const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "units" },
   { id: "tools", label: "Tools", icon: "brush" },
+  { id: "keys", label: "Keys", icon: "text" },
   { id: "guides", label: "Guides & grid", icon: "fit" },
   { id: "selection", label: "Selection", icon: "marquee" },
   { id: "colour", label: "Colour", icon: "proof" },
@@ -118,6 +130,55 @@ export function PreferencesDialog({
    * to be pressed for it. */
   const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
   const [listening, setListening] = useState<Tool | null>(null);
+  /** The chords as they stand, and which command is waiting for one. */
+  const chords = useMemo(() => boundChords(prefs.commandKeys), [prefs.commandKeys]);
+  const [catching, setCatching] = useState<CommandId | null>(null);
+  useEffect(() => {
+    if (!catching) return;
+    const command = catching;
+    // Ahead of everyone else, so the chord pressed is caught rather than
+    // obeyed: this window is reached by one of the chords being rebound.
+    const key = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") {
+        setCatching(null);
+        return;
+      }
+      // A modifier on its own is the start of a chord, not a chord.
+      if (["Control", "Meta", "Alt", "Shift"].includes(e.key)) return;
+      const next: CommandKeys = { ...prefs.commandKeys };
+      if (e.key === "Backspace" || e.key === "Delete") {
+        // Back to what it shipped with, taking that chord back from any
+        // rebinding holding it.
+        delete next[command];
+        const shipped = COMMANDS.find((c) => c.id === command)?.chord;
+        for (const id of Object.keys(next) as CommandId[]) {
+          if (next[id] === shipped) delete next[id];
+        }
+      } else {
+        const pressed = chordFromEvent(e);
+        if (!isChord(pressed)) return;
+        // A chord another command holds changes hands: that command
+        // takes the one this had, so the swap leaves nothing unreachable.
+        const holder = chords.byChord[pressed];
+        const had = chords.of[command];
+        if (holder && holder !== command) {
+          if (had) next[holder] = had;
+          else delete next[holder];
+        }
+        next[command] = pressed;
+      }
+      for (const id of Object.keys(next) as CommandId[]) {
+        const shipped = COMMANDS.find((c) => c.id === id)?.chord;
+        if (next[id] === shipped) delete next[id];
+      }
+      setPrefs({ commandKeys: next });
+      setCatching(null);
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, [catching, chords, prefs.commandKeys, setPrefs]);
   useEffect(() => {
     if (!listening) return;
     const tool = listening;
@@ -288,6 +349,48 @@ export function PreferencesDialog({
                   (v) => setPrefs({ keepDraft: v }),
                   "offered back next visit",
                 )}
+              </>
+            )}
+
+            {group === "keys" && (
+              <>
+                <p className="modal-aside">
+                  What each command answers to. Press the chord shown
+                  beside one and then the keys you want; a chord another
+                  command holds changes hands, and Backspace puts one
+                  back to what it shipped with. The tools' own keys are
+                  on the Tools page.
+                </p>
+                {COMMAND_GROUPS.map((section) => (
+                  <div className="prefs-tools prefs-chords" key={section} role="group">
+                    <span className="prefs-chord-group">{section}</span>
+                    {COMMANDS.filter((c) => c.group === section).map((c) => (
+                      <label className="row prefs-check prefs-tool" key={c.id}>
+                        <span>{c.label}</span>
+                        <button
+                          type="button"
+                          className={catching === c.id ? "prefs-key listening" : "prefs-key"}
+                          aria-label={`${c.label} chord`}
+                          title={
+                            catching === c.id
+                              ? "Press the keys for it; Escape leaves it as it is"
+                              : `The chord that runs ${c.label}: press to change it`
+                          }
+                          onClick={(e) => {
+                            e.preventDefault();
+                            setCatching(catching === c.id ? null : c.id);
+                          }}
+                        >
+                          {catching === c.id
+                            ? "press…"
+                            : chords.of[c.id]
+                              ? chordLabel(chords.of[c.id])
+                              : "none"}
+                        </button>
+                      </label>
+                    ))}
+                  </div>
+                ))}
               </>
             )}
 

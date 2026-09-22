@@ -22,6 +22,13 @@ import {
   boundKeys,
   type Tool,
 } from "./tools";
+import {
+  boundChords,
+  chordFromEvent,
+  chordLabel,
+  firesWhileTyping,
+  type CommandId,
+} from "./commands";
 import { ExportDialog } from "./ExportDialog";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
@@ -1122,6 +1129,16 @@ export function App() {
    * keys sheet all read. */
   const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
   const TOOL_HINT = keys.hint;
+  /** The command chords as they stand, and what a menu row writes for
+   * one: the person's rebindings over what each shipped with. */
+  const chords = useMemo(() => boundChords(prefs.commandKeys), [prefs.commandKeys]);
+  const hint = useCallback(
+    (id: CommandId) => {
+      const chord = chords.of[id];
+      return chord ? chordLabel(chord) : undefined;
+    },
+    [chords],
+  );
   // The theme, resolved to one of the two and put on the root for the
   // stylesheet: "system" follows the machine, and follows it *live*, so
   // a machine that goes dark at dusk takes the chrome with it.
@@ -1930,9 +1947,19 @@ export function App() {
           });
         }
       }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+      // Undo and redo come off the same table the file and layer keys
+      // do, so a chord changed on the Keys page reaches them as well.
+      //
+      // And they fire with the caret in a field, which everything else
+      // here does not: a colour typed into a box, a name being edited,
+      // a number in a panel are all edits of the *document*, and the
+      // key that takes one back is the same key. Guarding these the way
+      // the rest are guarded handed the field's own undo the page's
+      // work, which the text-run block noticed at once.
+      const fired = chords.byChord[chordFromEvent(e)];
+      if (fired === "undo" || fired === "redo") {
         e.preventDefault();
-        if (e.shiftKey) redo();
+        if (fired === "redo") redo();
         else undo();
       }
       // The zoom keys every editor has: in, out, the whole page, and the
@@ -1971,7 +1998,7 @@ export function App() {
         }
         deselect();
       }
-      if (!typing && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+      if (!typing && fired === "select-all") {
         e.preventDefault();
         // Two things are called selecting everything, and the tool in
         // hand says which is meant: with a marquee up it is the page
@@ -1980,12 +2007,7 @@ export function App() {
         if (SELECT_TOOLS.includes(tool as never)) pickWholePage();
         else selectAll();
       }
-      if (
-        !typing &&
-        (e.metaKey || e.ctrlKey) &&
-        e.shiftKey &&
-        e.key.toLowerCase() === "i"
-      ) {
+      if (!typing && fired === "pick-inverse") {
         e.preventDefault();
         pickInverse();
       }
@@ -2025,6 +2047,7 @@ export function App() {
     zoomTo,
     fitView,
     keys,
+    chords,
   ]);
 
   // Keep the viewport measurement in step with the element it describes.
@@ -4628,109 +4651,85 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = isTextEntry(e.target);
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "d") {
-        e.preventDefault();
-        duplicateSelected();
-      }
-      // With alt, the clipboard keys carry the layer's look rather than
-      // the layer: the pairing every editor uses for it.
-      if ((e.metaKey || e.ctrlKey) && e.altKey && !typing) {
-        const k = e.key.toLowerCase();
-        if (k === "c") {
-          e.preventDefault();
-          copyStyle();
-          return;
-        }
-        if (k === "v") {
-          e.preventDefault();
-          pasteStyle();
-          return;
-        }
-        if (k === "g") {
-          e.preventDefault();
-          clipSelection();
-          return;
-        }
-      }
-      if ((e.metaKey || e.ctrlKey) && !typing) {
-        const k = e.key.toLowerCase();
-        if (k === "c") {
-          e.preventDefault();
-          copySelected();
-        }
-        if (k === "x") {
-          e.preventDefault();
-          copySelected();
-          deleteSelected();
-        }
-        // Ctrl+V pastes the in-app clipboard a beat later, unless the
-        // paste event has already served a picture from another
-        // application by then — the one thing only the event can see. A
-        // webview that never fires the event on a non-editable target
-        // (WKWebView) reaches the same place by the same road.
-        if (k === "v") {
-          pasteSeen.current = false;
-          window.setTimeout(() => {
-            if (!pasteSeen.current) pasteClipboard();
-          }, 80);
-        }
-      }
-      // The file keys, and grouping. All six are what every application
-      // of this kind uses, and all six were reachable only down a menu.
-      //
-      // Ctrl+G has to come after the Ctrl+Alt+G above and check that alt
-      // is *not* held, or grouping would swallow clipping — they differ
-      // by one modifier and the more specific one has to win.
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !typing) {
-        const k = e.key.toLowerCase();
-        if (k === "g") {
-          e.preventDefault();
-          if (e.shiftKey) ungroupSelection();
-          else groupSelection();
-        }
-        if (k === "s") {
-          e.preventDefault();
-          saveFile();
-        }
-        if (k === "e") {
-          e.preventDefault();
-          // Shift asks the window; bare is the one-press export. The
-          // pairing Affinity and Photoshop both use.
-          if (e.shiftKey) setExportOpen(true);
-          else exportPng();
-        }
-        // The settings key every application on this machine answers
-        // to. `e.key` is the comma itself, so it needs no code lookup.
-        if (e.key === ",") {
-          e.preventDefault();
-          setPrefsOpen(true);
-        }
-        // A browser keeps Ctrl+N and Ctrl+O for itself and will not give
-        // them up to preventDefault, so these two only ever fire in the
-        // desktop shell. They are bound all the same — the cost is
-        // nothing where they never arrive — and the menu only *claims*
-        // them where they work, which is what `isTauri()` is doing on
-        // those two rows.
-        if (k === "n") {
-          e.preventDefault();
-          if (mayDiscard()) setNewDocOpen(true);
-        }
-        if (k === "o") {
-          e.preventDefault();
-          if (mayDiscard()) pick(openInputRef);
-        }
-      }
-      // The brackets carry the brush's size on their own; with ctrl and
-      // shift they carry a layer to the front or the back, which is the
-      // pairing every editor uses.
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !typing) {
-        if (e.code === "BracketRight") {
-          e.preventDefault();
-          orderSelected(true);
-        }
-        if (e.code === "BracketLeft") {
-          e.preventDefault();
-          orderSelected(false);
+      // One table, one lookup. These were a dozen nested tests on
+      // modifiers and letters, which is also why the more specific
+      // chord had to be checked before the less — clipping before
+      // grouping, since they differ by one modifier. A chord is one
+      // string now, so the two cannot be confused and the order of the
+      // rows does not matter.
+      const fired = chords.byChord[chordFromEvent(e)];
+      if (fired && (!typing || firesWhileTyping(fired))) {
+        // Everything but paste, which asks for the event's own
+        // clipboard first and has to let it through.
+        if (fired !== "paste") e.preventDefault();
+        switch (fired) {
+          case "duplicate":
+            duplicateSelected();
+            return;
+          case "copy-style":
+            copyStyle();
+            return;
+          case "paste-style":
+            pasteStyle();
+            return;
+          case "clip":
+            clipSelection();
+            return;
+          case "copy":
+            copySelected();
+            return;
+          case "cut":
+            copySelected();
+            deleteSelected();
+            return;
+          // Ctrl+V pastes the in-app clipboard a beat later, unless the
+          // paste event has already served a picture from another
+          // application by then — the one thing only the event can see.
+          // A webview that never fires the event on a non-editable
+          // target (WKWebView) reaches the same place by the same road.
+          case "paste":
+            pasteSeen.current = false;
+            window.setTimeout(() => {
+              if (!pasteSeen.current) pasteClipboard();
+            }, 80);
+            return;
+          case "group":
+            groupSelection();
+            return;
+          case "ungroup":
+            ungroupSelection();
+            return;
+          case "save":
+            saveFile();
+            return;
+          case "export":
+            exportPng();
+            return;
+          case "export-window":
+            setExportOpen(true);
+            return;
+          case "preferences":
+            setPrefsOpen(true);
+            return;
+          // A browser keeps Ctrl+N and Ctrl+O for itself and will not
+          // give them up to preventDefault, so these two only ever fire
+          // in the desktop shell. They are bound all the same — the
+          // cost is nothing where they never arrive — and the menu only
+          // *claims* them where they work.
+          case "new":
+            if (mayDiscard()) setNewDocOpen(true);
+            return;
+          case "open":
+            if (mayDiscard()) pick(openInputRef);
+            return;
+          case "to-front":
+            orderSelected(true);
+            return;
+          case "to-back":
+            orderSelected(false);
+            return;
+          default:
+            break;
         }
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
@@ -6512,7 +6511,7 @@ export function App() {
           () => {
             if (mayDiscard()) setNewDocOpen(true);
           },
-          isTauri() ? "Ctrl+N" : undefined,
+          isTauri() ? hint("new") : undefined,
         ),
         SEP,
         item(
@@ -6522,9 +6521,9 @@ export function App() {
           () => {
             if (mayDiscard()) pick(openInputRef);
           },
-          isTauri() ? "Ctrl+O" : undefined,
+          isTauri() ? hint("open") : undefined,
         ),
-        item("save", "save", "Save", saveFile, "Ctrl+S"),
+        item("save", "save", "Save", saveFile, hint("save")),
         SEP,
         // Bringing something in is its own kind of act — neither opening
         // a document nor saving one — so it sits between them rather
@@ -6538,10 +6537,10 @@ export function App() {
         // anybody might want, guessed in advance and frozen into a row
         // — and still no way to ask for JPEG at 80, or a PNG at half
         // size. That is a dialog's job, and it is one now.
-        item("export", "export", "Export…", () => setExportOpen(true), "Ctrl+Shift+E"),
+        item("export", "export", "Export…", () => setExportOpen(true), hint("export-window")),
         // Kept beside it because it is the one people press without
         // looking: the whole page, as it is, right now.
-        item("export-png", "export", "Export PNG", exportPng, "Ctrl+E"),
+        item("export-png", "export", "Export PNG", exportPng, hint("export")),
         // These two stay rows because they are not one file. The window
         // exports a picture; these write a file per artboard and a page
         // per frame, which is a different act with a different result.
@@ -6571,21 +6570,21 @@ export function App() {
         // application has them. What used to be here as well — arranging
         // layers, picking regions out of the page — was neither, and is
         // now in the two menus named after those things.
-        item("undo", "undo", "Undo", undo, "Ctrl+Z"),
-        item("redo", "redo", "Redo", redo, "Ctrl+Shift+Z"),
+        item("undo", "undo", "Undo", undo, hint("undo")),
+        item("redo", "redo", "Redo", redo, hint("redo")),
         SEP,
-        item("cut", "cut", "Cut", cutSelected, "Ctrl+X"),
-        item("copy", "copy", "Copy", copySelected, "Ctrl+C"),
+        item("cut", "cut", "Cut", cutSelected, hint("cut")),
+        item("copy", "copy", "Copy", copySelected, hint("copy")),
         ...(selectionSet.length > 0 || antRings.length > 0
           ? [item("copy-as-image", "copy", "Copy as image", copyAsImage)]
           : []),
-        item("paste", "paste", "Paste", pasteClipboard, "Ctrl+V"),
+        item("paste", "paste", "Paste", pasteClipboard, hint("paste")),
         SEP,
-        item("duplicate", "duplicate", "Duplicate", duplicateSelected, "Ctrl+D"),
+        item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
         item("delete", "trash", "Delete", deleteSelected, "Del"),
         SEP,
-        item("copy-style", "copy", "Copy style", copyStyle, "Ctrl+Alt+C"),
-        item("paste-style", "paste", "Paste style", pasteStyle, "Ctrl+Alt+V"),
+        item("copy-style", "copy", "Copy style", copyStyle, hint("copy-style")),
+        item("paste-style", "paste", "Paste style", pasteStyle, hint("paste-style")),
       ],
     },
     {
@@ -6597,11 +6596,11 @@ export function App() {
         // *region* out of the page is the other. They used to sit in
         // Edit with a single rule between them, which said they were
         // the same kind of thing as cut and paste. They are not.
-        item("select-all", "selectAll", "Select all layers", selectAll, "Ctrl+A"),
+        item("select-all", "selectAll", "Select all layers", selectAll, hint("select-all")),
         item("deselect", "check", "Deselect", deselect, "Esc"),
         SEP,
         item("pick-page", "marquee", "Pick out the whole page", pickWholePage),
-        item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, "Ctrl+Shift+I"),
+        item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, hint("pick-inverse")),
         item("pick-nothing", "lasso", "Pick out nothing", pickNothing),
         SEP,
         // The three that work the region out from the picture rather
@@ -6632,10 +6631,10 @@ export function App() {
         // wall is not read. Every one of these was on the panel and
         // nowhere else — an unlabelled icon, found by pressing it.
         sub("arrange", "raise", "Arrange", [
-          item("bring-front", "raise", "Bring to front", () => orderSelected(true), "Ctrl+Shift+]"),
+          item("bring-front", "raise", "Bring to front", () => orderSelected(true), hint("to-front")),
           item("bring-forward", "raise", "Bring forward", () => reorderSelected(1)),
           item("send-backward", "lower", "Send backward", () => reorderSelected(-1)),
-          item("send-back", "lower", "Send to back", () => orderSelected(false), "Ctrl+Shift+["),
+          item("send-back", "lower", "Send to back", () => orderSelected(false), hint("to-back")),
         ]),
         sub(
           "align",
@@ -6654,13 +6653,13 @@ export function App() {
           ),
         ),
         SEP,
-        item("group", "group", "Group", groupSelection, "Ctrl+G"),
-        item("ungroup", "ungroup", "Ungroup", ungroupSelection, "Ctrl+Shift+G"),
+        item("group", "group", "Group", groupSelection, hint("group")),
+        item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
         // The hint here is a shortcut that already exists and was
         // advertised nowhere. Group and ungroup get none, because they
         // have none: a menu that names a key the app does not answer to
         // is worse than a menu that names no key at all.
-        item("clip", "clip", "Clip to the layer below", clipSelection, "Ctrl+Alt+G"),
+        item("clip", "clip", "Clip to the layer below", clipSelection, hint("clip")),
         item("instance", "instance", "Make a live copy", instanceSelected),
         SEP,
         sub("mask", "mask", "Mask", [
@@ -7287,16 +7286,16 @@ export function App() {
         >
           {selectionSet.length > 0 ? (
             <>
-              <MenuItem icon="cut" onClick={cutSelected} hint="Ctrl+X">
+              <MenuItem icon="cut" onClick={cutSelected} hint={hint("cut")}>
                 Cut
               </MenuItem>
-              <MenuItem icon="copy" onClick={copySelected} hint="Ctrl+C">
+              <MenuItem icon="copy" onClick={copySelected} hint={hint("copy")}>
                 Copy
               </MenuItem>
               <MenuItem
                 icon="duplicate"
                 onClick={duplicateSelected}
-                hint="Ctrl+D"
+                hint={hint("duplicate")}
               >
                 Duplicate
               </MenuItem>
@@ -7358,7 +7357,7 @@ export function App() {
             </>
           ) : (
             <>
-              <MenuItem icon="paste" onClick={pasteClipboard} hint="Ctrl+V">
+              <MenuItem icon="paste" onClick={pasteClipboard} hint={hint("paste")}>
                 Paste
               </MenuItem>
               <MenuItem icon="selectAll" onClick={selectAll} hint="Ctrl+A">

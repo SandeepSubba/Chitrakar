@@ -19,6 +19,7 @@
  * document and goes through a `Command`.
  */
 
+import { COMMANDS, isChord, type CommandKeys } from "./commands";
 import { useCallback, useEffect, useState } from "react";
 import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
@@ -92,6 +93,9 @@ export type Prefs = {
    * of its default. Only what differs from the defaults is kept, so a
    * default that changes reaches everyone who did not rebind it. */
   toolKeys: ToolKeys;
+  /** The command chords rebound: what each named command answers to
+   * instead of the chord it shipped with. Only what differs is kept. */
+  commandKeys: CommandKeys;
   /** Which of the bar's groups of buttons are shown. Everything on them
    * is on a menu as well, so a group put away costs nothing but reach. */
   barDocument: boolean;
@@ -123,6 +127,7 @@ export const DEFAULTS: Prefs = {
   subjectTolerance: 0.5,
   hiddenTools: [],
   toolKeys: {},
+  commandKeys: {},
   exportSetups: [],
   barDocument: true,
   barSelection: true,
@@ -210,6 +215,22 @@ export function clamp(p: Prefs): Prefs {
           (t, i, all) => isTool(t) && t !== ALWAYS_SHOWN && all.indexOf(t) === i,
         )
       : [],
+    // Only named commands, one chord each, each chord once, and
+    // nothing that only says the default again.
+    commandKeys: (() => {
+      const out: CommandKeys = {};
+      const raw = p.commandKeys;
+      if (!raw || typeof raw !== "object") return out;
+      const seen = new Set<string>();
+      for (const [id, chord] of Object.entries(raw as Record<string, unknown>)) {
+        const known = COMMANDS.find((c) => c.id === id);
+        if (!known || !isChord(chord) || seen.has(chord)) continue;
+        if (known.chord === chord) continue;
+        seen.add(chord);
+        out[known.id] = chord;
+      }
+      return out;
+    })(),
     // Only tools that hold a key, one character each, each key once,
     // and nothing that only says the default again.
     toolKeys: (() => {

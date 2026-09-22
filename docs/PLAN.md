@@ -881,7 +881,7 @@ without reading anything else.*
   engine fails even now.
 - **Verify before committing:** `cargo test --workspace` (~507),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1321 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -5849,7 +5849,23 @@ without reading anything else.*
   rest are a shift away, so rebinding the marquee moves the lasso and
   the wand with it. What is *not* rebindable is the command keys —
   Ctrl+S, Ctrl+G, the brackets — which are still literals in the
-  handlers. The chrome has a **light theme** as well as the dark one,
+  handlers. The **commands** answer to a chord the person chooses too
+  (`app/src/commands.ts`, the preferences' Keys page): one table of
+  twenty-one — save, group, copy a look, send to the back, undo, pick
+  out the rest — where there had been a dozen nested tests on modifiers
+  and letters in two keydown handlers and the same chord spelled again
+  as a hint on every menu row. A chord is one string (`mod+shift+e`,
+  the modifiers in a fixed order, `mod` being whichever of control and
+  command the machine has), so the handler is a lookup rather than a
+  ladder — and the ladder's own hazard goes with it: clipping had to be
+  tested before grouping because they differ by one modifier, and two
+  chords simply cannot be confused. Brackets are named by what is
+  printed on them rather than by what shift makes of them, since those
+  differ by keyboard. Rebinding follows the tool keys' rule — a chord
+  another command holds changes hands, Backspace puts one back to what
+  it shipped with and hands that chord's old holder back its own — and
+  the menus, the context menu and the keys sheet all write the chord as
+  it now stands. The chrome has a **light theme** as well as the dark one,
   and which is shown is the person's (`prefs.theme`: as the system,
   dark, or light; the General page). Every colour of the chrome is a
   token on `:root` now — the six that were, and a dozen more that had
@@ -6573,9 +6589,9 @@ chitrakar/
   PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
   set ✅ (three files in one press), and exports kept by name ✅ (chips
   above the formats). There is still no slice export. The preferences window
-  lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*)
-  but not the command keys — Ctrl+S, Ctrl+G, the brackets are still
-  literals in the keydown handlers. A light theme is in ✅ (see §0
+  lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*) and
+  the command keys are
+  the person's too ✅ (the Keys page; see §0 *Chrome*). A light theme is in ✅ (see §0
   *Chrome*: every colour of the chrome is a token on the root, the
   light set is one attribute away, and `prefs.theme` is the system's
   choice or one of the two outright). Before that the stylesheet

@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1311 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1321 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -145,7 +145,7 @@ machine belongs in the document and goes through a `Command`. The
 panel's width and the toolbar's position deliberately stay on their own
 keys: they are written on every frame of a drag.
 
-`PreferencesDialog.tsx` (Ctrl+,) is a rail of seven groups over that
+`PreferencesDialog.tsx` (Ctrl+,) is a rail of eight groups over that
 object; its General page picks the theme (`prefs.theme`: system, dark
 or light — every chrome colour is a token on `:root` in `styles.css`,
 the light set sits under `:root[data-theme="light"]`, and the app
@@ -159,7 +159,12 @@ the keyboard handler and that page all read; the keys are defaults, and
 `boundKeys(prefs.toolKeys)` is what is read at run time, so a tool key
 rebound on the Tools page (press its key button, then the key; a key
 another tool holds changes hands; Backspace restores) reaches the
-handler, the tooltips and the keys sheet alike. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
+handler, the tooltips and the keys sheet alike. `app/src/commands.ts` is
+the same idea for the *commands* — save, group, undo, send to the back:
+one table of chords (`mod+shift+e`, modifiers in a fixed order) that the
+two keydown handlers, the menus and the preferences' Keys page all read,
+with `boundChords(prefs.commandKeys)` laying a person's rebindings over
+the defaults. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
 rows with format × area × scale, and shows the file's real size — it
 encodes the bytes rather than estimating, and the same encode is what
 gets written, and is decoded again for the picture beside the settings

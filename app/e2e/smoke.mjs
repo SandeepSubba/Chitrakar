@@ -51,6 +51,9 @@ const page = await browser.newPage({
   colorScheme: "dark",
 });
 const errors = [];
+/** An assertion whose evidence is that the step before it did not
+ * throw — a wait that would have timed out. */
+const ok_ = (what) => assert(true, what);
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !m.text().includes("404") && errors.push(m.text()));
 
@@ -11111,7 +11114,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   assert(
     (await page.locator(".prefs-tab").allTextContents()).join(",") ===
-      "General,Tools,Guides & grid,Selection,Colour,New documents,Export",
+      "General,Tools,Keys,Guides & grid,Selection,Colour,New documents,Export",
     "the settings are grouped rather than listed",
   );
 
@@ -12322,6 +12325,99 @@ assert(
   await page.click('.export-scales .preset:text-is("1\u00d7")');
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
+}
+
+// 9bx. The chord a command answers to is a preference, as a tool's key
+// is. Press the chord shown beside a command and then the keys you
+// want; a chord another command holds changes hands; Backspace puts it
+// back. The handlers and the menus read the chords as they stand.
+{
+  const chordOf = (label) => page.locator(`button[aria-label="${label} chord"]`);
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Keys")');
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Export…").textContent()) === "Ctrl+Shift+E",
+    `the export window's chord is shown beside it (${await chordOf("Export…").textContent()})`,
+  );
+  // A chord nobody holds is simply taken.
+  await chordOf("Export…").click();
+  assert(
+    (await chordOf("Export…").textContent()) === "press…",
+    "pressed, the button waits for a chord",
+  );
+  await page.keyboard.press("Control+Alt+E");
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Export…").textContent()) === "Ctrl+Alt+E",
+    `and the chord pressed is the command's (${await chordOf("Export…").textContent()})`,
+  );
+  // A chord another command holds changes hands.
+  await chordOf("Save").click();
+  await page.keyboard.press("Control+Alt+E");
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Save").textContent()) === "Ctrl+Alt+E" &&
+      (await chordOf("Export…").textContent()) === "Ctrl+S",
+    `a chord already held changes hands (${await chordOf("Save").textContent()}, ${await chordOf("Export…").textContent()})`,
+  );
+  // Put save back, which hands the export window its own chord again.
+  await chordOf("Save").click();
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Save").textContent()) === "Ctrl+S" &&
+      (await chordOf("Export…").textContent()) === "Ctrl+Shift+E",
+    `back to its own, and what had taken it falls back to its own too (${await chordOf("Save").textContent()}, ${await chordOf("Export…").textContent()})`,
+  );
+  await chordOf("Export…").click();
+  await page.keyboard.press("Control+Alt+E");
+  await page.waitForTimeout(150);
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+
+  // The chord as it stands is what the keyboard answers to.
+  await page.keyboard.press("Control+Alt+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]', { timeout: 5000 });
+  ok_("the export window answers to its new chord");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForTimeout(400);
+  assert(
+    !(await page.isVisible('[role=dialog][aria-label="Export"]')),
+    "and no longer to the one it shipped with",
+  );
+  // And what the menu writes beside it.
+  await page.click('.menubar button:text-is("File")');
+  await page.waitForTimeout(150);
+  const row = page.locator('.menu-pop .menu-item', { hasText: "Export…" }).first();
+  assert(
+    (await row.locator(".menu-item-hint").textContent()) === "Ctrl+Alt+E",
+    `the menu writes the chord as it stands (${await row.locator(".menu-item-hint").textContent()})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  assert(
+    JSON.stringify(
+      await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).commandKeys),
+    ) === JSON.stringify({ "export-window": "mod+alt+e" }),
+    "only what differs from the defaults is written down",
+  );
+  // Back to what it shipped with, for whoever comes next.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Keys")');
+  await chordOf("Export…").click();
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Export…").textContent()) === "Ctrl+Shift+E",
+    "and Backspace puts a chord back to what it shipped with",
+  );
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

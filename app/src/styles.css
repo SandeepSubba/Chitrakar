@@ -2645,6 +2645,24 @@ button.fold:hover {
 /* The key a tool answers to, as a button: press it and the next key
    pressed is the tool's. Sized like the hint it replaced, so the rows
    line up whether a tool's key can be changed or not. */
+/* The keys page: one column, since a chord's name is wider than a
+   letter, and a heading for each group of commands. */
+.prefs-chords {
+  grid-template-columns: 1fr;
+}
+
+.prefs-chord-group {
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.15rem 0 0.1rem;
+}
+
+.prefs-chords .prefs-key {
+  min-width: 6.5rem;
+}
+
 .prefs-tools .prefs-key {
   margin-left: auto;
   min-width: 2.2rem;
