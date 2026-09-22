@@ -82,6 +82,8 @@ pub struct Fixture {
     pub soft: NodeId,
     /// A stroked rectangle standing at an angle.
     pub tilted: NodeId,
+    /// A second picture on the first one's bytes, standing turned.
+    pub again: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -550,7 +552,7 @@ pub fn everything() -> Fixture {
         node: Box::new(Node::raster(
             "picture",
             RasterRef {
-                resource_id,
+                resource_id: resource_id.clone(),
                 width: 8,
                 height: 8,
             },
@@ -1535,6 +1537,45 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A second picture, and two things at once that this document has
+    // never held. It refers to **the same resource** as the first: two
+    // layers on one set of bytes is how a file with a repeated
+    // photograph is written, and until now every resource here was
+    // referred to exactly once — so a saver that wrote a resource per
+    // reference, or a loader that gave the second layer its own copy,
+    // would have passed everything. And it *stands turned*, which no
+    // raster had: a turned picture is sampled through the inverse of a
+    // rotation rather than along its own rows, and both exporters have
+    // to write the matrix rather than a place and a size.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::raster(
+            "again",
+            RasterRef {
+                resource_id: resource_id.clone(),
+                width: 8,
+                height: 8,
+            },
+        )),
+    })
+    .unwrap();
+    let again = *doc.children_of(root).unwrap().last().unwrap();
+    // Forty degrees and half again as large, about a point inside the
+    // page so the turned square clears every edge.
+    doc.apply(Command::SetTransform {
+        id: again,
+        transform: Transform {
+            a: 1.147_2,
+            b: 0.966_3,
+            c: -0.966_3,
+            d: 1.147_2,
+            e: 30.0,
+            f: 6.0,
+        },
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1730,6 +1771,7 @@ pub fn everything() -> Fixture {
         leveled,
         soft,
         tilted,
+        again,
         stroke,
     }
 }
@@ -2214,6 +2256,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         leveled,
         soft,
         tilted,
+        again,
         stroke,
         ..
     } = f;
@@ -2436,6 +2479,24 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 e: 28.0,
                 f: 26.0,
             },
+        },
+        // The second picture turned the other way and shrunk, so the
+        // sampling runs the other way round the clock and a device pixel
+        // covers more than one of its own.
+        Command::SetTransform {
+            id: *again,
+            transform: Transform {
+                a: 0.636_4,
+                b: -0.636_4,
+                c: 0.636_4,
+                d: 0.636_4,
+                e: 32.0,
+                f: 10.0,
+            },
+        },
+        Command::SetOpacity {
+            id: *again,
+            opacity: 0.85,
         },
         Command::AddStroke {
             id: painted,

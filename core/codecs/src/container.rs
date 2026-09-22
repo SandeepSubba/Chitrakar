@@ -1936,6 +1936,91 @@ mod tests {
         assert_eq!(names, want, "the resources are handed out in order");
     }
 
+    /// Two layers on one set of bytes travel as one set of bytes.
+    ///
+    /// A resource is content-addressed and referred to by name, so a
+    /// photograph placed twice is one PNG in the file and two layers
+    /// naming it. Until the shared fixture held a second picture on the
+    /// first one's bytes, every resource in it was referred to exactly
+    /// once — so a saver writing a PNG per *reference*, or a loader
+    /// handing the second layer a copy of its own, would have passed
+    /// everything here.
+    #[test]
+    fn two_layers_on_one_set_of_bytes_travel_as_one() {
+        let doc = chitrakar_doc::fixture::everything().doc;
+        // What the document refers to, reference by reference.
+        let mut refs: Vec<String> = Vec::new();
+        for (_, node) in doc.nodes() {
+            if let chitrakar_doc::NodeKind::Raster(r) = &node.kind {
+                refs.push(r.resource_id.clone());
+            }
+            if let Some(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Raster { resource_id, .. },
+                ..
+            }) = node.mask.as_ref()
+            {
+                refs.push(resource_id.clone());
+            }
+        }
+        let mut distinct = refs.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert!(
+            refs.len() > distinct.len(),
+            "the fixture has to name one resource twice for this to ask \
+             anything ({} references, {} of them distinct)",
+            refs.len(),
+            distinct.len()
+        );
+
+        let bytes = save_chitra(&doc).unwrap();
+        let zip = ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
+        let mut written: Vec<String> = zip
+            .file_names()
+            .filter(|n| n.starts_with("resources/"))
+            .map(String::from)
+            .collect();
+        written.sort();
+        // By name and not by count: a saver writing a file per reference
+        // under a name of its own can come out with the right number of
+        // files and the wrong files, which is how this test first passed
+        // the sabotage written to break it.
+        let want: Vec<String> = distinct
+            .iter()
+            .map(|id| format!("resources/{id}.png"))
+            .collect();
+        assert_eq!(
+            written, want,
+            "one file per resource, named for it, not one per reference"
+        );
+
+        // And the sharing survives: both layers name the same resource on
+        // the way back, rather than one of them naming a copy.
+        let back = load_chitra(&bytes).unwrap();
+        let mut theirs: Vec<String> = Vec::new();
+        for (_, node) in back.nodes() {
+            if let chitrakar_doc::NodeKind::Raster(r) = &node.kind {
+                theirs.push(r.resource_id.clone());
+            }
+            if let Some(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Raster { resource_id, .. },
+                ..
+            }) = node.mask.as_ref()
+            {
+                theirs.push(resource_id.clone());
+            }
+        }
+        theirs.sort();
+        let mut want = refs.clone();
+        want.sort();
+        assert_eq!(theirs, want, "every layer names the resource it named");
+        assert_eq!(
+            back.resources().count(),
+            distinct.len(),
+            "and the document that comes back holds one of each"
+        );
+    }
+
     #[test]
     fn a_document_of_everything_survives_the_round_trip() {
         let mut doc = Document::new(120, 120, ColorMode::Rgb);

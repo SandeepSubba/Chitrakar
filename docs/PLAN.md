@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~506),
+- **Verify before committing:** `cargo test --workspace` (~507),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its thirty-two is
+     cross-renderer audits can run: every one of its thirty-three is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's thirty-two layers can be removed outright without moving
+     fixture's thirty-three layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3965,6 +3965,31 @@ without reading anything else.*
      most, and before this every edge on every one of these pages was
      vertical or horizontal — so the rise is the measure doing its job.
      The interiors, which are the claim, did not move at all.
+     The twenty-sixth was **a second picture on the first one's bytes,
+     standing turned** (`again`), which is two things this document had
+     never held. Every resource in it was referred to exactly *once*, so
+     a saver writing a PNG per reference, or a loader handing the second
+     layer a copy of its own, would have passed everything. And no
+     *raster* stood turned: the twenty-fifth's stroked rectangle is a
+     vector, and a turned picture is sampled through the inverse of a
+     rotation rather than read along its own rows.
+     Every audit held, so the code was broken, and the turn's half was
+     measured the way the twenty-fifth's was: sample a raster through
+     the *transposed* turn — a change that does nothing at all to an
+     upright one — and
+     `every_layer_of_the_fixture_puts_down_what_the_cpu_puts_down`
+     **passes without this layer and fails with it**. Earned outright,
+     and by the same instrument twice, which is worth noting: the
+     per-layer cross-renderer audit is where a new kind of placement
+     pays.
+     The sharing's half earned a test rather than a sabotage
+     (`two_layers_on_one_set_of_bytes_travel_as_one`): one file per
+     resource named for it, and both layers naming the same resource on
+     the way back. Its first draft compared *counts* and a saver writing
+     a file per reference slipped straight past it — two references, two
+     files, the right number and the wrong files — so it compares names
+     now. A test written to catch a particular mistake should be shown
+     the mistake before it is believed.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this
