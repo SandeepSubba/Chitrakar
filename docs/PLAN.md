@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~504),
+- **Verify before committing:** `cargo test --workspace` (~506),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1311 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -3899,15 +3899,45 @@ without reading anything else.*
      looked like a fragment reading past the texture's edge. Growing
      the texture by the effects' reach changed nothing, because the
      effects were not reading that texture at all.
-     The generator's turn is **still not committed**: two failures
-     remain with it in. The backend draws one page's turned *stroked
+     The repainted rectangle's seam was **two more defects in the
+     reference renderer**, neither about turning, and both found by
+     minimising the page until one layer was left.
+     The first: **a stroke reaching into the rectangle was not drawn
+     where the shape it belongs to did not reach it.** A shape's box was
+     cut to the region being painted *before* the stroke's reach was
+     added to it, so a rectangle that missed the box left nothing for
+     the reach to grow. The box is grown while it is still a box of
+     numbers now, before it becomes pixels at all — which matters
+     because the case that bites is a layer on a surface of its own,
+     where the shape lies off that surface entirely and has no pixel box
+     to grow. Drawn straight onto the page the old arithmetic happened
+     to come out right, which is why the test for it carries a blend
+     (`a_stroke_reaching_into_the_region_is_drawn_there`).
+     The second: **a copy of a layer whose mask is feathered.** Every
+     surface is given room for the softenings that will land on it, and
+     a copy was asked for its *own* mask's margin — but a copy usually
+     carries no mask at all, since what it carries is what it copies.
+     The surface came out exactly the size of the rectangle and the
+     feather clamped at its edge. `softening_within` walks what a copy
+     copies and what a group holds, in the space the drawing happens in,
+     which is why a copy that shrinks what it copies showed this and one
+     that magnifies it did not
+     (`a_copy_of_a_softened_mask_repaints_to_the_whole_page`).
+     A wrong first cut of that one is worth recording: growing the
+     layer's *extent* by the same margin fixed the seam and broke
+     `every_command_repaints_every_pixel_it_changes`, because a
+     softening inside cannot make a layer land further out, and drawing
+     it there put ink outside the region the engine had called dirty.
+     The surface and what is laid down are two rectangles now, and only
+     the first is grown.
+     The generator's turn is **still not committed**: one failure
+     remains with it in. The backend draws one page's turned *stroked
      path* with a wedge of wrong colour a few pixels across — every
      ingredient is needed (the turn, the stroke, a copy of a masked
      group held to it, that copy's outline and its blend), and the
      synthetic pages built from those ingredients so far are all clean,
-     so it is not yet understood. And a repainted rectangle leaves a
-     nine-pixel seam on a page with turned layers on it. Those two are
-     next, and the turn goes in with them.
+     so it is not yet understood. That one is next, and the turn goes
+     in with it.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this

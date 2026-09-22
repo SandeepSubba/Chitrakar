@@ -1043,6 +1043,43 @@ fn feathered_reach(node: &chitrakar_doc::Node, parent: Transform) -> Option<f32>
     Some(blur::plane_reach(sigma) as f32 + 1.0)
 }
 
+/// The widest margin any softening in `id` or under it wants, measured in
+/// the space it will be drawn in.
+///
+/// A surface cut to the region being painted gives a feathered mask
+/// nothing to soften against at its edge, so every surface is given room
+/// for the softenings that will land on it. A layer's own mask is the
+/// easy half; this is the other one — what is *inside* a group, and what
+/// a copy copies, both of which are drawn onto the same surface and
+/// neither of which the layer's own mask says anything about.
+///
+/// Walked in the space the drawing happens in rather than the one the
+/// document places it in: the same feather is worth fewer device pixels
+/// under a copy that shrinks what it copies and more under one that
+/// magnifies it, which is why a copy scaled up never showed this and one
+/// scaled down did.
+fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) -> f32 {
+    if depth >= chitrakar_doc::MAX_DEPTH {
+        return 0.0;
+    }
+    let Ok(node) = doc.node(id) else {
+        return 0.0;
+    };
+    let mut most = feathered_reach(node, space).unwrap_or(0.0);
+    let inner = space.compose(node.transform);
+    for child in doc.children_of(id).unwrap_or_default() {
+        most = most.max(softening_within(doc, *child, inner, depth + 1));
+    }
+    // A copy of a copy: what the inner one draws lands on this surface
+    // too, in the space its own placement is undone into.
+    if let NodeKind::Instance { of, .. } = &node.kind {
+        if let Some(back) = doc.node(*of).ok().and_then(|m| invert(m.transform)) {
+            most = most.max(softening_within(doc, *of, inner.compose(back), depth + 1));
+        }
+    }
+    most
+}
+
 fn render_layer(
     doc: &Document,
     child: NodeId,
@@ -1527,14 +1564,45 @@ fn render_child(
                 // else a surface is cut: the plane the softening runs on is
                 // held to this surface, and at its own edge the blur has no
                 // neighbours and clamps.
+                //
+                // The layer's own mask *and* whatever softening is inside
+                // what it copies. A copy usually carries no mask at all —
+                // what it carries is what it copies — so asking only its
+                // own left the surface exactly the size of the region
+                // being painted, and a feathered mask down inside had
+                // nothing to soften against at its edge. A rectangle
+                // repainted then came back different from the same page
+                // drawn whole, along whichever edge the copy ran past.
+                let soften = feathered_reach(node, parent)
+                    .unwrap_or(0.0)
+                    .max(softening_within(doc, *of, space, 0));
+                // The *extent* is grown by the layer's own softening only:
+                // what is inside cannot make the layer land further out
+                // than it does, and growing the extent for it drew the
+                // layer past the region the engine had worked out as
+                // dirty, which is a stale pixel of another kind.
                 let extent = match (extent, feathered_reach(node, parent)) {
                     (Bounds::Rect(x0, y0, x1, y1), Some(r)) => {
                         Bounds::Rect(x0 - r, y0 - r, x1 + r, y1 + r)
                     }
                     (other, _) => other,
                 };
-                let room = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
+                // Two rectangles, and the difference between them is the
+                // whole of the repair. The *surface* is grown by the
+                // softening that will land on it, so a feathered mask has
+                // neighbours to soften against at its edge. What is
+                // **laid down** is not: a layer drawn outside the region
+                // the engine worked out as dirty is a stale pixel of
+                // another kind, and the engine knows nothing of a
+                // softening buried inside a group or inside what a copy
+                // copies.
+                let own = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
+                let room = soften.ceil() as u32;
                 let sub_clip = match extent.to_clip(dst.width, dst.height) {
+                    Some(b) => b.intersect(grow(clip, own, dst.width, dst.height)),
+                    None => return Ok(()),
+                };
+                let draw_clip = match extent.to_clip(dst.width, dst.height) {
                     Some(b) => b.intersect(grow(clip, room, dst.width, dst.height)),
                     None => return Ok(()),
                 };
@@ -1643,13 +1711,13 @@ fn render_child(
                     }
                     return Ok(());
                 }
-                let (ox, oy) = (sub_clip.x0, sub_clip.y0);
+                let (ox, oy) = (draw_clip.x0, draw_clip.y0);
                 let window = Transform::translation(-(ox as f32), -(oy as f32));
                 let inner = ClipRect {
                     x0: 0,
                     y0: 0,
-                    x1: sub_clip.x1 - ox,
-                    y1: sub_clip.y1 - oy,
+                    x1: draw_clip.x1 - ox,
+                    y1: draw_clip.y1 - oy,
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
                 if stand_ins.is_empty() {
@@ -1787,14 +1855,39 @@ fn render_child(
                 // else a surface is cut: the plane the softening runs on is
                 // held to this surface, and at its own edge the blur has no
                 // neighbours and clamps.
+                //
+                // A child's softening as well as the group's own, for the
+                // same reason a copy wants what it copies: the children
+                // are drawn onto this surface, and it is cut to the region
+                // being painted.
+                let soften = softening_within(doc, child, parent, 0);
+                // The *extent* is grown by the layer's own softening only:
+                // what is inside cannot make the layer land further out
+                // than it does, and growing the extent for it drew the
+                // layer past the region the engine had worked out as
+                // dirty, which is a stale pixel of another kind.
                 let extent = match (extent, feathered_reach(node, parent)) {
                     (Bounds::Rect(x0, y0, x1, y1), Some(r)) => {
                         Bounds::Rect(x0 - r, y0 - r, x1 + r, y1 + r)
                     }
                     (other, _) => other,
                 };
-                let room = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
+                // Two rectangles, and the difference between them is the
+                // whole of the repair. The *surface* is grown by the
+                // softening that will land on it, so a feathered mask has
+                // neighbours to soften against at its edge. What is
+                // **laid down** is not: a layer drawn outside the region
+                // the engine worked out as dirty is a stale pixel of
+                // another kind, and the engine knows nothing of a
+                // softening buried inside a group or inside what a copy
+                // copies.
+                let own = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
+                let room = soften.ceil() as u32;
                 let sub_clip = match extent.to_clip(dst.width, dst.height) {
+                    Some(b) => b.intersect(grow(clip, own, dst.width, dst.height)),
+                    None => return Ok(()),
+                };
+                let draw_clip = match extent.to_clip(dst.width, dst.height) {
                     Some(b) => b.intersect(grow(clip, room, dst.width, dst.height)),
                     None => return Ok(()),
                 };
@@ -1817,13 +1910,13 @@ fn render_child(
                 // group holding one small shape was allocating and
                 // clearing the canvas for it. Everything drawn into it
                 // is shifted by that window's own corner.
-                let (ox, oy) = (sub_clip.x0, sub_clip.y0);
+                let (ox, oy) = (draw_clip.x0, draw_clip.y0);
                 let window = Transform::translation(-(ox as f32), -(oy as f32));
                 let inner = ClipRect {
                     x0: 0,
                     y0: 0,
-                    x1: sub_clip.x1 - ox,
-                    y1: sub_clip.y1 - oy,
+                    x1: draw_clip.x1 - ox,
+                    y1: draw_clip.y1 - oy,
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
                 render_group(doc, child, &mut sub, inner, window.compose(t), bare)?;
@@ -4623,24 +4716,36 @@ fn paint_shape(
     // Smooth paths render as their flattened spline polyline.
     let flat = flatten_shape(shape);
     let shape = flat.as_ref();
-    let mut bbox =
-        match transformed_local_bounds(t, local_bounds(shape)).to_clip(dst.width, dst.height) {
-            Some(b) => b.intersect(clip),
-            None => return,
-        };
+    let mut box_ = transformed_local_bounds(t, local_bounds(shape));
     // A stroke reaches past the box its outline lies in — down the middle
     // of a line, outside a shape's edge, further still at a mitred corner
     // or a head. Whatever it is, `pad` says how far in the shape's own
     // units, and nothing at all for a band lying inside the outline.
+    //
+    // Grown *before* the region being painted is taken into account, and
+    // that order is the whole of a defect. Cut to the region first, a
+    // rectangle that misses the shape's own box left nothing for the pad
+    // to grow — so a stroke whose corner or width reaches into the
+    // rectangle while the shape itself does not was simply not drawn.
+    // The page drawn whole never showed it, since there the box and the
+    // region are the same thing; a thin strip repainted over a stroked
+    // shape just below it did.
+    // Grown while it is still a box of numbers rather than of pixels: a
+    // shape that lies entirely off the surface has no pixel box at all,
+    // and a stroke reaching back onto the surface from there is exactly
+    // the case being repaired.
     if let Some(s) = stroke.filter(|s| s.pad > 0.0) {
-        let pad = ((s.pad * max_scale(t)).ceil() as u32).saturating_add(1);
-        bbox = ClipRect {
-            x0: bbox.x0.saturating_sub(pad),
-            y0: bbox.y0.saturating_sub(pad),
-            x1: bbox.x1.saturating_add(pad).min(dst.width),
-            y1: bbox.y1.saturating_add(pad).min(dst.height),
+        let pad = s.pad * max_scale(t) + 1.0;
+        if let Bounds::Rect(x0, y0, x1, y1) = box_ {
+            box_ = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
         }
-        .intersect(clip);
+    }
+    let bbox = match box_.to_clip(dst.width, dst.height) {
+        Some(b) => b.intersect(clip),
+        None => return,
+    };
+    if bbox.is_empty() {
+        return;
     }
     // A degenerate transform maps nothing; bail before walking the bbox.
     // Inverting once here is what keeps the loops below free of it.
@@ -18030,6 +18135,260 @@ mod tests {
                      never what it covers."
                 );
             }
+        }
+    }
+
+    /// A stroke reaching into the rectangle being repainted is drawn,
+    /// even where the shape it belongs to does not reach it at all.
+    ///
+    /// The shape's box was cut to that rectangle *before* the stroke's
+    /// reach was added to it, so a rectangle that missed the box left
+    /// nothing for the reach to grow: the stroke was not drawn, and the
+    /// same page drawn whole drew it. A stale seam, and the narrowest
+    /// possible one — a row of pixels above a stroked shape.
+    ///
+    /// The box is grown while it is still a box of numbers now, before
+    /// it is turned into pixels at all, because a shape lying entirely
+    /// off the surface has no pixel box to grow.
+    #[test]
+    fn a_stroke_reaching_into_the_region_is_drawn_there() {
+        use chitrakar_doc::{Marker, Node, Stroke, StrokeJoin};
+        let mut doc = Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        // A path, not a rectangle: a rectangle's stroke lies inside its
+        // own outline and reaches nothing past it, so it could not ask
+        // this question.
+        let mut shape = Node::vector(
+            "stroked",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [16.0, 2.0], [8.0, 9.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut shape.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.6,
+                b: 0.2,
+                a: 1.0,
+            });
+            *stroke = Some(Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.2,
+                    b: 0.6,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: StrokeJoin::Round,
+                align: None,
+                start_marker: Marker::None,
+                end_marker: Marker::None,
+            });
+        }
+        // A blend, which is what puts the layer on a surface of its own —
+        // and the surface is cut to the region, so there the shape's box
+        // lies off the surface entirely and has no pixel box at all. That
+        // is the case the repair is for; drawn straight onto the page the
+        // old arithmetic happened to come out right.
+        shape.blend = BlendMode::Multiply;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(shape),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        // The shape's own box starts at y = 12; its stroke, half of four
+        // wide, reaches to y = 10.
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(12.0, 12.0),
+        })
+        .unwrap();
+        let whole = render(&doc).unwrap();
+        // Non-vacuity: there has to be stroke ink above the shape's box
+        // for the question to mean anything.
+        let ink = |s: &Surface, y: u32| {
+            (0..s.width).any(|x| s.pixels[(y * s.width + x) as usize].a > 0.01)
+        };
+        assert!(
+            ink(&whole, 11),
+            "the stroke reaches a row the shape's own box does not"
+        );
+        for rows in [(10u32, 12u32), (11, 12), (10, 11)] {
+            let clip = ClipRect {
+                x0: 0,
+                y0: rows.0,
+                x1: whole.width,
+                y1: rows.1,
+            };
+            let mut patch = whole.clone();
+            render_region(&doc, &mut patch, clip).unwrap();
+            for y in clip.y0..clip.y1 {
+                for x in clip.x0..clip.x1 {
+                    let i = (y * whole.width + x) as usize;
+                    let (a, b) = (patch.pixels[i], whole.pixels[i]);
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    assert!(
+                        d < 0.002,
+                        "repainting rows {rows:?} left {x},{y} different by {d:.4} \
+                         from the same page drawn whole"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A copy of a layer whose mask is feathered repaints a rectangle to
+    /// what the whole page gives there.
+    ///
+    /// A surface cut to the region being painted gives a softening
+    /// nothing to soften against at its edge, so every surface is given
+    /// room for it. A copy was asked for its *own* mask's margin, and a
+    /// copy usually carries no mask at all — what it carries is what it
+    /// copies. So the surface came out exactly the size of the rectangle
+    /// and the feather inside clamped at the edge.
+    ///
+    /// The room is measured in the space the drawing happens in, which is
+    /// why a copy that shrinks what it copies showed this and one that
+    /// magnifies it did not.
+    #[test]
+    fn a_copy_of_a_softened_mask_repaints_to_the_whole_page() {
+        use chitrakar_doc::{Mask, MaskKind, Node};
+        for scale in [0.5f32, 1.0, 1.4] {
+            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = Node::vector(
+                "ground",
+                VectorShape::Rect {
+                    width: 48.0,
+                    height: 36.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.15,
+                    g: 0.2,
+                    b: 0.3,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(ground),
+            })
+            .unwrap();
+            let mut shape = Node::vector(
+                "softly masked",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut shape.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.8,
+                    b: 0.2,
+                    a: 1.0,
+                });
+            }
+            shape.mask = Some(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 9.0, ry: 7.0 },
+                    transform: Transform::translation(9.0, 9.0),
+                },
+                invert: true,
+                feather: 2.5,
+            });
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(shape),
+            })
+            .unwrap();
+            let original = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: original,
+                transform: Transform::translation(1.0, 1.0),
+            })
+            .unwrap();
+            let mut copy = Node::vector(
+                "a copy of it",
+                VectorShape::Rect {
+                    width: 1.0,
+                    height: 1.0,
+                    radius: 0.0,
+                },
+            );
+            copy.kind = NodeKind::Instance {
+                of: original,
+                replaces: Vec::new(),
+            };
+            copy.opacity = 0.6;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(copy),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[2];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform {
+                    a: scale,
+                    b: 0.0,
+                    c: 0.0,
+                    d: scale,
+                    e: 10.0,
+                    f: 8.0,
+                },
+            })
+            .unwrap();
+            let whole = render(&doc).unwrap();
+            let clip = ClipRect {
+                x0: 16,
+                y0: 9,
+                x1: 48,
+                y1: 36,
+            };
+            let mut patch = whole.clone();
+            render_region(&doc, &mut patch, clip).unwrap();
+            let (mut n, mut worst) = (0usize, 0.0f32);
+            for y in clip.y0..clip.y1 {
+                for x in clip.x0..clip.x1 {
+                    let i = (y * whole.width + x) as usize;
+                    let (a, b) = (patch.pixels[i], whole.pixels[i]);
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    if d > 0.002 {
+                        n += 1;
+                        worst = worst.max(d);
+                    }
+                }
+            }
+            assert!(
+                n == 0,
+                "a copy at {scale}× of a softly masked layer: repainting left \
+                 {n} pixels different, the worst by {worst:.4}"
+            );
         }
     }
 
