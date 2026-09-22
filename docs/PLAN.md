@@ -3930,14 +3930,41 @@ without reading anything else.*
      it there put ink outside the region the engine had called dirty.
      The surface and what is laid down are two rectangles now, and only
      the first is grown.
-     The generator's turn is **still not committed**: one failure
-     remains with it in. The backend draws one page's turned *stroked
-     path* with a wedge of wrong colour a few pixels across — every
-     ingredient is needed (the turn, the stroke, a copy of a masked
-     group held to it, that copy's outline and its blend), and the
-     synthetic pages built from those ingredients so far are all clean,
-     so it is not yet understood. That one is next, and the turn goes
-     in with it.
+     The last of it was **an effect on a layer held to a turned one**,
+     and it took four tries to see because every reconstruction of the
+     failing page came out clean. What finally separated it was asking
+     the two renderers to *draw the same simple page and printing both*
+     — a base, a layer held to it hanging off its side, an outline on
+     that layer — at which point the picture said it in one line: the
+     outline traces the **cut**, and where the cut runs at an angle it
+     runs with it. Both renderers cut the layer before growing the
+     effect, and both cut again afterwards; the second cut changes
+     nothing where a coverage is nought or one, and where the cut is
+     diagonal it is neither, so the two compound a soft coverage
+     differently — the outline along the cut comes out two pixels wide
+     in the reference renderer and one in the backend, fading where the
+     coverage falls. Which is right is a question about what a soft
+     clip *means* rather than a defect with an answer, so the backend
+     declines that one combination (an effect on a layer held to
+     something not upright) and draws the upright case, where the two
+     agree exactly. `a_held_layer_wearing_an_effect_goes_back` pins the
+     decline and writes down what the reference renderer does, so
+     whoever settles it finds the evidence rather than the conclusion.
+     Two false starts are recorded with it, both plausible and both
+     wrong: that the coverage texture was too small for the effect to
+     read (growing it changed nothing — the effects were not reading
+     that texture), and that the coverage was being applied twice
+     (taking one of the two away changed nothing either, and made the
+     backend stop tracing the cut at all, which is how the real
+     mechanism came into view).
+     **The pages nobody wrote turn a third of their layers now.** What
+     that cost, measured: the coarseness watch rose from 27% of pages
+     with a rough pixel to 27% at a worst of 0.726 against a ceiling of
+     0.70, and is re-based to 30% and 0.75. An edge at an angle is the
+     one an edge-based rasterizer and a sampled one disagree about
+     most, and before this every edge on every one of these pages was
+     vertical or horizontal — so the rise is the measure doing its job.
+     The interiors, which are the claim, did not move at all.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this

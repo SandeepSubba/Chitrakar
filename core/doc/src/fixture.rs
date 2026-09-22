@@ -2033,13 +2033,37 @@ impl Rng {
     /// it composites, and now and then a mask, a clip, a child or an
     /// effect.
     fn dress(&mut self, doc: &mut Document, id: NodeId, made: &[NodeId]) {
-        let t = Transform {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: self.between(-4.0, 34.0),
-            f: self.between(-4.0, 26.0),
+        let (e, f) = (self.between(-4.0, 34.0), self.between(-4.0, 26.0));
+        // Every layer on these pages used to be *placed* and never
+        // turned: a translation, and the two scales left at one. So a
+        // turned layer met a mask, a clip, a blend or an effect nowhere
+        // here, and the combinations these pages exist to find were
+        // being drawn from a space with one of the axes missing. A
+        // third of them stand turned now, by an angle that is not a
+        // quarter of anything and a scale either side of one, so a box
+        // that is not the shape's box and a length that is not the
+        // length on the page are ordinary rather than exceptional.
+        let t = if self.chance(3) {
+            let angle = self.between(-0.7, 0.7);
+            let scale = self.between(0.7, 1.4);
+            let (sin, cos) = angle.sin_cos();
+            Transform {
+                a: scale * cos,
+                b: scale * sin,
+                c: -scale * sin,
+                d: scale * cos,
+                e,
+                f,
+            }
+        } else {
+            Transform {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e,
+                f,
+            }
         };
         doc.apply(Command::SetTransform { id, transform: t })
             .unwrap();
