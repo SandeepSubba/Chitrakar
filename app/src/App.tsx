@@ -7471,6 +7471,7 @@ export function App() {
             return unionBounds(selectionSet);
           }}
           hasIcc={hasIcc}
+          keptRegions={kept}
           onClose={() => setExportOpen(false)}
         />
       )}

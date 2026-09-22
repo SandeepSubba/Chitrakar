@@ -41,7 +41,7 @@ ICC profile (`core/codecs`).
 ## Commands
 
 ```sh
-cargo test --workspace                      # engine tests (~507)
+cargo test --workspace                      # engine tests (~508)
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 cd app && npm run dev                       # browser dev on :5173 (builds wasm first)
@@ -75,7 +75,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1321 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1329 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or
@@ -170,7 +170,9 @@ encodes the bytes rather than estimating, and the same encode is what
 gets written, and is decoded again for the picture beside the settings
 (a PDF or TIFF shows the page standing in); `Set` writes @1x, @2x and
 @3x in one press; `prefs.exportSetups` keeps a window's answers by name
-as chips above the formats. Above four megapixels it waits to be asked. Two exports
+as chips above the formats; the area "Each kept region" writes a file per
+region the document keeps by name (`Session::kept_region_png` reads one
+where it is kept, so exporting moves neither the selection nor history). Above four megapixels it waits to be asked. Two exports
 are still menu rows and should stay that way: a frame's export multiple
 and its name are the *document's* (`export_scale`), which the window's
 own scale cannot express.

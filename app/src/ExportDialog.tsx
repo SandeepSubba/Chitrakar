@@ -131,6 +131,7 @@ export function ExportDialog({
   hasRegion,
   selectionBounds,
   hasIcc,
+  keptRegions,
   onClose,
 }: {
   session: WasmSession;
@@ -146,11 +147,22 @@ export function ExportDialog({
   selectionBounds: () => [number, number, number, number] | null;
   /** Whether a press profile is loaded — the only way a TIFF can go. */
   hasIcc: boolean;
+  /** The regions kept by name, in the order the engine holds them: a
+   * slice each, when the area asked for is all of them. */
+  keptRegions: string[];
   onClose: () => void;
 }) {
   const format = prefs.exportFormat;
   const spec = FORMATS[format];
-  const area: ExportArea = spec.area ? prefs.exportArea : "page";
+  const asked: ExportArea = spec.area ? prefs.exportArea : "page";
+  // Regions only where there are some, and only in a format that can
+  // carry less than the whole page: a setup kept when there were
+  // regions must not ask a PDF for one now.
+  const area: ExportArea =
+    asked === "regions" && keptRegions.length === 0 ? "page" : asked;
+  /** Every slice that will be written, or one file with no name of its
+   * own. `null` is the whole page or what is picked out. */
+  const slices: (string | null)[] = area === "regions" ? keptRegions : [null];
   /** Whether the set is asked for rather than one size. */
   const set = spec.scales && prefs.exportScale === 0;
   /** The one scale everything shown is worked out at; the set's other
@@ -162,10 +174,37 @@ export function ExportDialog({
   /** The page's own size, which everything shown is worked out from. */
   const [pageW, pageH] = [session.width, session.height];
 
+  /** A kept region's box, worked out by encoding nothing: the engine
+   * knows where it is, and the window only needs its size. */
+  const regionBox = (at: number): [number, number, number, number] | null => {
+    try {
+      const png = session.kept_region_png(at, 1);
+      // A PNG says its size in the header. Cheaper than asking the
+      // engine for a box it would have to be taught to hand back, and
+      // the same encode the export itself goes through.
+      const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
+      return [0, 0, view.getUint32(16), view.getUint32(20)];
+    } catch {
+      return null;
+    }
+  };
+
   /** What will actually be written, in pixels. A region that is picked
    * is exported in the shape it was picked in, so the box it sits in is
    * what decides the size. */
   const outSize = (): [number, number] => {
+    if (area === "regions") {
+      // The first slice stands for the set here, as the first of the
+      // `@1x` set does: they are different sizes and the window has one
+      // line to say it in.
+      const box = regionBox(0);
+      if (box) {
+        return [
+          Math.max(1, Math.round((box[2] - box[0]) * scale)),
+          Math.max(1, Math.round((box[3] - box[1]) * scale)),
+        ];
+      }
+    }
     if (area === "selection") {
       const box = selectionBounds();
       if (box) {
@@ -200,7 +239,16 @@ export function ExportDialog({
   /** The bytes, made once and used for both the size shown and the file
    * written — so what the window says and what lands are the same
    * encode, not two that might differ. */
-  const encodeAt = useCallback((scale: number): Uint8Array => {
+  const encodeAt = useCallback(
+    (scale: number, slice: number | null = null): Uint8Array => {
+      if (slice !== null) return session.kept_region_png(slice, scale);
+      return encodeOne(scale);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, format, area, hasRegion, prefs.jpegQuality, selectionBounds],
+  );
+
+  const encodeOne = useCallback((scale: number): Uint8Array => {
     switch (format) {
       case "pdf":
         return session.export_pdf();
@@ -251,8 +299,12 @@ export function ExportDialog({
     session,
     selectionBounds,
   ]);
-  /** The bytes at the one scale shown — the set's first. */
-  const encode = useCallback(() => encodeAt(scale), [encodeAt, scale]);
+  /** The bytes at the one scale shown — the set's first, or the first
+   * slice when a slice each is what is being written. */
+  const encode = useCallback(
+    () => encodeAt(scale, area === "regions" ? 0 : null),
+    [encodeAt, scale, area],
+  );
 
   /** How big the file comes out. `null` while it is being worked out,
    * `-1` when it is too big to work out without being asked. */
@@ -295,7 +347,11 @@ export function ExportDialog({
         setSize(
           set
             ? SET.slice(1).reduce((n, s) => n + encodeAt(s).length, bytes.length)
-            : bytes.length,
+            : area === "regions"
+              ? slices
+                  .slice(1)
+                  .reduce((n, _, i) => n + encodeAt(scale, i + 1).length, bytes.length)
+              : bytes.length,
         );
         setFailed(null);
         // The browser shows a PNG, a JPEG or an SVG as it is; a PDF or
@@ -327,25 +383,37 @@ export function ExportDialog({
   // any of it puts the question back.
   useEffect(() => setMeasure(0), [format, area, scale, prefs.jpegQuality]);
 
-  const nameAt = (s: number) =>
-    `${fileName()}${area === "selection" ? "-selection" : ""}${
+  const nameAt = (s: number, slice: string | null = null) =>
+    `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
       s !== 1 || set ? `@${s}x` : ""
     }.${spec.ext}`;
-  const name = set ? `${nameAt(1)}, @2x, @3x` : nameAt(scale);
+  const name = set
+    ? `${nameAt(1)}, @2x, @3x`
+    : area === "regions"
+      ? `${nameAt(scale, keptRegions[0] ?? "")}${
+          keptRegions.length > 1 ? `, and ${keptRegions.length - 1} more` : ""
+        }`
+      : nameAt(scale);
 
   const run = useCallback(() => {
     if (refusal) return;
     try {
+      // Every scale asked for, and within each, every slice: the set
+      // and the slices multiply rather than choosing between each
+      // other, which is what an asset pipeline wanting three sizes of
+      // four slices means by it.
       for (const s of scales) {
-        const bytes = encodeAt(s);
-        const url = URL.createObjectURL(
-          new Blob([bytes as BlobPart], { type: spec.mime }),
-        );
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = nameAt(s);
-        a.click();
-        URL.revokeObjectURL(url);
+        for (const [at, slice] of slices.entries()) {
+          const bytes = encodeAt(s, slice === null ? null : at);
+          const url = URL.createObjectURL(
+            new Blob([bytes as BlobPart], { type: spec.mime }),
+          );
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = nameAt(s, slice);
+          a.click();
+          URL.revokeObjectURL(url);
+        }
       }
       onClose();
     } catch (err) {
@@ -493,6 +561,11 @@ export function ExportDialog({
           >
             <option value="page">Whole page</option>
             <option value="selection">What is picked</option>
+            {keptRegions.length > 0 && (
+              <option value="regions">
+                Each kept region ({keptRegions.length})
+              </option>
+            )}
           </select>
           {!spec.area ? (
             <span className="hint">{spec.label} carries the whole page</span>
@@ -530,7 +603,9 @@ export function ExportDialog({
               ? "as drawn"
               : set
                 ? `${outW} × ${outH} px, ×2, ×3`
-                : `${outW} × ${outH} px`}
+                : area === "regions"
+                  ? `${outW} × ${outH} px, and each other region's own`
+                  : `${outW} × ${outH} px`}
           </span>
         </div>
 

@@ -12420,6 +12420,107 @@ assert(
   await page.waitForTimeout(200);
 }
 
+// 9by. Slices: every region kept by name comes out as its own file, in
+// one press, named for the region. A slice is a region the document
+// already keeps, so nothing new is written down for it — and the set
+// and the slices multiply, which is what three sizes of four slices
+// means.
+{
+  await newDocument(400, 300, "rgb");
+  await pickTool("Rect");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  // Something on the page, so a slice has a picture in it.
+  await page.mouse.move(...at(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...at(380, 280), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+
+  // Two regions picked out and kept by name.
+  await pickTool("Select");
+  for (const [name, x0, y0, x1, y1] of [
+    ["badge", 40, 40, 140, 110],
+    ["banner", 180, 60, 380, 120],
+  ]) {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    // The suite answers every prompt from one place; this is what it
+    // types into the next one.
+    promptAnswer = name;
+    await page.click('button[aria-label="Keep what is picked"]');
+    await page.waitForTimeout(250);
+  }
+  assert(
+    (await page.locator('[aria-label="Kept regions"] .kept').allTextContents()).join(",") ===
+      "badge,banner",
+    "two regions are kept by name",
+  );
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.selectOption('select[aria-label="Area"]', "regions");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.textContent('[aria-label="Scale"] .hint')).includes("each other region's own"),
+    "the window says each region comes out at its own size",
+  );
+  assert(
+    (await page.textContent(".export-size span")).includes("-badge.png") &&
+      (await page.textContent(".export-size span")).includes("1 more"),
+    `and names the first slice and counts the rest (${await page.textContent(".export-size span")})`,
+  );
+  const landed = [];
+  const gather = (d) => landed.push(d);
+  page.on("download", gather);
+  await page.click(".modal-actions .primary");
+  for (let i = 0; i < 60 && landed.length < 2; i++) await page.waitForTimeout(100);
+  page.off("download", gather);
+  assert(landed.length === 2, `one file per kept region (${landed.length})`);
+  const names = landed.map((d) => d.suggestedFilename()).sort();
+  assert(
+    names[0].endsWith("-badge.png") && names[1].endsWith("-banner.png"),
+    `each named for its region (${names.join(", ")})`,
+  );
+  // Each is its own region's box rather than the page: the badge is a
+  // hundred by seventy where the banner is two hundred by sixty.
+  const sizes = {};
+  for (const d of landed) {
+    const bytes = await readFile(await d.path());
+    sizes[d.suggestedFilename().replace(/^.*-/, "")] = [
+      bytes.readUInt32BE(16),
+      bytes.readUInt32BE(20),
+    ];
+  }
+  assert(
+    Math.abs(sizes["badge.png"][0] - 100) < 6 && Math.abs(sizes["badge.png"][1] - 70) < 6,
+    `the badge comes out its own size (${sizes["badge.png"]})`,
+  );
+  assert(
+    Math.abs(sizes["banner.png"][0] - 200) < 6 && Math.abs(sizes["banner.png"][1] - 60) < 6,
+    `and the banner its own (${sizes["banner.png"]})`,
+  );
+  // Exporting slices moves neither what is picked out nor the history:
+  // a kept region is read where it is kept rather than picked first.
+  assert(
+    (await page.locator('[aria-label="Kept regions"] .kept').allTextContents()).join(",") ===
+      "badge,banner",
+    "and the regions are still kept, unpicked and unmoved",
+  );
+  // Back to the whole page for whoever opens the window next.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

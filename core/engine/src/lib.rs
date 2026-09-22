@@ -4566,7 +4566,12 @@ impl Session {
 
     /// The page-space box round what is picked out.
     pub fn selection_bounds(&self) -> Option<[f32; 4]> {
-        let rings = self.region_rings(self.doc.selection()?).ok()?;
+        self.region_bounds(self.doc.selection()?)
+    }
+
+    /// The box any region fits in, picked out or merely kept.
+    fn region_bounds(&self, region: &chitrakar_doc::Mask) -> Option<[f32; 4]> {
+        let rings = self.region_rings(region).ok()?;
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
@@ -4675,11 +4680,39 @@ impl Session {
         let Some(region) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
-        let Some([x0, y0, x1, y1]) = self.selection_bounds() else {
+        let Some(box_) = self.selection_bounds() else {
             return Err(EngineError::BadCommand(
                 "what is picked out has no outline".into(),
             ));
         };
+        self.png_of_region(&region, box_, scale)
+    }
+
+    /// The same for a region kept by name, without picking it first.
+    ///
+    /// Exporting a set of slices should not move what is picked out, and
+    /// it should not put a row in the history either — picking a kept
+    /// region is a command, and a command is an edit. So this reads the
+    /// region where it is kept and draws from it directly.
+    pub fn kept_region_png(&self, index: usize, scale: f32) -> Result<Vec<u8>, EngineError> {
+        let Some(kept) = self.doc.regions().get(index) else {
+            return Err(EngineError::BadCommand("no region is kept there".into()));
+        };
+        let region = kept.mask.clone();
+        let Some(box_) = self.region_bounds(&region) else {
+            return Err(EngineError::BadCommand("that region has no outline".into()));
+        };
+        self.png_of_region(&region, box_, scale)
+    }
+
+    /// A region of the page as a PNG: the picture inside its box, with
+    /// everything outside the region itself taken back to nothing.
+    fn png_of_region(
+        &self,
+        region: &chitrakar_doc::Mask,
+        [x0, y0, x1, y1]: [f32; 4],
+        scale: f32,
+    ) -> Result<Vec<u8>, EngineError> {
         let pad = region.feather * 3.0;
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
         let clip = chitrakar_render::ClipRect {
@@ -4721,7 +4754,7 @@ impl Session {
         };
         let cover = chitrakar_render::mask_plane_over(
             &self.doc,
-            &region,
+            region,
             seen,
             chitrakar_render::ClipRect {
                 x0: 0,
@@ -10278,6 +10311,81 @@ mod tests {
     /// picture hidden, the page differed from the picture deleted by an
     /// eighth of a channel somewhere else entirely, where the levels had
     /// landed on whatever was under the picture.
+    #[test]
+    fn a_kept_region_comes_out_as_its_own_picture() {
+        let mut session = Session::new(60, 40, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let mut ground = chitrakar_doc::Node::vector(
+            "ground",
+            VectorShape::Rect {
+                width: 60.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(ground),
+            })
+            .unwrap();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                Transform::translation(8.0, 6.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("a slice").unwrap();
+        // Something else picked out, and the history as it stands: an
+        // export may move neither.
+        session.pick_all().unwrap();
+        let picked = format!("{:?}", session.document().selection());
+        let history = session.history_labels().0.len();
+
+        // A PNG says its size in the header, which is all this asks of
+        // it: the bytes themselves are the same encode every other
+        // export goes through.
+        let size = |png: &[u8]| {
+            (
+                u32::from_be_bytes([png[16], png[17], png[18], png[19]]),
+                u32::from_be_bytes([png[20], png[21], png[22], png[23]]),
+            )
+        };
+        let png = session.kept_region_png(0, 1.0).unwrap();
+        assert_eq!(size(&png), (20, 10), "the region's own box, at one to one");
+        let twice = session.kept_region_png(0, 2.0).unwrap();
+        assert_eq!(size(&twice), (40, 20), "and twice that at twice");
+
+        assert_eq!(
+            format!("{:?}", session.document().selection()),
+            picked,
+            "what is picked out is where it was"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            history,
+            "and nothing went into the history"
+        );
+        assert!(
+            session.kept_region_png(1, 1.0).is_err(),
+            "a region that is not kept says so"
+        );
+    }
+
     #[test]
     fn a_layer_that_cannot_be_seen_is_the_same_as_no_layer() {
         let f = chitrakar_doc::fixture::everything();

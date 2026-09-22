@@ -879,9 +879,9 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~507),
+- **Verify before committing:** `cargo test --workspace` (~508),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1321 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1329 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -6084,6 +6084,17 @@ without reading anything else.*
   encoding, so on a 640 by 480 page the window already waits to be
   asked. Kept in the preference as a scale of zero, which is not a
   scale and never reaches the engine as one.
+  **Slices** are the regions the document already keeps by name: ask
+  the area for "Each kept region" and one press writes a file per
+  region, each at its own box's size and named for it
+  (`untitled-badge.png`). Nothing new is written down for a slice —
+  a region kept by name *is* one, which is why this needed no document
+  change at all, only an engine call that reads a kept region where it
+  is kept (`Session::kept_region_png`) rather than picking it first:
+  picking is a command, a command is an edit, and exporting should
+  move neither what is picked out nor the history. It multiplies with
+  the `@1x/@2x/@3x` set rather than choosing against it, which is what
+  three sizes of four slices means.
   Exports kept by name are chips above the formats (`prefs.exportSetups`,
   the same shape as the brushes): + keeps the window's four answers
   under a name made from them — `JPEG 2× q80`, `PNG set`, a plain
@@ -6587,8 +6598,8 @@ chitrakar/
   a dependency, so this is plumbing rather than a decision. The export
   preview is in ✅ (the file itself, decoded, beside the settings; a
   PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
-  set ✅ (three files in one press), and exports kept by name ✅ (chips
-  above the formats). There is still no slice export. The preferences window
+  set ✅ (three files in one press), exports kept by name ✅ (chips above
+  the formats), and slice export ✅ (a file per region kept by name). The preferences window
   lets the *tool* keys be rebound ✅ (the Tools page; see §0 *Chrome*) and
   the command keys are
   the person's too ✅ (the Keys page; see §0 *Chrome*). A light theme is in ✅ (see §0

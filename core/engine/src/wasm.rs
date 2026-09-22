@@ -799,6 +799,12 @@ impl WasmSession {
         self.inner.selection_png(scale).map_err(to_js)
     }
 
+    /// A region kept by name as its own PNG, without picking it first —
+    /// what a set of slices is written from.
+    pub fn kept_region_png(&self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner.kept_region_png(index, scale).map_err(to_js)
+    }
+
     /// Take the page in to what is picked out.
     pub fn crop_to_selection(&mut self) -> Result<(), JsError> {
         self.inner.crop_to_selection().map_err(to_js)

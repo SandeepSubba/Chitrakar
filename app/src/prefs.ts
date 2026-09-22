@@ -31,7 +31,9 @@ export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
 /** A frame exports at the multiple the *frame* asks for, under a name
  * the frame gives it, so it stays a row on the menu rather than a
  * choice here — see `exportArtboard`. */
-export type ExportArea = "page" | "selection";
+/** What leaves the document: the whole page, whatever is picked out,
+ * or every region kept by name — a slice each, in one press. */
+export type ExportArea = "page" | "selection" | "regions";
 
 /** A brush kept under a name: how wide, and how soft its edge. What
  * Photoshop's and Affinity's brush panels are a panel of; here a row of
@@ -190,7 +192,8 @@ export function clamp(p: Prefs): Prefs {
     ...p,
     // A value written by a version that offered more than these two
     // must not reach the window as an area it cannot show.
-    exportArea: p.exportArea === "selection" ? "selection" : "page",
+    exportArea:
+      p.exportArea === "selection" || p.exportArea === "regions" ? p.exportArea : "page",
     exportFormat: EXPORT_FORMATS.includes(p.exportFormat) ? p.exportFormat : "png",
     theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
     grid: n(Math.round(p.grid), 0, 512, 0),
@@ -266,7 +269,7 @@ export function clamp(p: Prefs): Prefs {
           .map((e) => ({
             name: e.name,
             format: e.format,
-            area: e.area === "selection" ? "selection" : "page",
+            area: e.area === "selection" || e.area === "regions" ? e.area : "page",
             scale: e.scale === 0 ? 0 : n(e.scale, 0.05, 16, 1),
             jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
           }))
