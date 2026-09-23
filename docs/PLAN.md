@@ -2378,7 +2378,7 @@ without reading anything else.*
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
-     cross-renderer audits can run: every one of its thirty-three is
+     cross-renderer audits can run: every one of its thirty-four is
      compared now.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
@@ -2921,7 +2921,7 @@ without reading anything else.*
      number.
      Asking why turned up the thing worth having. That audit's reading is
      a mean over the whole page against 0.004, and **nine of this
-     fixture's thirty-three layers can be removed outright without moving
+     fixture's thirty-four layers can be removed outright without moving
      it**: the picture, the text, the held-to layer and the group holding
      it, the masked adjustment, the adjustment inside a group, the clone
      layer, the copy's stand-in, and the new copy. Several of those are
@@ -3990,6 +3990,34 @@ without reading anything else.*
      files, the right number and the wrong files — so it compares names
      now. A test written to catch a particular mistake should be shown
      the mistake before it is believed.
+     The twenty-seventh was **type set loosely** (`spaced`): tracking,
+     and a line height of its own, which no block here had — every one
+     was spaced the way its face spaces itself. The first try put both
+     on the wrapped block, and the method caught it: a wrap that forgot
+     the tracking was noticed only by the text module's own test, with
+     the new spacing and without it alike, because at eighteen points
+     that block's two words are wider than the page before tracking
+     comes into it — the break could not move. So the spacing went on a
+     block of its own, *placed so the tracking decides the break*: at
+     twelve points "Agile mark" is fifty-five and a half pixels set
+     tight and sixty-four tracked, on a sixty-pixel line, so the right
+     answer is two lines and the wrong one is one. Its edit takes the
+     spacing back out, which changes the box's shape as well as its
+     size.
+     Then the sabotages, both measured against the fixture without the
+     block. A wrap that forgets the tracking — still only the text
+     module's own test, **with the block as without it**. That is not
+     the placement failing a second time but the nineteenth's finding
+     again, and worth having twice: every audit over this document
+     compares it with *itself* by another road — the file, the wire, the
+     clipboard, the second renderer — and every road shares one layout,
+     so a layout that is wrong everywhere is wrong in agreement. Where a
+     line breaks is held by tests that know where it should, and only by
+     them. A file that forgets the tracking, though, fails two file
+     audits with the block and **nothing at all without it** — the
+     tracking had no witness in the file before. So the shape earns the
+     round trip outright, and the honest account of the wrap is that no
+     self-comparison can hold it.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this

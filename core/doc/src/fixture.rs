@@ -84,6 +84,8 @@ pub struct Fixture {
     pub tilted: NodeId,
     /// A second picture on the first one's bytes, standing turned.
     pub again: NodeId,
+    /// A block tracked and leaded so that the tracking decides its break.
+    pub spaced: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1576,6 +1578,46 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // Type set loosely — tracking, and a line height of its own — which
+    // no block here had: every one was spaced the way its face spaces
+    // itself. Placed so the tracking *decides the break*. Set tight,
+    // these two words at twelve points come to fifty-five and a half
+    // pixels and share a sixty-pixel line; tracked by eight hundredths
+    // of an em they come to sixty-four and do not. So a measure that
+    // broke lines without counting the tracking would put both words on
+    // one line and then draw a line four pixels wider than the block —
+    // and the line height moves the second baseline only a block that
+    // really does break can show. The wrapped block above could not ask
+    // this: at eighteen points its two words are wider than the page
+    // before tracking comes into it.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::text("spaced", {
+            let mut spec = TextSpec::new(
+                "Agile mark",
+                12.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.15,
+                    g: 0.1,
+                    b: 0.3,
+                    a: 1.0,
+                },
+            );
+            spec.width = 60.0;
+            spec.letter_spacing = 0.08;
+            spec.line_height = 1.35;
+            spec
+        })),
+    })
+    .unwrap();
+    let spaced = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: spaced,
+        transform: Transform::translation(4.0, 20.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1772,6 +1814,7 @@ pub fn everything() -> Fixture {
         soft,
         tilted,
         again,
+        spaced,
         stroke,
     }
 }
@@ -2257,6 +2300,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         soft,
         tilted,
         again,
+        spaced,
         stroke,
         ..
     } = f;
@@ -2497,6 +2541,27 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         Command::SetOpacity {
             id: *again,
             opacity: 0.85,
+        },
+        // The spacing taken back out: tight, the two words share a line
+        // again, so the block's box changes shape as well as size — two
+        // lines to one — which is the edit whose dirty region is easiest
+        // to get wrong.
+        Command::SetKind {
+            id: *spaced,
+            kind: Box::new(NodeKind::Text({
+                let mut spec = TextSpec::new(
+                    "Agile mark",
+                    12.0,
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.15,
+                        g: 0.1,
+                        b: 0.3,
+                        a: 1.0,
+                    },
+                );
+                spec.width = 60.0;
+                spec
+            })),
         },
         Command::AddStroke {
             id: painted,
