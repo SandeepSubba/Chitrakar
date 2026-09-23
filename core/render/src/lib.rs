@@ -666,11 +666,24 @@ pub fn filter_reach(doc: &Document) -> u32 {
             // change at the source has to repaint the clone as well —
             // which is the same problem a filter's radius poses, and
             // takes the same answer.
+            //
+            // A healing stroke reaches further than that. The colour it
+            // takes is an average over the whole of it, so each pixel of
+            // it reads what is under every other pixel of it, and what
+            // is under every other pixel's source: its own length plus
+            // the offset.
             NodeKind::Clone { strokes } => {
                 let scale = max_scale(ancestor_space(doc, *id).compose(node.transform));
                 let far = strokes
                     .iter()
-                    .map(|s| s.source[0].abs().max(s.source[1].abs()))
+                    .map(|s| {
+                        let offset = s.source[0].abs().max(s.source[1].abs());
+                        let length = match s.bounds().filter(|_| s.heal) {
+                            Some([x0, y0, x1, y1]) => (x1 - x0).max(y1 - y0),
+                            None => 0.0,
+                        };
+                        offset + length
+                    })
                     .fold(0.0f32, f32::max);
                 ((far * scale).ceil() as u32).saturating_add(1)
             }
@@ -5983,7 +5996,7 @@ fn draw_clone(
         // patch taken from somewhere lighter sit into its surroundings
         // rather than showing as a disc.
         let shift = stroke.heal.then(|| {
-            let (mut lifted, mut under, mut total) = ([0.0f32; 3], [0.0f32; 3], 0.0f32);
+            let (mut lifted, mut under) = ([0.0f32; 4], [0.0f32; 4]);
             for py in bbox.y0..bbox.y1 {
                 for px in bbox.x0..bbox.x1 {
                     let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
@@ -5992,23 +6005,21 @@ fn draw_clone(
                     if c <= 0.0 || from.a <= 0.0 || to.a <= 0.0 {
                         continue;
                     }
-                    for (k, (f, t)) in [(from.r, to.r), (from.g, to.g), (from.b, to.b)]
-                        .into_iter()
-                        .enumerate()
-                    {
-                        lifted[k] += f / from.a * c;
-                        under[k] += t / to.a * c;
+                    for (sum, p) in [(&mut lifted, from), (&mut under, to)] {
+                        sum[0] += p.r * c;
+                        sum[1] += p.g * c;
+                        sum[2] += p.b * c;
+                        sum[3] += p.a * c;
                     }
-                    total += c;
                 }
             }
-            if total <= 0.0 {
+            if lifted[3] <= 0.0 || under[3] <= 0.0 {
                 return [0.0f32; 3];
             }
             [
-                (under[0] - lifted[0]) / total,
-                (under[1] - lifted[1]) / total,
-                (under[2] - lifted[2]) / total,
+                under[0] / under[3] - lifted[0] / lifted[3],
+                under[1] / under[3] - lifted[1] / lifted[3],
+                under[2] / under[3] - lifted[2] / lifted[3],
             ]
         });
         for py in bbox.y0..bbox.y1 {
@@ -10218,6 +10229,80 @@ mod tests {
         );
     }
 
+    /// The colour a heal takes is what the stroke covers, and a pixel
+    /// that is barely there is barely any of that.
+    ///
+    /// It was an average of *straight* colours, each pixel counted as
+    /// much as any other — and the straight colour of a pixel with next
+    /// to no alpha is whatever its last few bits say. Half a stroke over
+    /// solid grey and half over a wash of red at a five-hundredth of full
+    /// strength healed the whole of it pink, and found by a shape being
+    /// taken out of a group: the page moved by a ten-thousandth, which
+    /// is composing the same transforms in another order, everywhere but
+    /// the heal, which moved three times as far, since the faint edges
+    /// under it had had their noise divided by their alpha.
+    #[test]
+    fn a_pixel_that_is_barely_there_does_not_decide_what_a_heal_takes() {
+        let srgb = |v: [f32; 4]| AuthoredColor::Srgb {
+            r: v[0],
+            g: v[1],
+            b: v[2],
+            a: v[3],
+        };
+        let mut doc = Document::new(80, 40, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, (x, y, w, h, c)) in [
+            (0.0f32, 0.0f32, 40.0f32, 40.0f32, [0.7, 0.7, 0.7, 1.0]),
+            (40.0, 0.0, 40.0, 40.0, [1.0, 0.0, 0.0, 0.002]),
+            // What is lifted: a darker grey, solid, across the top.
+            (0.0, 2.0, 80.0, 14.0, [0.3, 0.3, 0.3, 1.0]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: filled_rect("part", w, h, srgb(c)),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, y),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::clone_layer("heal")),
+        })
+        .unwrap();
+        let heal = doc.children_of(root).unwrap()[3];
+        let mut s = stroke(&[[8.0, 30.0], [72.0, 30.0]], 4.0, RED);
+        s.source = [0.0, -22.0];
+        s.heal = true;
+        doc.apply(Command::AddStroke {
+            id: heal,
+            index: 0,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let healed = page.get(20, 30).to_srgb8();
+        let around = page.get(20, 36).to_srgb8();
+        assert!(
+            (healed[0] as i32 - healed[1] as i32).abs() < 6,
+            "the heal over grey came out grey ({healed:?})"
+        );
+        assert!(
+            (healed[0] as i32 - around[0] as i32).abs() < 8,
+            "and the grey it was dropped into ({healed:?} against {around:?})"
+        );
+    }
+
     /// A stroke that runs over what it is reading takes what was there
     /// when it began, rather than what it has just laid down.
     #[test]
@@ -13782,6 +13867,58 @@ mod tests {
             .unwrap();
             check(what, &doc);
         }
+
+        // And a healing stroke, whose reach is not the offset it reads
+        // from: the colour it takes is an average over the whole of it,
+        // so every pixel of it depends on what is under every other.
+        // Long and read from close by, so the two are far apart.
+        let mut doc = Document::new(40, 32, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, (x, c)) in [(0.0f32, [0.9, 0.3, 0.1]), (20.0, [0.1, 0.7, 0.9])]
+            .iter()
+            .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: filled_rect(
+                    "half",
+                    20.0,
+                    32.0,
+                    AuthoredColor::Srgb {
+                        r: c[0],
+                        g: c[1],
+                        b: c[2],
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(*x, 0.0),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::clone_layer("heal")),
+        })
+        .unwrap();
+        let heal = doc.children_of(root).unwrap()[2];
+        let mut s = stroke(&[[2.0, 22.0], [38.0, 24.0]], 3.0, RED);
+        s.source = [3.0, -12.0];
+        s.heal = true;
+        doc.apply(Command::AddStroke {
+            id: heal,
+            index: 0,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+        check("a healing stroke", &doc);
         assert!(asked >= 50, "the rectangles were actually asked: {asked}");
     }
 

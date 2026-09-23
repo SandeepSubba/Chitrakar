@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~508),
+- **Verify before committing:** `cargo test --workspace` (~510),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1329 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2372,8 +2372,9 @@ without reading anything else.*
   1. The GPU backend, in two halves. What is left to *teach* it:
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
-     *holds* rather than the kind of layer it is: a healing stroke, an
-     outline wider than a pass will walk, and an effect on a clone layer.
+     *holds* rather than the kind of layer it is: an outline wider than
+     a pass will walk, and an effect on a clone layer. (A healing stroke
+     was on that list; it is drawn now, below.)
      Two more came off in the same sitting — press ink, and a stroke
      carrying a region on a layer whose own mask was already riding that
      slot — and both are below. With those two gone there is no whole
@@ -2412,9 +2413,16 @@ without reading anything else.*
      the same copy of the surface, taken before the stroke's pass, so a
      stroke running over its own source reads what was there rather than
      what it has just laid — and that is also what leaves the blend
-     something to read. What still goes back is a healing stroke, whose
-     shift is an average over the whole stroke before any of it goes
-     down: a reduction, and a pass of quads is not where one happens.
+     something to read. A healing stroke it draws too
+     (`a_heal_averages_what_the_cpu_averages`), though its shift is an
+     average over the whole stroke before any of it goes down — a
+     reduction, and a pass of quads is not where one happens. So it gets
+     passes that are not quads of the page: each pixel's share of the
+     two sums onto a pair of full-precision textures the size of the
+     stroke's rectangle, sixteen-by-sixteen sums of those until one texel
+     is left, and the shift that texel says written beside the stroke's
+     coverage. An adapter that cannot draw into a full-precision texture
+     still hands a heal back.
      There is no arm left over in the walk now and none wanted, so a new
      kind of layer will not compile until it says how it is drawn.
      Effects on a *group* it draws too, and on a brush layer
@@ -4018,6 +4026,53 @@ without reading anything else.*
      tracking had no witness in the file before. So the shape earns the
      round trip outright, and the honest account of the wrap is that no
      self-comparison can hold it.
+     The twenty-eighth was **a stroke that heals**, the second stroke on
+     the clone layer (`borrowed`). Every stroke here had cloned; none had
+     healed, and a heal is the one stroke whose every pixel depends on
+     every other — its colour is the difference of two averages over
+     the whole of it. It found two defects in the reference renderer
+     before the backend was touched.
+     The first, with the stroke and not without it:
+     `a_dissolved_group_brings_its_children_masks_with_it` saw the page
+     move by 3.5e-4 when a shape came out of a group, against a
+     ten-thousandth everywhere else. The heal averaged **straight**
+     colours, every covered pixel counting as much as any other — and
+     the straight colour of a pixel with next to no alpha is whatever its
+     last few bits say, so the noise of composing the same transforms in
+     another order was divided by those alphas and fed into every pixel
+     of the heal. The averages are premultiplied sums over alpha now, so
+     a pixel a five-hundredth there is a five-hundredth of the answer
+     (`a_pixel_that_is_barely_there_does_not_decide_what_a_heal_takes`:
+     half a stroke over solid grey and half over a wash of red at that
+     strength came out pink, 221 against 130).
+     The second, which the fixture could not hold: `filter_reach` gave
+     a clone layer the reach of its offset, and a heal reaches its own
+     length further — a region render padded by the offset alone ends
+     partway along a heal and averages the part it drew. The fixture's
+     own blur pads further than its heal reaches, so it passed either
+     way; a heal on a page of its own, long and read from close by, is
+     now a case of `a_region_render_padded_by_the_reach_is_the_page`.
+     Then the backend, which handed every heal back — the last thing a
+     layer could *hold* that it did not draw, bar a band wider than a
+     pass will walk. It draws them now (`Healing`): a pass writes each
+     pixel's share of the two sums into a pair of full-precision
+     textures over the stroke's rectangle, passes sixteen by sixteen add
+     them to one texel, and a last one writes the shift beside the
+     stroke's coverage, which is what the clone pass lays from. Four
+     sabotages, and which tests noticed: a lay that ignores the shift —
+     the clone audit, whose every case now also runs healing, and the new
+     `a_heal_averages_what_the_cpu_averages`; a sum that adds eight by
+     eight — the clone audit; terms that ignore the stroke's region, that
+     average straight colours, or that ignore a frame's cut — only the
+     new test, one case each, and each read on both renderers rather
+     than compared. **The fixture audits noticed none of the four.** The
+     heal lies under enough of the page that six pixels of it show, and
+     none by more than 0.09 — which is the fixture doing its job, finding
+     the two defects above by carrying the stroke through every road, and
+     not a job it can do for what the stroke's colour should be.
+     Holding the rectangle to the page is only work saved, and the
+     comment says so: off the page nothing is under the stroke, so a
+     pixel there never counts, and no sabotage of it can show.
      The seventeenth was **an effect on a frame**, which could not have
      gone in an hour earlier: the backend handed such a page back, and
      one refused layer declines the whole fixture. Every effect in this

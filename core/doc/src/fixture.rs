@@ -968,6 +968,33 @@ pub fn everything() -> Fixture {
         on_mask: false,
     })
     .unwrap();
+    // And a stroke that heals rather than clones. It lifts the texture
+    // from under its source and takes its colour from where it lands,
+    // and the colour it takes is an average over the whole stroke —
+    // so every pixel of it depends on every pixel under the rest of
+    // it, which is a reach no other stroke has. Long, so that reach is
+    // the stroke's length rather than the offset it reads from.
+    doc.apply(Command::AddStroke {
+        id: borrowed,
+        index: 1,
+        stroke: Box::new(PaintStroke {
+            points: vec![[6.0, 50.0], [74.0, 54.0]],
+            radii: vec![3.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.3,
+            erase: false,
+            source: [2.0, -24.0],
+            heal: true,
+            clip: None,
+        }),
+        on_mask: false,
+    })
+    .unwrap();
     doc.apply(Command::AddNode {
         parent: root,
         index: 8,

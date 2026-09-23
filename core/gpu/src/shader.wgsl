@@ -1115,10 +1115,14 @@ fn fs_paint(in: ImageOut) -> @location(0) vec4f {
 // means the blend has what it needs too, and the fragment can work the
 // whole composite out and write over what was there.
 //
-// `params.yz` is the offset in device pixels, `params.x` the blend mode.
+// `params.yz` is the offset in device pixels, `params.x` the blend mode,
+// and `params.w` one for a stroke that heals — whose coverage then comes
+// with the shift it moves what it lifts by, in the three channels beside
+// it (`fs_heal_spread`).
 @fragment
 fn fs_clone(in: ImageOut) -> @location(0) vec4f {
-    let cover = textureSampleLevel(image, image_sampler, in.uv, 0.0).a
+    let taken = textureSampleLevel(image, image_sampler, in.uv, 0.0);
+    let cover = taken.a
         * in.alpha
         * mask_cover(in.page, in.mask);
     let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
@@ -1134,9 +1138,13 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
     if at.x < 0.0 || at.y < 0.0 || at.x >= page.size.x || at.y >= page.size.y {
         return dst;
     }
-    let lifted = textureLoad(backdrop, vec2i(at), 0);
+    var lifted = textureLoad(backdrop, vec2i(at), 0);
     if lifted.a <= 0.0 {
         return dst;
+    }
+    if in.params.w > 0.5 {
+        let a = lifted.a;
+        lifted = vec4f(max(lifted.rgb / a + taken.rgb, vec3f(0.0)) * a, a);
     }
     let src = lifted * cover;
     let sa = src.a;
@@ -1147,6 +1155,87 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
         (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
         sa + da * (1.0 - sa),
     );
+}
+
+// A healing stroke's two sums, a texel at a time: what it lifts and what
+// is under it, each premultiplied and weighed by the stroke's coverage.
+// Kept as colour and alpha together, so that the average each makes is
+// its colour over its alpha — a pixel with next to no alpha is next to
+// none of it, where an average of straight colours would let one decide
+// as much as a solid pixel does, with whatever its last few bits say.
+struct Sums {
+    @location(0) lifted: vec4f,
+    @location(1) under: vec4f,
+};
+
+// Each pixel's share, drawn onto a pair of textures the size of the
+// rectangle the averages are taken over: `params.xy` is where that
+// starts on the surface and `params.zw` the offset the stroke reads at,
+// `grad` the box of the stroke's own region on the mask slot.
+//
+// A pixel counts where the stroke covers it and both what it lifts and
+// what it lands on are there at all — the reference renderer's rule,
+// read the way `fs_clone` reads, so the two agree on which pixel is
+// lifted.
+@fragment
+fn fs_heal_terms(in: ImageOut) -> Sums {
+    var out: Sums;
+    out.lifted = vec4f(0.0);
+    out.under = vec4f(0.0);
+    let at = vec2i(floor(in.pos.xy)) + vec2i(in.params.xy);
+    let c = textureLoad(image, at, 0).a * mask_cover(vec2f(at) + 0.5, in.grad);
+    if c <= 0.0 {
+        return out;
+    }
+    let source = floor(vec2f(at) + 0.5 + in.params.zw);
+    if source.x < 0.0 || source.y < 0.0 || source.x >= page.size.x || source.y >= page.size.y {
+        return out;
+    }
+    let lifted = textureLoad(backdrop, vec2i(source), 0);
+    let under = textureLoad(backdrop, at, 0);
+    if lifted.a <= 0.0 || under.a <= 0.0 {
+        return out;
+    }
+    out.lifted = lifted * c;
+    out.under = under * c;
+    return out;
+}
+
+// Sixteen by sixteen texels of the pair before into one of the pair
+// after. Past the edge of what is being added up is nothing, rather than
+// whatever a load out of bounds would return.
+@fragment
+fn fs_heal_sum(in: ImageOut) -> Sums {
+    let size = vec2i(textureDimensions(image));
+    let base = vec2i(floor(in.pos.xy)) * 16;
+    var out: Sums;
+    out.lifted = vec4f(0.0);
+    out.under = vec4f(0.0);
+    for (var j = 0; j < 16; j++) {
+        for (var i = 0; i < 16; i++) {
+            let at = base + vec2i(i, j);
+            if at.x < size.x && at.y < size.y {
+                out.lifted += textureLoad(image, at, 0);
+                out.under += textureLoad(mask_tex, at, 0);
+            }
+        }
+    }
+    return out;
+}
+
+// The shift the sums say, written beside the stroke's coverage: the
+// average of what is under it less the average of what it lifts, which
+// is nothing where either average has nothing in it.
+@fragment
+fn fs_heal_spread(in: ImageOut) -> @location(0) vec4f {
+    let cover = textureSampleLevel(image, image_sampler, in.uv, 0.0).a;
+    let lifted = textureLoad(mask_tex, vec2i(0), 0);
+    let under = textureLoad(backdrop, vec2i(0), 0);
+    var shift = vec3f(0.0);
+    if lifted.a > 0.0 && under.a > 0.0 {
+        shift = under.rgb / under.a - lifted.rgb / lifted.a;
+    }
+    return vec4f(shift, cover);
 }
 
 // A layer's silhouette in one flat colour, or the hole around it: what

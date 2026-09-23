@@ -100,6 +100,9 @@ struct Vertex {
 /// fragment reads as "let everything through".
 const NO_MASK: [f32; 4] = [0.0; 4];
 
+/// What a healing stroke's sums are kept in.
+const SUMS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+
 /// The largest texture asked for, which is what `downlevel_defaults`
 /// guarantees on every adapter. A page that would need a bigger one —
 /// a page larger than this, a placed image larger than this, or a text
@@ -235,6 +238,9 @@ enum Draw {
     Clone {
         segments: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
+        /// For a stroke that heals: the passes that work out the colour
+        /// it shifts what it lifts by.
+        heal: Option<Healing>,
     },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
@@ -290,6 +296,16 @@ pub struct GpuRenderer {
     /// A clone stroke: the same coverage, filled with what the surface
     /// already holds a fixed distance away, composited in full.
     clone: wgpu::RenderPipeline,
+    /// A healing stroke's three kinds of pass (`Healing`): each pixel's
+    /// share of the two averages, the sums of those, and the shift the
+    /// sums say, written beside the stroke's coverage.
+    heal_terms: wgpu::RenderPipeline,
+    heal_sum: wgpu::RenderPipeline,
+    heal_spread: wgpu::RenderPipeline,
+    /// Whether this adapter can draw into the textures those sums are
+    /// kept in.
+    sums: bool,
+    sums_layout: wgpu::BindGroupLayout,
     /// The blurred copy coming back down onto what it was taken from.
     blur_down: wgpu::RenderPipeline,
     /// The same two passes again, painting from a gradient's ramp
@@ -1008,7 +1024,7 @@ impl GpuRenderer {
                 module: &shader,
                 entry_point: Some("fs_text"),
                 compilation_options: Default::default(),
-                targets: &[Some(target)],
+                targets: &[Some(target.clone())],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(stencil_state(
@@ -1019,6 +1035,100 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // A healing stroke's sums, which are full precision because they
+        // are sums: half precision runs out of digits long before a
+        // stroke of any size has been added up. Read by loading texels,
+        // never by filtering them — a full-precision texture is not one
+        // every adapter will filter — so the layout says so.
+        let sums_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sums"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let sums_target = Some(wgpu::ColorTargetState {
+            format: SUMS_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        let summing = |label: &'static str, entry: &'static str, layout: &wgpu::PipelineLayout| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_image"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[sums_target.clone(), sums_target.clone()],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        // Each pixel's share: the stroke's coverage, read off the scratch
+        // texture the brush pass left it on, the region it carries, and
+        // what is under it and under its source, off the copy.
+        let heal_terms = summing("heal terms", "fs_heal_terms", &pipeline_layout);
+        // Sixteen by sixteen of those into one, again and again.
+        let sums_pipeline = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sums"),
+            bind_group_layouts: &[&layout, &sums_layout, &sums_layout],
+            push_constant_ranges: &[],
+        });
+        let heal_sum = summing("heal sum", "fs_heal_sum", &sums_pipeline);
+        // And the shift the last of them says, beside the coverage.
+        let heal_spread = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("heal spread"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("heal spread"),
+                    bind_group_layouts: &[&layout, &texture_layout, &sums_layout, &sums_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_heal_spread"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        // Not every adapter draws into a full-precision texture. One that
+        // does not hands a healing stroke back, as every one used to.
+        let sums = adapter
+            .get_texture_format_features(SUMS_FORMAT)
+            .allowed_usages
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT);
         Some(Self {
             device,
             queue,
@@ -1039,6 +1149,11 @@ impl GpuRenderer {
             paint,
             eraser,
             clone,
+            heal_terms,
+            heal_sum,
+            heal_spread,
+            sums,
+            sums_layout,
             blur_down,
             shape_gradient,
             cover_gradient,
@@ -1078,6 +1193,13 @@ impl GpuRenderer {
     ) -> Option<Surface> {
         let mut scene = Scene::default();
         gather(doc, view, size, &mut scene)?;
+        let heals = scene
+            .draws
+            .iter()
+            .any(|item| matches!(item.draw, Draw::Clone { heal: Some(_), .. }));
+        if heals && !self.sums {
+            return None;
+        }
         Some(self.draw(size.0, size.1, &scene))
     }
 
@@ -1090,6 +1212,121 @@ impl GpuRenderer {
     /// Whether [`render_view`](Self::render_view) would draw it.
     pub fn can_render_view(doc: &Document, view: Transform, size: (u32, u32)) -> bool {
         gather(doc, view, size, &mut Scene::default()).is_some()
+    }
+
+    /// A healing stroke's passes (`Healing`), recorded onto `encoder`
+    /// between the one that gathers its coverage onto the first of the
+    /// scratch pair and the one that lays it from the second.
+    #[allow(clippy::too_many_arguments)]
+    fn heal(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        h: &Healing,
+        whole: &wgpu::BindGroup,
+        backdrop: &wgpu::BindGroup,
+        scratch: &[(wgpu::TextureView, wgpu::BindGroup)],
+        textures: &[wgpu::BindGroup],
+        quads: &wgpu::Buffer,
+    ) {
+        // A pair of textures a level, the first the rectangle's size and
+        // each after it a sixteenth of the one before along each side,
+        // down to a single texel.
+        let mut size = (h.rect.x1 - h.rect.x0, h.rect.y1 - h.rect.y0);
+        let mut levels = Vec::new();
+        loop {
+            let pair: Vec<_> = (0..2)
+                .map(|_| {
+                    let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("heal sums"),
+                        size: wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: SUMS_FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&Default::default());
+                    let read = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("heal sums"),
+                        layout: &self.sums_layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        }],
+                    });
+                    (view, read)
+                })
+                .collect();
+            levels.push(pair);
+            if size == (1, 1) {
+                break;
+            }
+            size = (size.0.div_ceil(16), size.1.div_ceil(16));
+        }
+        fn onto(
+            pair: &[(wgpu::TextureView, wgpu::BindGroup)],
+        ) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 2] {
+            [0, 1].map(|k| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &pair[k].0,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            })
+        }
+        for (n, pair) in levels.iter().enumerate() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("heal sums"),
+                color_attachments: &onto(pair),
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, whole, &[]);
+            if n == 0 {
+                pass.set_pipeline(&self.heal_terms);
+                pass.set_bind_group(1, &scratch[0].1, &[]);
+                pass.set_bind_group(2, h.region.map_or(&self.open, |at| &textures[at]), &[]);
+                pass.set_bind_group(3, backdrop, &[]);
+            } else {
+                pass.set_pipeline(&self.heal_sum);
+                pass.set_bind_group(1, &levels[n - 1][0].1, &[]);
+                pass.set_bind_group(2, &levels[n - 1][1].1, &[]);
+            }
+            pass.set_vertex_buffer(0, quads.slice(..));
+            pass.draw(h.quad.clone(), 0..1);
+        }
+        let last = levels.last().expect("at least the first level");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("heal spread"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &scratch[1].0,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.heal_spread);
+        pass.set_bind_group(0, whole, &[]);
+        pass.set_bind_group(1, &scratch[0].1, &[]);
+        pass.set_bind_group(2, &last[0].1, &[]);
+        pass.set_bind_group(3, &last[1].1, &[]);
+        pass.set_vertex_buffer(0, quads.slice(..));
+        pass.draw(h.quad.clone(), 0..1);
     }
 
     fn draw(&self, width: u32, height: u32, scene: &Scene) -> Surface {
@@ -1514,6 +1751,23 @@ impl GpuRenderer {
                 pass.set_vertex_buffer(0, quads.slice(..));
                 pass.draw(segments.clone(), 0..1);
             }
+            // A healing stroke, between gathering its coverage and laying
+            // it: the two sums over its rectangle, added up to a texel,
+            // and the shift they say written beside the coverage on the
+            // second of the pair — which is what it is then laid from.
+            if let (Some(Opening::Clone { heal: Some(h), .. }), Some((_, backdrop)), Some(quads)) =
+                (&step.lay, &under, &quads)
+            {
+                self.heal(
+                    &mut encoder,
+                    h,
+                    &whole,
+                    backdrop,
+                    &scratch,
+                    &textures,
+                    quads,
+                );
+            }
             // A live effect, before the pass that stamps it down: the
             // layer's own surface goes in, one pass turns its silhouette
             // into a field of flat colour, and the box passes blur that
@@ -1773,14 +2027,18 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &scratch[0].1, &[]);
                             (quad, mask)
                         }
-                        Opening::Clone { quad, mask, .. } => {
+                        Opening::Clone {
+                            quad, mask, heal, ..
+                        } => {
                             // What is under the stroke and what it lifts
                             // are the same copy, taken before the pass:
                             // a stroke running over its own source reads
                             // what was there rather than what it has just
-                            // laid.
+                            // laid. A heal's coverage has moved to the
+                            // second of the pair, with its shift beside it.
                             pass.set_pipeline(&self.clone);
-                            pass.set_bind_group(1, &scratch[0].1, &[]);
+                            let from = if heal.is_some() { 1 } else { 0 };
+                            pass.set_bind_group(1, &scratch[from].1, &[]);
                             (quad, mask)
                         }
                         Opening::Effect {
@@ -2625,14 +2883,6 @@ fn one(
         NodeKind::Clone { strokes } => {
             let band = 1.0 / t.max_scale().max(1e-6);
             for stroke in strokes {
-                // Healing takes the texture from the source and the
-                // colour from where it lands: the shift between what the
-                // two average over the whole stroke, worked out before a
-                // single pixel of it goes down. That is a reduction, and
-                // a pass of quads is not where one happens.
-                if stroke.heal {
-                    return None;
-                }
                 let confined = match stroke.clip.as_deref() {
                     Some(region) => match stroke.bounds() {
                         Some(box_) => Some(clip_texture(doc, region, box_, t, held, out)?),
@@ -2652,10 +2902,28 @@ fn one(
                     t.a * stroke.source[0] + t.c * stroke.source[1],
                     t.b * stroke.source[0] + t.d * stroke.source[1],
                 );
+                // Healing takes the texture from the source and the
+                // colour from where it lands: the shift between what the
+                // two average over the whole stroke, worked out before a
+                // single pixel of it goes down. That is a reduction, so
+                // it gets passes of its own (`Healing`) over the stroke's
+                // rectangle — the page's part of it, and the frame's if
+                // it is in one, which is the part the reference renderer
+                // takes its averages over.
+                let heal = if stroke.heal {
+                    healing(doc, stroke, t, held.bound, sx, sy, out)
+                } else {
+                    None
+                };
                 let quad = out.push(page_quad(
                     (out.page, out.surface),
                     alpha,
-                    [blend_index(node.blend) as f32, sx, sy, 0.0],
+                    [
+                        blend_index(node.blend) as f32,
+                        sx,
+                        sy,
+                        if heal.is_some() { 1.0 } else { 0.0 },
+                    ],
                     [0.0; 4],
                     [0.0; 3],
                 ));
@@ -2672,7 +2940,11 @@ fn one(
                     });
                 }
                 out.draws.push(Item {
-                    draw: Draw::Clone { segments, quad },
+                    draw: Draw::Clone {
+                        segments,
+                        quad,
+                        heal,
+                    },
                     mask: at,
                 });
             }
@@ -2976,9 +3248,10 @@ fn one(
           // drawn here now, so a new one will not compile until it says
           // how — which is the same bargain `Node::each_color_mut` makes.
           // What a layer is still handed back for is a thing it holds
-          // rather than the kind it is: a healing stroke, which is an
-          // average over the whole stroke before any of it goes down,
-          // and a band wider than a pass will walk.
+          // rather than the kind it is: a band wider than a pass will
+          // walk. (A healing stroke was the other, an average over the
+          // whole stroke before any of it goes down; it has passes of
+          // its own now — `Healing`.)
     }
     // Where the quads that lay the surface down start, so the mask can
     // be kept off them: a layer with effects wears its mask on its own
@@ -3227,6 +3500,101 @@ fn stroke_segments(
         out.vertices.extend(verts);
     }
     start..out.vertices.len() as u32
+}
+
+/// The passes a healing stroke needs before it can go down.
+///
+/// The colour a heal takes is the difference between two averages over
+/// the whole stroke — of what is under it and of what it lifts — and
+/// every pixel of it waits on both. So: one pass writes each pixel's
+/// share of the two sums (weighed by the stroke's coverage and by the
+/// pixel's own alpha, so a pixel that is barely there is barely any of
+/// the average) into a pair of full-precision textures the size of
+/// `rect`, a few more add them up sixteen by sixteen until one texel is
+/// left, and a last one writes the shift that texel says beside the
+/// stroke's coverage, which is what the stroke is laid from.
+#[derive(Clone)]
+struct Healing {
+    /// A quad over the whole surface, drawn by every one of those
+    /// passes: `params` is where `rect` starts and the offset the
+    /// stroke reads at, `grad` the box of the stroke's own region.
+    quad: std::ops::Range<u32>,
+    /// The stroke's own region, and nothing else the layer is held back
+    /// by: those decide what the stroke lays, not what it averages.
+    region: Option<usize>,
+    /// The part of the surface the sums are taken over.
+    rect: chitrakar_render::ClipRect,
+}
+
+/// What a healing stroke averages over, and the quad its passes draw:
+/// `None` when none of it is on the page (or in the frame it is cut
+/// to), which lays nothing either.
+fn healing(
+    doc: &Document,
+    stroke: &chitrakar_doc::PaintStroke,
+    t: Transform,
+    bound: Option<chitrakar_render::ClipRect>,
+    sx: f32,
+    sy: f32,
+    out: &mut Scene,
+) -> Option<Healing> {
+    let box_ = stroke.bounds()?;
+    let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) = chitrakar_render::transformed_box(t, box_)
+    else {
+        return None;
+    };
+    let edge = |v: f32, most: u32| (v as i64).clamp(0, most as i64) as u32;
+    let mut rect = chitrakar_render::ClipRect {
+        x0: edge(x0.floor() - 1.0, out.surface.0),
+        y0: edge(y0.floor() - 1.0, out.surface.1),
+        x1: edge(x1.ceil() + 1.0, out.surface.0),
+        y1: edge(y1.ceil() + 1.0, out.surface.1),
+    }
+    // Off the page nothing is under the stroke, so a pixel there never
+    // counts: holding the rectangle to the page is only work saved.
+    .intersect(out.page);
+    if let Some(b) = bound {
+        rect = rect.intersect(b);
+    }
+    if rect.is_empty() {
+        return None;
+    }
+    let (region, grad) = match stroke.clip.as_deref() {
+        Some(region) => {
+            let plane = chitrakar_render::mask_plane_over(doc, region, t, rect, out.surface);
+            let at = out.textures.len();
+            out.textures.push(Image {
+                width: rect.x1 - rect.x0,
+                height: rect.y1 - rect.y0,
+                channels: 1,
+                texels: plane.iter().map(|c| f32_to_f16(*c)).collect(),
+            });
+            (
+                Some(at),
+                [
+                    rect.x0 as f32,
+                    rect.y0 as f32,
+                    (rect.x1 - rect.x0) as f32,
+                    (rect.y1 - rect.y0) as f32,
+                ],
+            )
+        }
+        None => (None, NO_MASK),
+    };
+    let whole = chitrakar_render::ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: out.surface.0,
+        y1: out.surface.1,
+    };
+    let quad = out.push(page_quad(
+        (whole, out.surface),
+        1.0,
+        [rect.x0 as f32, rect.y0 as f32, sx, sy],
+        grad,
+        [0.0; 3],
+    ));
+    Some(Healing { quad, region, rect })
 }
 
 /// The region a brush stroke was laid inside, rasterized over the box
@@ -4510,6 +4878,7 @@ enum Opening {
         segments: std::ops::Range<u32>,
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
+        heal: Option<Healing>,
     },
 }
 
@@ -4668,12 +5037,17 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     mask: item.mask,
                 });
             }
-            Draw::Clone { segments, quad } => {
+            Draw::Clone {
+                segments,
+                quad,
+                heal,
+            } => {
                 clear = false;
                 lay = Some(Opening::Clone {
                     segments: segments.clone(),
                     quad: quad.clone(),
                     mask: item.mask,
+                    heal: heal.clone(),
                 });
             }
             _ => unreachable!("only the six above cut a pass"),
@@ -8355,20 +8729,32 @@ mod tests {
                     vec![dab(&[[20.0, 14.0], [44.0, 30.0]], 10.0, [-8.0, -5.0])],
                 ),
             ] {
-                let (mut doc, id) = page(strokes);
-                dress(&mut doc, id);
-                assert!(
-                    GpuRenderer::can_render(&doc),
-                    "{how} {name} is drawn rather than handed back"
-                );
-                let (mean, worst) = difference(
-                    &gpu.render(&doc).unwrap(),
-                    &chitrakar_render::render(&doc).unwrap(),
-                );
-                assert!(
-                    mean < 0.004,
-                    "{how} {name}: mean {mean:.5}, worst {worst:.3}"
-                );
+                // And each again healing, which lays the same texture in
+                // the colour of where it lands.
+                for heal in [false, true] {
+                    let strokes = strokes
+                        .iter()
+                        .cloned()
+                        .map(|mut s| {
+                            s.heal = heal;
+                            s
+                        })
+                        .collect();
+                    let (mut doc, id) = page(strokes);
+                    dress(&mut doc, id);
+                    assert!(
+                        GpuRenderer::can_render(&doc),
+                        "{how} {name} (healing: {heal}) is drawn rather than handed back"
+                    );
+                    let (mean, worst) = difference(
+                        &gpu.render(&doc).unwrap(),
+                        &chitrakar_render::render(&doc).unwrap(),
+                    );
+                    assert!(
+                        mean < 0.004,
+                        "{how} {name} (healing: {heal}): mean {mean:.5}, worst {worst:.3}"
+                    );
+                }
             }
         }
 
@@ -8400,8 +8786,9 @@ mod tests {
                 feather: 0.0,
             })
         };
-        let confined = |mask: bool, region: bool| {
+        let confined = |mask: bool, region: bool, heal: bool| {
             let mut stroke = dab(&[[50.0, 36.0]], 14.0, lift);
+            stroke.heal = heal;
             if region {
                 stroke.clip = Some(band(44.0, 36.0));
             }
@@ -8418,7 +8805,7 @@ mod tests {
         // Lifted from the patch, the dab is red where it lands; the page
         // under it is not. So one channel says whether it landed.
         let landed = |s: &Surface, x: u32| s.get(x, 36).g < 0.3;
-        let free = chitrakar_render::render(&confined(false, false)).unwrap();
+        let free = chitrakar_render::render(&confined(false, false, false)).unwrap();
         for x in [40u32, 50, 60] {
             assert!(
                 landed(&free, x),
@@ -8430,7 +8817,21 @@ mod tests {
             ("a mask", true, false, [true, true, false]),
             ("both", true, true, [false, true, false]),
         ] {
-            let doc = confined(mask, region);
+            // A heal averages over what its region lets through and not
+            // over what the layer's mask does, which is the difference
+            // between the one coverage the stroke is laid by and the two
+            // it is made of — so each is asked healing as well.
+            let doc = confined(mask, region, true);
+            assert!(GpuRenderer::can_render(&doc));
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004 && worst < 0.1,
+                "{what}, healing: mean {mean:.5}, worst {worst:.3}"
+            );
+            let doc = confined(mask, region, false);
             assert!(
                 GpuRenderer::can_render(&doc),
                 "{what} on a clone layer is drawn rather than handed back"
@@ -8527,11 +8928,167 @@ mod tests {
         );
 
         // Healing is an average over the whole stroke before any of it
-        // goes down, which is a reduction and not a pass of quads.
+        // goes down: the dab lifts the patch's red and lands in the
+        // page's pale colour, on both renderers, read rather than
+        // compared — a heal that shifted nothing would be a clone, and
+        // two renderers doing that would agree.
         let mut healing = dab(&[[50.0, 36.0]], 9.0, lift);
         healing.heal = true;
         let (doc, _) = page(vec![healing]);
-        assert!(!GpuRenderer::can_render(&doc), "a healing stroke goes back");
+        for (whose, drawn) in [
+            ("gpu", gpu.render(&doc).unwrap()),
+            ("cpu", chitrakar_render::render(&doc).unwrap()),
+        ] {
+            let (at, around) = (drawn.get(50, 36), drawn.get(50, 52));
+            assert!(
+                (at.r - around.r).abs() < 0.02
+                    && (at.g - around.g).abs() < 0.02
+                    && (at.b - around.b).abs() < 0.02,
+                "{whose}: a heal lands in the colour it was dropped into \
+                 ({at:?} against {around:?})"
+            );
+        }
+    }
+
+    /// A heal averages what the reference renderer averages.
+    ///
+    /// What a heal takes its colour from is decided by three things
+    /// besides the stroke, and each is a way for two renderers to lay
+    /// the same texture in different colours: the region the stroke
+    /// carries (it averages what the region lets through, not the whole
+    /// stroke), how much of each pixel is there (a pixel at a
+    /// five-hundredth of full strength is a five-hundredth of the
+    /// average), and a frame the layer sits in (it averages the part the
+    /// frame shows). Each case below puts two colours under the stroke
+    /// so that getting its one thing wrong lands the heal in a mix of
+    /// them — and reads where it landed on both renderers, rather than
+    /// only comparing them, since two renderers averaging the wrong
+    /// thing would agree.
+    #[test]
+    fn a_heal_averages_what_the_cpu_averages() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let (left, right) = ([0.2f32, 0.6, 0.9], [0.9f32, 0.8, 0.2]);
+        // A page split down the middle, a dark band across the top to
+        // lift from, and a heal along a row below it that crosses the
+        // split. `right_alpha` is how much of the right half is there.
+        let page = |right_alpha: f32| {
+            let mut doc = Document::new(80, 48, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "left",
+                    rect(40.0, 48.0),
+                    ink(left[0], left[1], left[2], 1.0),
+                ),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled(
+                    "right",
+                    rect(40.0, 48.0),
+                    ink(right[0], right[1], right[2], right_alpha),
+                ),
+                Transform::translation(40.0, 0.0),
+            );
+            add(
+                &mut doc,
+                filled("band", rect(80.0, 12.0), ink(0.25, 0.2, 0.2, 1.0)),
+                Transform::translation(0.0, 2.0),
+            );
+            doc
+        };
+        let heal = |clip: Option<Box<chitrakar_doc::Mask>>| chitrakar_doc::PaintStroke {
+            points: vec![[10.0, 32.0], [70.0, 32.0]],
+            radii: vec![5.0],
+            color: ink(0.0, 0.0, 0.0, 1.0),
+            softness: 0.2,
+            erase: false,
+            source: [0.0, -24.0],
+            heal: true,
+            clip,
+        };
+        let layer = |doc: &mut Document, parent: NodeId, stroke| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: Box::new(Node::clone_layer("heal")),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::AddStroke {
+                id,
+                index: 0,
+                stroke: Box::new(stroke),
+                on_mask: false,
+            })
+            .unwrap();
+        };
+        let near = |p: LinearRgba, q: LinearRgba| {
+            (p.r - q.r).abs() < 0.03 && (p.g - q.g).abs() < 0.03 && (p.b - q.b).abs() < 0.03
+        };
+
+        // The region: only the right half of the stroke, so only the
+        // right half's colour is what it heals towards.
+        let mut held = page(1.0);
+        let root = held.root();
+        layer(
+            &mut held,
+            root,
+            heal(Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: rect(40.0, 48.0),
+                    transform: Transform::translation(40.0, 0.0),
+                },
+                invert: false,
+                feather: 0.0,
+            }))),
+        );
+        // A wash of the right half's colour at a five-hundredth, so the
+        // left half is all there is to heal towards.
+        let mut faint = page(0.002);
+        let root = faint.root();
+        layer(&mut faint, root, heal(None));
+        // A frame over the left half only, with the heal inside it: the
+        // part it shows is over the left half's colour.
+        let mut framed = page(1.0);
+        let frame = add(
+            &mut framed,
+            Box::new(Node::artboard("frame", 36.0, 48.0, None)),
+            Transform::default(),
+        );
+        layer(&mut framed, frame, heal(None));
+
+        for (what, doc, at, like) in [
+            ("a region", &held, (60u32, 32u32), (60u32, 44u32)),
+            ("a faint wash", &faint, (20, 32), (20, 44)),
+            ("a frame", &framed, (20, 32), (20, 44)),
+        ] {
+            assert!(GpuRenderer::can_render(doc), "{what} is drawn");
+            let mine = gpu.render(doc).unwrap();
+            let theirs = chitrakar_render::render(doc).unwrap();
+            let (mean, worst) = difference(&mine, &theirs);
+            assert!(
+                mean < 0.004 && worst < 0.08,
+                "{what}: mean {mean:.5}, worst {worst:.3}"
+            );
+            for (whose, drawn) in [("gpu", &mine), ("cpu", &theirs)] {
+                let (p, q) = (drawn.get(at.0, at.1), drawn.get(like.0, like.1));
+                assert!(
+                    near(p, q),
+                    "{what}: {whose} heals to the colour around it ({p:?} against {q:?})"
+                );
+            }
+        }
     }
 
     /// A brush stroke laid inside a region stays inside it.
