@@ -241,6 +241,9 @@ enum Draw {
         /// For a stroke that heals: the passes that work out the colour
         /// it shifts what it lifts by.
         heal: Option<Healing>,
+        /// Laid onto the layer's own surface rather than onto the page,
+        /// for a clone layer wearing an effect.
+        aside: bool,
     },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
@@ -302,6 +305,11 @@ pub struct GpuRenderer {
     heal_terms: wgpu::RenderPipeline,
     heal_sum: wgpu::RenderPipeline,
     heal_spread: wgpu::RenderPipeline,
+    /// A clone layer's strokes onto a surface of its own, for a clone
+    /// layer wearing an effect; and a heal's terms read the same way.
+    clone_aside: wgpu::RenderPipeline,
+    heal_terms_aside: wgpu::RenderPipeline,
+    pair_layout: wgpu::BindGroupLayout,
     /// Whether this adapter can draw into the textures those sums are
     /// kept in.
     sums: bool,
@@ -1123,6 +1131,74 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // What a clone layer on a surface of its own reads in the place
+        // of the backdrop: the copy of what its strokes have laid so far,
+        // and the surface it will come down onto, as it stood when this
+        // one was opened (`fs_clone_aside`).
+        let pair_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("laid and parent"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let aside_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("aside"),
+            bind_group_layouts: &[&layout, &texture_layout, &texture_layout, &pair_layout],
+            push_constant_ranges: &[],
+        });
+        let clone_aside = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clone aside"),
+            layout: Some(&aside_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_clone_aside"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        let heal_terms_aside = summing("heal terms aside", "fs_heal_terms_aside", &aside_layout);
         // Not every adapter draws into a full-precision texture. One that
         // does not hands a healing stroke back, as every one used to.
         let sums = adapter
@@ -1152,6 +1228,9 @@ impl GpuRenderer {
             heal_terms,
             heal_sum,
             heal_spread,
+            clone_aside,
+            heal_terms_aside,
+            pair_layout,
             sums,
             sums_layout,
             blur_down,
@@ -1223,7 +1302,9 @@ impl GpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         h: &Healing,
         whole: &wgpu::BindGroup,
-        backdrop: &wgpu::BindGroup,
+        // What the terms read the page from, and whether that is a clone
+        // layer's own surface over the one under it (`fs_clone_aside`).
+        (backdrop, aside): (&wgpu::BindGroup, bool),
         scratch: &[(wgpu::TextureView, wgpu::BindGroup)],
         textures: &[wgpu::BindGroup],
         quads: &wgpu::Buffer,
@@ -1293,7 +1374,11 @@ impl GpuRenderer {
             });
             pass.set_bind_group(0, whole, &[]);
             if n == 0 {
-                pass.set_pipeline(&self.heal_terms);
+                pass.set_pipeline(if aside {
+                    &self.heal_terms_aside
+                } else {
+                    &self.heal_terms
+                });
                 pass.set_bind_group(1, &scratch[0].1, &[]);
                 pass.set_bind_group(2, h.region.map_or(&self.open, |at| &textures[at]), &[]);
                 pass.set_bind_group(3, backdrop, &[]);
@@ -1355,11 +1440,16 @@ impl GpuRenderer {
             wgpu::TextureFormat::Rgba16Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         );
+        // Read as well as read back: a clone layer drawn onto a surface of
+        // its own lifts from the one it will come down onto, which can be
+        // this one.
         let texture = make(
             "page",
             1,
             wgpu::TextureFormat::Rgba16Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
         );
         let stencil = make(
             "stencil",
@@ -1596,6 +1686,35 @@ impl GpuRenderer {
             });
             (backdrop, read)
         });
+        // For a clone stroke laid aside: the copy of what its surface
+        // holds so far, and the surface under that one.
+        let under_view = under
+            .as_ref()
+            .map(|(t, _)| t.create_view(&Default::default()));
+        let pair = |parent: usize| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("laid and parent"),
+                layout: &self.pair_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            under_view
+                                .as_ref()
+                                .expect("a clone stroke reads what is under it"),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(attachment(parent).1),
+                    },
+                ],
+            })
+        };
         // A blur is six box passes, three along each axis, ping-ponging
         // between two page-sized textures: the copy taken above goes in,
         // and the blurred page comes out of the second one. Neither is
@@ -1755,14 +1874,23 @@ impl GpuRenderer {
             // it: the two sums over its rectangle, added up to a texel,
             // and the shift they say written beside the coverage on the
             // second of the pair — which is what it is then laid from.
-            if let (Some(Opening::Clone { heal: Some(h), .. }), Some((_, backdrop)), Some(quads)) =
-                (&step.lay, &under, &quads)
+            if let (
+                Some(Opening::Clone {
+                    heal: Some(h),
+                    parent,
+                    ..
+                }),
+                Some((_, backdrop)),
+                Some(quads),
+            ) = (&step.lay, &under, &quads)
             {
+                let aside = parent.map(pair);
+                let reads = aside.as_ref().unwrap_or(backdrop);
                 self.heal(
                     &mut encoder,
                     h,
                     &whole,
-                    backdrop,
+                    (reads, aside.is_some()),
                     &scratch,
                     &textures,
                     quads,
@@ -2028,7 +2156,11 @@ impl GpuRenderer {
                             (quad, mask)
                         }
                         Opening::Clone {
-                            quad, mask, heal, ..
+                            quad,
+                            mask,
+                            heal,
+                            parent,
+                            ..
                         } => {
                             // What is under the stroke and what it lifts
                             // are the same copy, taken before the pass:
@@ -2036,7 +2168,13 @@ impl GpuRenderer {
                             // what was there rather than what it has just
                             // laid. A heal's coverage has moved to the
                             // second of the pair, with its shift beside it.
-                            pass.set_pipeline(&self.clone);
+                            match parent {
+                                Some(p) => {
+                                    pass.set_pipeline(&self.clone_aside);
+                                    pass.set_bind_group(3, &pair(*p), &[]);
+                                }
+                                None => pass.set_pipeline(&self.clone),
+                            }
                             let from = if heal.is_some() { 1 } else { 0 };
                             pass.set_bind_group(1, &scratch[from].1, &[]);
                             (quad, mask)
@@ -2484,6 +2622,7 @@ fn one(
                 | NodeKind::Raster(_)
                 | NodeKind::Text(_)
                 | NodeKind::Paint { .. }
+                | NodeKind::Clone { .. }
                 | NodeKind::Group
                 | NodeKind::Instance { .. }
                 | NodeKind::Artboard { .. }
@@ -2712,7 +2851,12 @@ fn one(
     // it, and a surface of its own would have nothing under it to paint
     // with. Its blend, its opacity and its mask go on each stroke as it
     // lands, which is where the CPU renderer puts them too.
-    let alone = alone && !matches!(node.kind, NodeKind::Clone { .. });
+    //
+    // Unless it wears an effect, which wants a silhouette: then it goes on
+    // one after all, and each stroke reads the surface it will come down
+    // onto as well as what the strokes before it laid (`fs_clone_aside`),
+    // which is the reference renderer's picture of it drawn aside.
+    let alone = alone && !(matches!(node.kind, NodeKind::Clone { .. }) && shadings.is_empty());
     if alone {
         out.draws.push(Item::of(Draw::Open));
     }
@@ -2732,9 +2876,10 @@ fn one(
     // nor for a brush layer, whose strokes have their conversation with
     // each other before any of it fades. Those two owe the silhouette
     // their opacity when it is built instead.
+    // A clone layer draws one thing too, each stroke faded as it lands.
     let in_surface = matches!(
         node.kind,
-        NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_)
+        NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_) | NodeKind::Clone { .. }
     );
     let owed = if in_surface { 1.0 } else { node.opacity };
     let alpha = match (alone, shadings.is_empty()) {
@@ -2960,6 +3105,7 @@ fn one(
                         segments,
                         quad,
                         heal,
+                        aside: alone,
                     },
                     mask: at,
                 });
@@ -4895,6 +5041,9 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
         heal: Option<Healing>,
+        /// For a stroke laid aside, the surface under the one it is laid
+        /// on — what it lifts from, with what it has laid over it.
+        parent: Option<usize>,
     },
 }
 
@@ -5057,6 +5206,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                 segments,
                 quad,
                 heal,
+                aside,
             } => {
                 clear = false;
                 lay = Some(Opening::Clone {
@@ -5064,6 +5214,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     quad: quad.clone(),
                     mask: item.mask,
                     heal: heal.clone(),
+                    parent: aside.then(|| stack[stack.len().saturating_sub(2)]),
                 });
             }
             _ => unreachable!("only the six above cut a pass"),
@@ -10964,9 +11115,10 @@ mod tests {
     ///   at the blend mode. A surface of its own would be a different
     ///   picture.
     /// - An effect grows from a layer's silhouette, and those two have
-    ///   none: what they draw *is* what is under them. Nor has a **clone
-    ///   layer**, which is never put on a surface of its own — on one
-    ///   there would be nothing under it to paint with.
+    ///   none: what they draw *is* what is under them. A **clone layer**
+    ///   has one — what its strokes lay — and wearing an effect is what
+    ///   puts one on a surface of its own, reading the surface under it
+    ///   as it goes.
     /// - A **copy** is drawn by walking what it copies, and that walk
     ///   ends this one, so there is no surface of its own to fade, blend,
     ///   mask or cast a shadow from. This is the one row here that is a
@@ -10993,12 +11145,12 @@ mod tests {
         const DRESS: [&str; 6] = ["plain", "faded", "blended", "masked", "clipped", "effects"];
         // What each kind can wear and still be drawn. Read across DRESS.
         const TABLE: [[bool; 6]; 9] = [
-            [true, true, true, true, true, true],  // vector
-            [true, true, true, true, true, true],  // raster
-            [true, true, true, true, true, true],  // text
-            [true, true, true, true, true, true],  // group
-            [true, true, true, true, true, true],  // paint
-            [true, true, true, true, true, false], // clone
+            [true, true, true, true, true, true], // vector
+            [true, true, true, true, true, true], // raster
+            [true, true, true, true, true, true], // text
+            [true, true, true, true, true, true], // group
+            [true, true, true, true, true, true], // paint
+            [true, true, true, true, true, true], // clone
             // An adjustment and a filter wear an effect and are still
             // drawn — by *ignoring* it, which is what the reference
             // renderer has always done with one: there is no silhouette
@@ -13215,26 +13367,43 @@ mod tests {
         }
     }
 
-    /// An effect on a clone layer goes back, and now it has to.
+    /// A clone layer wearing an effect is drawn, the reference's way.
     ///
-    /// A clone layer paints with what is under it, so it is never on a
-    /// surface of its own, and an effect is built from a silhouette this
-    /// backend has no pass to make for one. That was always a safe
-    /// answer. It was not, until now, a *necessary* one: the reference
-    /// renderer was dropping the effect in silence too, so both drew the
-    /// same page and the refusal cost a page it could have drawn for
-    /// nothing. It builds the silhouette out of the strokes the layer
-    /// lays now, so there is a shadow here to disagree about.
+    /// It used to go back: a clone paints with what is under it, so it was
+    /// never put on a surface of its own, and an effect wants the
+    /// silhouette a surface of its own gives. The reference renderer
+    /// builds that silhouette out of what the strokes lay, drawn aside as
+    /// they land — each lifting from the page with the strokes before it
+    /// already over it — and then brings it down once, by the layer's
+    /// blend, with its effects. So here it goes on a surface after all,
+    /// and each stroke reads two things: the surface it will come down
+    /// onto, still as it was when this one was opened, and what the
+    /// strokes before it laid (`fs_clone_aside`). The effects are then
+    /// the ones every other layer on a surface gets.
     ///
-    /// Three things, and the last two are what keep the limit honest:
-    /// that the page goes back; that the same layer without the effect is
-    /// still drawn, and drawn the reference's way, so the refusal is no
-    /// wider than it needs; and that the effect really changes the
-    /// picture, so what is declined is a disagreement rather than a
-    /// scruple.
+    /// Asked dressed every way that changes what is laid aside or how it
+    /// comes down, with two strokes so the second lifts from over the
+    /// first, and once inside a group — where what it will come down onto
+    /// is the group's surface, not the page. Each is read as well as
+    /// compared: the shadow is there on both, which is the thing that was
+    /// missing.
     #[test]
-    fn an_effect_on_a_clone_layer_goes_back() {
-        let build = |cast: bool| {
+    fn a_clone_layer_casts_its_shadow_here_too() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 2.0,
+            color: ink(0.0, 0.0, 0.0),
+            opacity: 1.0,
+        };
+        let build = |effects: Vec<chitrakar_doc::Effect>,
+                     dress: &dyn Fn(&mut Document, NodeId),
+                     heal: bool,
+                     grouped: bool| {
             let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
             add(
                 &mut doc,
@@ -13245,120 +13414,180 @@ mod tests {
                         height: 36.0,
                         radius: 0.0,
                     },
-                    AuthoredColor::Srgb {
-                        r: 0.75,
-                        g: 0.8,
-                        b: 0.85,
-                        a: 1.0,
-                    },
+                    ink(0.75, 0.8, 0.85),
                 ),
                 Transform::default(),
             );
+            let root = doc.root();
+            let parent = if grouped {
+                let g = add(&mut doc, Box::new(Node::group("g")), Transform::default());
+                // A group that is isolated, so it has a surface of its own
+                // for the clone to come down onto — with the patch on it,
+                // so what the clone lifts is on that surface and not on
+                // the page.
+                doc.apply(Command::SetOpacity {
+                    id: g,
+                    opacity: 0.9,
+                })
+                .unwrap();
+                g
+            } else {
+                root
+            };
             // Something worth lifting: a clone of a uniform ground puts
             // back what was already there and has no silhouette at all.
-            add(
-                &mut doc,
-                filled(
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: filled(
                     "patch",
                     VectorShape::Rect {
                         width: 20.0,
                         height: 12.0,
                         radius: 0.0,
                     },
-                    AuthoredColor::Srgb {
-                        r: 0.9,
-                        g: 0.25,
-                        b: 0.15,
-                        a: 1.0,
-                    },
+                    ink(0.9, 0.25, 0.15),
                 ),
-                Transform::translation(4.0, 20.0),
-            );
-            let lifting = add(
-                &mut doc,
-                Box::new(Node::clone_layer("borrowed")),
-                Transform::default(),
-            );
-            doc.apply(Command::AddStroke {
-                id: lifting,
-                index: 0,
-                on_mask: false,
-                stroke: Box::new(chitrakar_doc::PaintStroke {
-                    points: vec![[10.0, 10.0], [26.0, 16.0]],
-                    radii: vec![4.0],
-                    color: AuthoredColor::Srgb {
-                        r: 0.1,
-                        g: 0.1,
-                        b: 0.1,
-                        a: 1.0,
-                    },
-                    softness: 0.0,
-                    erase: false,
-                    source: [4.0, 14.0],
-                    heal: false,
-                    clip: None,
-                }),
             })
             .unwrap();
-            if cast {
-                doc.apply(Command::SetEffects {
+            let patch = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id: patch,
+                transform: Transform::translation(4.0, 20.0),
+            })
+            .unwrap();
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: Box::new(Node::clone_layer("borrowed")),
+            })
+            .unwrap();
+            let lifting = doc.children_of(parent).unwrap()[index];
+            for (i, (points, source)) in [
+                (vec![[10.0, 10.0], [26.0, 16.0]], [4.0, 14.0]),
+                // The second runs over the first's source and its own,
+                // so what it lifts is partly what the first laid.
+                (vec![[30.0, 6.0], [40.0, 12.0]], [-18.0, 6.0]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddStroke {
                     id: lifting,
-                    effects: vec![chitrakar_doc::Effect::DropShadow {
-                        dx: 4.0,
-                        dy: 4.0,
-                        blur: 2.0,
-                        color: AuthoredColor::Srgb {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        },
-                        opacity: 1.0,
-                    }],
+                    index: i,
+                    on_mask: false,
+                    stroke: Box::new(chitrakar_doc::PaintStroke {
+                        points,
+                        radii: vec![4.0],
+                        color: ink(0.1, 0.1, 0.1),
+                        softness: 0.3,
+                        erase: false,
+                        source,
+                        heal,
+                        clip: None,
+                    }),
                 })
                 .unwrap();
             }
+            doc.apply(Command::SetEffects {
+                id: lifting,
+                effects,
+            })
+            .unwrap();
+            dress(&mut doc, lifting);
             doc
         };
-
-        let casting = build(true);
-        assert!(
-            !GpuRenderer::can_render(&casting),
-            "an effect on a clone layer has to go back: there is no \
-             surface to take its silhouette from here"
-        );
-
-        // Declining is worth something only because the effect changes
-        // the picture, which is asked of the renderer that draws it.
-        let plain = build(false);
-        let (mean, worst) = difference(
-            &chitrakar_render::render(&casting).unwrap(),
-            &chitrakar_render::render(&plain).unwrap(),
-        );
-        assert!(
-            mean > 0.005,
-            "the shadow has to be worth declining a page over: mean \
-             {mean:.5}, worst {worst:.4} against the same layer bare"
-        );
-
-        // And no wider than it needs: bare, the layer is drawn, the way
-        // the reference renderer draws it.
-        let Some(gpu) = gpu_or_skip() else {
-            return;
+        let bare = |_: &mut Document, _: NodeId| {};
+        let faded = |doc: &mut Document, id: NodeId| {
+            doc.apply(Command::SetOpacity { id, opacity: 0.6 }).unwrap();
         };
-        assert!(
-            GpuRenderer::can_render(&plain),
-            "a clone layer wearing no effect is still drawn"
-        );
-        let (mean, worst) = difference(
-            &gpu.render(&plain).unwrap(),
-            &chitrakar_render::render(&plain).unwrap(),
-        );
-        assert!(
-            mean < 0.004,
-            "bare it draws what the reference draws: mean {mean:.5}, \
-             worst {worst:.3}"
-        );
+        let blended = |doc: &mut Document, id: NodeId| {
+            doc.apply(Command::SetBlendMode {
+                id,
+                blend: BlendMode::Multiply,
+            })
+            .unwrap();
+        };
+        let masked = |doc: &mut Document, id: NodeId| {
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 12.0, ry: 10.0 },
+                        transform: Transform::translation(20.0, 12.0),
+                    },
+                    invert: false,
+                    feather: 1.5,
+                })),
+            })
+            .unwrap();
+        };
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 2.0,
+            color: ink(0.1, 0.6, 0.2),
+            opacity: 1.0,
+        };
+        let inner = chitrakar_doc::Effect::InnerShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 1.5,
+            color: ink(0.0, 0.0, 0.3),
+            opacity: 0.8,
+        };
+        type Dress<'a> = &'a dyn Fn(&mut Document, NodeId);
+        let cases: Vec<(&str, Vec<chitrakar_doc::Effect>, Dress, bool, bool)> = vec![
+            ("a shadow", vec![shadow.clone()], &bare, false, false),
+            ("faded", vec![shadow.clone()], &faded, false, false),
+            ("blended", vec![shadow.clone()], &blended, false, false),
+            ("masked", vec![shadow.clone()], &masked, false, false),
+            ("healing", vec![shadow.clone()], &bare, true, false),
+            ("in a group", vec![shadow.clone()], &bare, false, true),
+            (
+                "healing in a group",
+                vec![shadow.clone()],
+                &bare,
+                true,
+                true,
+            ),
+            ("an outline", vec![outline], &bare, false, false),
+            ("an inner shadow", vec![inner], &bare, false, false),
+        ];
+        for (what, effects, dress, heal, grouped) in cases {
+            let doc = build(effects, dress, heal, grouped);
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let theirs = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &theirs);
+            assert!(
+                mean < 0.004 && worst < 0.1,
+                "{what}: mean {mean:.5}, worst {worst:.3}"
+            );
+        }
+        // The shadow itself, read rather than compared: down and to the
+        // right of the first stroke, on the pale ground, darker than the
+        // same page with the effect taken off — on both renderers.
+        let with = build(vec![shadow], &bare, false, false);
+        let without = build(Vec::new(), &bare, false, false);
+        for (whose, a, b) in [
+            (
+                "gpu",
+                gpu.render(&with).unwrap(),
+                gpu.render(&without).unwrap(),
+            ),
+            (
+                "cpu",
+                chitrakar_render::render(&with).unwrap(),
+                chitrakar_render::render(&without).unwrap(),
+            ),
+        ] {
+            let (p, q) = (a.get(30, 20), b.get(30, 20));
+            assert!(
+                p.g < q.g - 0.15,
+                "{whose}: the shadow falls ({p:?} against {q:?})"
+            );
+        }
     }
 
     /// A copy of a blended layer wearing a mask goes back.

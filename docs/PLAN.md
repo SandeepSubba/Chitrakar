@@ -2373,9 +2373,9 @@ without reading anything else.*
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: an outline wider than
-     a pass will walk, an effect on a clone layer, and a copy of a clone
-     layer wearing anything of its own (a mask, a fade, a blend, an
-     effect, or being held). (A healing stroke
+     a pass will walk, and a copy of a clone layer wearing anything of
+     its own (a mask, a fade, a blend, an effect, or being held). An
+     effect on a clone layer came off that list (below). (A healing stroke
      was on that list; it is drawn now, below.)
      Two more came off in the same sitting — press ink, and a stroke
      carrying a region on a layer whose own mask was already riding that
@@ -2415,7 +2415,28 @@ without reading anything else.*
      the same copy of the surface, taken before the stroke's pass, so a
      stroke running over its own source reads what was there rather than
      what it has just laid — and that is also what leaves the blend
-     something to read. A healing stroke it draws too
+     something to read. A clone layer wearing an **effect** it draws now
+     too (`a_clone_layer_casts_its_shadow_here_too`), which meant
+     putting one on a surface of its own after all — an effect wants a
+     silhouette, and a clone's is what its strokes lay. On that surface
+     each stroke reads two things (`fs_clone_aside`): the surface it will
+     come down onto, still as it was when this one was opened, since
+     everything drawn meanwhile went here, and a copy of what the strokes
+     before it laid, the one seen through the other — the page with the
+     earlier strokes on it, which is what the reference renderer lifts
+     from as it draws the same layer aside. The strokes go down Normal,
+     each faded as it lands, and the layer's blend and its effects come
+     when the surface does, from the machinery every other layer on a
+     surface already has. A heal on such a layer averages the same two
+     through the same lens (`fs_heal_terms_aside`). Asked faded,
+     blended, masked, healing, inside an isolated group (where what it
+     comes down onto is the group's surface and the patch it lifts is
+     on it) and wearing an outline and an inner shadow; five sabotages
+     — reading only the parent, only what was laid, always the page as
+     the parent, a heal's terms read the plain way, the fade left out of
+     the silhouette — each fail it, two of them the random pages as
+     well. Those pages went from 1377 drawn to 1477, against 1491 before
+     they held clone layers at all. A healing stroke it draws too
      (`a_heal_averages_what_the_cpu_averages`), though its shift is an
      average over the whole stroke before any of it goes down — a
      reduction, and a pass of quads is not where one happens. So it gets
@@ -4002,10 +4023,24 @@ without reading anything else.*
        for one composited picture, and the copy unmasked at coverage one
        (`a_copy_of_a_clone_lifts_where_it_stands`; its held case first
        read one channel and let the sabotage through, blue and red
-       sharing a green of nought). One copy of a clone still vanishes:
-       one wearing an effect of its own, which wants a silhouette drawn
-       aside — recorded rather than guessed at. The GPU backend draws a
-       plain copy of a clone and hands every dressed one back.
+       sharing a green of nought). A copy wearing an effect of its own
+       vanished too, and was the one left for a second sitting: it wants
+       a silhouette, and a clone's is what its strokes lay, drawn aside
+       as they land — which the clone's own branch already builds. So
+       the copy is resolved down to the clone it copies
+       (`clone_behind`): the clone's strokes in the space the copy puts
+       them, the clone's mask and fade on each stroke, every copy's on
+       the way down letting through part of what was laid, the
+       outermost blend that is not Normal bringing it down, effects and
+       all. Held against a twin — a second clone layer with the same
+       stroke where the copy puts it, the same shadow — to a
+       ten-thousandth, masked and unmasked; each half fails when its
+       step is taken out. What is still not resolved, and still draws
+       nothing, is a chain with an effect *inside* it — on the clone
+       itself or on a copy between — since the picture the outer copy
+       then copies is the inner one's shadow as well as its strokes.
+       The GPU backend draws a plain copy of a clone and hands every
+       dressed one back.
      Two came from the reshuffle and are older than the clones:
      - **A surface cut before it was grown** (seed 259): a copy — and,
        the same code again, a group — is given room for the feathered

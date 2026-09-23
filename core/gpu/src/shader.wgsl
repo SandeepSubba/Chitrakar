@@ -1157,6 +1157,50 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
     );
 }
 
+// A clone layer wearing an effect is drawn onto a surface of its own, so
+// that the effect has a silhouette to grow from: what its strokes lay.
+// But a clone paints with what is under it, and what is under it is not
+// on that surface — it is the surface the layer is going to come down
+// onto, which is still whatever it was when this one was opened, since
+// everything drawn meanwhile went here. So both are read: the parent at
+// `parent_tex`, and what the strokes have laid so far off the copy of
+// this surface. What a stroke lifts is the one seen through the other —
+// the page with the strokes before it already on it, which is what the
+// reference renderer lifts from.
+@group(3) @binding(2) var parent_tex: texture_2d<f32>;
+
+fn seen(p: vec2i) -> vec4f {
+    let laid = textureLoad(backdrop, p, 0);
+    return laid + textureLoad(parent_tex, p, 0) * (1.0 - laid.a);
+}
+
+// `fs_clone` onto the layer's own surface. It lays what it lifts over
+// what the strokes before it laid, and nothing else: its blend is the
+// layer's, and comes when the surface does.
+@fragment
+fn fs_clone_aside(in: ImageOut) -> @location(0) vec4f {
+    let taken = textureSampleLevel(image, image_sampler, in.uv, 0.0);
+    let cover = taken.a * in.alpha * mask_cover(in.page, in.mask);
+    let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    if cover <= 0.0 {
+        return dst;
+    }
+    let at = floor(in.uv * page.size + vec2f(in.params.y, in.params.z));
+    if at.x < 0.0 || at.y < 0.0 || at.x >= page.size.x || at.y >= page.size.y {
+        return dst;
+    }
+    var lifted = seen(vec2i(at));
+    if lifted.a <= 0.0 {
+        return dst;
+    }
+    if in.params.w > 0.5 {
+        let a = lifted.a;
+        lifted = vec4f(max(lifted.rgb / a + taken.rgb, vec3f(0.0)) * a, a);
+    }
+    let src = lifted * cover;
+    return src + dst * (1.0 - src.a);
+}
+
 // A healing stroke's two sums, a texel at a time: what it lifts and what
 // is under it, each premultiplied and weighed by the stroke's coverage.
 // Kept as colour and alpha together, so that the average each makes is
@@ -1193,6 +1237,32 @@ fn fs_heal_terms(in: ImageOut) -> Sums {
     }
     let lifted = textureLoad(backdrop, vec2i(source), 0);
     let under = textureLoad(backdrop, at, 0);
+    if lifted.a <= 0.0 || under.a <= 0.0 {
+        return out;
+    }
+    out.lifted = lifted * c;
+    out.under = under * c;
+    return out;
+}
+
+// The same, for a heal on a clone layer's own surface: both of what it
+// averages are the page as the strokes before it left it.
+@fragment
+fn fs_heal_terms_aside(in: ImageOut) -> Sums {
+    var out: Sums;
+    out.lifted = vec4f(0.0);
+    out.under = vec4f(0.0);
+    let at = vec2i(floor(in.pos.xy)) + vec2i(in.params.xy);
+    let c = textureLoad(image, at, 0).a * mask_cover(vec2f(at) + 0.5, in.grad);
+    if c <= 0.0 {
+        return out;
+    }
+    let source = floor(vec2f(at) + 0.5 + in.params.zw);
+    if source.x < 0.0 || source.y < 0.0 || source.x >= page.size.x || source.y >= page.size.y {
+        return out;
+    }
+    let lifted = seen(vec2i(source));
+    let under = seen(at);
     if lifted.a <= 0.0 || under.a <= 0.0 {
         return out;
     }

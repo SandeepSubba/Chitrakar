@@ -1111,6 +1111,61 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
     most
 }
 
+/// What a clone layer — or a copy of one, through however many copies —
+/// lays, resolved down to the clone: its strokes in the space they are
+/// drawn in, the clone's own opacity and mask (which go on each stroke
+/// as it lands), the mask and opacity of every copy on the way down
+/// (which let through part of what was laid), and the blend it comes
+/// down by, the outermost one that is not `Normal`.
+///
+/// `None` for anything else, and for a chain with effects anywhere but
+/// on `id` itself, or anything hidden in it, which this does not
+/// resolve.
+struct CloneBehind<'a> {
+    strokes: &'a [chitrakar_doc::PaintStroke],
+    t: Transform,
+    opacity: f32,
+    mask: (Option<&'a Mask>, Transform),
+    over: Vec<(Option<&'a Mask>, Transform, f32)>,
+    blend: BlendMode,
+}
+
+fn clone_behind(doc: &Document, id: NodeId, parent: Transform) -> Option<CloneBehind<'_>> {
+    let (mut at, mut space) = (id, parent);
+    let (mut over, mut blend) = (Vec::new(), BlendMode::Normal);
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        let node = doc.node(at).ok()?;
+        if at != id && (!node.effects.is_empty() || !node.visible) {
+            return None;
+        }
+        if blend == BlendMode::Normal {
+            blend = node.blend;
+        }
+        match &node.kind {
+            NodeKind::Clone { strokes } => {
+                return Some(CloneBehind {
+                    strokes,
+                    t: space.compose(node.transform),
+                    opacity: node.opacity,
+                    mask: (node.mask.as_ref(), space),
+                    over,
+                    blend,
+                });
+            }
+            NodeKind::Instance { of, .. } => {
+                // A copy draws what it copies where the copy is: the
+                // original's own placement undone first.
+                let back = invert(doc.node(*of).ok()?.transform)?;
+                over.push((node.mask.as_ref(), space, node.opacity));
+                space = space.compose(node.transform).compose(back);
+                at = *of;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn render_layer(
     doc: &Document,
     child: NodeId,
@@ -1276,8 +1331,20 @@ fn draw_layer(
         // back, and the reference renderer was drawing that page with
         // the effect silently missing — a shadow put on a clone layer
         // did nothing at all, and nothing said so.
-        if let NodeKind::Clone { strokes } = &node.kind {
-            if !node.effects.is_empty() {
+        //
+        // A copy of a clone layer wearing effects of its own comes here
+        // too. It has the same silhouette — the strokes the clone lays,
+        // where the copy puts them — and went, for its effects, to a
+        // surface of its own, where it had nothing to lift and laid
+        // nothing: the copy vanished, shadow and all.
+        let resolved = if node.effects.is_empty() {
+            None
+        } else {
+            clone_behind(doc, child, parent)
+        };
+        if let Some(behind) = resolved {
+            {
+                let strokes = behind.strokes;
                 let scale = max_scale(parent);
                 let reach = node
                     .effects
@@ -1300,28 +1367,50 @@ fn draw_layer(
                     return Ok(capture
                         .map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
                 }
-                let t = parent.compose(node.transform);
+                let (inner_mask, inner_space) = behind.mask;
                 let plane = MaskRef::plane_over(
                     Some(doc),
-                    node.mask.as_ref(),
-                    parent,
+                    inner_mask,
+                    inner_space,
                     region,
                     (dst.width, dst.height),
                 );
-                let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                let m = MaskRef::new(inner_mask, inner_space).with_plane(plane.as_ref());
                 let mut scratch = dst.clone();
                 let mut laid = Surface::new(dst.width, dst.height);
                 draw_clone(
                     &mut scratch,
                     doc,
                     strokes,
-                    t,
-                    node.opacity,
+                    behind.t,
+                    behind.opacity,
                     BlendMode::Normal,
                     region,
                     m,
                     Some(&mut laid),
                 );
+                // Each copy on the way down to the clone lets through its
+                // own mask's worth at its own opacity, of what the clone
+                // laid — the same mix a copy of one without effects is
+                // given where it stands.
+                for (mask, space, opacity) in &behind.over {
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
+                        *mask,
+                        *space,
+                        region,
+                        (dst.width, dst.height),
+                    );
+                    let m = MaskRef::new(*mask, *space).with_plane(plane.as_ref());
+                    for y in region.y0..region.y1 {
+                        for x in region.x0..region.x1 {
+                            let a = coverage_at(doc, m, x, y) * opacity;
+                            let i = (y * laid.width + x) as usize;
+                            laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+                        }
+                    }
+                }
+                let blend = behind.blend;
                 // Whatever it is held to cuts what it laid before
                 // anything is made of it, so the effects grow from the
                 // shape that will really be seen.
@@ -1344,11 +1433,11 @@ fn draw_layer(
                         parent,
                         region,
                         clip,
-                        node.blend,
+                        blend,
                         node.opacity,
                     );
                 }
-                composite_from(dst, &laid, (0, 0), 1.0, node.blend, clip.intersect(region));
+                composite_from(dst, &laid, (0, 0), 1.0, blend, clip.intersect(region));
                 for effect in node.effects.iter().filter(|e| e.over()) {
                     draw_effect(
                         dst,
@@ -1359,7 +1448,7 @@ fn draw_layer(
                         parent,
                         region,
                         clip,
-                        node.blend,
+                        blend,
                         node.opacity,
                     );
                 }
@@ -10550,7 +10639,8 @@ mod tests {
     }
 
     /// A copy of a clone layer lays what the clone would lay where the
-    /// copy stands, faded, masked or wearing a blend of its own.
+    /// copy stands, faded, masked, held, wearing a blend of its own or a
+    /// shadow.
     ///
     /// A clone paints with what is under it, so a copy of one put on a
     /// surface of its own has nothing to lift and lays nothing. A faded
@@ -10662,15 +10752,16 @@ mod tests {
                     .unwrap();
                 }
             }
-            render(&doc).unwrap()
+            doc
         };
-        let without = build(None, false).get(40, 45);
-        let whole = build(Some((1.0, false, BlendMode::Normal)), false).get(40, 45);
+        let draw = |doc: Document| render(&doc).unwrap();
+        let without = draw(build(None, false)).get(40, 45);
+        let whole = draw(build(Some((1.0, false, BlendMode::Normal)), false)).get(40, 45);
         assert!(
             whole.g < without.g - 0.3,
             "the copy lifts the red strip ({whole:?} against {without:?})"
         );
-        let half = build(Some((0.5, false, BlendMode::Normal)), false).get(40, 45);
+        let half = draw(build(Some((0.5, false, BlendMode::Normal)), false)).get(40, 45);
         assert!(
             (half.g - (whole.g + without.g) / 2.0).abs() < 0.02,
             "a faded copy lays it faded ({half:?} between {whole:?} and {without:?})"
@@ -10678,7 +10769,7 @@ mod tests {
         // Wearing a blend of its own, it lifts the same red and brings it
         // down by that blend: red multiplied into the pale page keeps the
         // page's red and none of its green.
-        let multiplied = build(Some((1.0, false, BlendMode::Multiply)), false).get(40, 45);
+        let multiplied = draw(build(Some((1.0, false, BlendMode::Multiply)), false)).get(40, 45);
         assert!(
             (multiplied.r - without.r).abs() < 0.02 && multiplied.g < 0.02,
             "a copy wearing a blend lifts and blends ({multiplied:?})"
@@ -10686,7 +10777,7 @@ mod tests {
         let same = |p: LinearRgba, q: LinearRgba| {
             (p.r - q.r).abs() < 0.02 && (p.g - q.g).abs() < 0.02 && (p.b - q.b).abs() < 0.02
         };
-        let held = build(Some((1.0, false, BlendMode::Normal)), true);
+        let held = draw(build(Some((1.0, false, BlendMode::Normal)), true));
         assert!(
             same(held.get(40, 45), whole),
             "a held copy lays it over what holds it ({:?})",
@@ -10697,7 +10788,7 @@ mod tests {
             "and not past it ({:?})",
             held.get(45, 45)
         );
-        let masked = build(Some((1.0, true, BlendMode::Normal)), false);
+        let masked = draw(build(Some((1.0, true, BlendMode::Normal)), false));
         assert!(
             (masked.get(40, 45).g - whole.g).abs() < 0.02,
             "a masked copy lays it where its mask lets it through ({:?})",
@@ -10708,6 +10799,121 @@ mod tests {
             "and not where it does not ({:?})",
             masked.get(44, 45)
         );
+
+        // Wearing a shadow of its own. It went to a surface for the
+        // effect, where it had nothing to lift — so the copy and its
+        // shadow both vanished. Against a twin: a second clone layer
+        // with the same stroke where the copy puts it, the same shadow.
+        let shadow = vec![Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 1.0,
+            color: BLACK,
+            opacity: 0.8,
+        }];
+        let mut shadowed = build(Some((1.0, false, BlendMode::Normal)), false);
+        let copy = shadowed.children_of(shadowed.root()).unwrap()[3];
+        shadowed
+            .apply(Command::SetEffects {
+                id: copy,
+                effects: shadow.clone(),
+            })
+            .unwrap();
+        let mut twin = build(None, false);
+        let root = twin.root();
+        twin.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::clone_layer("twin")),
+        })
+        .unwrap();
+        let id = twin.children_of(root).unwrap()[3];
+        let mut s = stroke(&[[40.0, 45.0]], 6.0, RED);
+        s.source = [-30.0, 0.0];
+        twin.apply(Command::AddStroke {
+            id,
+            index: 0,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+        twin.apply(Command::SetEffects {
+            id,
+            effects: shadow,
+        })
+        .unwrap();
+        let (shadowed_page, twin_page) = (shadowed.clone(), twin.clone());
+        let (mine, theirs) = (draw(shadowed), draw(twin));
+        assert!(
+            same(mine.get(40, 45), whole),
+            "a copy wearing a shadow lifts ({:?})",
+            mine.get(40, 45)
+        );
+        assert!(
+            mine.get(48, 49).g < without.g - 0.2,
+            "and casts it ({:?})",
+            mine.get(48, 49)
+        );
+        let apart = mine
+            .pixels
+            .iter()
+            .zip(&theirs.pixels)
+            .map(|(p, q)| {
+                (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.a - q.a).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(apart < 1e-4, "as its twin does ({apart})");
+
+        // And masked as well: the copy's mask lets through part of what
+        // the clone laid, which for one stroke is the same as the twin
+        // wearing that mask on its own stroke — shadow cast from the part
+        // that shows.
+        let half = || {
+            Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 42.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: false,
+                feather: 0.0,
+            }))
+        };
+        let mut masked_copy = shadowed_page;
+        masked_copy
+            .apply(Command::SetMask {
+                id: copy,
+                mask: half(),
+            })
+            .unwrap();
+        let mut masked_twin = twin_page;
+        masked_twin
+            .apply(Command::SetMask { id, mask: half() })
+            .unwrap();
+        let (mine, theirs) = (draw(masked_copy), draw(masked_twin));
+        assert!(
+            (mine.get(43, 41).r - mine.get(43, 41).g).abs() < 0.02,
+            "the masked copy lays none of the red past its mask ({:?})",
+            mine.get(43, 41)
+        );
+        let apart = mine
+            .pixels
+            .iter()
+            .zip(&theirs.pixels)
+            .map(|(p, q)| {
+                (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.a - q.a).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(apart < 1e-4, "masked, as its twin is ({apart})");
     }
 
     /// A feathered mask softens the same whatever surface it lands on.
