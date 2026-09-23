@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~510),
+- **Verify before committing:** `cargo test --workspace` (~513),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1329 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2373,7 +2373,9 @@ without reading anything else.*
      nothing of the node kinds — a clone layer was the last it had never
      drawn — and what it still hands a page back for is a thing a layer
      *holds* rather than the kind of layer it is: an outline wider than
-     a pass will walk, and an effect on a clone layer. (A healing stroke
+     a pass will walk, an effect on a clone layer, and a copy of a clone
+     layer wearing anything of its own (a mask, a fade, a blend, an
+     effect, or being held). (A healing stroke
      was on that list; it is drawn now, below.)
      Two more came off in the same sitting — press ink, and a stroke
      carrying a region on a layer whose own mask was already riding that
@@ -3973,6 +3975,61 @@ without reading anything else.*
      most, and before this every edge on every one of these pages was
      vertical or horizontal — so the rise is the measure doing its job.
      The interiors, which are the claim, did not move at all.
+     **And they hold clone layers now**, half of whose strokes heal —
+     the one kind no page nobody wrote had held, so no clone had ever
+     met a random mask, blend, turn, copy or effect. Adding a kind
+     reshuffles every seed, so each finding was asked whether it was the
+     clone or the reshuffle, and both kinds turned up. Five came from
+     the clones:
+     - **A crash.** A clone layer held to the one below and wearing an
+       effect read the holding coverage over a region grown by the
+       effect's reach, past the window that coverage spans: an overflow
+       in a debug build, an index out of bounds in a release one — the
+       engine stopping, in the browser. Three audits over these pages
+       and the file round trip panicked on it. Its region is now cut to
+       that window first, as every other held layer's surface is, and
+       that also stopped its shadow falling outside what holds it
+       (`a_held_clone_wearing_an_effect_shows_only_where_it_is_held`).
+     - **A copy of a clone vanished** whenever it went to a surface of
+       its own, which has nothing under it to lift from: faded or masked
+       (seed 426, found by the blend-coverage audit, since with a blend
+       on the clone the copy took another road), wearing its own blend
+       (seed 1263, the next page that audit stopped on), masked while
+       blended (seed 514, the mask-identity audit), or held to the layer
+       below. One road now serves every copy of a clone: drawn where it
+       stands, its own blend taking the clone's place on each stroke,
+       then mixed back by its mask and fade — exact at every coverage
+       for one composited picture, and the copy unmasked at coverage one
+       (`a_copy_of_a_clone_lifts_where_it_stands`; its held case first
+       read one channel and let the sabotage through, blue and red
+       sharing a green of nought). One copy of a clone still vanishes:
+       one wearing an effect of its own, which wants a silhouette drawn
+       aside — recorded rather than guessed at. The GPU backend draws a
+       plain copy of a clone and hands every dressed one back.
+     Two came from the reshuffle and are older than the clones:
+     - **A surface cut before it was grown** (seed 259): a copy — and,
+       the same code again, a group — is given room for the feathered
+       masks inside it to soften over, and the room was added to a box
+       already cut to the layer's own, so wherever the box ended first
+       the softening met a wall. A copy of a feathered layer moved three
+       pixels when given a mask that hides nothing
+       (`a_feathered_mask_softens_the_same_on_any_surface`, one half per
+       road, each failing alone when its fix is taken out).
+     - **A copied blend spent on a surface** (seed 294) — the long-known
+       limit written up below, in the one case `copies_a_blend` leaves
+       out: a blended layer wearing effects, which a `Cover` would cut
+       before they grew. Drawn where it stands and mixed back instead;
+       a mask that hides nothing had moved seventy pixels by a fifth.
+     The GPU's watch went from 1491 pages drawn to 1377 — the new
+     declines are effects on clone layers, dressed copies of clones,
+     and the held-layer rules meeting clones and groups-with-effects as
+     bases, all on the backend's hand-back list — and its worst pixel
+     from 0.726 to 0.922, on a page with no clone on it (seed 1178): an
+     outline measured from a yes-or-no silhouette, one pixel of a
+     turned path's edge at 0.55 alpha from four samples against 0.43
+     exact, in on one side and out on the other. One page can own a
+     maximum that way, so the watch now counts the pages at or past
+     0.75 and names them (one), rather than holding the maximum alone.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

@@ -1970,7 +1970,7 @@ impl Rng {
     /// be a copy of and cannot reach itself.
     fn node(&mut self, doc: &mut Document, made: &[NodeId], i: usize) -> Box<Node> {
         let name = format!("l{i}");
-        match self.upto(9) {
+        match self.upto(10) {
             0 => Box::new(Node::group(&name)),
             1 => {
                 let mut node = Node::vector(&name, self.shape());
@@ -2128,6 +2128,32 @@ impl Rng {
             7 if !made.is_empty() => {
                 let of = made[self.upto(made.len() as u64) as usize];
                 Box::new(Node::instance(&name, of))
+            }
+            // A clone layer, which no page here held: what it lays is
+            // whatever the page under it shows somewhere else, so a mask,
+            // a blend, a turn or an effect on it meets a layer that
+            // paints with its neighbours. Half its strokes heal, which
+            // reads the whole stroke before laying any of it.
+            8 => {
+                let mut node = Node::clone_layer(&name);
+                let strokes: Vec<PaintStroke> = (0..1 + self.upto(2))
+                    .map(|_| PaintStroke {
+                        points: (0..1 + self.upto(3))
+                            .map(|_| [self.between(0.0, 40.0), self.between(0.0, 30.0)])
+                            .collect(),
+                        radii: vec![self.between(2.0, 6.0)],
+                        color: self.color(1.0),
+                        softness: self.between(0.0, 0.8),
+                        erase: false,
+                        source: [self.between(-20.0, 20.0), self.between(-16.0, 16.0)],
+                        heal: self.chance(2),
+                        clip: None,
+                    })
+                    .collect();
+                if let NodeKind::Clone { strokes: s } = &mut node.kind {
+                    *s = strokes;
+                }
+                Box::new(node)
             }
             _ => {
                 let mut node = Node::vector(&name, self.shape());

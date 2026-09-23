@@ -1031,6 +1031,24 @@ pub fn copies_a_blend(doc: &Document, id: NodeId) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a layer is a copy — directly or through other copies — of a
+/// clone layer, which paints with what is under it and so, like an
+/// adjustment, comes back with nothing from a surface of its own.
+pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
+    let mut at = id;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        let Ok(node) = doc.node(at) else {
+            return false;
+        };
+        match &node.kind {
+            NodeKind::Instance { of, .. } => at = *of,
+            NodeKind::Clone { .. } => return at != id,
+            _ => return false,
+        }
+    }
+    false
+}
+
 pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
@@ -1181,7 +1199,13 @@ fn draw_layer(
         // that is how this was found: seventeen of two thousand random
         // pages changed their alpha when their blends were taken off, and
         // every one of them was a copy of a filter wearing a blend.
-        let blended = node.blend != BlendMode::Normal && !rewrites_what_is_under_it(doc, child);
+        // A copy of a clone layer is the other exception: what it copies
+        // paints with what is under it, so a surface of its own leaves it
+        // nothing to paint with, and it takes its blend stroke by stroke
+        // where it stands, as the clone does (`render_child`).
+        let blended = node.blend != BlendMode::Normal
+            && !rewrites_what_is_under_it(doc, child)
+            && !copies_a_clone(doc, child);
         // Clipping needs the layer as a picture before it goes down —
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
@@ -1209,6 +1233,7 @@ fn draw_layer(
             && !blended
             && cover.is_none()
             && matches!(node.kind, NodeKind::Instance { .. })
+            && !copies_a_clone(doc, child)
         {
             if let Some(pad) = capture {
                 render_child(doc, child, dst, clip, parent, node.blend, bare)?;
@@ -1260,6 +1285,21 @@ fn draw_layer(
                     .map(Effect::reach)
                     .fold(0.0f32, f32::max);
                 let region = grow(clip, (reach * scale).ceil() as u32, dst.width, dst.height);
+                // Held to the layer under it, it cannot show outside that
+                // layer's window — nor can anything grown from it — so
+                // that is as far as it is drawn, the way every other held
+                // layer's surface is cut. The coverage it is held by
+                // spans only that window: read over the region grown by
+                // the effects' reach, it indexed off the start of its
+                // plane, which in a release build is the engine stopping.
+                let region = match cover {
+                    Some(c) => region.intersect(c.rect()),
+                    None => region,
+                };
+                if region.is_empty() {
+                    return Ok(capture
+                        .map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
+                }
                 let t = parent.compose(node.transform);
                 let plane = MaskRef::plane_over(
                     Some(doc),
@@ -1344,10 +1384,13 @@ fn draw_layer(
         // page — by a twentieth of a channel over eleven hundred pixels
         // on a page nobody wrote, and by seven tenths on one of the
         // random pages, which is where it was found.
+        // A copy of a clone layer among them, whatever holds it or is
+        // held to it: drawn anywhere else it has nothing to lift.
         if matches!(
             node.kind,
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
-        ) || (cover.is_some() && rewrites_what_is_under_it(doc, child))
+        ) || (!effected && copies_a_clone(doc, child))
+            || (cover.is_some() && rewrites_what_is_under_it(doc, child))
         {
             if let Some(c) = cover {
                 let region = clip.intersect(c.rect());
@@ -1615,8 +1658,15 @@ fn render_child(
                     Some(b) => b.intersect(grow(clip, own, dst.width, dst.height)),
                     None => return Ok(()),
                 };
+                // Grown from the box as well as from the region: cut to
+                // the box first, the room was cut off with it wherever the
+                // box ended before the region did — a feathered mask
+                // inside what is copied clamped at the copy's own edge,
+                // and a copy given a mask that hides nothing moved three
+                // pixels of a page nobody wrote.
                 let draw_clip = match extent.to_clip(dst.width, dst.height) {
-                    Some(b) => b.intersect(grow(clip, room, dst.width, dst.height)),
+                    Some(b) => grow(b, room, dst.width, dst.height)
+                        .intersect(grow(clip, room, dst.width, dst.height)),
                     None => return Ok(()),
                 };
                 if sub_clip.is_empty() {
@@ -1665,8 +1715,97 @@ fn render_child(
                 // same, while losing the coverage the surface gets right.
                 // So a copy of a blend that wears a blend keeps its own
                 // and spends what it copies, which is the limit here.
+                // A copy of a clone layer, which paints with what is under
+                // it: on a surface of its own it has nothing to lift and
+                // lays nothing. Faded, masked or wearing a blend of its own,
+                // a copy of one went to a surface and vanished — found by
+                // the audits over pages nobody wrote, since a layer that
+                // vanishes for being blended changes what the page covers,
+                // and one that vanishes for a mask that hides nothing
+                // changes the page.
+                //
+                // So it is drawn where it stands, as the clone is, and its
+                // own blend — where it has one — takes the place of the
+                // clone's on each stroke as it lands. Then it is mixed back
+                // into what was there by how much of it the copy lets
+                // through, which for one composited picture is exact at
+                // every coverage and at coverage one is the copy unmasked.
+                if copies_a_clone(doc, child) && stand_ins.is_empty() {
+                    let blend = if blend != BlendMode::Normal {
+                        blend
+                    } else {
+                        doc.node(*of)?.blend
+                    };
+                    if node.opacity >= 1.0 && node.mask.is_none() {
+                        return render_child(doc, *of, dst, sub_clip, space, blend, bare);
+                    }
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
+                        node.mask.as_ref(),
+                        parent,
+                        sub_clip,
+                        (dst.width, dst.height),
+                    );
+                    let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                    let before = blur::snapshot(dst, sub_clip);
+                    let corner = (sub_clip.x0, sub_clip.y0);
+                    let stride = sub_clip.x1 - sub_clip.x0;
+                    render_child(doc, *of, dst, sub_clip, space, blend, bare)?;
+                    for y in sub_clip.y0..sub_clip.y1 {
+                        for x in sub_clip.x0..sub_clip.x1 {
+                            let a = coverage_at(doc, m, x, y) * node.opacity;
+                            let i = (y * dst.width + x) as usize;
+                            dst.pixels[i] =
+                                lerp(before[at_in(corner, stride, x, y)], dst.pixels[i], a);
+                        }
+                    }
+                    return Ok(());
+                }
                 let blend_would_be_spent =
                     copies_a_blend(doc, child) && node.blend == BlendMode::Normal;
+                // The one copied blend that road cannot carry: a layer
+                // wearing effects as well, which a `Cover` would cut
+                // before they grew. So it is drawn where it stands —
+                // blend meeting the real page, effects and all, exactly
+                // what the copy draws unmasked — and then mixed back into
+                // what was there by how much the copy lets through. The
+                // mix is exact at every coverage for one composited
+                // picture, compositing being linear in how strongly the
+                // source is laid, and at coverage one it *is* the copy
+                // unmasked. Taken to a surface instead, the blend met a
+                // transparent page and was spent: a mask that hides
+                // nothing moved seventy pixels of a page nobody wrote by
+                // a fifth of a channel.
+                let spends_an_effected_blend = node.blend == BlendMode::Normal
+                    && stand_ins.is_empty()
+                    && (node.mask.is_some() || node.opacity < 1.0)
+                    && doc
+                        .node(*of)
+                        .map(|m| m.blend != BlendMode::Normal && !m.effects.is_empty())
+                        .unwrap_or(false);
+                if spends_an_effected_blend {
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
+                        node.mask.as_ref(),
+                        parent,
+                        sub_clip,
+                        (dst.width, dst.height),
+                    );
+                    let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                    let before = blur::snapshot(dst, sub_clip);
+                    let corner = (sub_clip.x0, sub_clip.y0);
+                    let stride = sub_clip.x1 - sub_clip.x0;
+                    render_layer(doc, *of, dst, sub_clip, space, bare)?;
+                    for y in sub_clip.y0..sub_clip.y1 {
+                        for x in sub_clip.x0..sub_clip.x1 {
+                            let a = coverage_at(doc, m, x, y) * node.opacity;
+                            let i = (y * dst.width + x) as usize;
+                            dst.pixels[i] =
+                                lerp(before[at_in(corner, stride, x, y)], dst.pixels[i], a);
+                        }
+                    }
+                    return Ok(());
+                }
                 if (rewrites_what_is_under_it(doc, child) || blend_would_be_spent)
                     && (node.mask.is_some() || node.opacity < 1.0)
                     && stand_ins.is_empty()
@@ -1901,7 +2040,8 @@ fn render_child(
                     None => return Ok(()),
                 };
                 let draw_clip = match extent.to_clip(dst.width, dst.height) {
-                    Some(b) => b.intersect(grow(clip, room, dst.width, dst.height)),
+                    Some(b) => grow(b, room, dst.width, dst.height)
+                        .intersect(grow(clip, room, dst.width, dst.height)),
                     None => return Ok(()),
                 };
                 if sub_clip.is_empty() {
@@ -10300,6 +10440,399 @@ mod tests {
         assert!(
             (healed[0] as i32 - around[0] as i32).abs() < 8,
             "and the grey it was dropped into ({healed:?} against {around:?})"
+        );
+    }
+
+    /// A clone layer held to the one under it, wearing an effect, is
+    /// drawn — and shows only where that layer does.
+    ///
+    /// Its effects are grown from what it laid, over a region widened by
+    /// their reach, and what it laid was cut to the layer it is held to
+    /// by reading that layer's coverage at every pixel of the widened
+    /// region. That coverage only spans the layer's own window, so the
+    /// first pixel of the region outside it indexed past the start of
+    /// the plane: an overflow in a debug build and an index out of
+    /// bounds in a release one, which in the browser is the engine
+    /// stopping. Found the moment the pages nobody wrote held clone
+    /// layers — three audits over those pages panicked on it. Every other
+    /// held layer is drawn onto a surface cut to that window first, since
+    /// a held layer cannot show outside it, and past its edge this one
+    /// now reads the same nothing.
+    #[test]
+    fn a_held_clone_wearing_an_effect_shows_only_where_it_is_held() {
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let root = doc.root();
+        let pale = AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.9,
+            b: 0.85,
+            a: 1.0,
+        };
+        for (i, (name, w, h, x, y, c)) in [
+            ("ground", 60.0f32, 40.0f32, 0.0f32, 0.0f32, pale),
+            ("patch", 14.0, 12.0, 4.0, 4.0, RED),
+            ("base", 12.0, 12.0, 34.0, 20.0, BLUE),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: filled_rect(name, w, h, c),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, y),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 3,
+            node: Box::new(Node::clone_layer("clone")),
+        })
+        .unwrap();
+        let clone = doc.children_of(root).unwrap()[3];
+        // A dab over the base and well past it, lifting the red patch.
+        let mut s = stroke(&[[40.0, 26.0]], 12.0, RED);
+        s.source = [-30.0, -16.0];
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 0,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: clone,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: clone,
+            effects: vec![Effect::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 3.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.9,
+            }],
+        })
+        .unwrap();
+        let page = render(&doc).unwrap().to_srgb8();
+        let at = |x: u32, y: u32| {
+            let i = ((y * 60 + x) * 4) as usize;
+            [page[i], page[i + 1], page[i + 2]]
+        };
+        // Inside the base the dab lands in the patch's red.
+        let inside = at(40, 26);
+        assert!(
+            inside[0] > 180 && inside[2] < 90,
+            "it lands where it is held ({inside:?})"
+        );
+        // Outside it, where the dab reaches and its shadow would fall,
+        // the page is the ground untouched.
+        for (x, y) in [(30u32, 26u32), (40, 16), (49, 30), (50, 36)] {
+            let p = at(x, y);
+            assert!(
+                p[0] > 220 && p[1] > 220,
+                "and nothing of it or its shadow shows at {x},{y} ({p:?})"
+            );
+        }
+    }
+
+    /// A copy of a clone layer lays what the clone would lay where the
+    /// copy stands, faded, masked or wearing a blend of its own.
+    ///
+    /// A clone paints with what is under it, so a copy of one put on a
+    /// surface of its own has nothing to lift and lays nothing. A faded
+    /// or masked copy went there, and vanished — found by taking the
+    /// blends off a random page and watching what it covered change,
+    /// since with a blend on the clone the copy took another road. And
+    /// a copy wearing a blend of its own went there too, for the blend,
+    /// and vanished the same way: the next page that audit stopped on.
+    #[test]
+    fn a_copy_of_a_clone_lifts_where_it_stands() {
+        let pale = AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.9,
+            b: 0.85,
+            a: 1.0,
+        };
+        let build = |copy: Option<(f32, bool, BlendMode)>, held: bool| {
+            let mut doc = Document::new(60, 60, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, (w, h, x, y, c)) in [
+                (60.0f32, 60.0f32, 0.0f32, 0.0f32, pale.clone()),
+                (16.0, 50.0, 2.0, 5.0, RED),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: filled_rect("part", w, h, c),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[2];
+            // Lifting the red strip from thirty pixels to the left.
+            let mut s = stroke(&[[40.0, 15.0]], 6.0, RED);
+            s.source = [-30.0, 0.0];
+            doc.apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(s),
+                on_mask: false,
+            })
+            .unwrap();
+            if let Some((opacity, masked, blend)) = copy {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 3,
+                    node: Box::new(Node::instance("copy", clone)),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[3];
+                // Held to a narrow strip under it, which a mask that is a
+                // strip wide would not be the same test of: one is the
+                // copy's own coverage, the other the layer below's.
+                if held {
+                    doc.apply(Command::AddNode {
+                        parent: root,
+                        index: 3,
+                        node: filled_rect("base", 6.0, 14.0, BLUE),
+                    })
+                    .unwrap();
+                    let base = doc.children_of(root).unwrap()[3];
+                    doc.apply(Command::SetTransform {
+                        id: base,
+                        transform: Transform::translation(37.0, 38.0),
+                    })
+                    .unwrap();
+                    doc.apply(Command::SetClipped { id, clipped: true })
+                        .unwrap();
+                }
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(0.0, 30.0),
+                })
+                .unwrap();
+                doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+                doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+                // Everything left of x = 42 on the page, which is the
+                // copy's parent's space: half the dab.
+                if masked {
+                    doc.apply(Command::SetMask {
+                        id,
+                        mask: Some(Box::new(chitrakar_doc::Mask {
+                            kind: chitrakar_doc::MaskKind::Vector {
+                                shape: VectorShape::Rect {
+                                    width: 42.0,
+                                    height: 60.0,
+                                    radius: 0.0,
+                                },
+                                transform: Transform::default(),
+                            },
+                            invert: false,
+                            feather: 0.0,
+                        })),
+                    })
+                    .unwrap();
+                }
+            }
+            render(&doc).unwrap()
+        };
+        let without = build(None, false).get(40, 45);
+        let whole = build(Some((1.0, false, BlendMode::Normal)), false).get(40, 45);
+        assert!(
+            whole.g < without.g - 0.3,
+            "the copy lifts the red strip ({whole:?} against {without:?})"
+        );
+        let half = build(Some((0.5, false, BlendMode::Normal)), false).get(40, 45);
+        assert!(
+            (half.g - (whole.g + without.g) / 2.0).abs() < 0.02,
+            "a faded copy lays it faded ({half:?} between {whole:?} and {without:?})"
+        );
+        // Wearing a blend of its own, it lifts the same red and brings it
+        // down by that blend: red multiplied into the pale page keeps the
+        // page's red and none of its green.
+        let multiplied = build(Some((1.0, false, BlendMode::Multiply)), false).get(40, 45);
+        assert!(
+            (multiplied.r - without.r).abs() < 0.02 && multiplied.g < 0.02,
+            "a copy wearing a blend lifts and blends ({multiplied:?})"
+        );
+        let same = |p: LinearRgba, q: LinearRgba| {
+            (p.r - q.r).abs() < 0.02 && (p.g - q.g).abs() < 0.02 && (p.b - q.b).abs() < 0.02
+        };
+        let held = build(Some((1.0, false, BlendMode::Normal)), true);
+        assert!(
+            same(held.get(40, 45), whole),
+            "a held copy lays it over what holds it ({:?})",
+            held.get(40, 45)
+        );
+        assert!(
+            same(held.get(45, 45), without),
+            "and not past it ({:?})",
+            held.get(45, 45)
+        );
+        let masked = build(Some((1.0, true, BlendMode::Normal)), false);
+        assert!(
+            (masked.get(40, 45).g - whole.g).abs() < 0.02,
+            "a masked copy lays it where its mask lets it through ({:?})",
+            masked.get(40, 45)
+        );
+        assert!(
+            (masked.get(44, 45).g - without.g).abs() < 0.02,
+            "and not where it does not ({:?})",
+            masked.get(44, 45)
+        );
+    }
+
+    /// A feathered mask softens the same whatever surface it lands on.
+    ///
+    /// The softening reads the plane either side of every pixel, and at
+    /// the edge of the surface the plane is cut to there is nothing to
+    /// read. So a surface is given room for the softening that will land
+    /// on it — the room for a copy's original and a group's children was
+    /// already worked out — and then cut to the layer's box *before* that
+    /// room was added, which took it away again wherever the box ended
+    /// first. A mask whose soft edge lies along the layer's own edge then
+    /// softened against a wall. Found on a page nobody wrote: a copy of a
+    /// feathered layer moved three pixels when given a mask that hides
+    /// nothing, the one road of the two that went to a surface.
+    #[test]
+    fn a_feathered_mask_softens_the_same_on_any_surface() {
+        let shape = |doc: &mut Document, parent: NodeId, index: usize| {
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node: filled_rect("soft", 16.0, 16.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.0, 8.0),
+            })
+            .unwrap();
+            // An ellipse whose edge runs down the rectangle's left side,
+            // softened by two pixels: half the fade is outside the box.
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 8.0, ry: 30.0 },
+                        transform: Transform::translation(18.0, 16.0),
+                    },
+                    invert: false,
+                    feather: 2.0,
+                })),
+            })
+            .unwrap();
+            id
+        };
+        let hides_nothing = || {
+            Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 400.0,
+                        height: 400.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(-200.0, -200.0),
+                },
+                invert: false,
+                feather: 0.0,
+            }))
+        };
+        let apart = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .map(|(p, q)| (p.r - q.r).abs().max((p.a - q.a).abs()))
+                .fold(0.0f32, f32::max)
+        };
+
+        // A copy, drawn once straight in and once on a surface of its own
+        // — the mask that hides nothing is what sends it there.
+        let copy = |masked: bool| {
+            let mut doc = Document::new(64, 32, ColorMode::Rgb);
+            let root = doc.root();
+            let original = shape(&mut doc, root, 0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::instance("copy", original)),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 0.0),
+            })
+            .unwrap();
+            if masked {
+                doc.apply(Command::SetMask {
+                    id,
+                    mask: hides_nothing(),
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+        let d = apart(&copy(false), &copy(true));
+        assert!(
+            d < 1e-4,
+            "a copy on a surface of its own softens alike ({d})"
+        );
+
+        // A group of one, faded, against the same layer faded on its own:
+        // the group composites on a surface, the layer straight in.
+        let group = |grouped: bool| {
+            let mut doc = Document::new(64, 32, ColorMode::Rgb);
+            let root = doc.root();
+            let id = if grouped {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                let g = doc.children_of(root).unwrap()[0];
+                shape(&mut doc, g, 0);
+                g
+            } else {
+                shape(&mut doc, root, 0)
+            };
+            doc.apply(Command::SetOpacity { id, opacity: 0.8 }).unwrap();
+            render(&doc).unwrap()
+        };
+        let d = apart(&group(false), &group(true));
+        assert!(
+            d < 1e-4,
+            "a group on a surface of its own softens alike ({d})"
         );
     }
 
