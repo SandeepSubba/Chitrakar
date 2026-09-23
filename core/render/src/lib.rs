@@ -864,7 +864,17 @@ fn region_at(
         return Ok(());
     }
     match showing {
-        Showing::Alone(id) if clone_alone(doc, id, surface, inside, view)? => Ok(()),
+        Showing::Alone(id)
+            if clone_alone(
+                doc,
+                id,
+                surface,
+                inside,
+                view.compose(ancestor_space(doc, id)),
+            )? =>
+        {
+            Ok(())
+        }
         Showing::Alone(id) => render_layer(
             doc,
             id,
@@ -1119,34 +1129,89 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
 /// the picture it was retouching. So what is under it is drawn aside
 /// first, and it lifts from that.
 ///
-/// For a clone at the top of the page, or a copy of one there, where
-/// what is under it is the page below it. Inside a group it lifts from
-/// the group's own surface, which is not a thing this can draw aside, so
-/// `false` says so and the caller draws it the plain way.
+/// What is under it is the page below it for a clone at the top of the
+/// page. Inside a group it is the group's own surface — a group holding a
+/// clone is always isolated (`reads_backdrop`), so what its clone lifts is
+/// the group's earlier children and nothing outside it. That is drawn
+/// aside as the document with the group's ancestors made plain (no fade,
+/// blend, mask, effect or hold), everything off the path down to the
+/// group hidden, and the group's own layers from the clone on hidden too.
+/// A frame above the group would paint its ground into that, which is not
+/// the group's, so there `false` says so and the caller draws the clone
+/// the plain way. `space` is the one the clone's parent is drawn in.
 fn clone_alone(
     doc: &Document,
     id: NodeId,
     dst: &mut Surface,
     clip: ClipRect,
-    view: Transform,
+    space: Transform,
 ) -> Result<bool, DocError> {
     let root = doc.root();
     let node = doc.node(id)?;
-    if doc.parent_of(id) != Some(root) || !node.visible || node.opacity <= 0.0 {
+    if !node.visible || node.opacity <= 0.0 || clone_behind(doc, id, space).is_none() {
         return Ok(false);
     }
-    if clone_behind(doc, id, view).is_none() {
+    let Some(group) = doc.parent_of(id) else {
         return Ok(false);
+    };
+    let mut path = Vec::new();
+    let mut at = group;
+    while at != root {
+        let a = doc.node(at)?;
+        let lifts_within = matches!(a.kind, NodeKind::Group)
+            || (at == group && matches!(a.kind, NodeKind::Artboard { .. }));
+        if !lifts_within {
+            return Ok(false);
+        }
+        path.push(at);
+        let Some(up) = doc.parent_of(at) else {
+            return Ok(false);
+        };
+        at = up;
     }
     let mut below = doc.clone();
-    let layers = below.children_of(root)?.to_vec();
+    let hide = |d: &mut Document, id: NodeId| {
+        d.apply(chitrakar_doc::Command::SetVisible { id, visible: false })
+    };
+    for (i, &a) in path.iter().enumerate() {
+        for c in [
+            chitrakar_doc::Command::SetOpacity {
+                id: a,
+                opacity: 1.0,
+            },
+            chitrakar_doc::Command::SetBlendMode {
+                id: a,
+                blend: BlendMode::Normal,
+            },
+            chitrakar_doc::Command::SetMask { id: a, mask: None },
+            chitrakar_doc::Command::SetEffects {
+                id: a,
+                effects: Vec::new(),
+            },
+            chitrakar_doc::Command::SetClipped {
+                id: a,
+                clipped: false,
+            },
+        ] {
+            below.apply(c)?;
+        }
+        let over = *path.get(i + 1).unwrap_or(&root);
+        for sibling in doc.children_of(over)?.to_vec() {
+            if sibling != a {
+                hide(&mut below, sibling)?;
+            }
+        }
+    }
+    let layers = doc.children_of(group)?.to_vec();
     let at = layers.iter().position(|k| *k == id).unwrap_or(layers.len());
     for &later in &layers[at..] {
-        below.apply(chitrakar_doc::Command::SetVisible {
-            id: later,
-            visible: false,
-        })?;
+        hide(&mut below, later)?;
     }
+    // The page's own space, which the document drawn aside is placed in.
+    let Some(back) = invert(ancestor_space(doc, id)) else {
+        return Ok(false);
+    };
+    let view = space.compose(back);
     // What has to be drawn under it: the region asked for, grown by the
     // effects' reach and then by the document's reach, which is the
     // region-render guarantee (`filter_reach`) — and which counts this
@@ -1172,7 +1237,8 @@ fn clone_alone(
         ((nx1 + pad).ceil() - ox).max(1.0) as u32,
         ((ny1 + pad).ceil() - oy).max(1.0) as u32,
     );
-    let shifted = Transform::translation(-ox, -oy).compose(view);
+    let shift = Transform::translation(-ox, -oy);
+    let shifted = shift.compose(space);
     let whole = ClipRect {
         x0: 0,
         y0: 0,
@@ -1180,7 +1246,13 @@ fn clone_alone(
         y1: h,
     };
     let mut under = Surface::new(w, h);
-    region_at(&below, &mut under, whole, shifted, Showing::Everything)?;
+    region_at(
+        &below,
+        &mut under,
+        whole,
+        shift.compose(view),
+        Showing::Everything,
+    )?;
     let Some(behind) = clone_behind(doc, id, shifted) else {
         return Ok(false);
     };
@@ -6908,6 +6980,77 @@ pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     }))
 }
 
+/// What a clone layer lays, on its own at one pixel per unit of its own
+/// space, for an exporter whose format has no clone in it: an image of
+/// the strokes filled with what they lift from the page under them —
+/// drawn aside the way the layer's thumbnail is (`clone_alone`) — and
+/// nothing else. Bare: at full strength, unmasked and without its
+/// effects, since the exporter wraps the image in the layer's own
+/// opacity, mask and blend the way it wraps a brush layer's. That fades
+/// the strokes as one where the page fades each as it lands, which is
+/// the same picture wherever they do not overlap.
+///
+/// `None` for anything but a clone layer with strokes on it, and for one
+/// whose surroundings `clone_alone` cannot draw aside.
+pub fn clone_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    let node = doc.node(id)?;
+    let NodeKind::Clone { strokes } = &node.kind else {
+        return Ok(None);
+    };
+    let Some([x0, y0, x1, y1]) = painted_bounds(strokes) else {
+        return Ok(None);
+    };
+    let (w, h) = (
+        (x1 - x0).ceil().max(1.0) as u32,
+        (y1 - y0).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    let Some(back) = invert(node.transform) else {
+        return Ok(None);
+    };
+    let mut bare = doc.clone();
+    for c in [
+        chitrakar_doc::Command::SetOpacity { id, opacity: 1.0 },
+        chitrakar_doc::Command::SetMask { id, mask: None },
+        chitrakar_doc::Command::SetEffects {
+            id,
+            effects: Vec::new(),
+        },
+        chitrakar_doc::Command::SetBlendMode {
+            id,
+            blend: BlendMode::Normal,
+        },
+    ] {
+        bare.apply(c)?;
+    }
+    let mut surface = Surface::new(w, h);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    // The layer's own space, placed so its painted box starts at the
+    // image's corner: the parent's space is that with the layer's own
+    // transform undone.
+    let space = Transform::translation(-x0, -y0).compose(back);
+    if !clone_alone(&bare, id, &mut surface, clip, space)? {
+        return Ok(None);
+    }
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for px in &surface.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
 /// A paint layer rendered on its own at one pixel per document unit,
 /// for an exporter whose format has no brush in it and has to hand the
 /// layer over as an image. `None` when the layer has no paint on it.
@@ -11281,6 +11424,122 @@ mod tests {
             mid[3] > 250 && mid[0] > 200 && mid[1] < 60,
             "its thumbnail shows it too ({mid:?})"
         );
+
+        // Inside a group, moved over the page and holding the patch too.
+        // A group holding a clone is isolated, so what the clone lifts is
+        // the group's own earlier layers and nothing from outside it: the
+        // patch, not the page's ground. A second stroke lifting only from
+        // where the group holds nothing lays nothing on the page, and so
+        // shows nothing alone either.
+        let group = {
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::group("retouching")),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[3]
+        };
+        let patch = doc.children_of(doc.root()).unwrap()[1];
+        for (id, index) in [(patch, 0), (clone, 1)] {
+            doc.apply(Command::MoveNode {
+                id,
+                parent: group,
+                index,
+            })
+            .unwrap();
+        }
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: Transform::translation(8.0, 3.0),
+        })
+        .unwrap();
+        // A layer in the group *above* the clone, lying over what it
+        // lifts from: on the page it comes after the clone and is not
+        // lifted, so alone it is not either.
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 2,
+            node: filled_rect("over", 6.0, 10.0, BLUE),
+        })
+        .unwrap();
+        let over = doc.children_of(group).unwrap()[2];
+        doc.apply(Command::SetTransform {
+            id: over,
+            transform: Transform::translation(10.0, 15.0),
+        })
+        .unwrap();
+        // A mask on the group that hides the patch it holds and not the
+        // dab: a group's mask is over the finished group, so the clone
+        // inside it still lifts the patch — on the page and alone.
+        doc.apply(Command::SetMask {
+            id: group,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 30.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(28.0, 0.0),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        let mut s = stroke(&[[30.0, 4.0]], 3.0, RED);
+        s.source = [20.0, 0.0];
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 1,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let mut alone = Surface::new(60, 40);
+        render_showing_at(
+            &doc,
+            &mut alone,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 60,
+                y1: 40,
+            },
+            Transform::default(),
+            Showing::Alone(clone),
+        )
+        .unwrap();
+        let laid = alone.get(50, 23).to_srgb8();
+        assert!(
+            laid[3] > 250 && laid[0] > 200 && laid[1] < 60,
+            "inside a group, alone, it shows what it lays ({laid:?})"
+        );
+        assert!(
+            page.get(50, 23).to_srgb8()[..3] == laid[..3],
+            "the same as the page has there"
+        );
+        for (what, x, y) in [
+            ("the patch", 14u32, 23u32),
+            ("the layer above it", 20, 23),
+            ("the ground", 55, 38),
+            ("the stroke that lifted nothing", 38, 7),
+        ] {
+            assert!(
+                alone.get(x, y).a < 1e-4,
+                "and nothing of {what} ({x},{y}: {:?})",
+                alone.get(x, y)
+            );
+        }
+        let px = thumbnail(&doc, clone, 48).unwrap().unwrap();
+        let inked = px
+            .chunks(4)
+            .filter(|p| p[3] > 250 && p[0] > 200 && p[1] < 60)
+            .count();
+        assert!(inked > 50, "and its thumbnail ({inked} red pixels)");
     }
 
     /// A stroke that runs over what it is reading takes what was there

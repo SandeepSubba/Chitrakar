@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~515),
+- **Verify before committing:** `cargo test --workspace` (~516),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4065,9 +4065,32 @@ without reading anything else.*
        (`a_clone_layer_on_its_own_shows_what_it_lays`, and block 9i in the
        browser). An explicit union of every stroke's source was written
        first and then taken out: the reach already covered it, and a
-       sabotage of the union could not show. Inside a group a clone lifts
-       from the group's own surface, which this cannot draw aside, so it
-       keeps the plain answer there.
+       sabotage of the union could not show. Inside a group it now works
+       too, one sitting later: a group holding a clone is always isolated
+       (`reads_backdrop`), so what its clone lifts is the group's own
+       earlier layers and nothing outside it, and that is drawn aside as
+       the document with the group's ancestors made plain — no fade,
+       blend, mask, effect or hold — everything off the path down to it
+       hidden, and its own layers from the clone on hidden. The test
+       gives the group a mask that hides the patch the clone lifts (a
+       group's mask is over the finished group, so the page still lifts
+       it), a layer above the clone lying over its source, and an offset
+       big enough to move the dab off the patch; four sabotages — siblings
+       left showing, ancestors left dressed, later layers left showing,
+       the page's space taken for the group's — each fail it, and the
+       last two passed until the layer above and the larger offset went
+       in. Only a clone under a *frame* above its group keeps the plain
+       answer: the frame would paint its ground into what was drawn
+       aside. And SVG, which wrote a clone layer as a comment saying it
+       had no equivalent, now carries what it lays as an image the way it
+       carries a brush layer's paint (`clone_pixels`, the same drawing
+       aside, bare so the SVG wrapper's own opacity, mask and blend are
+       not taken twice — which fades overlapping strokes as one where the
+       page fades each as it lands); read back by resvg with the layer
+       placed through a transform of its own
+       (`a_clone_layer_travels_as_what_it_lays`). A *copy* of a clone
+       keeps the comment: the original's markup again would carry what
+       the original lifted to the copy's place.
      Two came from the reshuffle and are older than the clones:
      - **A surface cut before it was grown** (seed 259): a copy — and,
        the same code again, a group — is given room for the feathered

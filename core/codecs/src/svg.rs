@@ -207,6 +207,17 @@ fn write_node(
                 write_children(doc, child, out, depth + 1, defs)?;
                 let _ = writeln!(out, "{pad}</g>");
             }
+            // A copy of a clone layer lifts where the copy stands, and the
+            // original's markup again would carry what the original lifted
+            // to the copy's place — a picture of the wrong part of the
+            // page. It is left out, as the clone itself used to be.
+            NodeKind::Instance { .. } if chitrakar_render::copies_a_clone(doc, child) => {
+                let _ = writeln!(
+                    out,
+                    "{pad}<!-- copy of a clone layer '{}' has no SVG equivalent; omitted -->",
+                    escape_xml(&node.name)
+                );
+            }
             NodeKind::Instance { of, .. } => {
                 // Where the copy has layers of its own standing in for
                 // some of the original's, what travels is what the copy
@@ -614,9 +625,33 @@ fn write_node(
                     let _ = writeln!(out, "</text>");
                 }
             }
-            // These three are all changes to what is under them rather
-            // than pictures of their own, and SVG has no equivalent that
-            // composites the way ours does.
+            // A clone layer has no picture of its own either — it paints
+            // with what is under it — but what it *lays* is one, and SVG
+            // can carry that: an image of the strokes filled with what
+            // they lift, placed the way a brush layer's is. It used to be
+            // left out, so an SVG of a retouched page had none of the
+            // retouching in it.
+            NodeKind::Clone { .. }
+                if matches!(chitrakar_render::clone_pixels(doc, child), Ok(Some(_))) =>
+            {
+                if let Ok(Some(laid)) = chitrakar_render::clone_pixels(doc, child) {
+                    let (w, h) = (laid.width, laid.height);
+                    let [x, y] = laid.origin;
+                    if let Ok(png) = crate::encode_png(w, h, &laid.rgba8) {
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        let _ = writeln!(
+                            out,
+                            r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                            base64(&png)
+                        );
+                        let _ = writeln!(out, "{pad}</g>");
+                    }
+                }
+            }
+            // These are changes to what is under them rather than
+            // pictures of their own, and SVG has no equivalent that
+            // composites the way ours does — and a clone whose
+            // surroundings cannot be drawn aside is left out with them.
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => {
                 let _ = writeln!(
                     out,
@@ -2183,6 +2218,81 @@ mod tests {
         })
         .unwrap();
         doc
+    }
+
+    /// A clone layer travels as what it lays.
+    ///
+    /// It paints with what is under it, so it has no picture of its own,
+    /// and it used to be left out with a comment — an SVG of a retouched
+    /// page had none of the retouching in it. What it lays is a picture,
+    /// though, and SVG can carry that the way it carries a brush layer's
+    /// paint: an image in the layer's own space, inside its transform and
+    /// its opacity. The layer is placed away from the page's corner here,
+    /// so the image has to land through its transform, and a reader that
+    /// is not us draws the lifted patch where the page has it. Not faded:
+    /// an SVG reader mixes opacity in sRGB where the engine mixes it in
+    /// linear light, which is a difference of every faded layer rather
+    /// than of this one.
+    #[test]
+    fn a_clone_layer_travels_as_what_it_lays() {
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let srgb = |r, g, b| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let rect = |w, h| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        place(
+            &mut doc,
+            painted("ground", rect(60.0, 40.0), srgb(0.9, 0.9, 0.85)),
+            [0.0, 0.0],
+        );
+        place(
+            &mut doc,
+            painted("patch", rect(14.0, 30.0), srgb(0.85, 0.1, 0.1)),
+            [4.0, 5.0],
+        );
+        let clone = place(&mut doc, Node::clone_layer("retouch"), [3.0, 2.0]);
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 0,
+            on_mask: false,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[39.0, 18.0]],
+                radii: vec![7.0],
+                color: srgb(0.0, 0.0, 0.0),
+                softness: 0.0,
+                erase: false,
+                source: [-31.0, 0.0],
+                heal: false,
+                clip: None,
+            }),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(!svg.contains("clone layer"), "it is not left out");
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(60, 40).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let at = |x: usize, y: usize| &drawn.data()[(y * 60 + x) * 4..(y * 60 + x) * 4 + 3];
+        let lifted = ours.get(42, 20).to_srgb8();
+        assert!(
+            lifted[0] > 180 && lifted[1] < 60,
+            "the page has it ({lifted:?})"
+        );
+        for (x, y) in [(42usize, 20usize), (39, 17), (45, 23), (10, 20), (55, 5)] {
+            let want = ours.get(x as u32, y as u32).to_srgb8();
+            let got = at(x, y);
+            assert!(
+                (0..3).all(|c| (got[c] as i32 - want[c] as i32).abs() <= 4),
+                "at {x},{y} the file has {got:?} where the page has {want:?}"
+            );
+        }
     }
 
     /// A copy with a layer of its own in place of one of the original's
