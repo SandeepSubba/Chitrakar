@@ -341,6 +341,20 @@ struct FontUse {
     unicode: BTreeMap<u16, String>,
 }
 
+/// Whether what a layer draws depends on what is already under it in a
+/// way PDF cannot say: an adjustment or a filter changes it, a clone
+/// layer lifts from it, and a copy of any of the three does the same
+/// where the copy stands. A *group* holding one is not among them — the
+/// engine isolates such a group, so what is inside it works only on
+/// what is inside it, and the group drawn on its own is already right.
+fn works_on_what_is_under(doc: &Document, id: NodeId) -> bool {
+    matches!(
+        doc.node(id).map(|n| &n.kind),
+        Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. })
+    ) || chitrakar_render::rewrites_what_is_under_it(doc, id)
+        || chitrakar_render::copies_a_clone(doc, id)
+}
+
 fn stream_object(dict_head: &str, data: &[u8]) -> Vec<u8> {
     let mut body = format!("{dict_head} /Length {} >>\nstream\n", data.len()).into_bytes();
     body.extend_from_slice(data);
@@ -367,7 +381,11 @@ impl Page {
                 continue;
             }
             match &node.kind {
-                NodeKind::Adjustment(_) | NodeKind::Filter(_) => {
+                // And a clone layer, which lifts from it, and a copy of any
+                // of the three. Placed as pixels on its own, a clone had
+                // nothing under it to lift and laid nothing, and every PDF
+                // of a retouched page came out without the retouching.
+                _ if works_on_what_is_under(&self.doc, child) => {
                     // Everything under it changes, so everything under it
                     // — what was drawn so far — becomes one picture.
                     pending.clear();
@@ -2342,6 +2360,127 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A clone layer goes into a PDF as what it lays.
+    ///
+    /// It paints with what is under it, so it has no picture of its own —
+    /// and it was being placed as if it had: it joined the run of layers
+    /// that go over as pixels and was rendered with only that run shown,
+    /// which left it nothing under it to lift and so nothing to lay. The
+    /// retouching went missing from every PDF of a retouched page while
+    /// the file read perfectly well. It now goes the way an adjustment
+    /// and a filter do, flattening what is under it into the picture it
+    /// is part of, and a reader that is not us draws the lifted patch
+    /// where it was laid.
+    #[test]
+    fn a_clone_layer_goes_over_as_what_it_lays() {
+        let srgb = |r, g, b| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut doc = Document::new(60, 40, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut doc,
+            shape(
+                "ground",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                Some(srgb(0.9, 0.9, 0.85)),
+            ),
+            [0.0, 0.0],
+        );
+        add(
+            &mut doc,
+            shape(
+                "patch",
+                VectorShape::Rect {
+                    width: 14.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                Some(srgb(0.85, 0.1, 0.1)),
+            ),
+            [4.0, 5.0],
+        );
+        let clone = add(
+            &mut doc,
+            chitrakar_doc::Node::clone_layer("retouch"),
+            [0.0, 0.0],
+        );
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 0,
+            on_mask: false,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[42.0, 20.0]],
+                radii: vec![7.0],
+                color: srgb(0.0, 0.0, 0.0),
+                softness: 0.0,
+                erase: false,
+                source: [-31.0, 0.0],
+                heal: false,
+                clip: None,
+            }),
+        })
+        .unwrap();
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let red = ours.get(42, 20).to_srgb8();
+        assert!(red[0] > 200 && red[1] < 60, "the page has it ({red:?})");
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let Some(drawn) = rasterized(&pdf, (60, 40)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let at = |x: usize, y: usize| &drawn.rgba8[(y * 60 + x) * 4..(y * 60 + x) * 4 + 3];
+        for (x, y) in [(42usize, 20usize), (40, 18), (44, 23)] {
+            let want = ours.get(x as u32, y as u32).to_srgb8();
+            let got = at(x, y);
+            assert!(
+                (0..3).all(|c| (got[c] as i32 - want[c] as i32).abs() <= 4),
+                "the file has it too at {x},{y}: {got:?} against {want:?}"
+            );
+        }
+        // And the patch it lifted from is still there, untouched.
+        let got = at(10, 20);
+        assert!(got[0] > 200 && got[1] < 60, "and what it lifted ({got:?})");
+
+        // And a copy of it, somewhere else on the page: a copy of a
+        // clone lifts where the copy stands, so it is the same case again
+        // and went missing the same way — it is not a clone layer by kind,
+        // so a rule reading the kind alone would miss it.
+        let copy = add(
+            &mut doc,
+            chitrakar_doc::Node::instance("again", clone),
+            [0.0, 0.0],
+        );
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(0.0, 12.0),
+        })
+        .unwrap();
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let again = ours.get(42, 32).to_srgb8();
+        assert!(
+            again[0] > 200 && again[1] < 60,
+            "the page has the copy ({again:?})"
+        );
+        let pdf = export_pdf_document(&doc).unwrap();
+        let drawn = rasterized(&pdf, (60, 40)).unwrap();
+        let at = |x: usize, y: usize| &drawn.rgba8[(y * 60 + x) * 4..(y * 60 + x) * 4 + 3];
+        for (what, x, y) in [
+            ("the clone", 42usize, 20usize),
+            ("its copy", 42, 32),
+            ("the patch under both", 10, 20),
+        ] {
+            let want = ours.get(x as u32, y as u32).to_srgb8();
+            let got = at(x, y);
+            assert!(
+                (0..3).all(|c| (got[c] as i32 - want[c] as i32).abs() <= 4),
+                "{what}: the file has {got:?} where the page has {want:?}"
+            );
+        }
     }
 
     /// Hand a PDF to Ghostscript and get back what it drew, or nothing

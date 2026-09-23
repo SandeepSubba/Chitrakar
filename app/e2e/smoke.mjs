@@ -4953,6 +4953,36 @@ assert(
     (await page.locator(".panel ul li").count()) === cloneRows + 1,
     "on a layer of its own",
   );
+  // And that layer's row shows what it lays. A layer's thumbnail is the
+  // layer drawn on nothing, which a clone lifts nothing from, so the row
+  // used to carry a transparent square; the engine now draws what is
+  // under it aside first.
+  await page.waitForTimeout(700);
+  const cloneThumb = await page
+    .locator(".panel ul li")
+    .first()
+    .locator(".layer-thumb")
+    .getAttribute("src");
+  const cloneInk = await page.evaluate(
+    (url) =>
+      new Promise((done) => {
+        const img = new Image();
+        img.onload = () => {
+          const c = document.createElement("canvas");
+          c.width = img.width;
+          c.height = img.height;
+          const x = c.getContext("2d");
+          x.drawImage(img, 0, 0);
+          const d = x.getImageData(0, 0, c.width, c.height).data;
+          let inked = 0;
+          for (let i = 3; i < d.length; i += 4) if (d[i] > 100) inked++;
+          done(inked);
+        };
+        img.src = url;
+      }),
+    cloneThumb,
+  );
+  assert(cloneInk > 20, `the clone layer's thumbnail shows what it lays (${cloneInk} pixels)`);
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);

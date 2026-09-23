@@ -879,9 +879,9 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~513),
+- **Verify before committing:** `cargo test --workspace` (~515),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1329 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -4041,6 +4041,33 @@ without reading anything else.*
        then copies is the inner one's shadow as well as its strokes.
        The GPU backend draws a plain copy of a clone and hands every
        dressed one back.
+     - **And two roads out of the page that assumed a clone has a
+       picture of its own.** PDF export placed a clone layer with the
+       run of layers that go over as pixels, rendered with only that run
+       shown — nothing under it to lift, so every PDF of a retouched
+       page came out without the retouching, while the file read
+       perfectly well. It now flattens what is under it, as an
+       adjustment and a filter always did, and so does a copy of any of
+       the three, which the old kind check missed as well. A *group*
+       holding one does not: the engine isolates such a group, so the
+       group drawn alone was already right — which the first draft of the
+       test did not know, and its group case passed with the rule taken
+       out; a copy of the clone is what reaches through, and is what the
+       test asks now (`a_clone_layer_goes_over_as_what_it_lays`, read
+       back by Ghostscript). And a layer's thumbnail, like the view that
+       shows one layer alone, draws it on nothing: a clone's was a
+       transparent square in the layers panel. A clone at the top of the
+       page, or a copy of one there, is now shown as what it lays, lifted
+       from the page below it drawn aside over the region asked for
+       padded by the document's reach — which counts the clone's own
+       offsets and a heal's length, so a source off the thumbnail's square
+       or off the part of the page on screen is drawn too
+       (`a_clone_layer_on_its_own_shows_what_it_lays`, and block 9i in the
+       browser). An explicit union of every stroke's source was written
+       first and then taken out: the reach already covered it, and a
+       sabotage of the union could not show. Inside a group a clone lifts
+       from the group's own surface, which this cannot draw aside, so it
+       keeps the plain answer there.
      Two came from the reshuffle and are older than the clones:
      - **A surface cut before it was grown** (seed 259): a copy — and,
        the same code again, a group — is given room for the feathered

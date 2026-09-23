@@ -864,6 +864,7 @@ fn region_at(
         return Ok(());
     }
     match showing {
+        Showing::Alone(id) if clone_alone(doc, id, surface, inside, view)? => Ok(()),
         Showing::Alone(id) => render_layer(
             doc,
             id,
@@ -1111,6 +1112,205 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
     most
 }
 
+/// A clone layer shown on its own — in its thumbnail, or picked out to be
+/// looked at alone — as what it lays where the page puts it. Drawn on
+/// nothing, the way every other layer is shown on its own, it had nothing
+/// to lift and showed nothing: a blank square in the layers panel beside
+/// the picture it was retouching. So what is under it is drawn aside
+/// first, and it lifts from that.
+///
+/// For a clone at the top of the page, or a copy of one there, where
+/// what is under it is the page below it. Inside a group it lifts from
+/// the group's own surface, which is not a thing this can draw aside, so
+/// `false` says so and the caller draws it the plain way.
+fn clone_alone(
+    doc: &Document,
+    id: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    view: Transform,
+) -> Result<bool, DocError> {
+    let root = doc.root();
+    let node = doc.node(id)?;
+    if doc.parent_of(id) != Some(root) || !node.visible || node.opacity <= 0.0 {
+        return Ok(false);
+    }
+    if clone_behind(doc, id, view).is_none() {
+        return Ok(false);
+    }
+    let mut below = doc.clone();
+    let layers = below.children_of(root)?.to_vec();
+    let at = layers.iter().position(|k| *k == id).unwrap_or(layers.len());
+    for &later in &layers[at..] {
+        below.apply(chitrakar_doc::Command::SetVisible {
+            id: later,
+            visible: false,
+        })?;
+    }
+    // What has to be drawn under it: the region asked for, grown by the
+    // effects' reach and then by the document's reach, which is the
+    // region-render guarantee (`filter_reach`) — and which counts this
+    // clone's own: its strokes' offsets, a heal's length. So wherever a
+    // stroke lifts from, off a thumbnail's square or off the part of the
+    // page on screen, is drawn, and drawn as the page has it.
+    let scale = max_scale(view);
+    let reach = node
+        .effects
+        .iter()
+        .map(Effect::reach)
+        .fold(0.0f32, f32::max)
+        * scale;
+    let pad = reach + filter_reach(&below) as f32 * scale + 2.0;
+    let (nx0, ny0, nx1, ny1) = (
+        clip.x0 as f32,
+        clip.y0 as f32,
+        clip.x1 as f32,
+        clip.y1 as f32,
+    );
+    let (ox, oy) = ((nx0 - pad).floor(), (ny0 - pad).floor());
+    let (w, h) = (
+        ((nx1 + pad).ceil() - ox).max(1.0) as u32,
+        ((ny1 + pad).ceil() - oy).max(1.0) as u32,
+    );
+    let shifted = Transform::translation(-ox, -oy).compose(view);
+    let whole = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    let mut under = Surface::new(w, h);
+    region_at(&below, &mut under, whole, shifted, Showing::Everything)?;
+    let Some(behind) = clone_behind(doc, id, shifted) else {
+        return Ok(false);
+    };
+    let mut shown = Surface::new(w, h);
+    lay_clone(
+        doc,
+        node,
+        behind,
+        &mut shown,
+        under,
+        (whole, whole),
+        None,
+        shifted,
+    );
+    // Back into the window that was asked for, onto nothing — which is
+    // what a layer shown on its own is drawn on.
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let (sx, sy) = (x as f32 - ox, y as f32 - oy);
+            if sx < 0.0 || sy < 0.0 || sx >= w as f32 || sy >= h as f32 {
+                continue;
+            }
+            let i = (y * dst.width + x) as usize;
+            dst.pixels[i] = shown.get(sx as u32, sy as u32);
+        }
+    }
+    Ok(true)
+}
+
+/// What a clone layer lays, kept aside as a picture, and that picture
+/// brought down onto `dst` with the layer's effects around it: the clone's
+/// strokes drawn onto `scratch` — what is under the layer, which each
+/// stroke lifts from, the strokes before it on it — with each copy on the
+/// way down to the clone letting through its share of what was laid.
+///
+/// `scratch` is usually the page itself, as it stands under the layer;
+/// for a layer shown on its own it is the page under it drawn aside, and
+/// `dst` is empty.
+#[allow(clippy::too_many_arguments)]
+fn lay_clone(
+    doc: &Document,
+    node: &chitrakar_doc::Node,
+    behind: CloneBehind<'_>,
+    dst: &mut Surface,
+    mut scratch: Surface,
+    (region, clip): (ClipRect, ClipRect),
+    cover: Option<&Cover>,
+    parent: Transform,
+) {
+    let strokes = behind.strokes;
+    let (inner_mask, inner_space) = behind.mask;
+    let plane = MaskRef::plane_over(
+        Some(doc),
+        inner_mask,
+        inner_space,
+        region,
+        (dst.width, dst.height),
+    );
+    let m = MaskRef::new(inner_mask, inner_space).with_plane(plane.as_ref());
+    let mut laid = Surface::new(dst.width, dst.height);
+    draw_clone(
+        &mut scratch,
+        doc,
+        strokes,
+        behind.t,
+        behind.opacity,
+        BlendMode::Normal,
+        region,
+        m,
+        Some(&mut laid),
+    );
+    // Each copy on the way down to the clone lets through its
+    // own mask's worth at its own opacity, of what the clone
+    // laid — the same mix a copy of one without effects is
+    // given where it stands.
+    for (mask, space, opacity) in &behind.over {
+        let plane = MaskRef::plane_over(Some(doc), *mask, *space, region, (dst.width, dst.height));
+        let m = MaskRef::new(*mask, *space).with_plane(plane.as_ref());
+        for y in region.y0..region.y1 {
+            for x in region.x0..region.x1 {
+                let a = coverage_at(doc, m, x, y) * opacity;
+                let i = (y * laid.width + x) as usize;
+                laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+            }
+        }
+    }
+    let blend = behind.blend;
+    // Whatever it is held to cuts what it laid before
+    // anything is made of it, so the effects grow from the
+    // shape that will really be seen.
+    if let Some(c) = cover {
+        for y in region.y0..region.y1 {
+            for x in region.x0..region.x1 {
+                let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                let i = (y * laid.width + x) as usize;
+                laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+            }
+        }
+    }
+    for effect in node.effects.iter().filter(|e| !e.over()) {
+        draw_effect(
+            dst,
+            &laid,
+            (0, 0),
+            doc,
+            effect,
+            parent,
+            region,
+            clip,
+            blend,
+            node.opacity,
+        );
+    }
+    composite_from(dst, &laid, (0, 0), 1.0, blend, clip.intersect(region));
+    for effect in node.effects.iter().filter(|e| e.over()) {
+        draw_effect(
+            dst,
+            &laid,
+            (0, 0),
+            doc,
+            effect,
+            parent,
+            region,
+            clip,
+            blend,
+            node.opacity,
+        );
+    }
+}
+
 /// What a clone layer — or a copy of one, through however many copies —
 /// lays, resolved down to the clone: its strokes in the space they are
 /// drawn in, the clone's own opacity and mask (which go on each stroke
@@ -1344,7 +1544,6 @@ fn draw_layer(
         };
         if let Some(behind) = resolved {
             {
-                let strokes = behind.strokes;
                 let scale = max_scale(parent);
                 let reach = node
                     .effects
@@ -1367,91 +1566,16 @@ fn draw_layer(
                     return Ok(capture
                         .map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
                 }
-                let (inner_mask, inner_space) = behind.mask;
-                let plane = MaskRef::plane_over(
-                    Some(doc),
-                    inner_mask,
-                    inner_space,
-                    region,
-                    (dst.width, dst.height),
-                );
-                let m = MaskRef::new(inner_mask, inner_space).with_plane(plane.as_ref());
-                let mut scratch = dst.clone();
-                let mut laid = Surface::new(dst.width, dst.height);
-                draw_clone(
-                    &mut scratch,
+                lay_clone(
                     doc,
-                    strokes,
-                    behind.t,
-                    behind.opacity,
-                    BlendMode::Normal,
-                    region,
-                    m,
-                    Some(&mut laid),
+                    node,
+                    behind,
+                    dst,
+                    dst.clone(),
+                    (region, clip),
+                    cover,
+                    parent,
                 );
-                // Each copy on the way down to the clone lets through its
-                // own mask's worth at its own opacity, of what the clone
-                // laid — the same mix a copy of one without effects is
-                // given where it stands.
-                for (mask, space, opacity) in &behind.over {
-                    let plane = MaskRef::plane_over(
-                        Some(doc),
-                        *mask,
-                        *space,
-                        region,
-                        (dst.width, dst.height),
-                    );
-                    let m = MaskRef::new(*mask, *space).with_plane(plane.as_ref());
-                    for y in region.y0..region.y1 {
-                        for x in region.x0..region.x1 {
-                            let a = coverage_at(doc, m, x, y) * opacity;
-                            let i = (y * laid.width + x) as usize;
-                            laid.pixels[i] = scale_alpha(laid.pixels[i], a);
-                        }
-                    }
-                }
-                let blend = behind.blend;
-                // Whatever it is held to cuts what it laid before
-                // anything is made of it, so the effects grow from the
-                // shape that will really be seen.
-                if let Some(c) = cover {
-                    for y in region.y0..region.y1 {
-                        for x in region.x0..region.x1 {
-                            let a = c.alpha[at_in(c.origin, c.width, x, y)];
-                            let i = (y * laid.width + x) as usize;
-                            laid.pixels[i] = scale_alpha(laid.pixels[i], a);
-                        }
-                    }
-                }
-                for effect in node.effects.iter().filter(|e| !e.over()) {
-                    draw_effect(
-                        dst,
-                        &laid,
-                        (0, 0),
-                        doc,
-                        effect,
-                        parent,
-                        region,
-                        clip,
-                        blend,
-                        node.opacity,
-                    );
-                }
-                composite_from(dst, &laid, (0, 0), 1.0, blend, clip.intersect(region));
-                for effect in node.effects.iter().filter(|e| e.over()) {
-                    draw_effect(
-                        dst,
-                        &laid,
-                        (0, 0),
-                        doc,
-                        effect,
-                        parent,
-                        region,
-                        clip,
-                        blend,
-                        node.opacity,
-                    );
-                }
                 return Ok(
                     capture.map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height)))
                 );
@@ -6103,7 +6227,9 @@ pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>
         x1: size,
         y1: size,
     };
-    render_layer(doc, id, &mut surface, clip, fit, false)?;
+    if !clone_alone(doc, id, &mut surface, clip, fit)? {
+        render_layer(doc, id, &mut surface, clip, fit, false)?;
+    }
     let mut rgba8 = Vec::with_capacity((size * size) as usize * 4);
     for px in &surface.pixels {
         rgba8.extend_from_slice(&px.to_srgb8());
@@ -11039,6 +11165,121 @@ mod tests {
         assert!(
             d < 1e-4,
             "a group on a surface of its own softens alike ({d})"
+        );
+    }
+
+    /// A clone layer on its own shows what it lays.
+    ///
+    /// Every layer's thumbnail, and the view that picks one layer out to
+    /// be looked at alone, draw the layer on nothing — which a clone lifts
+    /// nothing from. So its thumbnail was a transparent square, and the
+    /// layers panel showed a blank where every other kind shows a picture
+    /// or the glyph that says what it is.
+    #[test]
+    fn a_clone_layer_on_its_own_shows_what_it_lays() {
+        let pale = AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.9,
+            b: 0.85,
+            a: 1.0,
+        };
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, (w, h, x, y, c)) in [
+            (60.0f32, 40.0f32, 0.0f32, 0.0f32, pale),
+            (14.0, 30.0, 4.0, 5.0, RED),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: filled_rect("part", w, h, c),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, y),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::clone_layer("retouch")),
+        })
+        .unwrap();
+        let clone = doc.children_of(root).unwrap()[2];
+        let mut s = stroke(&[[42.0, 20.0]], 7.0, RED);
+        s.source = [-31.0, 0.0];
+        doc.apply(Command::AddStroke {
+            id: clone,
+            index: 0,
+            stroke: Box::new(s),
+            on_mask: false,
+        })
+        .unwrap();
+
+        // Alone: the lifted red where it was laid, and nothing where the
+        // patch it lifted from is, nor where the page is.
+        let mut alone = Surface::new(60, 40);
+        render_showing_at(
+            &doc,
+            &mut alone,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 60,
+                y1: 40,
+            },
+            Transform::default(),
+            Showing::Alone(clone),
+        )
+        .unwrap();
+        let laid = alone.get(42, 20).to_srgb8();
+        assert!(
+            laid[3] > 250 && laid[0] > 200 && laid[1] < 60,
+            "alone, it shows what it lays ({laid:?})"
+        );
+        for (x, y) in [(10u32, 20u32), (55, 5)] {
+            assert!(
+                alone.get(x, y).a < 1e-4,
+                "and nothing else ({x},{y}: {:?})",
+                alone.get(x, y)
+            );
+        }
+
+        // Panned so the patch it lifts from is off the surface: it still
+        // lifts it, as the page would.
+        let mut panned = Surface::new(30, 40);
+        render_showing_at(
+            &doc,
+            &mut panned,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 30,
+                y1: 40,
+            },
+            Transform::translation(-30.0, 0.0),
+            Showing::Alone(clone),
+        )
+        .unwrap();
+        let laid = panned.get(12, 20).to_srgb8();
+        assert!(
+            laid[3] > 250 && laid[0] > 200 && laid[1] < 60,
+            "with its source off the surface as well ({laid:?})"
+        );
+
+        // The thumbnail: its own box fitted into the square, so the dab
+        // fills the middle of it — red, where it had been nothing.
+        let px = thumbnail(&doc, clone, 32).unwrap().unwrap();
+        let mid = &px[(16 * 32 + 16) * 4..(16 * 32 + 16) * 4 + 4];
+        assert!(
+            mid[3] > 250 && mid[0] > 200 && mid[1] < 60,
+            "its thumbnail shows it too ({mid:?})"
         );
     }
 
