@@ -2042,9 +2042,13 @@ impl Rng {
                     },
                 ))
             }
+            // Every adjustment rather than three. The other nine had never
+            // stood on one of these pages, so none of them had met a
+            // random mask, blend, turn, copy or layer held to it, nor the
+            // second renderer on a page it did not choose.
             4 => Box::new(Node::adjustment(
                 &name,
-                match self.upto(3) {
+                match self.upto(12) {
                     0 => Adjustment::Exposure {
                         stops: self.between(-1.5, 1.5),
                     },
@@ -2052,11 +2056,105 @@ impl Rng {
                         brightness: self.between(-0.3, 0.3),
                         contrast: self.between(-0.3, 0.3),
                     },
-                    _ => Adjustment::HueSaturation {
+                    2 => Adjustment::HueSaturation {
                         hue_degrees: self.between(-60.0, 60.0),
                         saturation: self.between(-0.5, 0.5),
                         lightness: self.between(-0.2, 0.2),
                     },
+                    3 => {
+                        let in_black = self.between(0.0, 0.3);
+                        let out_black = self.between(0.0, 0.2);
+                        Adjustment::Levels {
+                            in_black,
+                            in_white: self.between(in_black + 0.3, 1.0),
+                            gamma: self.between(0.5, 2.0),
+                            out_black,
+                            out_white: self.between(out_black + 0.5, 1.0),
+                        }
+                    }
+                    4 => {
+                        let curve = |r: &mut Self| {
+                            vec![
+                                [0.0, r.between(0.0, 0.2)],
+                                [0.5, r.between(0.3, 0.7)],
+                                [1.0, r.between(0.8, 1.0)],
+                            ]
+                        };
+                        Adjustment::Curves {
+                            points: curve(self),
+                            red: if self.chance(2) {
+                                curve(self)
+                            } else {
+                                Vec::new()
+                            },
+                            green: Vec::new(),
+                            blue: if self.chance(2) {
+                                curve(self)
+                            } else {
+                                Vec::new()
+                            },
+                        }
+                    }
+                    5 => Adjustment::WhiteBalance {
+                        temperature: self.between(-0.8, 0.8),
+                        tint: self.between(-0.5, 0.5),
+                    },
+                    6 => Adjustment::Vibrance {
+                        amount: self.between(-0.8, 0.8),
+                    },
+                    7 => Adjustment::BlackAndWhite {
+                        red: self.between(0.0, 1.0),
+                        green: self.between(0.0, 1.0),
+                        blue: self.between(0.0, 1.0),
+                    },
+                    8 => Adjustment::GradientMap {
+                        stops: vec![
+                            GradientStop {
+                                offset: 0.0,
+                                color: self.color(1.0),
+                            },
+                            GradientStop {
+                                offset: 1.0,
+                                color: self.color(1.0),
+                            },
+                        ],
+                    },
+                    9 => Adjustment::Invert {
+                        amount: self.between(0.2, 1.0),
+                    },
+                    10 => Adjustment::SelectiveHsl {
+                        bands: (0..6)
+                            .map(|_| {
+                                [
+                                    self.between(-0.5, 0.5),
+                                    self.between(-0.6, 0.6),
+                                    self.between(-0.3, 0.3),
+                                ]
+                            })
+                            .collect(),
+                    },
+                    _ => {
+                        if self.chance(2) {
+                            Adjustment::ShadowsHighlights {
+                                shadows: self.between(-0.8, 0.8),
+                                highlights: self.between(-0.8, 0.8),
+                            }
+                        } else {
+                            let mut three = || {
+                                [
+                                    self.between(-0.6, 0.6),
+                                    self.between(-0.6, 0.6),
+                                    self.between(-0.6, 0.6),
+                                ]
+                            };
+                            Adjustment::ColorBalance {
+                                shadows: three(),
+                                midtones: three(),
+                                highlights: three(),
+                                preserve_luminosity: self.chance(2),
+                            }
+                        }
+                    }
                 },
             )),
             // All six filters rather than two. The four that were

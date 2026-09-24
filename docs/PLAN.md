@@ -4128,6 +4128,27 @@ without reading anything else.*
      exact, in on one side and out on the other. One page can own a
      maximum that way, so the watch now counts the pages at or past
      0.75 and names them (one), rather than holding the maximum alone.
+     **And every adjustment, not three.** The pages held exposure,
+     brightness/contrast and hue/saturation, and the fixture five kinds,
+     so white balance, vibrance, black and white, invert, selective HSL,
+     shadows/highlights and colour balance had never met a random mask,
+     blend, turn, copy or held layer. Everything held — the GPU drew 1474
+     pages against 1477 — so the method's other half: ten sabotages in
+     the backend's adjustment code, one per kind, each run against the
+     suite with the widened pages and without them. Three had been
+     noticed by **nothing at all**: black and white left unnormalized,
+     invert dropping what lies above white, and selective HSL giving a
+     pale colour the whole of a band's change. The widened pages caught
+     all three, but only the statistical audit did, so each got a
+     pointed ask in the dedicated tests, which is where the reason for
+     the gap was: the black-and-white weights there were 0.5, 0.3 and
+     0.2, which already add to one; no page had anything above white
+     for an invert to carry through (an exposure under it now puts the
+     light strip there); and the bands' strips were all saturated enough
+     to take a band's whole change, and warm where the band set was the
+     blues (a pale blue strip now). The same instrument that found them
+     caught nothing new on the reference side — the widening's value is
+     the three holes, each now closed by a test that names it.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

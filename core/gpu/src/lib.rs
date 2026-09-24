@@ -8335,8 +8335,8 @@ mod tests {
 
     /// Adjustment layers: each rewrites what is composited below it, and
     /// each is held against the CPU's own answer. The ones stated by a
-    /// table — a curve, a gradient map — and the two that speak in bands
-    /// of colour are not here yet, and the page goes back for them.
+    /// table — a curve, a gradient map, the bands — have a test of their
+    /// own (`the_adjustments_stated_by_a_table_read_the_cpu_s_own`).
     #[test]
     fn adjustment_layers_rewrite_the_page_the_way_the_cpu_does() {
         use chitrakar_doc::Adjustment as A;
@@ -8366,10 +8366,13 @@ mod tests {
                 tint: -0.2,
             },
             A::Vibrance { amount: 0.7 },
+            // Weights that do not add to one, so that the normalizing is
+            // asked: 0.5, 0.3 and 0.2 sum to one already, and a mix left
+            // unnormalized went unnoticed by every test here.
             A::BlackAndWhite {
-                red: 0.5,
-                green: 0.3,
-                blue: 0.2,
+                red: 0.9,
+                green: 0.6,
+                blue: 0.3,
             },
             A::Invert { amount: 1.0 },
             A::ShadowsHighlights {
@@ -8452,6 +8455,53 @@ mod tests {
                 moved(30, 30)
             );
         }
+
+        // An invert over a page that is above white in places. What is
+        // past the end of the scale a device shows cannot be turned inside
+        // out on it, so it is carried through by what is left of the
+        // original — which nothing on a page of ordinary colours can ask,
+        // and which went unnoticed when it was dropped. An exposure under
+        // the invert is what puts the light strip past white.
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "light",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.8,
+                    b: 0.4,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        let root = doc.root();
+        for (i, adj) in [A::Exposure { stops: 1.5 }, A::Invert { amount: 0.6 }]
+            .into_iter()
+            .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1 + i,
+                node: Box::new(Node::adjustment("adj", adj)),
+            })
+            .unwrap();
+        }
+        let (drawn, reference) = (
+            gpu.render(&doc).unwrap(),
+            chitrakar_render::render(&doc).unwrap(),
+        );
+        let (a, b) = (drawn.get(30, 20), reference.get(30, 20));
+        assert!(
+            (a.r - b.r).abs() < 0.02 && (a.g - b.g).abs() < 0.02 && (a.b - b.b).abs() < 0.02,
+            "an invert past white: {a:?} against {b:?}"
+        );
 
         // Its opacity and its mask weigh it, and half of it is half of
         // the difference it makes.
@@ -10998,7 +11048,7 @@ mod tests {
             },
         ];
         for adj in told {
-            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let mut doc = Document::new(60, 60, ColorMode::Rgb);
             add(
                 &mut doc,
                 filled(
@@ -11035,10 +11085,33 @@ mod tests {
                 ),
                 Transform::translation(0.0, 20.0),
             );
+            // And a pale blue strip, a fifth of the way from grey: the
+            // bands give a colour less of their change the less colour it
+            // has, and on the two strips above every colour has enough to
+            // take all of it, so that fade was never asked. Blue, since
+            // the blues are the band the case below sets.
+            add(
+                &mut doc,
+                filled(
+                    "pale",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.62,
+                        g: 0.66,
+                        b: 0.74,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(0.0, 40.0),
+            );
             let root = doc.root();
             doc.apply(Command::AddNode {
                 parent: root,
-                index: 2,
+                index: 3,
                 node: Box::new(Node::adjustment("adj", adj.clone())),
             })
             .unwrap();
@@ -11053,7 +11126,7 @@ mod tests {
                 mean < 0.004,
                 "{adj:?}: mean channel difference {mean:.5} (worst {worst:.3})"
             );
-            for (x, y) in [(30u32, 10u32), (30, 30)] {
+            for (x, y) in [(30u32, 10u32), (30, 30), (30, 50)] {
                 let (a, b) = (drawn.get(x, y), reference.get(x, y));
                 assert!(
                     (a.r - b.r).abs() < 0.02
