@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~516),
+- **Verify before committing:** `cargo test --workspace` (~519),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4149,6 +4149,39 @@ without reading anything else.*
      blues (a pale blue strip now). The same instrument that found them
      caught nothing new on the reference side — the widening's value is
      the three holes, each now closed by a test that names it.
+     **And every kind of mask, and a stroke dressed every way.** Masks
+     here had all been a vector ellipse; now they are any vector shape, a
+     brushed one or a picture's brightness. Strokes had all been plain;
+     now they are dashed, capped and joined each way, kept inside or
+     outside, marked at their ends and swelling. And a gradient can be
+     radial. Four defects, three of them the reference renderer's:
+     - **A repainted rectangle left a seam over a feathered brushed
+       mask** (seed 500). Every kind of mask worked its softened plane
+       out over the region grown by what the blur reaches — except a
+       brushed one, which returned early with a plane cut to the region
+       and blurred there, fading out along the region's border
+       (`a_brushed_mask_softened_repaints_without_a_seam`).
+     - **A blended copy of a group changed what the page covered**
+       (seed 1570). The blend sends the copy to a surface of its own,
+       grown only by the copy's own feather — none — so a feathered
+       mask inside the group softened against the surface's edge. The
+       growth tried and taken back two sittings earlier, for want of a
+       page that needed it, was exactly the fix; this was the page. The
+       feathered-mask test has a third road now.
+     - **A feathered picture mask was empty in its thumbnail and hid
+       everything in an SVG** (found reading the code while chasing the
+       second). Both worked the softened plane out with no document, and
+       without one a picture mask has no picture: it read as hiding
+       everything, blurred. The page, which passes the document, was
+       right. The document-less helper is gone
+       (`a_feathered_image_mask_is_what_it_lets_through_everywhere`).
+     - **The GPU drew a dashed rectangle or ellipse solid** (seed 1116):
+       their strokes are a band from the signed distance, which knows
+       nothing of a pattern, and every dash in the fixture was on a path,
+       which goes through the reference's pieces. A dashed one now goes
+       that way too (`a_dashed_rectangle_and_ellipse_are_dashed_here_too`,
+       read as stroke and gap on both renderers).
+     The GPU drew 1478 of the pages after; every other audit held.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

@@ -1984,19 +1984,65 @@ impl Rng {
                 {
                     *f = Some(fill);
                     if self.chance(3) {
+                        // Dressed now and then the way a stroke can be —
+                        // broken into dashes, capped and joined each way,
+                        // kept inside or outside the outline, ended with
+                        // a marker, swelling along a path — where every
+                        // stroke on these pages had been the plain one.
+                        let marker = |r: &mut Self| match r.upto(6) {
+                            0 => Marker::Arrow,
+                            1 => Marker::Bar,
+                            2 => Marker::Dot,
+                            _ => Marker::None,
+                        };
                         *stroke = Some(Stroke {
                             color: self.color(1.0),
                             width: self.between(0.5, 3.0),
-                            widths: Vec::new(),
-                            dash: Vec::new(),
-                            cap: Default::default(),
-                            join: Default::default(),
-                            align: None,
-                            start_marker: Default::default(),
-                            end_marker: Default::default(),
+                            widths: if self.chance(4) {
+                                (0..5).map(|_| self.between(0.2, 1.0)).collect()
+                            } else {
+                                Vec::new()
+                            },
+                            dash: if self.chance(4) {
+                                vec![self.between(1.0, 5.0), self.between(1.0, 4.0)]
+                            } else {
+                                Vec::new()
+                            },
+                            cap: match self.upto(3) {
+                                0 => crate::StrokeCap::Butt,
+                                1 => crate::StrokeCap::Round,
+                                _ => crate::StrokeCap::Square,
+                            },
+                            join: match self.upto(3) {
+                                0 => crate::StrokeJoin::Miter,
+                                1 => crate::StrokeJoin::Round,
+                                _ => crate::StrokeJoin::Bevel,
+                            },
+                            align: match self.upto(4) {
+                                0 => Some(StrokeAlign::Inside),
+                                1 => Some(StrokeAlign::Outside),
+                                _ => None,
+                            },
+                            start_marker: marker(self),
+                            end_marker: marker(self),
                         });
                     }
-                    if self.chance(4) {
+                    if self.chance(4) && self.chance(2) {
+                        *gradient = Some(Gradient::Radial {
+                            center: [self.between(0.2, 0.8), self.between(0.2, 0.8)],
+                            radius: self.between(0.4, 1.2),
+                            stops: vec![
+                                GradientStop {
+                                    offset: 0.0,
+                                    color: self.color(1.0),
+                                },
+                                GradientStop {
+                                    offset: 1.0,
+                                    color: self.color(1.0),
+                                },
+                            ],
+                        });
+                    } else if self.chance(4) {
                         *gradient = Some(Gradient::Linear {
                             from: [0.0, 0.0],
                             to: [1.0, 1.0],
@@ -2312,17 +2358,67 @@ impl Rng {
             doc.apply(Command::SetBlendMode { id, blend }).unwrap();
         }
         if self.chance(5) {
-            let mask = Mask {
-                kind: MaskKind::Vector {
+            let at = Transform::translation(self.between(0.0, 20.0), self.between(0.0, 16.0));
+            // Every kind of mask rather than an ellipse. A mask of another
+            // shape is the same code with another outline; a brushed one
+            // is a plane worked out stroke by stroke, and an image one is
+            // a picture's brightness read through a transform — two
+            // readings of coverage no page here had ever asked for.
+            let kind = match self.upto(4) {
+                0 => MaskKind::Vector {
                     shape: VectorShape::Ellipse {
                         rx: self.between(4.0, 14.0),
                         ry: self.between(4.0, 12.0),
                     },
-                    transform: Transform::translation(
-                        self.between(0.0, 20.0),
-                        self.between(0.0, 16.0),
-                    ),
+                    transform: at,
                 },
+                1 => MaskKind::Vector {
+                    shape: self.shape(),
+                    transform: at,
+                },
+                2 => MaskKind::Painted {
+                    strokes: (0..1 + self.upto(3))
+                        .map(|_| PaintStroke {
+                            points: (0..2)
+                                .map(|_| [self.between(0.0, 40.0), self.between(0.0, 30.0)])
+                                .collect(),
+                            radii: vec![self.between(2.0, 6.0)],
+                            color: self.color(1.0),
+                            softness: self.between(0.0, 0.8),
+                            erase: self.chance(2),
+                            source: [0.0, 0.0],
+                            heal: false,
+                            clip: None,
+                        })
+                        .collect(),
+                },
+                _ => {
+                    let (w, h) = (3u32, 3u32);
+                    let bytes: Vec<u8> = (0..w * h)
+                        .flat_map(|_| {
+                            let v = (self.unit() * 255.0) as u8;
+                            [v, v, v, 255]
+                        })
+                        .collect();
+                    let resource_id = doc.add_resource(w, h, bytes);
+                    let scale = self.between(3.0, 8.0);
+                    MaskKind::Raster {
+                        resource_id,
+                        width: w,
+                        height: h,
+                        transform: at.compose(Transform {
+                            a: scale,
+                            b: 0.0,
+                            c: 0.0,
+                            d: scale,
+                            e: 0.0,
+                            f: 0.0,
+                        }),
+                    }
+                }
+            };
+            let mask = Mask {
+                kind,
                 invert: self.chance(3),
                 feather: if self.chance(2) {
                     self.between(0.0, 2.0)

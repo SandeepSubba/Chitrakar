@@ -4122,6 +4122,19 @@ fn vector(
         ));
         out.draws.push(Item::of(Draw::Shape { quad, ramp }));
     }
+    // A dashed stroke is not a band at all but the pieces the pattern
+    // leaves, each capped as a line of its own — which the band from
+    // the signed distance knows nothing of, so a dashed rectangle or
+    // ellipse came out solid here while every dashed *path* was right:
+    // those went through the pieces already. The reference renderer
+    // states the pieces for a dashed rectangle and ellipse as it does
+    // for a path, and an undashed one has none.
+    if let Some((color, s)) = ink {
+        if !chitrakar_render::stroke_pieces(shape, s).is_empty() {
+            stroke_path(shape, t, color, s, out);
+            return Some(());
+        }
+    }
     if let Some((color, s)) = ink {
         // A band between two outlines: the shape shrunk by one figure
         // and grown by the other. Which side of its edge the band lies
@@ -9164,6 +9177,99 @@ mod tests {
                 "{whose}: a heal lands in the colour it was dropped into \
                  ({at:?} against {around:?})"
             );
+        }
+    }
+
+    /// A dashed rectangle and a dashed ellipse are dashed here too.
+    ///
+    /// Their strokes are drawn as a band from the shape's signed distance,
+    /// which is exact for a solid stroke and knows nothing of a pattern —
+    /// so a dashed one came out solid, while every dashed *path* was right,
+    /// being drawn from the reference renderer's own pieces. The fixture's
+    /// dashes were all on paths; a page nobody wrote put one on a
+    /// rectangle. Each case is read as well as compared: along the edge
+    /// the dashes run on, both renderers have stroke and gap.
+    #[test]
+    fn a_dashed_rectangle_and_ellipse_are_dashed_here_too() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.2,
+            b: 0.7,
+            a: 1.0,
+        };
+        for (what, shape) in [
+            (
+                "a rectangle",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 24.0,
+                    radius: 0.0,
+                },
+            ),
+            (
+                "a rounded rectangle",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 24.0,
+                    radius: 5.0,
+                },
+            ),
+            ("an ellipse", VectorShape::Ellipse { rx: 20.0, ry: 12.0 }),
+        ] {
+            for (align, cap) in [
+                (None, chitrakar_doc::StrokeCap::Butt),
+                (
+                    Some(chitrakar_doc::StrokeAlign::Inside),
+                    chitrakar_doc::StrokeCap::Round,
+                ),
+                (
+                    Some(chitrakar_doc::StrokeAlign::Outside),
+                    chitrakar_doc::StrokeCap::Square,
+                ),
+            ] {
+                let mut node = Node::vector("dashed", shape.clone());
+                if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                    *stroke = Some(chitrakar_doc::Stroke {
+                        color: ink.clone(),
+                        width: 3.0,
+                        widths: Vec::new(),
+                        dash: vec![6.0, 5.0],
+                        cap,
+                        join: Default::default(),
+                        align,
+                        start_marker: Default::default(),
+                        end_marker: Default::default(),
+                    });
+                }
+                let mut doc = Document::new(60, 40, ColorMode::Rgb);
+                add(&mut doc, Box::new(node), Transform::translation(10.0, 8.0));
+                assert!(GpuRenderer::can_render(&doc));
+                let mine = gpu.render(&doc).unwrap();
+                let theirs = chitrakar_render::render(&doc).unwrap();
+                let (mean, worst) = difference(&mine, &theirs);
+                assert!(
+                    mean < 0.004,
+                    "{what} {align:?} {cap:?}: mean {mean:.5}, worst {worst:.3}"
+                );
+                // Along the middle of the band on the left edge: both
+                // stroke and gap, on both renderers.
+                let x = match align {
+                    Some(chitrakar_doc::StrokeAlign::Inside) => 11,
+                    Some(chitrakar_doc::StrokeAlign::Outside) => 8,
+                    _ => 10,
+                };
+                for (whose, page) in [("gpu", &mine), ("cpu", &theirs)] {
+                    let inked = (14..26u32).filter(|y| page.get(x, *y).a > 0.5).count();
+                    assert!(
+                        inked > 0 && inked < 12,
+                        "{what} {align:?} {cap:?}: {whose} has dashes, not a solid line \
+                         ({inked} of 12 inked)"
+                    );
+                }
+            }
         }
     }
 

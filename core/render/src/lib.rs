@@ -1763,9 +1763,21 @@ fn draw_layer(
         // the plane's own margin (`MaskRef::plane_over`). Growing the clip
         // instead does nothing, which is worth knowing: the surface is cut
         // to the *extent*, and the clip only narrows it further.
-        let extent = match (extent, feathered_reach(node, parent)) {
-            (Bounds::Rect(x0, y0, x1, y1), Some(r)) => Bounds::Rect(x0 - r, y0 - r, x1 + r, y1 + r),
-            (other, _) => other,
+        //
+        // Every softening that lands on the surface, not only the layer's
+        // own: a copy draws the layer it copies onto it, feathered mask
+        // and all, and a group draws its children's. A copy wearing a
+        // blend of a group with a feathered mask softened that mask
+        // against the edge of a surface cut to the copy's own box — and
+        // taking the blends off, which sends the copy down a road that
+        // leaves the room, changed what the page covered. Only the
+        // surface grows; what comes down is still held to the region.
+        let reach = softening_within(doc, child, parent, 0);
+        let extent = match extent {
+            Bounds::Rect(x0, y0, x1, y1) if reach > 0.0 => {
+                Bounds::Rect(x0 - reach, y0 - reach, x1 + reach, y1 + reach)
+            }
+            other => other,
         };
         // A clipped layer cannot show outside what it is clipped to, so
         // its surface need never be bigger than that layer's window.
@@ -5465,17 +5477,6 @@ impl<'a> MaskRef<'a> {
         MaskRef { plane, ..self }
     }
 
-    /// The plane a painted mask needs before it can be read, over the
-    /// region about to be drawn.
-    fn plane_for(
-        mask: Option<&Mask>,
-        parent: Transform,
-        clip: ClipRect,
-        surface: (u32, u32),
-    ) -> Option<MaskPlane> {
-        Self::plane_over(None, mask, parent, clip, surface)
-    }
-
     /// The coverage a mask needs worked out ahead of being read pixel by
     /// pixel: a painted one, which is strokes rather than a formula, and
     /// any mask with a softened edge, which is a neighbourhood and so
@@ -5493,10 +5494,24 @@ impl<'a> MaskRef<'a> {
     ) -> Option<MaskPlane> {
         let m = mask?;
         if let MaskKind::Painted { strokes } = &m.kind {
-            let plane = paint_plane(doc, strokes, parent, clip, surface);
+            // Softened, it wants the same margin every other kind is given
+            // below: worked out over exactly the region, the blur found
+            // nothing past its edge and faded there, so a rectangle of the
+            // page repainted over a feathered brushed mask left a seam.
+            // The only kind that had never been on a page nobody wrote,
+            // and so the only one no repaint had ever been asked of.
             return Some(match feather_of(m, parent) {
-                Some(sigma) => softened(plane, sigma),
-                None => plane,
+                Some(sigma) => {
+                    let pad = blur::plane_reach(sigma).saturating_add(1);
+                    let grown = ClipRect {
+                        x0: clip.x0.saturating_sub(pad),
+                        y0: clip.y0.saturating_sub(pad),
+                        x1: clip.x1.saturating_add(pad).min(surface.0),
+                        y1: clip.y1.saturating_add(pad).min(surface.1),
+                    };
+                    softened(paint_plane(doc, strokes, parent, grown, surface), sigma)
+                }
+                None => paint_plane(doc, strokes, parent, clip, surface),
             });
         }
         let sigma = feather_of(m, parent)?;
@@ -6724,7 +6739,9 @@ pub fn mask_thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Ve
         x1: size,
         y1: size,
     };
-    let plane = MaskRef::plane_for(Some(mask), fit, clip, (size, size));
+    // With the document: an image mask's softened plane reads the picture,
+    // and without one it read as hiding everything.
+    let plane = MaskRef::plane_over(Some(doc), Some(mask), fit, clip, (size, size));
     let m = MaskRef::new(Some(mask), fit).with_plane(plane.as_ref());
     let mut rgba8 = Vec::with_capacity((size * size) as usize * 4);
     for y in 0..size {
@@ -6984,7 +7001,7 @@ pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
         x1: w,
         y1: h,
     };
-    let plane = MaskRef::plane_for(Some(mask), space, clip, (w, h));
+    let plane = MaskRef::plane_over(Some(doc), Some(mask), space, clip, (w, h));
     let m = MaskRef::new(Some(mask), space).with_plane(plane.as_ref());
     let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
     for y in 0..h {
@@ -11206,6 +11223,134 @@ mod tests {
         assert!(apart < 1e-4, "masked, as its twin is ({apart})");
     }
 
+    /// A feathered image mask is a picture of what it lets through, in its
+    /// thumbnail and in what an exporter is handed.
+    ///
+    /// Both worked the mask's softened plane out with no document to hand,
+    /// and without one an image mask has no picture to read: it read as
+    /// hiding everything, blurred, which is still everything. So its
+    /// thumbnail in the layers panel was empty and an SVG of the layer
+    /// carried a mask that hid all of it — while the page itself, which
+    /// does pass the document, drew the layer through it correctly.
+    #[test]
+    fn a_feathered_image_mask_is_what_it_lets_through_everywhere() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("shape", 40.0, 40.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let white = doc.add_resource(2, 2, vec![255; 16]);
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Raster {
+                    resource_id: white,
+                    width: 2,
+                    height: 2,
+                    transform: Transform {
+                        a: 20.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: 20.0,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                },
+                invert: false,
+                feather: 1.5,
+            })),
+        })
+        .unwrap();
+        assert!(
+            render(&doc).unwrap().get(20, 20).a > 0.99,
+            "the page draws the layer through it"
+        );
+        let thumb = mask_thumbnail(&doc, id, 16).unwrap().unwrap();
+        let mid = thumb[(8 * 16 + 8) * 4 + 3];
+        assert!(
+            mid > 250,
+            "its thumbnail shows it letting the middle through ({mid})"
+        );
+        let pixels = mask_pixels(&doc, id).unwrap().unwrap();
+        let (w, h) = (pixels.width as usize, pixels.height as usize);
+        let mid = pixels.rgba8[((h / 2) * w + w / 2) * 4 + 3];
+        assert!(
+            mid > 250,
+            "and so does the picture an exporter is handed ({mid})"
+        );
+    }
+
+    /// A feathered brushed mask repaints without a seam.
+    ///
+    /// A softened mask is a blur, and a blur reads its neighbours, so the
+    /// plane it is worked out on is grown past the region being drawn by
+    /// as far as the blur reaches. Every kind of mask was given that
+    /// margin but a brushed one, whose plane was worked out over exactly
+    /// the region and then blurred: at the region's edge the blur found
+    /// nothing, and a rectangle of the page repainted there came back
+    /// with its mask fading out along its border. Found when the pages
+    /// nobody wrote were given brushed masks, which they had never held.
+    #[test]
+    fn a_brushed_mask_softened_repaints_without_a_seam() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("shape", 48.0, 36.0, RED),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let mut s = stroke(&[[4.0, 18.0], [44.0, 18.0]], 7.0, RED);
+        s.erase = true;
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Painted { strokes: vec![s] },
+                invert: false,
+                feather: 2.0,
+            })),
+        })
+        .unwrap();
+        let whole = render(&doc).unwrap();
+        // Rectangles whose edges run through the softened band, where the
+        // blur reads both sides of the edge.
+        for clip in [
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 48,
+                y1: 12,
+            },
+            ClipRect {
+                x0: 10,
+                y0: 20,
+                x1: 30,
+                y1: 36,
+            },
+            ClipRect {
+                x0: 0,
+                y0: 9,
+                x1: 48,
+                y1: 10,
+            },
+        ] {
+            let mut patch = whole.clone();
+            render_region(&doc, &mut patch, clip).unwrap();
+            let worst = patch
+                .pixels
+                .iter()
+                .zip(&whole.pixels)
+                .map(|(p, q)| (p.a - q.a).abs().max((p.r - q.r).abs()))
+                .fold(0.0f32, f32::max);
+            assert!(worst < 2e-3, "repainting {clip:?} left a seam of {worst}");
+        }
+    }
+
     /// A feathered mask softens the same whatever surface it lands on.
     ///
     /// The softening reads the plane either side of every pixel, and at
@@ -11330,6 +11475,47 @@ mod tests {
             d < 1e-4,
             "a group on a surface of its own softens alike ({d})"
         );
+
+        // A copy of a group holding that layer, wearing a blend: the blend
+        // puts the copy on a surface of its own, cut to the copy's box and
+        // grown only by the copy's own feather, which it has none of — so
+        // the feather inside softened against a wall. A blend never changes
+        // what a page covers, so the alpha with it and without it is the
+        // same, which is how a page nobody wrote found this.
+        let copied = |blend: BlendMode| {
+            let mut doc = Document::new(64, 32, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+            let g = doc.children_of(root).unwrap()[0];
+            shape(&mut doc, g, 0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::instance("copy", g)),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 0.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            render(&doc).unwrap()
+        };
+        let (plain, blended) = (copied(BlendMode::Normal), copied(BlendMode::Luminosity));
+        let d = plain
+            .pixels
+            .iter()
+            .zip(&blended.pixels)
+            .map(|(p, q)| (p.a - q.a).abs())
+            .fold(0.0f32, f32::max);
+        assert!(d < 1e-4, "a blended copy of a group softens alike ({d})");
     }
 
     /// A clone layer on its own shows what it lays.
