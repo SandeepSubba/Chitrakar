@@ -1899,6 +1899,38 @@ pub fn page(seed: u64) -> Document {
         made.push(id);
         rng.dress(&mut doc, id, &made);
     }
+    // A quarter of the pages end on a symbol: a plain group, placed but
+    // otherwise left alone, and a copy of it dressed like any other layer
+    // — which half the time gives it a layer of its own in place of one
+    // of the group's. Left to chance, a copy met a group it could stand
+    // in for parts of on fewer than one page in a hundred.
+    if rng.chance(4) {
+        let at = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: at,
+            node: Box::new(Node::group("symbol")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[at];
+        let placed = Transform::translation(rng.between(-4.0, 24.0), rng.between(-4.0, 18.0));
+        doc.apply(Command::SetTransform {
+            id: group,
+            transform: placed,
+        })
+        .unwrap();
+        rng.hold(&mut doc, group);
+        made.push(group);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: at + 1,
+            node: Box::new(Node::instance("used", group)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[at + 1];
+        made.push(copy);
+        rng.dress(&mut doc, copy, &made);
+    }
     doc
 }
 
@@ -2120,14 +2152,23 @@ impl Rng {
                 Box::new(Node::text(&name, spec))
             }
             3 => {
-                // A tiny picture, two by two, in its own colours.
+                // A tiny picture, two by two, in its own colours — and a
+                // third of them see-through in places. Every picture here
+                // was opaque to the last pixel, so what a picture's own
+                // alpha does under a mask, a blend, a turn or an effect
+                // had been asked by nothing but the pages somebody wrote.
+                let clear = self.chance(3);
                 let mut bytes = Vec::with_capacity(16);
                 for _ in 0..4 {
                     bytes.extend_from_slice(&[
                         (self.unit() * 255.0) as u8,
                         (self.unit() * 255.0) as u8,
                         (self.unit() * 255.0) as u8,
-                        255,
+                        if clear {
+                            (self.unit() * 255.0) as u8
+                        } else {
+                            255
+                        },
                     ]);
                 }
                 let id = doc.add_resource(2, 2, bytes);
@@ -2356,7 +2397,30 @@ impl Rng {
                 Box::new(node)
             }
             7 if !made.is_empty() => {
-                let of = made[self.upto(made.len() as u64) as usize];
+                // Half the time a plain group where there is one, since
+                // that is the only original a copy can stand in for parts
+                // of (`dress`), and picked from everything alone it was
+                // one page in two hundred.
+                let plain: Vec<NodeId> = made
+                    .iter()
+                    .copied()
+                    .filter(|m| {
+                        doc.node(*m)
+                            .map(|o| {
+                                matches!(o.kind, NodeKind::Group)
+                                    && o.opacity >= 1.0
+                                    && o.blend == BlendMode::Normal
+                                    && o.mask.is_none()
+                                    && o.effects.is_empty()
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                let of = if !plain.is_empty() && self.chance(2) {
+                    plain[self.upto(plain.len() as u64) as usize]
+                } else {
+                    made[self.upto(made.len() as u64) as usize]
+                };
                 Box::new(Node::instance(&name, of))
             }
             // A clone layer, which no page here held: what it lays is
@@ -2403,6 +2467,27 @@ impl Rng {
                 }
                 Box::new(node)
             }
+        }
+    }
+
+    /// Something for a group or a frame to hold: one or two layers,
+    /// placed inside it.
+    fn hold(&mut self, doc: &mut Document, id: NodeId) {
+        for k in 0..1 + self.upto(2) {
+            let child = self.node(doc, &[], 90 + k as usize);
+            doc.apply(Command::AddNode {
+                parent: id,
+                index: k as usize,
+                node: child,
+            })
+            .unwrap();
+            let cid = doc.children_of(id).unwrap()[k as usize];
+            let ct = Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
+            doc.apply(Command::SetTransform {
+                id: cid,
+                transform: ct,
+            })
+            .unwrap();
         }
     }
 
@@ -2566,21 +2651,85 @@ impl Rng {
             .map(|n| matches!(n.kind, NodeKind::Group | NodeKind::Artboard { .. }))
             .unwrap_or(false)
         {
-            for k in 0..1 + self.upto(2) {
-                let child = self.node(doc, &[], 90 + k as usize);
+            self.hold(doc, id);
+        }
+        // A copy that differs from what it follows. Every copy on these
+        // pages drew its original entire, so a layer of the copy's own
+        // standing in for one of the original's had met a mask, a blend,
+        // a turn, an effect or a layer held to it only on the one page
+        // somebody wrote. Where the original is a plain group — the only
+        // thing a copy can stand in for parts of — half the copies take
+        // a stand-in: the original's layer moved and, for a shape, given
+        // another fill, as `Session::override_child` starts one and a
+        // person then changes it; a group is stood in for by a copy of
+        // it, as there. Now and then a layer of the copy's own stands in
+        // for nothing and is drawn after the rest.
+        let copied = match doc.node(id).map(|n| &n.kind) {
+            Ok(NodeKind::Instance { of, .. }) => Some(*of),
+            _ => None,
+        };
+        if let Some(of) = copied {
+            let plain = doc
+                .node(of)
+                .map(|o| {
+                    matches!(o.kind, NodeKind::Group)
+                        && o.opacity >= 1.0
+                        && o.blend == BlendMode::Normal
+                        && o.mask.is_none()
+                        && o.effects.is_empty()
+                })
+                .unwrap_or(false);
+            let theirs = doc.children_of(of).map(|c| c.to_vec()).unwrap_or_default();
+            if plain && !theirs.is_empty() && self.chance(2) {
+                let original = theirs[self.upto(theirs.len() as u64) as usize];
+                let o = doc.node(original).unwrap();
+                let mut own = if o.kind.holds_children() {
+                    let mut n = Node::instance(&o.name, original);
+                    n.transform = o.transform;
+                    n
+                } else {
+                    o.clone()
+                };
+                own.transform.e += self.between(-4.0, 4.0);
+                own.transform.f += self.between(-4.0, 4.0);
+                if let NodeKind::Vector { fill: Some(f), .. } = &mut own.kind {
+                    let alpha = self.between(0.5, 1.0);
+                    *f = self.color(alpha);
+                }
+                if self.chance(3) {
+                    own.blend = BLENDS[self.upto(BLENDS.len() as u64) as usize];
+                }
                 doc.apply(Command::AddNode {
                     parent: id,
-                    index: k as usize,
-                    node: child,
+                    index: 0,
+                    node: Box::new(own),
                 })
                 .unwrap();
-                let cid = doc.children_of(id).unwrap()[k as usize];
-                let ct = Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
-                doc.apply(Command::SetTransform {
-                    id: cid,
-                    transform: ct,
+                doc.apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Instance {
+                        of,
+                        replaces: vec![original],
+                    }),
                 })
                 .unwrap();
+                if self.chance(4) {
+                    let extra = self.node(doc, &[], 95);
+                    doc.apply(Command::AddNode {
+                        parent: id,
+                        index: 1,
+                        node: extra,
+                    })
+                    .unwrap();
+                    let eid = doc.children_of(id).unwrap()[1];
+                    let et =
+                        Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
+                    doc.apply(Command::SetTransform {
+                        id: eid,
+                        transform: et,
+                    })
+                    .unwrap();
+                }
             }
         }
     }

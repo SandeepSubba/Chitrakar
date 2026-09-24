@@ -1293,7 +1293,7 @@ fn clone_alone(
     let mut shown = Surface::new(w, h);
     lay_clone(
         doc,
-        node,
+        behind.wears,
         behind,
         &mut shown,
         under,
@@ -1424,9 +1424,15 @@ fn lay_clone(
 /// (which let through part of what was laid), and the blend it comes
 /// down by, the outermost one that is not `Normal`.
 ///
-/// `None` for anything else, and for a chain with effects anywhere but
-/// on `id` itself, or anything hidden in it, which this does not
-/// resolve.
+/// `wears` is the one layer on the way down wearing effects — `id`
+/// itself, a copy under it, or the clone — whose effects are drawn around
+/// what is laid; `id` when none does. A copy draws what it copies, effects
+/// and all, so a plain copy of a clone wearing a shadow wears the shadow
+/// too: it went down the road for a copy with no effects anywhere, and
+/// the shadow was simply missing, where the GPU backend drew it.
+///
+/// `None` for anything else, and for a chain with effects on more than
+/// one layer, or anything hidden in it, which this does not resolve.
 struct CloneBehind<'a> {
     strokes: &'a [chitrakar_doc::PaintStroke],
     t: Transform,
@@ -1434,15 +1440,23 @@ struct CloneBehind<'a> {
     mask: (Option<&'a Mask>, Transform),
     over: Vec<(Option<&'a Mask>, Transform, f32)>,
     blend: BlendMode,
+    wears: &'a chitrakar_doc::Node,
 }
 
 fn clone_behind(doc: &Document, id: NodeId, parent: Transform) -> Option<CloneBehind<'_>> {
     let (mut at, mut space) = (id, parent);
     let (mut over, mut blend) = (Vec::new(), BlendMode::Normal);
+    let mut wears: Option<&chitrakar_doc::Node> = None;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
         let node = doc.node(at).ok()?;
-        if at != id && (!node.effects.is_empty() || !node.visible) {
+        if at != id && !node.visible {
             return None;
+        }
+        if !node.effects.is_empty() {
+            if wears.is_some() {
+                return None;
+            }
+            wears = Some(node);
         }
         if blend == BlendMode::Normal {
             blend = node.blend;
@@ -1456,6 +1470,10 @@ fn clone_behind(doc: &Document, id: NodeId, parent: Transform) -> Option<CloneBe
                     mask: (node.mask.as_ref(), space),
                     over,
                     blend,
+                    wears: match wears {
+                        Some(w) => w,
+                        None => doc.node(id).ok()?,
+                    },
                 });
             }
             NodeKind::Instance { of, .. } => {
@@ -1526,9 +1544,15 @@ fn draw_layer(
         // own, where what it copies was handed a transparent page to
         // rewrite and came back with nothing — so a copy of a filter
         // wearing a drop shadow *at no opacity at all* vanished.
-        let effected = !node.effects.is_empty()
+        // A copy of a clone layer wearing effects wears them too, though
+        // it has none of its own: what it draws is what it copies.
+        let worn_below = node.effects.is_empty()
+            && copies_a_clone(doc, child)
+            && clone_behind(doc, child, parent).is_some_and(|b| !b.wears.effects.is_empty());
+        let effected = (!node.effects.is_empty()
             && !matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
-            && !rewrites_what_is_under_it(doc, child);
+            && !rewrites_what_is_under_it(doc, child))
+            || worn_below;
         // A blend mode is the same kind of demand. A layer with one has
         // to meet what is under it *once*, as the whole of itself — and
         // almost every layer here puts down more than one mark: a shape
@@ -1647,7 +1671,7 @@ fn draw_layer(
         // where the copy puts them — and went, for its effects, to a
         // surface of its own, where it had nothing to lift and laid
         // nothing: the copy vanished, shadow and all.
-        let resolved = if node.effects.is_empty() {
+        let resolved = if node.effects.is_empty() && !worn_below {
             None
         } else {
             clone_behind(doc, child, parent)
@@ -1678,7 +1702,7 @@ fn draw_layer(
                 }
                 lay_clone(
                     doc,
-                    node,
+                    behind.wears,
                     behind,
                     dst,
                     dst.clone(),
@@ -18965,6 +18989,99 @@ mod tests {
     /// silhouette a *paint* layer with the same strokes would have. The
     /// two shadows have to be the same shadow. Asserting only that some
     /// shadow appears would pass on a silhouette of the wrong shape.
+    /// A copy of a clone layer wearing a shadow casts the shadow too.
+    ///
+    /// A copy draws what it copies, effects and all — a copy of a shape
+    /// with a shadow has always cast one. A copy of a *clone* layer went
+    /// its own road, drawn where it stands so it has something to lift,
+    /// and that road drew the strokes and nothing else: the shadow was
+    /// missing from the copy with nothing said, and the GPU backend,
+    /// which drew it, disagreed on a page nobody wrote (seed 1343).
+    #[test]
+    fn a_copy_of_a_clone_layer_casts_the_shadow_it_copies() {
+        let page = |shadow: bool, fade: f32| {
+            let mut doc = Document::new(48, 24, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", 48.0, 24.0, WHITE),
+            })
+            .unwrap();
+            let mut node = Node::clone_layer("borrowed");
+            if let NodeKind::Clone { strokes } = &mut node.kind {
+                strokes.push(chitrakar_doc::PaintStroke {
+                    points: vec![[4.0, 6.0], [14.0, 6.0]],
+                    radii: vec![2.0],
+                    color: WHITE,
+                    softness: 0.0,
+                    erase: false,
+                    source: [0.0, 10.0],
+                    heal: false,
+                    clip: None,
+                });
+            }
+            if shadow {
+                node.effects = vec![Effect::DropShadow {
+                    dx: 6.0,
+                    dy: 6.0,
+                    blur: 0.0,
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 1.0,
+                }];
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::instance("copy", clone)),
+            })
+            .unwrap();
+            let copy = doc.children_of(root).unwrap()[2];
+            doc.apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(24.0, 0.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetOpacity {
+                id: copy,
+                opacity: fade,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let bare = page(false, 1.0);
+        let cast = page(true, 1.0);
+        assert!(
+            cast.get(10, 12).g < 0.1,
+            "the clone casts its shadow ({:?})",
+            cast.get(10, 12)
+        );
+        assert!(bare.get(34, 12).g > 0.9, "nothing there without one");
+        assert!(
+            cast.get(34, 12).g < 0.1,
+            "and the copy casts the same shadow ({:?})",
+            cast.get(34, 12)
+        );
+        let faded = page(true, 0.5);
+        assert!(
+            faded.get(34, 12).g < 0.9,
+            "faded, the copy still casts one ({:?})",
+            faded.get(34, 12)
+        );
+    }
+
     #[test]
     fn a_clone_layer_casts_the_shadow_its_strokes_cast() {
         let strokes = || {

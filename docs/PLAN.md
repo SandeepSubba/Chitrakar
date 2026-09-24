@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~527),
+- **Verify before committing:** `cargo test --workspace` (~528),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4217,6 +4217,31 @@ without reading anything else.*
        (seeds 1104, 223): the first is kept apart, the other two go back.
      The GPU draws 980 of the 2000 pages now, fewer because frames that
      hold things and text along a curve go back; every audit holds.
+     **And copies that differ from what they follow.** Every copy on
+     these pages drew its original entire; a copy with a layer of its own
+     in place of one of the original's had met a mask, a blend, a turn or
+     an effect only on the page somebody wrote. Half the copies of a
+     plain group now take a stand-in (moved, refilled, sometimes blended;
+     a group stood in for by a copy of it, as `override_child` does), now
+     and then with a layer of their own standing in for nothing, and a
+     quarter of the pages end on a plain group and a copy of it dressed
+     like anything else — left to chance, fewer than one page in a
+     hundred had one; 279 of 2000 do now. A third of the pictures are
+     see-through in places, where every one had been opaque. The
+     widening found nothing wrong with stand-ins, and that is now worth
+     something: drawing a masked copy's original instead of its
+     stand-ins, or no longer isolating stand-ins that read the page,
+     failed **no** renderer test before this and fails three audits
+     after. One defect, found by the pages' new random stream:
+     - **A copy of a clone layer wearing a shadow cast none** (seed
+       1343). A copy draws what it copies, effects and all, but a copy
+       of a clone goes its own road — drawn where it stands, to have
+       something to lift — and that road drew the strokes alone. The GPU
+       drew the shadow, and disagreed. `clone_behind` now takes the
+       effects from whichever one layer on the way down wears them, and
+       a plain copy over an effected clone is drawn as effected
+       (`a_copy_of_a_clone_layer_casts_the_shadow_it_copies`).
+     The GPU draws 858 of the pages; every audit holds.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
