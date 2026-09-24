@@ -1305,18 +1305,31 @@ impl Effect {
     /// How far, in the space the effect is written in, it can reach beyond
     /// the layer's own bounds — what bounds and dirty regions must grow by.
     pub fn reach(&self) -> f32 {
+        // Three iterated box blurs reach about 3σ — but never less than
+        // three pixels once there is any blur at all, since each box is
+        // held at a radius of one however small σ is. Estimated from σ
+        // alone, a shadow blurred by a sixth of a pixel reached half a
+        // pixel on paper and three in fact, and a rectangle repainted
+        // beside it read a silhouette cut short (seed 172).
+        let blurred = |blur: f32| {
+            if blur.abs() > 0.01 {
+                (blur.abs() * 3.0).max(3.0)
+            } else {
+                0.0
+            }
+        };
         match self {
-            // Three iterated box blurs reach about 3σ; round up generously,
-            // then add the offset, which can point either way.
+            // Round up generously, then add the offset, which can point
+            // either way.
             Effect::DropShadow { dx, dy, blur, .. } => {
-                blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
+                blurred(*blur) + dx.abs().max(dy.abs()) + 2.0
             }
             Effect::Outline { width, .. } => width.abs() + 2.0,
             // An inner shadow stays inside the layer, but it still needs
             // the silhouette read from a ring outside it to know where the
             // edge is.
             Effect::InnerShadow { dx, dy, blur, .. } => {
-                blur.abs() * 3.0 + dx.abs().max(dy.abs()) + 2.0
+                blurred(*blur) + dx.abs().max(dy.abs()) + 2.0
             }
         }
     }

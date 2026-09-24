@@ -935,10 +935,17 @@ fn render_group(
             // wants the cut known that much further out as well. Already
             // in the space the drawing happens in, where `reach` is in the
             // layer's own and has to be scaled.
+            //
+            // And what is *inside* those layers wants the same, for the
+            // same reasons (`softening_within`, `effects_within`): a
+            // frame held to the ground was cut to the ground's alpha
+            // over the region alone, so a feathered mask on the text in
+            // it softened against the region's edge.
             let soft = children[i + 1..end]
                 .iter()
-                .filter_map(|&c| doc.node(c).ok())
-                .filter_map(|n| feathered_reach(n, parent))
+                .map(|&c| {
+                    softening_within(doc, c, parent, 0).max(effects_within(doc, c, parent, 0))
+                })
                 .fold(0.0f32, f32::max);
             (reach * max_scale(parent)).max(soft).ceil() as u32
         });
@@ -1130,6 +1137,88 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
     if let NodeKind::Instance { of, .. } = &node.kind {
         if let Some(back) = doc.node(*of).ok().and_then(|m| invert(m.transform)) {
             most = most.max(softening_within(doc, *of, inner.compose(back), depth + 1));
+        }
+    }
+    most
+}
+
+/// Draw a frame's contents straight onto the page, held to the frame.
+///
+/// A frame drawn where it stands cuts what it holds by the region it
+/// hands them, and that is almost enough: a layer inside with a feathered
+/// mask lays its softened edge a little past the region it is given — by
+/// its own feather, so a rectangle repainted has its soft edge to
+/// match — and inside a frame that is past the frame's edge. A group
+/// under a feathered brushed mask showed below a frame drawn in place,
+/// and not below the same frame on a surface of its own, where the cut is
+/// made afterwards. So what the contents laid outside `inside` is put
+/// back as it was.
+fn held_inside(
+    dst: &mut Surface,
+    inside: ClipRect,
+    doc: &Document,
+    frame: NodeId,
+    parent: Transform,
+    draw: impl FnOnce(&mut Surface) -> Result<(), DocError>,
+) -> Result<(), DocError> {
+    let spill = softening_within(doc, frame, parent, 0).ceil() as u32;
+    let ring = grow(inside, spill, dst.width, dst.height);
+    if ring == inside {
+        return draw(dst);
+    }
+    let kept = blur::snapshot(dst, ring);
+    draw(dst)?;
+    let stride = ring.x1 - ring.x0;
+    for y in ring.y0..ring.y1 {
+        for x in ring.x0..ring.x1 {
+            if x < inside.x0 || x >= inside.x1 || y < inside.y0 || y >= inside.y1 {
+                dst.pixels[(y * dst.width + x) as usize] =
+                    kept[at_in((ring.x0, ring.y0), stride, x, y)];
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How far the effects worn by the layers *inside* one reach past what
+/// wears them, on the page, when the layer is drawn in `space`: the room
+/// a surface those layers are drawn on needs around the region it lays
+/// down, for the same reason a feathered mask does (`softening_within`).
+/// A shadow is grown from its layer's whole silhouette, and a surface cut
+/// to the region being drawn cut the silhouette with it — so the shadow a
+/// layer inside a group cast back into a repainted rectangle came from
+/// less of the layer than the same shadow on the page drawn whole. A
+/// frame shows it without any rectangle: its box is its bounds, so its
+/// surface stopped at its own edge, and a layer inside it casting a
+/// shadow back in from beyond the edge lost that part of it.
+fn effects_within(doc: &Document, id: NodeId, space: Transform, depth: usize) -> f32 {
+    if depth >= chitrakar_doc::MAX_DEPTH {
+        return 0.0;
+    }
+    let Ok(node) = doc.node(id) else {
+        return 0.0;
+    };
+    let inner = space.compose(node.transform);
+    let worn = |n: &chitrakar_doc::Node, at: Transform| {
+        n.effects.iter().map(Effect::reach).fold(0.0f32, f32::max) * max_scale(at)
+    };
+    let mut most = 0.0f32;
+    for child in doc.children_of(id).unwrap_or_default() {
+        if let Ok(c) = doc.node(*child) {
+            most = most.max(worn(c, inner));
+        }
+        most = most.max(effects_within(doc, *child, inner, depth + 1));
+    }
+    // What a copy draws is another layer, its effects and what is inside
+    // it, in the space the copy undoes its placement into.
+    if let NodeKind::Instance { of, .. } = &node.kind {
+        if let Ok(master) = doc.node(*of) {
+            if let Some(back) = invert(master.transform) {
+                let there = inner.compose(back);
+                most =
+                    most.max(worn(master, there))
+                        .max(effects_within(doc, *of, there, depth + 1));
+            }
         }
     }
     most
@@ -1781,7 +1870,17 @@ fn draw_layer(
             .as_ref()
             .and_then(|m| feather_of(m, parent))
             .map_or(0.0, |sigma| blur::plane_reach(sigma) as f32 + 1.0);
-        let pad = ((reach * scale).max(softened).ceil() as u32).max(capture.unwrap_or(0));
+        // And the room what is *inside* the layer wants around the region
+        // — a feathered mask's neighbours, a shadow's silhouette — which
+        // a surface cut to the region being repainted took away: a
+        // blended frame holding text under a feathered mask repainted a
+        // rectangle with a seam along its top, where the page drawn
+        // whole had none. The extent below is grown by the same room;
+        // growing that alone let the region cut the surface instead.
+        let within =
+            softening_within(doc, child, parent, 0).max(effects_within(doc, child, parent, 0));
+        let pad =
+            ((reach * scale).max(softened).max(within).ceil() as u32).max(capture.unwrap_or(0));
         // The layer has to be drawn wherever it could feed a visible
         // effect pixel, which is further out than the region being
         // repainted — by exactly the effects' reach.
@@ -1813,10 +1912,9 @@ fn draw_layer(
         // taking the blends off, which sends the copy down a road that
         // leaves the room, changed what the page covered. Only the
         // surface grows; what comes down is still held to the region.
-        let reach = softening_within(doc, child, parent, 0);
         let extent = match extent {
-            Bounds::Rect(x0, y0, x1, y1) if reach > 0.0 => {
-                Bounds::Rect(x0 - reach, y0 - reach, x1 + reach, y1 + reach)
+            Bounds::Rect(x0, y0, x1, y1) if within > 0.0 => {
+                Bounds::Rect(x0 - within, y0 - within, x1 + within, y1 + within)
             }
             other => other,
         };
@@ -1999,7 +2097,8 @@ fn render_child(
                 // drawn whole, along whichever edge the copy ran past.
                 let soften = feathered_reach(node, parent)
                     .unwrap_or(0.0)
-                    .max(softening_within(doc, *of, space, 0));
+                    .max(softening_within(doc, *of, space, 0))
+                    .max(effects_within(doc, child, parent, 0));
                 // The *extent* is grown by the layer's own softening only:
                 // what is inside cannot make the layer land further out
                 // than it does, and growing the extent for it drew the
@@ -2305,7 +2404,9 @@ fn render_child(
                     if let Some(color) = ground {
                         fill_region(dst, inside, color, blend);
                     }
-                    return render_group(doc, child, dst, inside, t, bare);
+                    return held_inside(dst, inside, doc, child, parent, |dst| {
+                        render_group(doc, child, dst, inside, t, bare)
+                    });
                 }
                 // Upright and faded or masked, but brought down by Normal,
                 // holding something that works on what is under it — an
@@ -2338,38 +2439,70 @@ fn render_child(
                     if inside.is_empty() {
                         return Ok(());
                     }
+                    // Its mask worked out over the region first. A layer
+                    // that holds others gets no plane on the way in —
+                    // it is usually drawn on a surface of its own and
+                    // works its mask out there — and a feathered or
+                    // brushed mask read with none lets everything
+                    // through: a frame masked away entirely showed its
+                    // whole ground the moment what it held read the page.
+                    let plane = MaskRef::plane_over(
+                        Some(doc),
+                        node.mask.as_ref(),
+                        parent,
+                        inside,
+                        (dst.width, dst.height),
+                    );
+                    let mask = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
                     let before = blur::snapshot(dst, inside);
                     let corner = (inside.x0, inside.y0);
                     let stride = inside.x1 - inside.x0;
+                    // Drawn over the room what is inside wants around the
+                    // region — a feathered mask's neighbours, a shadow's
+                    // silhouette — as on any surface a frame's contents
+                    // are drawn on; only the region is read back.
                     let alone = if blend == BlendMode::Normal {
                         None
                     } else {
+                        let room = effects_within(doc, child, parent, 0)
+                            .max(softening_within(doc, child, parent, 0))
+                            .ceil() as u32;
+                        let area = grow(inside, room, dst.width, dst.height);
                         let inner = ClipRect {
                             x0: 0,
                             y0: 0,
-                            x1: stride,
-                            y1: inside.y1 - inside.y0,
+                            x1: area.x1 - area.x0,
+                            y1: area.y1 - area.y0,
                         };
                         let mut sub = Surface::new(inner.x1, inner.y1);
+                        let window = Transform::translation(-(area.x0 as f32), -(area.y0 as f32));
                         if let Some(color) = ground {
-                            fill_region(&mut sub, inner, color, BlendMode::Normal);
+                            let under = shift_clip(area.intersect(board), (area.x0, area.y0));
+                            fill_region(&mut sub, under, color, BlendMode::Normal);
                         }
-                        let window = Transform::translation(-(corner.0 as f32), -(corner.1 as f32));
-                        render_group(doc, child, &mut sub, inner, window.compose(t), bare)?;
-                        Some(sub)
+                        // Over the region the frame is drawn in place over,
+                        // not the whole room: the room is for what reads
+                        // past it, and a pixelate averages its blocks over
+                        // what is drawn, so drawing more changed the blocks
+                        // at the edge between the two passes.
+                        let drawn = shift_clip(inside, (area.x0, area.y0));
+                        render_group(doc, child, &mut sub, drawn, window.compose(t), bare)?;
+                        Some((sub, (area.x0, area.y0)))
                     };
                     if let Some(color) = ground {
                         fill_region(dst, inside, color, BlendMode::Normal);
                     }
-                    render_group(doc, child, dst, inside, t, bare)?;
+                    held_inside(dst, inside, doc, child, parent, |dst| {
+                        render_group(doc, child, dst, inside, t, bare)
+                    })?;
                     for y in inside.y0..inside.y1 {
                         for x in inside.x0..inside.x1 {
                             let a = coverage_at(doc, mask, x, y) * node.opacity;
                             let i = (y * dst.width + x) as usize;
                             let under = before[at_in(corner, stride, x, y)];
                             let mut drawn = dst.pixels[i];
-                            if let Some(sub) = &alone {
-                                let paint = sub.pixels[at_in(corner, stride, x, y)];
+                            if let Some((sub, origin)) = &alone {
+                                let paint = sub.pixels[at_in(*origin, sub.width, x, y)];
                                 let laid = blend_pixel(paint, under, BlendMode::Normal);
                                 let met = blend_pixel(paint, under, blend);
                                 let alpha = drawn.a;
@@ -2391,13 +2524,24 @@ fn render_child(
                 // much of each pixel it covers, so its edge is as smooth
                 // as any other edge in the picture; upright, to the whole
                 // pixels it rounds to above.
-                let sub_clip = match frame.to_clip(dst.width, dst.height) {
+                let lay = match frame.to_clip(dst.width, dst.height) {
                     Some(b) => b.intersect(clip),
                     None => return Ok(()),
                 };
-                if sub_clip.is_empty() {
+                if lay.is_empty() {
                     return Ok(());
                 }
+                // Drawn over more than it lays down: a layer inside
+                // casting a shadow back in from past the frame's edge
+                // needs its silhouette out there (`effects_within`), and
+                // a feathered mask inside needs neighbours to soften
+                // against past the region being repainted, as on a
+                // group's surface (`softening_within`). Everything past
+                // the edge is cut below, and only the region is laid.
+                let room = effects_within(doc, child, parent, 0)
+                    .max(softening_within(doc, child, parent, 0))
+                    .ceil() as u32;
+                let sub_clip = grow(lay, room, dst.width, dst.height);
                 let (ox, oy) = (sub_clip.x0, sub_clip.y0);
                 let window = Transform::translation(-(ox as f32), -(oy as f32));
                 let inner = ClipRect {
@@ -2414,7 +2558,17 @@ fn render_child(
                     // shape painted here would give it a second one.
                     fill_region(&mut sub, inner, color, BlendMode::Normal);
                 }
-                render_group(doc, child, &mut sub, inner, shifted, bare)?;
+                // Over what is laid down; the room around it is for what
+                // reads past it, not for more of the contents to be drawn
+                // (a pixelate averages its blocks over what is drawn).
+                render_group(
+                    doc,
+                    child,
+                    &mut sub,
+                    shift_clip(lay, (ox, oy)),
+                    shifted,
+                    bare,
+                )?;
                 // An upright frame is cut to the same whole pixels here as
                 // on the plain road above. It was cut by how much of each
                 // pixel it covers — the turned frame's treatment — so a
@@ -2457,7 +2611,7 @@ fn render_child(
                         MaskRef::new(node.mask.as_ref(), shifted_parent).with_plane(plane.as_ref());
                     apply_mask(doc, m, &mut sub, inner);
                 }
-                composite_from(dst, &sub, (ox, oy), node.opacity, blend, sub_clip);
+                composite_from(dst, &sub, (ox, oy), node.opacity, blend, lay);
             }
             NodeKind::Group => {
                 // Isolate the group on its own surface so group opacity,
@@ -2484,7 +2638,8 @@ fn render_child(
                 // same reason a copy wants what it copies: the children
                 // are drawn onto this surface, and it is cut to the region
                 // being painted.
-                let soften = softening_within(doc, child, parent, 0);
+                let soften = softening_within(doc, child, parent, 0)
+                    .max(effects_within(doc, child, parent, 0));
                 // The *extent* is grown by the layer's own softening only:
                 // what is inside cannot make the layer land further out
                 // than it does, and growing the extent for it drew the
@@ -11583,6 +11738,198 @@ mod tests {
     /// paints, and the frame is still drawn where it stands. Sent to a
     /// surface for its effects, a frame's adjustment had nothing to work
     /// on, so a drop shadow at no opacity took the whole of it away.
+    /// A page, a frame on it and something in the frame, for the three
+    /// tests below. `dress` is handed the frame and what it holds.
+    fn framed(dress: &dyn Fn(&mut Document, NodeId, NodeId)) -> Surface {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("page", 40.0, 30.0, BLUE),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::artboard("frame", 20.0, 10.0, None)),
+        })
+        .unwrap();
+        let frame = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: frame,
+            transform: Transform::translation(10.0, 5.0),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: filled_rect("held", 10.0, 20.0, RED),
+        })
+        .unwrap();
+        let held = doc.children_of(frame).unwrap()[0];
+        dress(&mut doc, frame, held);
+        render(&doc).unwrap()
+    }
+
+    fn everywhere(feather: f32) -> Option<Box<Mask>> {
+        Some(Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 400.0,
+                    height: 400.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(-200.0, -200.0),
+            },
+            invert: false,
+            feather,
+        }))
+    }
+
+    /// A frame drawn where it stands keeps what it holds inside its edge.
+    ///
+    /// It cuts its contents by the region it hands them, and a layer with
+    /// a feathered mask lays its soft edge a little past the region it is
+    /// given. Inside a frame that is past the frame's edge: a group under
+    /// a feathered mask showed below a plain frame, and not below the
+    /// same frame faded, which is drawn on a surface and cut afterwards.
+    #[test]
+    fn a_frame_drawn_in_place_keeps_a_soft_edged_layer_inside_it() {
+        let page = framed(&|_, _, _| {});
+        let soft = framed(&|doc, frame, held| {
+            // The red rectangle, in a group with a feathered mask that
+            // hides nothing, running off the frame's bottom edge.
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 1,
+                node: Box::new(Node::group("soft")),
+            })
+            .unwrap();
+            let group = doc.children_of(frame).unwrap()[1];
+            doc.apply(Command::MoveNode {
+                id: held,
+                parent: group,
+                index: 0,
+            })
+            .unwrap();
+            doc.apply(Command::SetMask {
+                id: group,
+                mask: everywhere(2.0),
+            })
+            .unwrap();
+        });
+        assert!(soft.get(15, 10).r > 0.5, "inside the frame it shows");
+        let (p, s) = (page.get(15, 16), soft.get(15, 16));
+        assert!(
+            (p.r - s.r).abs() < 1e-4 && (p.b - s.b).abs() < 1e-4,
+            "a pixel below the frame is the page ({s:?} against {p:?})"
+        );
+    }
+
+    /// A frame masked away shows nothing, whatever it holds.
+    ///
+    /// Holding something that reads the page, it is drawn where it stands
+    /// and mixed back by its mask — and a layer holding others is given
+    /// no worked-out mask on the way in, since it usually works its mask
+    /// out on a surface of its own. A feathered mask read with none lets
+    /// everything through, so a frame masked away entirely showed whole
+    /// the moment one of its layers took a blend.
+    #[test]
+    fn a_frame_masked_away_hides_a_layer_that_reads_the_page() {
+        let page = framed(&|doc, _, held| {
+            doc.apply(Command::SetVisible {
+                id: held,
+                visible: false,
+            })
+            .unwrap();
+        });
+        let hidden = framed(&|doc, frame, held| {
+            doc.apply(Command::SetBlendMode {
+                id: held,
+                blend: BlendMode::Multiply,
+            })
+            .unwrap();
+            doc.apply(Command::SetMask {
+                id: frame,
+                mask: Some(Box::new(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 3.0, ry: 3.0 },
+                        transform: Transform::translation(-100.0, -100.0),
+                    },
+                    invert: false,
+                    feather: 1.0,
+                })),
+            })
+            .unwrap();
+        });
+        let (p, h) = (page.get(15, 10), hidden.get(15, 10));
+        assert!(
+            (p.b - h.b).abs() < 1e-4 && (p.r - h.r).abs() < 1e-4,
+            "the frame is hidden ({h:?} against {p:?})"
+        );
+    }
+
+    /// A shadow cast into a frame from past its edge is the same shadow
+    /// however the frame is composited.
+    ///
+    /// A frame's bounds are its box, so a surface of its own stopped at
+    /// its own edge, and the part of a layer out beyond the edge was not
+    /// there to cast the part of its shadow that falls back inside.
+    #[test]
+    fn a_shadow_cast_into_a_frame_from_past_its_edge_is_whole_when_faded() {
+        let shadowed = |fade: f32| {
+            framed(&|doc, frame, held| {
+                // Mostly left of the frame's edge, casting to the right.
+                doc.apply(Command::SetTransform {
+                    id: held,
+                    transform: Transform::translation(-8.0, 0.0),
+                })
+                .unwrap();
+                doc.apply(Command::SetEffects {
+                    id: held,
+                    effects: vec![Effect::DropShadow {
+                        dx: 6.0,
+                        dy: 0.0,
+                        blur: 0.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 1.0,
+                    }],
+                })
+                .unwrap();
+                doc.apply(Command::SetOpacity {
+                    id: frame,
+                    opacity: fade,
+                })
+                .unwrap();
+            })
+        };
+        let page = framed(&|doc, _, held| {
+            doc.apply(Command::SetVisible {
+                id: held,
+                visible: false,
+            })
+            .unwrap();
+        });
+        let whole = shadowed(1.0);
+        // Just right of the red, which ends at x 12: shadow cast from
+        // the part of the red left of the frame's edge at x 10, and from
+        // nothing inside it.
+        assert!(whole.get(13, 10).b < 0.05, "the shadow falls there");
+        let faded = shadowed(0.5);
+        let want = (page.get(13, 10).b + whole.get(13, 10).b) / 2.0;
+        assert!(
+            (faded.get(13, 10).b - want).abs() < 1e-3,
+            "faded, it is half of it ({:?}, wanting blue {want})",
+            faded.get(13, 10)
+        );
+    }
+
     #[test]
     fn a_frame_holding_an_adjustment_works_on_the_page_under_an_effect() {
         let build = |shadow: Option<f32>| {
@@ -20657,11 +21004,19 @@ mod tests {
     /// what a dirty region *is*, so it needs no second renderer to check
     /// it against, and it is asked of pages nobody wrote.
     ///
-    /// Two kinds of page are left out, and for the same reason both ways:
-    /// what is in them reads *outside* the rectangle, so the engine grows
-    /// the region or abandons it rather than repainting exactly this
-    /// much. An adjustment, a filter and a clone layer read what is under
-    /// them; an effect reads past its layer's own silhouette.
+    /// One kind of page is left out: what is in it reads what is *under*
+    /// it outside the rectangle, so the engine grows the region or
+    /// abandons it rather than repainting exactly this much. An
+    /// adjustment, a filter and a clone layer do that.
+    ///
+    /// Pages with an effect on them used to be left out too, on the same
+    /// argument, and the argument was wrong: the engine grows the region
+    /// for the layer that *changed*, and any other layer wearing a shadow
+    /// can still straddle the rectangle's edge. Asked of them, three
+    /// things failed — surfaces cut to the rectangle under a shadow's
+    /// silhouette, inside a frame, a group or a copy, and a shadow
+    /// blurred by a sixth of a pixel reaching three where its reach
+    /// said half of one (seed 172).
     ///
     /// Nothing else is left out. A **clipped** layer carrying a
     /// **feathered** mask was the last thing that failed it, and it is the
@@ -20678,11 +21033,10 @@ mod tests {
         for seed in 0..SEEDS {
             let doc = chitrakar_doc::fixture::page(seed);
             let reaches_out = doc.nodes().any(|(_, n)| {
-                !n.effects.is_empty()
-                    || matches!(
-                        n.kind,
-                        NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
-                    )
+                matches!(
+                    n.kind,
+                    NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
+                )
             });
             if reaches_out {
                 continue;

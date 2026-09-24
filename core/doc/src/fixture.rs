@@ -2473,6 +2473,18 @@ impl Rng {
     /// Something for a group or a frame to hold: one or two layers,
     /// placed inside it.
     fn hold(&mut self, doc: &mut Document, id: NodeId) {
+        self.hold_at(doc, id, 0)
+    }
+
+    /// The same, for a group `depth` groups down.
+    ///
+    /// What is held is dressed as a layer on the page is — masked,
+    /// faded, blended, turned, given an effect, held to the one below it
+    /// — two groups deep. It used to be placed and nothing else, so no
+    /// layer inside a group or a frame on these pages had ever worn any
+    /// of that, and a group is where isolation decides what a blend or
+    /// an adjustment sees.
+    fn hold_at(&mut self, doc: &mut Document, id: NodeId, depth: u32) {
         for k in 0..1 + self.upto(2) {
             let child = self.node(doc, &[], 90 + k as usize);
             doc.apply(Command::AddNode {
@@ -2482,7 +2494,19 @@ impl Rng {
             })
             .unwrap();
             let cid = doc.children_of(id).unwrap()[k as usize];
-            let ct = Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
+            let mut ct = Transform::translation(self.between(0.0, 16.0), self.between(0.0, 12.0));
+            if depth < 2 && self.chance(2) {
+                let siblings = doc.children_of(id).unwrap()[..=k as usize].to_vec();
+                self.dress_at(doc, cid, &siblings, depth + 1);
+                // Kept the turn and scale it was given, placed as a
+                // held layer is rather than across the whole page.
+                let t = doc.node(cid).unwrap().transform;
+                ct = Transform {
+                    e: ct.e,
+                    f: ct.f,
+                    ..t
+                };
+            }
             doc.apply(Command::SetTransform {
                 id: cid,
                 transform: ct,
@@ -2495,6 +2519,11 @@ impl Rng {
     /// it composites, and now and then a mask, a clip, a child or an
     /// effect.
     fn dress(&mut self, doc: &mut Document, id: NodeId, made: &[NodeId]) {
+        self.dress_at(doc, id, made, 0)
+    }
+
+    /// The same, `depth` groups down.
+    fn dress_at(&mut self, doc: &mut Document, id: NodeId, made: &[NodeId], depth: u32) {
         let (e, f) = (self.between(-4.0, 34.0), self.between(-4.0, 26.0));
         // Every layer on these pages used to be *placed* and never
         // turned: a translation, and the two scales left at one. So a
@@ -2651,7 +2680,7 @@ impl Rng {
             .map(|n| matches!(n.kind, NodeKind::Group | NodeKind::Artboard { .. }))
             .unwrap_or(false)
         {
-            self.hold(doc, id);
+            self.hold_at(doc, id, depth);
         }
         // A copy that differs from what it follows. Every copy on these
         // pages drew its original entire, so a layer of the copy's own

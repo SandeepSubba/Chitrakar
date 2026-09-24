@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~528),
+- **Verify before committing:** `cargo test --workspace` (~531),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4242,6 +4242,46 @@ without reading anything else.*
        a plain copy over an effected clone is drawn as effected
        (`a_copy_of_a_clone_layer_casts_the_shadow_it_copies`).
      The GPU draws 858 of the pages; every audit holds.
+     **And what groups and frames hold, dressed.** A layer inside a
+     group or a frame had only ever been placed: no mask, fade, blend,
+     turn, effect or clip on any of them, two levels deep, which is where
+     isolation decides what a blend or an adjustment sees. Half of them
+     are dressed now like a layer on the page. And the repaint audit asks
+     pages with effects too — they were left out on the argument that the
+     engine grows the region, but it grows it for the layer that changed,
+     and a layer wearing a shadow elsewhere can straddle its edge (382
+     pages compared now, from about 300). Six defects:
+     - **A frame drawn in place let a soft-edged layer out past its
+       edge** (seed 1093): a group under a feathered mask lays its soft
+       edge a little past the region it is given, and in place that
+       region is the frame's. What the contents lay outside is put back
+       (`held_inside`; `a_frame_drawn_in_place_keeps_a_soft_edged_layer_inside_it`).
+     - **A frame masked away showed whole once a layer in it took a
+       blend** (seed 361): the in-place road read a feathered or brushed
+       mask with no plane worked out, which lets everything through —
+       a defect of the road added last chunk
+       (`a_frame_masked_away_hides_a_layer_that_reads_the_page`).
+     - **A shadow cast into a frame from past its edge was cut short**
+       on the frame's own surface, whose bounds are its box
+       (`a_shadow_cast_into_a_frame_from_past_its_edge_is_whole_when_faded`).
+     - **Surfaces cut to a repainted rectangle cut a shadow's silhouette
+       or a feathered mask's neighbours**: the generic effects road grew
+       its extent by what is inside but not its pad around the region;
+       a layer held to another asked the base's alpha only as far as its
+       own feather reached; the group and copy arms knew softening but
+       not shadows (seeds 980, 24). `effects_within` beside
+       `softening_within`, used wherever a surface is sized.
+     - **A blended frame's side surface drew more than the frame**, so a
+       pixelate inside averaged its edge blocks over more (seed 51): it
+       is drawn over the frame's region, with the room only around it.
+     - **A shadow blurred by a sixth of a pixel reached three pixels
+       where `Effect::reach` said half of one** (seed 172): each box of
+       the blur is held at a radius of one.
+     The GPU draws 858 of the pages; every audit holds. Taken out
+     again one at a time, every one of these fails an audit or its own
+     test, bar one: drawing a turned frame's contents over the laid
+     region only, which keeps what a pixelate there averages exactly
+     what it was before the surface grew.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
