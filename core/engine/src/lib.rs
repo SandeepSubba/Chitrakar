@@ -3739,6 +3739,35 @@ impl Session {
                 effects: Vec::new(),
             })?;
         }
+        // A clone layer has no picture of its own either: drawn alone it
+        // lifts from nothing and lays nothing, and "that layer covers
+        // nothing" was the answer about every one. What it *occupies* is
+        // its strokes — the same geometry a click on the canvas reads to
+        // pick it — so for this question each clone the layer is, copies
+        // or holds is drawn as a brush laying those strokes in solid paint.
+        let mut clones = Vec::new();
+        clones_within(&self.doc, id, &mut clones, 0);
+        for clone in clones {
+            if let NodeKind::Clone { strokes } = &self.doc.node(clone)?.kind {
+                let solid = strokes
+                    .iter()
+                    .map(|s| chitrakar_doc::PaintStroke {
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                        erase: false,
+                        ..s.clone()
+                    })
+                    .collect();
+                alone.apply(Command::SetKind {
+                    id: clone,
+                    kind: Box::new(NodeKind::Paint { strokes: solid }),
+                })?;
+            }
+        }
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
         // An adjustment and a filter have no picture of their own: they
         // rewrite what is under them, and what they cover is what their
@@ -6436,6 +6465,25 @@ pub struct LayerInfo {
     pub parent: u64,
     pub index: usize,
     pub sibling_count: usize,
+}
+
+/// Every clone layer `id` is, copies or holds, down through groups and
+/// copies alike.
+fn clones_within(doc: &Document, id: NodeId, out: &mut Vec<NodeId>, depth: usize) {
+    if depth >= chitrakar_doc::MAX_DEPTH {
+        return;
+    }
+    let Ok(node) = doc.node(id) else {
+        return;
+    };
+    match &node.kind {
+        NodeKind::Clone { .. } => out.push(id),
+        NodeKind::Instance { of, .. } => clones_within(doc, *of, out, depth + 1),
+        _ => {}
+    }
+    for child in doc.children_of(id).unwrap_or_default() {
+        clones_within(doc, *child, out, depth + 1);
+    }
 }
 
 #[cfg(test)]
@@ -14798,6 +14846,82 @@ mod tests {
         assert!(
             near(through, [20.0, 20.0, 50.0, 40.0]),
             "masked, it covers what the mask lets through: {through:?}"
+        );
+
+        // A clone layer has no picture of its own, and this one lifts
+        // from bare page, so what it lays is nothing at all. What it
+        // occupies is its strokes, which is what a click on the canvas
+        // picks it by — and what used to come back as "covers nothing".
+        // A copy of it occupies the same shape where the copy stands.
+        session
+            .apply(Command::SetMask {
+                id: lift,
+                mask: None,
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: lift,
+                visible: false,
+            })
+            .unwrap();
+        let root = session.document().root();
+        let at = session.document().children_of(root).unwrap().len();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: Box::new(Node::clone_layer("retouch")),
+            })
+            .unwrap();
+        let clone = session.document().children_of(root).unwrap()[at];
+        session
+            .apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                on_mask: false,
+                stroke: Box::new(chitrakar_doc::PaintStroke {
+                    points: vec![[60.0, 30.0]],
+                    radii: vec![8.0],
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    softness: 0.0,
+                    erase: false,
+                    source: [-40.0, 0.0],
+                    heal: false,
+                    clip: None,
+                }),
+            })
+            .unwrap();
+        session.pick_from_layer(clone, "replace").unwrap();
+        let dab = session.selection_bounds().unwrap();
+        assert!(
+            near(dab, [52.0, 22.0, 68.0, 38.0]),
+            "a clone layer covers its strokes: {dab:?}"
+        );
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: at + 1,
+                node: Box::new(Node::instance("again", clone)),
+            })
+            .unwrap();
+        let again = session.document().children_of(root).unwrap()[at + 1];
+        session
+            .apply(Command::SetTransform {
+                id: again,
+                transform: Transform::translation(-30.0, 10.0),
+            })
+            .unwrap();
+        session.pick_from_layer(again, "replace").unwrap();
+        let moved = session.selection_bounds().unwrap();
+        assert!(
+            near(moved, [22.0, 32.0, 38.0, 48.0]),
+            "and a copy of it the same shape where it stands: {moved:?}"
         );
 
         // A layer covering nothing on the page says so rather than

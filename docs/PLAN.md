@@ -4079,9 +4079,10 @@ without reading anything else.*
        left showing, ancestors left dressed, later layers left showing,
        the page's space taken for the group's — each fail it, and the
        last two passed until the layer above and the larger offset went
-       in. Only a clone under a *frame* above its group keeps the plain
-       answer: the frame would paint its ground into what was drawn
-       aside. And SVG, which wrote a clone layer as a comment saying it
+       in. A *frame* above the group is made plain the same way, drawn
+       aside without its ground — which is behind the group rather than
+       in it, so the page's clone never lifts it — and a frame case with
+       a green ground fails the test when the ground is left in. And SVG, which wrote a clone layer as a comment saying it
        had no equivalent, now carries what it lays as an image the way it
        carries a brush layer's paint (`clone_pixels`, the same drawing
        aside, bare so the SVG wrapper's own opacity, mask and blend are
@@ -4090,7 +4091,19 @@ without reading anything else.*
        placed through a transform of its own
        (`a_clone_layer_travels_as_what_it_lays`). A *copy* of a clone
        keeps the comment: the original's markup again would carry what
-       the original lifted to the copy's place.
+       the original lifted to the copy's place. The last of these roads
+       was **picking out what a layer covers** (`pick_from_layer`, and the
+       subject picker that asks the same question first): it draws the
+       layer alone and traces what it covers, and a clone alone covers
+       nothing, so every one answered "that layer covers nothing on the
+       page". What a layer *occupies* is asked, not the picture it makes,
+       and a clone occupies its strokes — the geometry a click on the
+       canvas already picks it by — so for that question each clone the
+       layer is, copies or holds is drawn as a brush laying the same
+       strokes in solid paint. Asked of a clone lifting from bare page,
+       which lays nothing visible at all, and of a copy of it moved
+       elsewhere (`a_layer_says_what_it_covers`); taking the conversion
+       out, or not following copies, brings the old error back.
      Two came from the reshuffle and are older than the clones:
      - **A surface cut before it was grown** (seed 259): a copy — and,
        the same code again, a group — is given room for the feathered

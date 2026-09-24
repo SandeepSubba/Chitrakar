@@ -1136,9 +1136,9 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
 /// aside as the document with the group's ancestors made plain (no fade,
 /// blend, mask, effect or hold), everything off the path down to the
 /// group hidden, and the group's own layers from the clone on hidden too.
-/// A frame above the group would paint its ground into that, which is not
-/// the group's, so there `false` says so and the caller draws the clone
-/// the plain way. `space` is the one the clone's parent is drawn in.
+/// A frame above the group is drawn aside without its ground, which is the
+/// frame's and not the group's. `space` is the one the clone's parent is
+/// drawn in.
 fn clone_alone(
     doc: &Document,
     id: NodeId,
@@ -1158,9 +1158,7 @@ fn clone_alone(
     let mut at = group;
     while at != root {
         let a = doc.node(at)?;
-        let lifts_within = matches!(a.kind, NodeKind::Group)
-            || (at == group && matches!(a.kind, NodeKind::Artboard { .. }));
-        if !lifts_within {
+        if !matches!(a.kind, NodeKind::Group | NodeKind::Artboard { .. }) {
             return Ok(false);
         }
         path.push(at);
@@ -1194,6 +1192,29 @@ fn clone_alone(
             },
         ] {
             below.apply(c)?;
+        }
+        // A frame above the group cuts it to its box, which stays, and
+        // paints a ground behind it, which is the frame's and not the
+        // group's: drawn aside without one. The group's own ground, where
+        // it is a frame itself, is under the clone and stays.
+        if a != group {
+            if let NodeKind::Artboard {
+                width,
+                height,
+                export_scale,
+                ..
+            } = doc.node(a)?.kind.clone()
+            {
+                below.apply(chitrakar_doc::Command::SetKind {
+                    id: a,
+                    kind: Box::new(NodeKind::Artboard {
+                        width,
+                        height,
+                        background: None,
+                        export_scale,
+                    }),
+                })?;
+            }
         }
         let over = *path.get(i + 1).unwrap_or(&root);
         for sibling in doc.children_of(over)?.to_vec() {
@@ -11540,6 +11561,62 @@ mod tests {
             .filter(|p| p[3] > 250 && p[0] > 200 && p[1] < 60)
             .count();
         assert!(inked > 50, "and its thumbnail ({inked} red pixels)");
+
+        // And the group inside a frame with a ground of its own. The
+        // frame cuts the group to its box, which is the whole page here,
+        // and paints green behind it — behind the group, not inside it,
+        // so the clone does not lift it on the page and must not alone.
+        let frame = {
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::artboard(
+                    "frame",
+                    60.0,
+                    40.0,
+                    Some(AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.8,
+                        b: 0.2,
+                        a: 1.0,
+                    }),
+                )),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[1]
+        };
+        doc.apply(Command::MoveNode {
+            id: group,
+            parent: frame,
+            index: 0,
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let mut alone = Surface::new(60, 40);
+        render_showing_at(
+            &doc,
+            &mut alone,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 60,
+                y1: 40,
+            },
+            Transform::default(),
+            Showing::Alone(clone),
+        )
+        .unwrap();
+        let laid = alone.get(50, 23).to_srgb8();
+        assert!(
+            laid[3] > 250 && page.get(50, 23).to_srgb8()[..3] == laid[..3],
+            "under a frame, alone, it shows what the page has there ({laid:?})"
+        );
+        assert!(
+            alone.get(38, 7).a < 1e-4,
+            "and none of the frame's ground ({:?})",
+            alone.get(38, 7)
+        );
     }
 
     /// A stroke that runs over what it is reading takes what was there
