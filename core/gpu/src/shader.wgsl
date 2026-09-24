@@ -383,7 +383,16 @@ fn fs_text(in: CoverOut) -> @location(0) vec4f {
     let size = vec2f(textureDimensions(image));
     let cov = textureSampleLevel(image, image_sampler, (in.uv + vec2f(1.0, 1.0)) / size, 0.0).r;
     let inked = in.uv.x >= 0.0 && in.uv.y >= 0.0;
-    return in.color * select(0.0, cov, inked) * mask_cover(in.page, in.mask);
+    // A block set in more than one colour carries them on the backdrop's
+    // slot, which text never reads: the colour of the texel the pixel
+    // falls in, not a mix of its neighbours, and the quad's colour is then
+    // only the layer's opacity.
+    var color = in.color;
+    if in.grad.x > 0.5 {
+        let at = clamp(vec2i(floor(in.uv)) + vec2i(1, 1), vec2i(0), vec2i(size) - vec2i(1));
+        color = textureLoad(backdrop, at, 0) * in.color.a;
+    }
+    return color * select(0.0, cov, inked) * mask_cover(in.page, in.mask);
 }
 
 // Where a point of the shape's normalized box sits along its gradient:

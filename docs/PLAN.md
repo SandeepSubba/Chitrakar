@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~519),
+- **Verify before committing:** `cargo test --workspace` (~527),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4182,6 +4182,41 @@ without reading anything else.*
        that way too (`a_dashed_rectangle_and_ellipse_are_dashed_here_too`,
        read as stroke and gap on both renderers).
      The GPU drew 1478 of the pages after; every other audit held.
+     **And frames that hold things, text set every way, brushes that
+     erase.** Frames here had been empty or absent; now a page can hold
+     one, with or without a ground, and frames get children as groups
+     do. Text had been one plain line; now it is underlined, struck,
+     aligned, spaced, set in a width, given a run in its own colour and
+     set along a curve. A brush layer can carry a second stroke that
+     erases or is held to a region. Seven defects, three the reference's:
+     - **An upright frame's edge moved when it was faded, blended or
+       masked** (seed 3): plain, it is cut to whole pixels; on a surface
+       it was cut by coverage, the turned frame's treatment, so a frame
+       at half a pixel lost half its last row under a mask that hides
+       nothing (`an_upright_frame_keeps_its_edge_however_it_is_composited`).
+     - **A faded or masked frame took away what an adjustment inside it
+       did** (seed 152): a plain upright frame is only a narrower region
+       to paint in, so its contents see the page; on a surface they saw
+       nothing. It is drawn in place and mixed back by mask and opacity
+       (`a_frame_holding_an_adjustment_works_on_the_page_however_it_is_faded`).
+     - **Blended, copied or given an effect, the same frame lost the
+       page again** (seeds 4 and 51): a turned frame holding a heal,
+       copied upright, lifted the page at Normal and nothing at Hard
+       Light; a masked copy and an invisible shadow did the same. The
+       blend now meets what the frame *paints* (from a surface of its
+       own) and what its contents made of the page is added as it was;
+       effects grow from that painted silhouette
+       (`…_blended_or_copied`, `…_under_an_effect`).
+     - The GPU drew a text run in its own colour in the block's
+       (seed 112): a tinted block now carries an ink texture.
+     - The GPU faded a leaf's fill and stroke once for both, where the
+       reference fades each as it paints (seed 611).
+     - The GPU put a clipped stroke's region, a mask and an effect in one
+       texture slot (seed 1195), and drew a masked copy of an effected,
+       blended layer and an effect held to a brush layer its own way
+       (seeds 1104, 223): the first is kept apart, the other two go back.
+     The GPU draws 980 of the 2000 pages now, fewer because frames that
+     hold things and text along a curve go back; every audit holds.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

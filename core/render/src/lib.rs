@@ -1060,6 +1060,19 @@ pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
     false
 }
 
+/// Whether a frame is drawn where it stands whatever it is composited
+/// by: upright where it lands, and holding something that works on what
+/// is under it, which on a surface of its own would have nothing to work
+/// on. See the frame's arm in `render_child`.
+fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<bool, DocError> {
+    let node = doc.node(id)?;
+    if !matches!(node.kind, NodeKind::Artboard { .. }) {
+        return Ok(false);
+    }
+    let t = parent.compose(node.transform);
+    Ok(t.b.abs() < 1e-6 && t.c.abs() < 1e-6 && reads_backdrop(doc, id)?)
+}
+
 pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
@@ -1551,9 +1564,13 @@ fn draw_layer(
         // paints with what is under it, so a surface of its own leaves it
         // nothing to paint with, and it takes its blend stroke by stroke
         // where it stands, as the clone does (`render_child`).
+        // An upright frame holding something that works on the page is
+        // the third: it takes its blend where it stands (`render_child`),
+        // since on a surface what is inside it would lose the page.
         let blended = node.blend != BlendMode::Normal
             && !rewrites_what_is_under_it(doc, child)
-            && !copies_a_clone(doc, child);
+            && !copies_a_clone(doc, child)
+            && !frame_in_place(doc, child, parent)?;
         // Clipping needs the layer as a picture before it goes down —
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
@@ -1846,14 +1863,23 @@ fn draw_layer(
                 node.opacity,
             );
         }
-        composite_from(
-            dst,
-            &layer,
-            origin,
-            1.0,
-            node.blend,
-            clip.intersect(layer_clip),
-        );
+        // An upright frame holding something that works on the page is
+        // drawn where it stands, effects or not: its surface above gave
+        // the effects a silhouette — what it paints — but laid down from
+        // there, what is inside it had no page, and a shadow at no
+        // opacity at all took a clone's whole lift away.
+        if cover.is_none() && frame_in_place(doc, child, parent)? {
+            render_child(doc, child, dst, clip, parent, node.blend, bare)?;
+        } else {
+            composite_from(
+                dst,
+                &layer,
+                origin,
+                1.0,
+                node.blend,
+                clip.intersect(layer_clip),
+            );
+        }
         for effect in node.effects.iter().filter(|e| e.over()) {
             draw_effect(
                 dst,
@@ -2101,7 +2127,13 @@ fn render_child(
                         .node(*of)
                         .map(|m| m.blend != BlendMode::Normal && !m.effects.is_empty())
                         .unwrap_or(false);
-                if spends_an_effected_blend {
+                // A copy of a frame that is drawn where it stands, for the
+                // same reason: on a surface what is inside it has no page.
+                let lays_a_frame_in_place = node.blend == BlendMode::Normal
+                    && stand_ins.is_empty()
+                    && (node.mask.is_some() || node.opacity < 1.0)
+                    && frame_in_place(doc, *of, space)?;
+                if spends_an_effected_blend || lays_a_frame_in_place {
                     let plane = MaskRef::plane_over(
                         Some(doc),
                         node.mask.as_ref(),
@@ -2251,10 +2283,90 @@ fn render_child(
                     }
                     return render_group(doc, child, dst, inside, t, bare);
                 }
+                // Upright and faded or masked, but brought down by Normal,
+                // holding something that works on what is under it — an
+                // adjustment, a filter, a clone. On a surface of its own
+                // that would have nothing under it: a sharpen inside a
+                // frame sharpened the page below while the frame was
+                // plain, and nothing once it was given a mask that hides
+                // nothing. So it is drawn as the plain frame is and mixed
+                // back by its mask and opacity, which for contents that
+                // only lay paint down is exactly the frame composited as
+                // a whole — the fade of a picture laid over is the fade of
+                // what it adds — and for the rest is what fading it means.
+                //
+                // Wearing a blend as well, the frame still has to be drawn
+                // where it stands: sent to a surface for the blend, what is
+                // inside it lost the page — a clone in a frame set to Hard
+                // Light lifted nothing, and the same frame at Normal lifted
+                // the page, so taking a blend off changed what the page
+                // covered. So it is drawn in place as at Normal, and
+                // alongside on a surface of its own, where what it paints
+                // is all there is. What it paints is brought down by the
+                // blend; what drawing it in place did beyond that — what
+                // its contents made of the page — is added as it was, the
+                // way a blend means nothing to an adjustment. For a frame
+                // that only lays paint the second part is nothing and this
+                // is the frame composited whole; at Normal it is exactly
+                // the road above.
+                if upright && reads_backdrop(doc, child)? {
+                    let inside = board.intersect(clip);
+                    if inside.is_empty() {
+                        return Ok(());
+                    }
+                    let before = blur::snapshot(dst, inside);
+                    let corner = (inside.x0, inside.y0);
+                    let stride = inside.x1 - inside.x0;
+                    let alone = if blend == BlendMode::Normal {
+                        None
+                    } else {
+                        let inner = ClipRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: stride,
+                            y1: inside.y1 - inside.y0,
+                        };
+                        let mut sub = Surface::new(inner.x1, inner.y1);
+                        if let Some(color) = ground {
+                            fill_region(&mut sub, inner, color, BlendMode::Normal);
+                        }
+                        let window = Transform::translation(-(corner.0 as f32), -(corner.1 as f32));
+                        render_group(doc, child, &mut sub, inner, window.compose(t), bare)?;
+                        Some(sub)
+                    };
+                    if let Some(color) = ground {
+                        fill_region(dst, inside, color, BlendMode::Normal);
+                    }
+                    render_group(doc, child, dst, inside, t, bare)?;
+                    for y in inside.y0..inside.y1 {
+                        for x in inside.x0..inside.x1 {
+                            let a = coverage_at(doc, mask, x, y) * node.opacity;
+                            let i = (y * dst.width + x) as usize;
+                            let under = before[at_in(corner, stride, x, y)];
+                            let mut drawn = dst.pixels[i];
+                            if let Some(sub) = &alone {
+                                let paint = sub.pixels[at_in(corner, stride, x, y)];
+                                let laid = blend_pixel(paint, under, BlendMode::Normal);
+                                let met = blend_pixel(paint, under, blend);
+                                let alpha = drawn.a;
+                                let keep = |m: f32, d: f32, l: f32| (m + d - l).max(0.0);
+                                drawn = LinearRgba {
+                                    r: keep(met.r, drawn.r, laid.r),
+                                    g: keep(met.g, drawn.g, laid.g),
+                                    b: keep(met.b, drawn.b, laid.b),
+                                    a: alpha,
+                                };
+                            }
+                            dst.pixels[i] = lerp(under, drawn, a);
+                        }
+                    }
+                    return Ok(());
+                }
                 // Turned, or composited as a whole: the frame is drawn on
-                // a surface of its own and cut to shape by how much of
-                // each pixel it covers, so its edge is as smooth as any
-                // other edge in the picture.
+                // a surface of its own and cut to shape — turned, by how
+                // much of each pixel it covers, so its edge is as smooth
+                // as any other edge in the picture; upright, to the whole
+                // pixels it rounds to above.
                 let sub_clip = match frame.to_clip(dst.width, dst.height) {
                     Some(b) => b.intersect(clip),
                     None => return Ok(()),
@@ -2279,10 +2391,28 @@ fn render_child(
                     fill_region(&mut sub, inner, color, BlendMode::Normal);
                 }
                 render_group(doc, child, &mut sub, inner, shifted, bare)?;
+                // An upright frame is cut to the same whole pixels here as
+                // on the plain road above. It was cut by how much of each
+                // pixel it covers — the turned frame's treatment — so a
+                // frame at half a pixel lost half its last row the moment
+                // it was faded, blended or masked, even by a mask that
+                // hides nothing: fading a frame changed its edge.
+                let whole = |x: u32, y: u32| {
+                    let (px, py) = (x + ox, y + oy);
+                    if px >= board.x0 && px < board.x1 && py >= board.y0 && py < board.y1 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                };
                 if let Some(inv) = Inverse::of(shifted) {
                     for y in inner.y0..inner.y1 {
                         for x in inner.x0..inner.x1 {
-                            let cov = rect_coverage(*width, *height, shifted, inv, x, y);
+                            let cov = if upright {
+                                whole(x, y)
+                            } else {
+                                rect_coverage(*width, *height, shifted, inv, x, y)
+                            };
                             if cov < 1.0 {
                                 let i = (y * sub.width + x) as usize;
                                 sub.pixels[i] = scale_alpha(sub.pixels[i], cov);
@@ -11221,6 +11351,374 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         assert!(apart < 1e-4, "masked, as its twin is ({apart})");
+    }
+
+    /// A frame holding an adjustment works on the page below it however
+    /// the frame is composited.
+    ///
+    /// A plain upright frame is only a narrower region to paint in, so an
+    /// adjustment inside it changes the page under the frame. Faded or
+    /// masked, the frame went to a surface of its own, where the
+    /// adjustment had nothing to change: a mask that hides nothing took
+    /// the adjustment's whole effect away.
+    #[test]
+    fn a_frame_holding_an_adjustment_works_on_the_page_however_it_is_faded() {
+        let build = |dress: &dyn Fn(&mut Document, NodeId), holding: bool| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("page", 40.0, 30.0, BLUE),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::artboard("frame", 30.0, 20.0, None)),
+            })
+            .unwrap();
+            let frame = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: frame,
+                transform: Transform::translation(5.0, 5.0),
+            })
+            .unwrap();
+            if holding {
+                doc.apply(Command::AddNode {
+                    parent: frame,
+                    index: 0,
+                    node: Box::new(Node::adjustment(
+                        "brighter",
+                        chitrakar_doc::Adjustment::Exposure { stops: 1.5 },
+                    )),
+                })
+                .unwrap();
+            }
+            dress(&mut doc, frame);
+            render(&doc).unwrap()
+        };
+        let bare = build(&|_, _| {}, false);
+        let plain = build(&|_, _| {}, true);
+        assert!(
+            plain.get(20, 15).b > bare.get(20, 15).b + 0.1,
+            "plain, it brightens the page inside the frame"
+        );
+        let masked = build(
+            &|doc, id| {
+                doc.apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(Mask {
+                        kind: MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 400.0,
+                                height: 400.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(-200.0, -200.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            },
+            true,
+        );
+        let (p, m) = (plain.get(20, 15), masked.get(20, 15));
+        assert!(
+            (p.b - m.b).abs() < 1e-4 && (p.r - m.r).abs() < 1e-4,
+            "masked by nothing, it is the plain frame ({m:?} against {p:?})"
+        );
+        let faded = build(
+            &|doc, id| {
+                doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+            },
+            true,
+        );
+        let (b, f) = (bare.get(20, 15), faded.get(20, 15));
+        assert!(
+            (f.b - (b.b + p.b) / 2.0).abs() < 1e-3,
+            "faded to a half, it is half of it ({f:?} between {b:?} and {p:?})"
+        );
+    }
+
+    /// The same frame, blended or copied: what is inside it still sees
+    /// the page, and what it paints still meets the page by its blend.
+    ///
+    /// Wearing a blend, an upright frame went to a surface of its own
+    /// for it, where a clone inside lifted nothing — the same frame at
+    /// Normal lifted the page, so taking a blend off changed what the
+    /// page covered. A copy of it wearing a mask that hides nothing went
+    /// to a surface the same way. Found by a page nobody wrote: a turned
+    /// frame holding a heal, copied upright.
+    #[test]
+    fn a_frame_holding_an_adjustment_works_on_the_page_blended_or_copied() {
+        let build = |blend: BlendMode, copied: bool, masked: bool| {
+            let mut doc = Document::new(80, 30, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("page", 80.0, 30.0, BLUE),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::artboard("frame", 30.0, 20.0, None)),
+            })
+            .unwrap();
+            let frame = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: frame,
+                transform: Transform::translation(5.0, 5.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetBlendMode { id: frame, blend })
+                .unwrap();
+            // Paint on the left of the frame, and over all of it an
+            // adjustment brightening whatever is under it.
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: filled_rect("paint", 10.0, 20.0, RED),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "brighter",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.5 },
+                )),
+            })
+            .unwrap();
+            if copied {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 2,
+                    node: Box::new(Node::instance("copy", frame)),
+                })
+                .unwrap();
+                let copy = doc.children_of(root).unwrap()[2];
+                doc.apply(Command::SetTransform {
+                    id: copy,
+                    transform: Transform::translation(45.0, 5.0),
+                })
+                .unwrap();
+                if masked {
+                    doc.apply(Command::SetMask {
+                        id: copy,
+                        mask: Some(Box::new(Mask {
+                            kind: MaskKind::Vector {
+                                shape: VectorShape::Rect {
+                                    width: 400.0,
+                                    height: 400.0,
+                                    radius: 0.0,
+                                },
+                                transform: Transform::translation(-200.0, -200.0),
+                            },
+                            invert: false,
+                            feather: 0.0,
+                        })),
+                    })
+                    .unwrap();
+                }
+            }
+            render(&doc).unwrap()
+        };
+        let plain = build(BlendMode::Normal, false, false);
+        let multiplied = build(BlendMode::Multiply, false, false);
+        // Right of the paint, only the adjustment is at work.
+        let (p, m) = (plain.get(25, 15), multiplied.get(25, 15));
+        assert!(p.b > 1.2, "it brightens the page ({p:?})");
+        assert!(
+            (p.b - m.b).abs() < 1e-4 && (p.a - m.a).abs() < 1e-4,
+            "blended, the adjustment still works on the page ({m:?} against {p:?})"
+        );
+        // Over the paint: red multiplied into blue is black, and the
+        // brightening of black is black.
+        let (p, m) = (plain.get(8, 15), multiplied.get(8, 15));
+        assert!(p.r > 0.5, "plain, the paint is red ({p:?})");
+        assert!(
+            m.r < 0.05 && m.b < 0.05 && (m.a - 1.0).abs() < 1e-4,
+            "multiplied, the paint meets the page by its blend ({m:?})"
+        );
+        let copy = build(BlendMode::Normal, true, false);
+        let masked = build(BlendMode::Normal, true, true);
+        let (c, k) = (copy.get(65, 15), masked.get(65, 15));
+        assert!(c.b > 1.2, "the copy brightens the page too ({c:?})");
+        assert!(
+            (c.b - k.b).abs() < 1e-4,
+            "masked by nothing, the copy is the copy ({k:?} against {c:?})"
+        );
+    }
+
+    /// And wearing an effect: the effect grows from what the frame
+    /// paints, and the frame is still drawn where it stands. Sent to a
+    /// surface for its effects, a frame's adjustment had nothing to work
+    /// on, so a drop shadow at no opacity took the whole of it away.
+    #[test]
+    fn a_frame_holding_an_adjustment_works_on_the_page_under_an_effect() {
+        let build = |shadow: Option<f32>| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("page", 60.0, 40.0, BLUE),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::artboard("frame", 30.0, 20.0, None)),
+            })
+            .unwrap();
+            let frame = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id: frame,
+                transform: Transform::translation(5.0, 5.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: filled_rect("paint", 10.0, 20.0, RED),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 1,
+                node: Box::new(Node::adjustment(
+                    "brighter",
+                    chitrakar_doc::Adjustment::Exposure { stops: 1.5 },
+                )),
+            })
+            .unwrap();
+            if let Some(opacity) = shadow {
+                doc.apply(Command::SetEffects {
+                    id: frame,
+                    effects: vec![Effect::DropShadow {
+                        dx: 4.0,
+                        dy: 4.0,
+                        blur: 0.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity,
+                    }],
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+        let plain = build(None);
+        let unseen = build(Some(0.0));
+        for (x, y) in [(25, 15), (8, 15), (12, 27)] {
+            let (p, u) = (plain.get(x, y), unseen.get(x, y));
+            assert!(
+                (p.r - u.r).abs() < 1e-4 && (p.b - u.b).abs() < 1e-4,
+                "a shadow at no opacity is no shadow at ({x}, {y}): {u:?} against {p:?}"
+            );
+        }
+        assert!(plain.get(25, 15).b > 1.2, "it brightens the page");
+        let shaded = build(Some(1.0));
+        assert!(
+            shaded.get(25, 15).b > 1.2,
+            "shadowed, the frame still brightens the page ({:?})",
+            shaded.get(25, 15)
+        );
+        // Below the frame, where the paint's shadow falls.
+        assert!(
+            shaded.get(12, 27).b < plain.get(12, 27).b - 0.5,
+            "and the shadow is there ({:?} against {:?})",
+            shaded.get(12, 27),
+            plain.get(12, 27)
+        );
+    }
+
+    /// An upright frame's edge is the same whole pixels however it is
+    /// composited.
+    ///
+    /// A frame's edge is a page's edge, so an upright one is rounded to
+    /// whole pixels rather than antialiased. That held on the plain road;
+    /// faded, blended or masked the frame goes to a surface of its own, and
+    /// there it was cut by how much of each pixel its box covers — which
+    /// is what a *turned* frame needs. So a frame at half a pixel lost half
+    /// of its last row the moment it was masked, even by a mask that hides
+    /// nothing, and a page nobody wrote said so the first time one held a
+    /// frame.
+    #[test]
+    fn an_upright_frame_keeps_its_edge_however_it_is_composited() {
+        let build = |dress: &dyn Fn(&mut Document, NodeId)| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::artboard("frame", 25.0, 10.0, Some(RED))),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(2.0, 3.5),
+            })
+            .unwrap();
+            dress(&mut doc, id);
+            render(&doc).unwrap()
+        };
+        let plain = build(&|_, _| {});
+        // Rows 3 and 13 are the half-covered ones; rounded, the frame runs
+        // from row 4 to row 13, so the one is wholly outside and the other
+        // wholly in.
+        assert!(plain.get(10, 13).a > 0.99 && plain.get(10, 3).a < 1e-4);
+        let masked = build(&|doc, id| {
+            doc.apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 400.0,
+                            height: 400.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(-200.0, -200.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        });
+        let blended = build(&|doc, id| {
+            doc.apply(Command::SetBlendMode {
+                id,
+                blend: BlendMode::Multiply,
+            })
+            .unwrap();
+        });
+        let faded = build(&|doc, id| {
+            doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        });
+        for (what, page, scale) in [
+            ("masked by nothing", &masked, 1.0),
+            ("blended", &blended, 1.0),
+            ("faded to a half", &faded, 0.5),
+        ] {
+            let worst = plain
+                .pixels
+                .iter()
+                .zip(&page.pixels)
+                .map(|(p, q)| (p.a * scale - q.a).abs())
+                .fold(0.0f32, f32::max);
+            assert!(worst < 1e-4, "{what}, its edge moved by {worst}");
+        }
     }
 
     /// A feathered image mask is a picture of what it lets through, in its

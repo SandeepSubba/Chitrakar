@@ -1970,7 +1970,7 @@ impl Rng {
     /// be a copy of and cannot reach itself.
     fn node(&mut self, doc: &mut Document, made: &[NodeId], i: usize) -> Box<Node> {
         let name = format!("l{i}");
-        match self.upto(10) {
+        match self.upto(11) {
             0 => Box::new(Node::group(&name)),
             1 => {
                 let mut node = Node::vector(&name, self.shape());
@@ -2062,9 +2062,61 @@ impl Rng {
                 Box::new(node)
             }
             2 => {
-                let mut spec = TextSpec::new("Ab", self.between(8.0, 20.0), self.color(1.0));
+                // Text as it is set, rather than two letters on one line:
+                // wrapped to a width, aligned, tracked and spaced, ruled
+                // under and through, a run of it styled differently, and
+                // now and then set along a curve instead of a line.
+                let words = ["Ab", "Wave hi", "Mixed type set", "Café au lait"];
+                let text = words[self.upto(words.len() as u64) as usize];
+                let mut spec = TextSpec::new(text, self.between(8.0, 20.0), self.color(1.0));
                 spec.bold = self.chance(3);
                 spec.italic = self.chance(3);
+                spec.underline = self.chance(5);
+                spec.strike = self.chance(6);
+                spec.align = match self.upto(3) {
+                    0 => crate::TextAlign::Left,
+                    1 => crate::TextAlign::Center,
+                    _ => crate::TextAlign::Right,
+                };
+                if self.chance(3) {
+                    spec.width = self.between(14.0, 40.0);
+                }
+                if self.chance(3) {
+                    spec.letter_spacing = self.between(-0.05, 0.2);
+                    spec.line_height = self.between(0.9, 1.6);
+                }
+                // A styled run over the first word, which is plain ASCII in
+                // every one of the strings, so its bytes are its letters.
+                if self.chance(3) {
+                    let end = text.find(' ').unwrap_or(text.len()).min(2);
+                    spec.runs = vec![StyleRun {
+                        start: 0,
+                        end,
+                        fill: Some(self.color(1.0)),
+                        bold: Some(self.chance(2)),
+                        italic: None,
+                        underline: Some(self.chance(2)),
+                        strike: None,
+                        font: None,
+                    }];
+                }
+                if self.chance(6) {
+                    spec.along = Some(if self.chance(2) {
+                        VectorShape::Ellipse {
+                            rx: self.between(10.0, 20.0),
+                            ry: self.between(6.0, 14.0),
+                        }
+                    } else {
+                        VectorShape::Path {
+                            points: vec![[0.0, 10.0], [15.0, 0.0], [30.0, 10.0]],
+                            closed: false,
+                            smooth: true,
+                            handles: Vec::new(),
+                            subpaths: Vec::new(),
+                        }
+                    });
+                    spec.along_offset = self.between(0.0, 10.0);
+                }
                 Box::new(Node::text(&name, spec))
             }
             3 => {
@@ -2264,8 +2316,42 @@ impl Rng {
                     heal: false,
                     clip: None,
                 };
+                // Now and then a second stroke that erases across the
+                // first, or one laid inside a region it carries — the two
+                // things a brush does that are not laying paint down.
+                let second = if self.chance(3) {
+                    let clip = self.chance(2).then(|| {
+                        Box::new(Mask {
+                            kind: MaskKind::Vector {
+                                shape: VectorShape::Rect {
+                                    width: self.between(8.0, 30.0),
+                                    height: self.between(8.0, 24.0),
+                                    radius: 0.0,
+                                },
+                                transform: Transform::translation(
+                                    self.between(0.0, 20.0),
+                                    self.between(0.0, 16.0),
+                                ),
+                            },
+                            invert: false,
+                            feather: 0.0,
+                        })
+                    });
+                    Some(PaintStroke {
+                        points: (0..2)
+                            .map(|_| [self.between(0.0, 40.0), self.between(0.0, 30.0)])
+                            .collect(),
+                        radii: vec![self.between(1.5, 5.0)],
+                        erase: clip.is_none(),
+                        clip,
+                        ..stroke.clone()
+                    })
+                } else {
+                    None
+                };
                 if let NodeKind::Paint { strokes } = &mut node.kind {
                     strokes.push(stroke);
+                    strokes.extend(second);
                 }
                 Box::new(node)
             }
@@ -2299,6 +2385,15 @@ impl Rng {
                 }
                 Box::new(node)
             }
+            // A frame, which no page here held: it cuts what it holds to
+            // its own box and paints a ground behind it, or none. Given
+            // something to hold the way a group is, below.
+            9 => Box::new(Node::artboard(
+                &name,
+                self.between(12.0, 36.0),
+                self.between(10.0, 28.0),
+                self.chance(2).then(|| self.color(1.0)),
+            )),
             _ => {
                 let mut node = Node::vector(&name, self.shape());
                 let alpha = self.between(0.4, 1.0);
@@ -2464,10 +2559,11 @@ impl Rng {
             doc.apply(Command::SetClipped { id, clipped: true })
                 .unwrap();
         }
-        // A group with nothing in it draws nothing, so one gets a child.
+        // A group with nothing in it draws nothing, so one gets a child —
+        // and so does a frame, which is a group with a box.
         if doc
             .node(id)
-            .map(|n| matches!(n.kind, NodeKind::Group))
+            .map(|n| matches!(n.kind, NodeKind::Group | NodeKind::Artboard { .. }))
             .unwrap_or(false)
         {
             for k in 0..1 + self.upto(2) {

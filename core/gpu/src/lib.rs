@@ -184,6 +184,9 @@ enum Draw {
     Text {
         quad: std::ops::Range<u32>,
         texture: usize,
+        /// For a block whose style runs ask for more than one colour, the
+        /// texture saying which colour inked each texel.
+        ink: Option<usize>,
     },
     /// A placed image: the quad, and which of the scene's textures it
     /// samples.
@@ -2266,10 +2269,16 @@ impl GpuRenderer {
                             pass.set_pipeline(&self.cover);
                             pass.draw(cover.clone(), 0..1);
                         }
-                        Draw::Text { quad, texture } => {
+                        Draw::Text { quad, texture, ink } => {
                             pass.set_pipeline(&self.text);
                             pass.set_bind_group(1, &textures[*texture], &[]);
+                            if let Some(ink) = ink {
+                                pass.set_bind_group(3, &textures[*ink], &[]);
+                            }
                             pass.draw(quad.clone(), 0..1);
+                            if ink.is_some() {
+                                pass.set_bind_group(3, &self.open, &[]);
+                            }
                         }
                         Draw::Image { quad, texture } => {
                             pass.set_pipeline(&self.image);
@@ -2487,6 +2496,16 @@ fn draws_something_masked(doc: &Document, id: NodeId) -> bool {
         };
         if depth > 0 && node.mask.is_some() {
             return true;
+        }
+        // A stroke laid inside a region rides the same slot with that
+        // region, the layer's own included: a copy of a brush layer with
+        // one, masked and outlined, drew its outline from the wrong
+        // coverage — a page nobody wrote, once its strokes carried
+        // regions.
+        if let NodeKind::Paint { strokes } | NodeKind::Clone { strokes } = &node.kind {
+            if strokes.iter().any(|s| s.clip.is_some()) {
+                return true;
+            }
         }
         if let NodeKind::Instance { of, .. } = &node.kind {
             if walk(doc, *of, depth + 1) {
@@ -2779,8 +2798,17 @@ fn one(
     // shape *vanished* — and the reference renderer lost it the same
     // way, which is why the two agreed and neither was right. It is
     // fixed there and declined here.
-    if (rewrites
-        || (chitrakar_render::copies_a_blend(doc, child) && node.blend == BlendMode::Normal))
+    // Whether or not what it copies wears effects: the reference renderer
+    // draws a masked copy of a blended layer with effects where it stands
+    // and mixes it back, which this has no shape for either.
+    let copies_any_blend = match &node.kind {
+        NodeKind::Instance { of, .. } => doc
+            .node(*of)
+            .map(|m| m.blend != BlendMode::Normal)
+            .unwrap_or(false),
+        _ => false,
+    };
+    if (rewrites || (copies_any_blend && node.blend == BlendMode::Normal))
         && matches!(node.kind, NodeKind::Instance { .. })
         && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
     {
@@ -2815,10 +2843,19 @@ fn one(
     // soft clip rather than a defect with an answer — see the roadmap —
     // so this backend declines until it is settled. Held to something
     // upright, where the cut is exact, the two agree and it is drawn.
+    //
+    // A brush layer as the base is the same case at every point of its
+    // edge rather than along one side: its strokes are round and soft, so
+    // the cut is soft all the way round. A held rectangle with a shadow
+    // over a brushed shape drifted by twice the level the pages nobody
+    // wrote are held to, the first time those pages brushed a base.
     if !node.effects.is_empty() {
         if let Some(base) = held_to {
             let t = chitrakar_render::world_transform(doc, base).ok()?;
             if t.b.abs() > 1e-6 || t.c.abs() > 1e-6 {
+                return None;
+            }
+            if matches!(doc.node(base).ok()?.kind, NodeKind::Paint { .. }) {
                 return None;
             }
         }
@@ -2882,16 +2919,16 @@ fn one(
         NodeKind::Vector { .. } | NodeKind::Raster(_) | NodeKind::Text(_) | NodeKind::Clone { .. }
     );
     let owed = if in_surface { 1.0 } else { node.opacity };
-    let alpha = match (alone, shadings.is_empty()) {
-        (true, true) => 1.0,
-        (true, false) => {
-            if in_surface {
-                node.opacity
-            } else {
-                1.0
-            }
-        }
-        (false, _) => node.opacity * opacity,
+    //
+    // And not only with effects: a leaf on a surface of its own for its
+    // blend or its mask is faded as it paints too, which is where the
+    // reference renderer fades it — so an inside stroke over its fill is
+    // faded twice where they overlap. Faded once on the way down, a faded,
+    // blended rectangle with a stroke came out lighter where the two met.
+    let alpha = match alone {
+        true if in_surface => node.opacity,
+        true => 1.0,
+        false => node.opacity * opacity,
     };
     // Where the layer's own drawing starts, so the mask can be put
     // on everything the layer turns into and nothing else.
@@ -3155,8 +3192,7 @@ fn one(
             out.draws.push(Item::of(Draw::Image { quad, texture: at }));
         }
         NodeKind::Text(spec) => {
-            let color = premultiplied_color(doc, &spec.fill, alpha);
-            text(spec, t, color, out)?;
+            text(doc, spec, t, alpha, out)?;
         }
         NodeKind::Adjustment(adj) => {
             // An adjustment rewrites what is composited below it,
@@ -3529,7 +3565,7 @@ fn one(
             .collect();
         let quad = out.push(page_quad(
             (down, out.surface),
-            if shadings.is_empty() || !in_surface {
+            if !in_surface {
                 node.opacity * opacity
             } else {
                 // Its own opacity is already in the surface; what is
@@ -3979,11 +4015,13 @@ fn mask_texture(
 /// bitmap is the one the CPU would have sampled — and read back off a
 /// quad over the block's own box.
 fn text(
+    doc: &Document,
     spec: &chitrakar_doc::TextSpec,
     t: Transform,
-    color: [f32; 4],
+    alpha: f32,
     out: &mut Scene,
 ) -> Option<()> {
+    let color = premultiplied_color(doc, &spec.fill, alpha);
     let [bx0, by0, bx1, by1] = chitrakar_render::text::bounds(spec);
     if !(bx1 > bx0 && by1 > by0) {
         return Some(());
@@ -4012,6 +4050,47 @@ fn text(
         channels: 1,
         texels,
     });
+    // A block whose style runs ask for more than one colour: which colour
+    // inked each texel, premultiplied and at full strength — the layer's
+    // opacity is on the quad. Nearest rather than mixed, as the reference
+    // renderer reads it: a colour is a choice, not a quantity. Where no
+    // run says otherwise, and in the padding, it is the block's own fill.
+    // Without this every run was painted in the block's fill.
+    let ink = if raster.colors.is_empty() {
+        None
+    } else {
+        let fill = premultiplied_color(doc, &spec.fill, 1.0);
+        let palette: Vec<[f32; 4]> = raster
+            .colors
+            .iter()
+            .map(|c| premultiplied_color(doc, c, 1.0))
+            .collect();
+        let mut texels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x >= 1 && y >= 1 && x - 1 < raster.width && y - 1 < raster.height;
+                let c = if inside {
+                    raster
+                        .tint
+                        .get(((y - 1) * raster.width + (x - 1)) as usize)
+                        .and_then(|i| palette.get(*i as usize))
+                        .copied()
+                        .unwrap_or(fill)
+                } else {
+                    fill
+                };
+                texels.extend(c.map(f32_to_f16));
+            }
+        }
+        let at = out.textures.len();
+        out.textures.push(Image {
+            width: w,
+            height: h,
+            channels: 4,
+            texels,
+        });
+        Some(at)
+    };
     // The quad is the block's box, grown by a device pixel: the CPU
     // walks whole pixels of that box, so the last of them can reach a
     // little past it.
@@ -4023,8 +4102,10 @@ fn text(
         // needs to read it the way the CPU reads it.
         local: [(x - ox) * scale, (y - oy) * scale],
         params: [0.0; 4],
-        color,
-        grad: [0.0; 4],
+        // Tinted, the colour comes off the ink texture and the quad
+        // carries only the opacity; `grad.x` says which.
+        color: if ink.is_some() { [alpha; 4] } else { color },
+        grad: [if ink.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         mask: NO_MASK,
     };
     let (x0, y0, x1, y1) = (bx0 - m, by0 - m, bx1 + m, by1 + m);
@@ -4036,7 +4117,11 @@ fn text(
         corner(x1, y1),
         corner(x0, y1),
     ]);
-    out.draws.push(Item::of(Draw::Text { quad, texture: at }));
+    out.draws.push(Item::of(Draw::Text {
+        quad,
+        texture: at,
+        ink,
+    }));
     Some(())
 }
 
@@ -7542,6 +7627,264 @@ mod tests {
             }
         }
         assert_eq!(drawn.get(196, 96).a, 0.0, "bare page stays bare");
+    }
+
+    /// A faded leaf on a surface of its own is faded as it paints, as the
+    /// reference renderer fades it.
+    ///
+    /// A shape with a blend goes onto a surface of its own to meet what
+    /// is under it once. Its opacity went on the quad that brings the
+    /// surface down, so where an inside stroke lies over the fill the
+    /// fade was taken once — the reference fades the fill and the stroke
+    /// as each is painted, twice over their overlap, which is the rule a
+    /// shadow's silhouette already followed here. Read at the overlap.
+    #[test]
+    fn a_faded_blended_shape_is_faded_as_it_paints() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "ground",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.8,
+                    b: 0.4,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        let mut node = Node::vector(
+            "stroked",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 24.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.5,
+                b: 0.8,
+                a: 1.0,
+            });
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.1,
+                    b: 0.3,
+                    a: 1.0,
+                },
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                align: Some(chitrakar_doc::StrokeAlign::Inside),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        let id = add(&mut doc, Box::new(node), Transform::translation(10.0, 8.0));
+        doc.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        doc.apply(Command::SetBlendMode {
+            id,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc));
+        let (mine, theirs) = (
+            gpu.render(&doc).unwrap(),
+            chitrakar_render::render(&doc).unwrap(),
+        );
+        // In the stroke, over the fill.
+        let (p, q) = (mine.get(12, 20), theirs.get(12, 20));
+        assert!(
+            (p.r - q.r).abs() < 0.01 && (p.g - q.g).abs() < 0.01 && (p.b - q.b).abs() < 0.01,
+            "where stroke and fill overlap: {p:?} against {q:?}"
+        );
+        let (mean, worst) = difference(&mine, &theirs);
+        assert!(mean < 0.002, "mean {mean:.5}, worst {worst:.3}");
+    }
+
+    /// A layer wearing an effect held to a brush layer goes back.
+    ///
+    /// Where the cut a held layer is given is soft, the two renderers
+    /// compound it with the effect differently — the open question on
+    /// the roadmap, for which a base standing at an angle already goes
+    /// back. A brushed base is soft all the way round, and a rectangle
+    /// with a shadow held to one drifted by twice the level the pages
+    /// nobody wrote are held to. Bare, the same held layer is drawn.
+    #[test]
+    fn an_effect_held_to_a_brush_layer_goes_back() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let mut brush = Node::paint("brushed");
+        if let NodeKind::Paint { strokes } = &mut brush.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[6.0, 6.0], [30.0, 20.0]],
+                radii: vec![6.0],
+                color: BLUE,
+                softness: 0.0,
+                erase: false,
+                source: [0.0, 0.0],
+                heal: false,
+                clip: None,
+            });
+        }
+        add(&mut doc, Box::new(brush), Transform::default());
+        let held = add(
+            &mut doc,
+            filled(
+                "held",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            Transform::translation(10.0, 4.0),
+        );
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc), "bare, it is drawn");
+        doc.apply(Command::SetEffects {
+            id: held,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 2.0,
+                dy: -1.5,
+                blur: 1.3,
+                color: BLUE,
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&doc),
+            "wearing a shadow, it goes back"
+        );
+    }
+
+    /// A masked copy of a blended layer wearing an effect goes back.
+    ///
+    /// The reference renderer draws that copy where it stands and mixes
+    /// it back by the mask, so the copied blend meets the page; this
+    /// backend would put the copy on a surface of its own, where the
+    /// blend meets nothing. A copy of a blended layer *without* effects
+    /// already went back for the same reason; with effects it was drawn,
+    /// and wrongly.
+    #[test]
+    fn a_masked_copy_of_a_blended_layer_with_effects_goes_back() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let base = add(
+            &mut doc,
+            filled(
+                "shape",
+                VectorShape::Rect {
+                    width: 12.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                BLUE,
+            ),
+            Transform::translation(4.0, 4.0),
+        );
+        doc.apply(Command::SetBlendMode {
+            id: base,
+            blend: BlendMode::Darken,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: base,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 2.0,
+                dy: 2.0,
+                blur: 1.0,
+                color: RED,
+                opacity: 0.5,
+            }],
+        })
+        .unwrap();
+        let copy = add(
+            &mut doc,
+            Box::new(Node::instance("copy", base)),
+            Transform::translation(20.0, 10.0),
+        );
+        doc.apply(Command::SetOpacity {
+            id: copy,
+            opacity: 0.7,
+        })
+        .unwrap();
+        assert!(!GpuRenderer::can_render(&doc));
+    }
+
+    /// A run in a colour of its own is that colour here too.
+    ///
+    /// Text went up as one channel of coverage painted in the block's own
+    /// fill, so a run that asked for another colour came out in the
+    /// block's — the words right, every letter the wrong colour. The
+    /// reference renderer says per texel which run inked it, and that
+    /// goes up now as a second texture, read the same way: nearest,
+    /// since a colour is a choice and not a quantity to blend. Found when
+    /// the pages nobody wrote first set a styled run.
+    #[test]
+    fn a_run_in_its_own_colour_is_that_colour_here_too() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(200, 60, ColorMode::Rgb);
+        add(
+            &mut doc,
+            texted("runs", "Red and blue", 30.0, |spec| {
+                spec.runs = vec![chitrakar_doc::StyleRun {
+                    start: 0,
+                    end: 3,
+                    fill: Some(RED),
+                    bold: None,
+                    italic: None,
+                    underline: Some(true),
+                    strike: None,
+                    font: None,
+                }];
+            }),
+            Transform::translation(8.0, 10.0),
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(mean < 0.001, "mean {mean:.5}, worst {worst:.3}");
+        // Where both have solid ink, the same colour — which is where a
+        // run painted in the block's fill differs by the whole of it.
+        let (mut solid, mut red) = (0usize, 0usize);
+        for (g, c) in drawn.pixels.iter().zip(&reference.pixels) {
+            if g.a > 0.9 && c.a > 0.9 {
+                solid += 1;
+                assert!(
+                    (g.r - c.r).abs() < 0.05 && (g.b - c.b).abs() < 0.05,
+                    "{g:?} against {c:?}"
+                );
+                if g.r > 0.5 && g.b < 0.2 {
+                    red += 1;
+                }
+            }
+        }
+        assert!(
+            solid > 100 && red > 20,
+            "{red} of {solid} solid pixels are the run's red"
+        );
     }
 
     /// The device is asked for the textures every adapter guarantees,
