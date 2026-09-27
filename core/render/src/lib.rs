@@ -7382,6 +7382,31 @@ pub fn layer_coverage_at(
 /// alpha — white has luminance 1, so one is the other. For an exporter
 /// whose format has no mask like ours and has to hand one over as a
 /// picture. `None` when the layer has no mask, or no box to draw it in.
+/// Where a frame is cut, in its own space, when it reaches the page by
+/// `to_page`: an upright frame's box rounded to whole pixels of the page,
+/// as the page cuts it (its edge is a page edge, and crisp), taken back
+/// into the frame's space; a turned frame's own box, whose edge the page
+/// works out per pixel. For an exporter, whose reader would otherwise
+/// antialias the edge the page does not.
+pub fn frame_cut(to_page: Transform, width: f32, height: f32) -> (f32, f32, f32, f32) {
+    let t = to_page;
+    if t.b.abs() >= 1e-6 || t.c.abs() >= 1e-6 || t.a.abs() <= 1e-6 || t.d.abs() <= 1e-6 {
+        return (0.0, 0.0, width, height);
+    }
+    let (x0, x1) = (t.e, t.e + t.a * width);
+    let (y0, y1) = (t.f, t.f + t.d * height);
+    let (x0, x1) = (x0.min(x1).round(), x0.max(x1).round());
+    let (y0, y1) = (y0.min(y1).round(), y0.max(y1).round());
+    let (lx0, lx1) = ((x0 - t.e) / t.a, (x1 - t.e) / t.a);
+    let (ly0, ly1) = ((y0 - t.f) / t.d, (y1 - t.f) / t.d);
+    (
+        lx0.min(lx1),
+        ly0.min(ly1),
+        (lx1 - lx0).abs(),
+        (ly1 - ly0).abs(),
+    )
+}
+
 /// A box an exported picture is made over, widened to whole pixels of
 /// the page where the space it is in reaches the page by a plain move.
 ///

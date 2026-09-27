@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~537),
+- **Verify before committing:** `cargo test --workspace` (~540),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4338,6 +4338,52 @@ without reading anything else.*
      Each fix, taken out again, fails an audit or a test; the hold to a
      clone needed a test of its own reading colour, since the clone
      covers the same pixels either way.
+     **And ghostscript, for the PDF.** The same question of the PDF
+     exporter, over 300 pages
+     (`ghostscript_covers_what_the_engine_covers_on_pages_nobody_wrote`):
+     one run of ghostscript renders every page's PDF onto transparency,
+     images interpolated — a placed picture is rendered at up to four
+     times for print, and without interpolation ghostscript takes one
+     sample in sixteen and aliases every edge — against the engine
+     rendered at those four times and averaged, since at that resolution
+     a frame's edge rounds to a quarter pixel and that is the picture the
+     PDF carries. Text is left out: ghostscript sets it lighter and half a
+     pixel right of both the engine and resvg, which agree to a tenth.
+     Two thirds of the pages disagreed the first time. Found:
+     - **A copy of a hidden layer was in every PDF** and on no page.
+     - **A copy pointing at a removed layer stopped the export** — and,
+       once it did not, left its placement on everything drawn after it,
+       as **a copy with stand-ins always had**: an early return past the
+       `Q` that closes its state. The copy's arm is a block left by
+       `break` now, and `every_state_a_page_saves_it_restores` reads the
+       stream itself, since the pages put their copies last where a leak
+       has nothing to land on. The removal audit now exports a PDF too
+       wherever a removal leaves a copy pointing at nothing.
+     - **A layer held to a filter was in no PDF**: the filter went into a
+       picture of everything under it, and the held layer into one of its
+       own with the filter hidden, where the hold let nothing through. A
+       layer and what is held to it now always go down together.
+     - **A copy with a blend drew nothing**: its picture was made with
+       every other layer hidden, its original included. The others are
+       put aside into a hidden group instead, where a copy still finds
+       its original visible.
+     - **A copy faded to a third was drawn solid** — live, with nothing
+       applying its opacity. A faded or blended copy goes as pixels, as a
+       faded group does.
+     - **Every placed picture started at a quarter of a pixel**, cropped
+       at its ink; it is widened to whole page pixels.
+     - **A regular stretch after a bold one was stroked**: the text render
+       mode is graphics state and outlives `ET`
+       (`a_regular_stretch_after_a_bold_one_is_not_stroked`).
+     Left open, measured: a synthesized bold in a PDF is the outline
+     stroked, which grows every edge both ways, where the engine smears
+     the outline sideways — ghostscript puts on twice the ink the engine
+     does. A stroke under a space squashed flat grows sideways only, and
+     was written, but ghostscript draws a sub-pixel stroke as a hairline
+     whatever its shape, so nothing here could say whether it was right;
+     it was taken back out. And an upright frame drawn live in a PDF keeps
+     its exact box: rounding it to whole 72-dpi pixels, as the SVG does,
+     is a screen's rule, and the audit could not tell the two apart.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

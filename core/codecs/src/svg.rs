@@ -381,28 +381,8 @@ fn write_node(
                 // rounded on the page and taken back into the frame's
                 // own space; a turned frame's edge is worked out per
                 // pixel here too, and keeps its exact box.
-                let to_page = space.compose(node.transform);
-                let (bx, by, bw, bh) = if to_page.b.abs() < 1e-6
-                    && to_page.c.abs() < 1e-6
-                    && to_page.a.abs() > 1e-6
-                    && to_page.d.abs() > 1e-6
-                {
-                    let (t, a) = (to_page, *width);
-                    let (x0, x1) = (t.e, t.e + t.a * a);
-                    let (y0, y1) = (t.f, t.f + t.d * *height);
-                    let (x0, x1) = (x0.min(x1).round(), x0.max(x1).round());
-                    let (y0, y1) = (y0.min(y1).round(), y0.max(y1).round());
-                    let (lx0, lx1) = ((x0 - t.e) / t.a, (x1 - t.e) / t.a);
-                    let (ly0, ly1) = ((y0 - t.f) / t.d, (y1 - t.f) / t.d);
-                    (
-                        lx0.min(lx1),
-                        ly0.min(ly1),
-                        (lx1 - lx0).abs(),
-                        (ly1 - ly0).abs(),
-                    )
-                } else {
-                    (0.0, 0.0, *width, *height)
-                };
+                let (bx, by, bw, bh) =
+                    chitrakar_render::frame_cut(space.compose(node.transform), *width, *height);
                 let _ = writeln!(
                     defs,
                     r#"<clipPath id="{name}"><rect x="{bx}" y="{by}" width="{bw}" height="{bh}"/></clipPath>"#
@@ -3750,6 +3730,17 @@ mod tests {
                 assert!(
                     export_svg(&doc).is_ok(),
                     "seed {seed}: without {id:?} the page does not export"
+                );
+                // The PDF too, where a copy is left pointing at nothing —
+                // the case that stops an exporter — since a PDF of every
+                // page takes too long to make for every layer of it.
+                let dangling = doc.nodes().any(|(_, n)| match &n.kind {
+                    NodeKind::Instance { of, .. } => doc.node(*of).is_err(),
+                    _ => false,
+                });
+                assert!(
+                    !dangling || crate::export_pdf_document(&doc).is_ok(),
+                    "seed {seed}: without {id:?} the page does not export to PDF"
                 );
             }
         }

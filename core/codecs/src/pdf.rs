@@ -375,7 +375,40 @@ impl Page {
         // of them composites the same whether drawn one by one or as one
         // picture, so long as each lands with the default blend.
         let mut pending: Vec<NodeId> = Vec::new();
-        for (i, &child) in children.iter().enumerate() {
+        let mut next = 0;
+        while next < children.len() {
+            let i = next;
+            let child = children[i];
+            // A layer and the ones held to it go down together, whatever
+            // they are: what is held is cut by the layer under it, which a
+            // picture of one without the other cannot do. A plain run
+            // joins the pictures waiting; one with a blend in it, or with
+            // something in it that works on what is under it, is the page
+            // so far as one picture. Split, a layer held to a filter went
+            // into a picture of its own with the filter hidden, where the
+            // hold let nothing through, and was in no PDF.
+            let mut end = i + 1;
+            while end < children.len() && self.doc.node(children[end])?.clipped {
+                end += 1;
+            }
+            next = end;
+            if end > i + 1 {
+                let run = &children[i..end];
+                let mut whole = false;
+                for &c in run {
+                    let n = self.doc.node(c)?;
+                    whole |= n.blend != BlendMode::Normal || works_on_what_is_under(&self.doc, c);
+                }
+                if whole {
+                    pending.clear();
+                    self.content.clear();
+                    let shown = children[..end].to_vec();
+                    self.place_rendered(&shown, BlendMode::Normal)?;
+                } else {
+                    pending.extend_from_slice(run);
+                }
+                continue;
+            }
             let node = self.doc.node(child)?.clone();
             if !node.visible || node.opacity <= 0.0 {
                 continue;
@@ -466,7 +499,17 @@ impl Page {
                 } else {
                     Vec::new()
                 };
-                if stand_ins.is_empty() {
+                // Faded or blended, a copy is composited as one picture,
+                // as a group is — and drawn live nothing applied its
+                // opacity at all: a copy faded to a third was solid in
+                // every PDF.
+                if node.opacity < 1.0 || node.blend != BlendMode::Normal {
+                    false
+                } else if self.doc.node(*of).is_err() {
+                    // A copy of a layer that has since gone draws
+                    // nothing, which PDF says as well as anything.
+                    true
+                } else if stand_ins.is_empty() {
                     self.is_live(*of)?
                 } else {
                     let mut live = true;
@@ -515,11 +558,38 @@ impl Page {
     }
 
     fn place_rendered(&mut self, shown: &[NodeId], blend: BlendMode) -> Result<(), PdfError> {
+        // Everything else is put aside into a hidden group rather than
+        // hidden itself: a copy draws what it copies only while that is
+        // visible, and a copy drawn as a picture of its own — one wearing
+        // a blend — found its original hidden here and drew nothing. Put
+        // aside, the original is still visible and still not on the page.
+        // The group stands where the page does, so nothing moved into it
+        // moves.
         let mut alone = self.doc.clone();
         let root = alone.root();
-        for id in alone.children_of(root)?.to_vec() {
-            if !shown.contains(&id) {
-                alone.apply(Command::SetVisible { id, visible: false })?;
+        let aside: Vec<NodeId> = alone
+            .children_of(root)?
+            .iter()
+            .copied()
+            .filter(|id| !shown.contains(id))
+            .collect();
+        if !aside.is_empty() {
+            let holder = alone.peek_next_id();
+            alone.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("aside")),
+            })?;
+            alone.apply(Command::SetVisible {
+                id: holder,
+                visible: false,
+            })?;
+            for (k, id) in aside.into_iter().enumerate() {
+                alone.apply(Command::MoveNode {
+                    id,
+                    parent: holder,
+                    index: k,
+                })?;
             }
         }
         // Pixels for print: a screen-resolution document would put
@@ -559,6 +629,24 @@ impl Page {
             .find(|&x| (y0..y1).any(|y| inked(x, y)))
             .unwrap()
             + 1;
+        // Out to whole pixels of the page. Cropped at the ink, a picture
+        // oversampled four times started at a quarter of a pixel, and a
+        // reader bringing it down to the page averaged samples from two
+        // page pixels into one — every edge in it softened by a reader,
+        // an upright frame's crisp one included.
+        let step = over.round().max(1.0) as usize;
+        let snapped = (over - step as f32).abs() < 1e-6;
+        let (x0, y0, x1, y1) = if snapped {
+            (
+                x0 / step * step,
+                y0 / step * step,
+                x1.div_ceil(step) * step,
+                y1.div_ceil(step) * step,
+            )
+        } else {
+            (x0, y0, x1, y1)
+        };
+        let (x1, y1) = (x1.min(w), y1.min(h));
         let (cw, ch) = (x1 - x0, y1 - y0);
         let mut rgba = Vec::with_capacity(cw * ch * 4);
         for y in y0..y1 {
@@ -753,7 +841,12 @@ impl Page {
                     }
                 }
             }
-            NodeKind::Instance { of, .. } => {
+            // A block to leave rather than a function to return from:
+            // every way out has to reach the `Q` below, which closes the
+            // copy's own `q` and takes its placement off again. Returned
+            // from, a copy with layers of its own standing in left its
+            // placement on everything drawn after it in the PDF.
+            NodeKind::Instance { of, .. } => 'copy: {
                 // Where the copy stands in for some of the original's
                 // layers with layers of its own, what goes over is what
                 // the copy draws. Those layers are written in the
@@ -772,11 +865,22 @@ impl Page {
                             self.draw_node(part)?;
                         }
                     }
-                    return Ok(());
+                    break 'copy;
                 }
                 // The original's own placement is undone first: a copy
-                // puts the picture where the copy is.
-                let master = self.doc.node(*of)?;
+                // puts the picture where the copy is. A copy of a layer
+                // that has since gone draws nothing, as on the page —
+                // asked with `?`, the whole export failed.
+                let Ok(master) = self.doc.node(*of) else {
+                    break 'copy;
+                };
+                // Nor does a copy of one that is hidden or faded to
+                // nothing: a copy draws what the original draws, and that
+                // is nothing. Drawn anyway, a copy of a hidden layer was
+                // in every PDF and on no page.
+                if !master.visible || master.opacity <= 0.0 {
+                    break 'copy;
+                }
                 if let Some(back) = chitrakar_render::invert(master.transform) {
                     let _ = writeln!(
                         self.content,
@@ -964,7 +1068,12 @@ impl Page {
                             num(run.thicken)
                         )
                     } else {
-                        String::new()
+                        // Said every time: the mode is graphics state, not
+                        // the text object's, and outlives `ET` — so a
+                        // stretch set after a bold one was stroked too, and
+                        // the regular letters of a word came out as heavy
+                        // as the rest.
+                        "\n0 Tr".to_string()
                     };
                     let _ = writeln!(
                         self.content,
@@ -2949,6 +3058,85 @@ mod tests {
     /// draws it: the glyphs filled and then stroked in the same colour,
     /// which is a page's own way of putting weight on an upright. A face
     /// that carries its own bold is just set in it.
+    /// Every state a page saves it restores, in order.
+    ///
+    /// A layer's placement, clip and colours are set inside a `q`/`Q`
+    /// pair so they end with the layer. A copy with layers of its own
+    /// standing in left its pair by an early return past the `Q`, and its
+    /// placement stayed on everything drawn after it — a file every
+    /// reader would draw wrongly and none would complain about. The pages
+    /// nobody wrote put their copies last, where a leak has nothing to
+    /// land on, so this reads the stream itself.
+    #[test]
+    fn every_state_a_page_saves_it_restores() {
+        for seed in 0..120u64 {
+            let mut doc = chitrakar_doc::fixture::page(seed);
+            // Something after everything, for a leak to land on.
+            let root = doc.root();
+            let at = doc.children_of(root).unwrap().len();
+            add_at(&mut doc, at);
+            let content = content_of(&export_pdf_document(&doc).unwrap());
+            let mut depth = 0i32;
+            for line in content.lines() {
+                match line.trim() {
+                    "q" => depth += 1,
+                    "Q" => {
+                        depth -= 1;
+                        assert!(depth >= 0, "seed {seed}: a Q with no q");
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                depth, 0,
+                "seed {seed}: {depth} states saved and never restored"
+            );
+        }
+    }
+
+    fn add_at(doc: &mut Document, at: usize) {
+        let root = doc.root();
+        let mut last = chitrakar_doc::Node::vector(
+            "last",
+            VectorShape::Rect {
+                width: 4.0,
+                height: 4.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut last.kind {
+            *fill = Some(BLUE);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: at,
+            node: Box::new(last),
+        })
+        .unwrap();
+    }
+
+    /// A regular stretch after a bold one is not stroked. The text render
+    /// mode is graphics state, not the text object's, and outlives `ET`,
+    /// so a stretch that did not say its own mode was drawn in the one
+    /// before it: a word whose last letters were set regular came out
+    /// heavy to the end.
+    #[test]
+    fn a_regular_stretch_after_a_bold_one_is_not_stroked() {
+        let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
+        let mut spec = chitrakar_doc::TextSpec::new("Heavy", 20.0, BLUE);
+        spec.bold = true;
+        let mut run = chitrakar_doc::StyleRun::over(3, 5);
+        run.bold = Some(false);
+        spec.runs = vec![run];
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        let heavy = content.find("2 Tr").expect("the bold stretch is stroked");
+        assert!(
+            content[heavy..].contains("0 Tr"),
+            "and the regular one after it says it is not: {content}"
+        );
+    }
+
     #[test]
     fn a_synthesized_bold_is_stroked_rather_than_faked_with_pixels() {
         let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
@@ -3213,5 +3401,167 @@ mod tests {
             .read_to_end(&mut embedded)
             .unwrap();
         assert_eq!(embedded, icc, "profile embedded verbatim");
+    }
+
+    /// What ghostscript covers, pixel by pixel, drawing each document's
+    /// PDF onto nothing: one run of ghostscript for all of them, since
+    /// starting it is most of what it costs. `None` without ghostscript.
+    ///
+    /// Images are interpolated. A picture the exporter places is rendered
+    /// at up to four times the page's resolution for print, and without
+    /// interpolation ghostscript brings it down by taking one sample in
+    /// sixteen, which aliases every edge in it; that is the reader, and it
+    /// is not what is being asked about.
+    fn ghostscript_alpha(docs: &[Document]) -> Option<Vec<Vec<f32>>> {
+        std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let dir = std::env::temp_dir().join(format!("chitrakar-pdf-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for (i, d) in docs.iter().enumerate() {
+            let p = dir.join(format!("p{i:04}.pdf"));
+            std::fs::write(&p, export_pdf_document(d).unwrap()).unwrap();
+            paths.push(p);
+        }
+        let status = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=pngalpha",
+                "-r72",
+                "-dGraphicsAlphaBits=4",
+                "-dTextAlphaBits=4",
+                "-dDOINTERPOLATE",
+            ])
+            .arg(format!("-sOutputFile={}", dir.join("o%04d.png").display()))
+            .args(&paths)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ghostscript accepted the files");
+        let out = (1..=docs.len())
+            .map(|k| {
+                let png = std::fs::read(dir.join(format!("o{k:04}.png"))).unwrap();
+                let img = crate::decode(&png).unwrap();
+                img.rgba8.chunks(4).map(|p| p[3] as f32 / 255.0).collect()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(out)
+    }
+
+    /// What the engine covers, rendered at the four times the exporter
+    /// renders the pictures it places for print, and brought down to the
+    /// page by averaging. At that resolution a frame's edge is rounded to
+    /// a quarter of a pixel rather than a whole one, and that is the
+    /// picture the PDF carries.
+    fn engine_alpha(doc: &Document) -> Vec<f32> {
+        let k = 4u32;
+        let (w, h) = (doc.meta.width, doc.meta.height);
+        let mut big = chitrakar_render::Surface::new(w * k, h * k);
+        let clip = big.full_clip();
+        chitrakar_render::render_region_at(
+            doc,
+            &mut big,
+            clip,
+            Transform {
+                a: k as f32,
+                d: k as f32,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let mut a = 0.0;
+                for j in 0..k {
+                    for i in 0..k {
+                        a += big.get(x * k + i, y * k + j).a;
+                    }
+                }
+                out.push(a / (k * k) as f32);
+            }
+        }
+        out
+    }
+
+    /// Ghostscript draws the pages nobody wrote covering what the engine
+    /// covers — the PDF's half of the question the SVG exporter's
+    /// `a_reader_covers_what_the_engine_covers_on_pages_nobody_wrote`
+    /// asks, and for the same reason in coverage rather than colour.
+    ///
+    /// Text is left out: ghostscript sets it lighter and about half a
+    /// pixel right of both the engine and resvg, which agree with each
+    /// other to a tenth of one — the witness on the page somebody wrote
+    /// reads colour where that matters. So is the ground, so that what a
+    /// page covers is not everywhere.
+    ///
+    /// Two thirds of the pages disagreed the first time. Among what that
+    /// found: a copy of a hidden layer drawn anyway; a copy pointing at a
+    /// removed layer stopping the export, and — once it did not — leaving
+    /// its placement on everything after it, as a copy with stand-ins of
+    /// its own always had (an early return past the `Q`); a layer held to
+    /// a filter put in a picture of its own with the filter hidden, where
+    /// the hold let nothing through; a copy with a blend drawn as a
+    /// picture in which its original had been hidden; a copy faded to a
+    /// third drawn solid; an upright frame cut at its exact box; and
+    /// every placed picture starting at a quarter of a pixel.
+    #[test]
+    fn ghostscript_covers_what_the_engine_covers_on_pages_nobody_wrote() {
+        const SEEDS: u64 = 300;
+        let docs: Vec<Document> = (0..SEEDS)
+            .map(|seed| {
+                let mut doc = chitrakar_doc::fixture::page(seed);
+                let page = doc.clone();
+                for (id, n) in page.nodes() {
+                    if n.name == "ground" || matches!(n.kind, NodeKind::Text(_)) {
+                        doc.apply(Command::SetVisible {
+                            id: *id,
+                            visible: false,
+                        })
+                        .unwrap();
+                    }
+                }
+                doc
+            })
+            .collect();
+        let Some(theirs) = ghostscript_alpha(&docs) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let mut touched = 0usize;
+        for (seed, (doc, t)) in docs.iter().zip(&theirs).enumerate() {
+            let ours = engine_alpha(doc);
+            assert_eq!(ours.len(), t.len(), "seed {seed}: the page is its own size");
+            let (mut bad, mut worst, mut at) = (0usize, 0.0f32, 0usize);
+            for (i, (o, g)) in ours.iter().zip(t).enumerate() {
+                let d = (o - g).abs();
+                if d > 0.5 {
+                    bad += 1;
+                }
+                if d > worst {
+                    worst = d;
+                    at = i;
+                }
+            }
+            let w = doc.meta.width as usize;
+            assert!(
+                bad <= 6,
+                "seed {seed}: {bad} pixels are covered differently by more than half, \
+                 the worst by {worst:.3} at ({}, {})",
+                at % w,
+                at / w
+            );
+            touched += (bad > 0) as usize;
+        }
+        assert!(
+            touched <= 15,
+            "{touched} pages differ by more than half somewhere"
+        );
     }
 }
