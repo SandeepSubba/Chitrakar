@@ -27,7 +27,14 @@ pub fn export_svg(doc: &Document) -> Result<String, DocError> {
     // the defs it asked for are spliced in ahead of it.
     let mut body = String::new();
     let mut defs = String::new();
-    write_children(doc, doc.root(), &mut body, 1, &mut defs)?;
+    write_children(
+        doc,
+        doc.root(),
+        &mut body,
+        1,
+        &mut defs,
+        Transform::default(),
+    )?;
     if !defs.is_empty() {
         let _ = write!(out, "  <defs>\n{defs}  </defs>\n");
     }
@@ -42,6 +49,10 @@ fn write_children(
     out: &mut String,
     depth: usize,
     defs: &mut String,
+    // How the space the children sit in reaches the page, *here*: a copy
+    // writes its original's layers again at the copy's own place, so the
+    // tree above a layer does not say where this writing of it lands.
+    space: Transform,
 ) -> Result<(), DocError> {
     // Where this group's own markup starts, so that a filter layer can
     // wrap everything written before it: an adjustment or a filter
@@ -96,7 +107,7 @@ fn write_children(
             let _ = writeln!(out, "{pad}</g>");
             continue;
         }
-        write_node(doc, child, out, depth, defs)?;
+        write_node(doc, child, out, depth, defs, true, space)?;
     }
     Ok(())
 }
@@ -177,6 +188,15 @@ fn write_node(
     out: &mut String,
     depth: usize,
     defs: &mut String,
+    // Whether the layer is held to the one below it here. Not when it is
+    // written as part of a copy: being held is between neighbours, and a
+    // copy draws the layer's own picture where the copy stands, with
+    // nothing of the original's neighbours under it (`render_child`). A
+    // copy of a held layer carried the original's hold to its own place
+    // and was cut to whatever lay under the original.
+    held: bool,
+    // How the space the layer sits in reaches the page (`write_children`).
+    space: Transform,
 ) -> Result<(), DocError> {
     {
         let node = doc.node(child)?;
@@ -184,7 +204,29 @@ fn write_node(
             return Ok(());
         }
         let pad = "  ".repeat(depth);
-        let common = common_attrs(node);
+        // A layer's effects travel as a filter on a wrapper outside all
+        // of its own: outside its transform, since an offset is written in
+        // the space the layer sits in; outside its mask and what it is
+        // held to, since a shadow grows from what shows of the layer and
+        // is not itself cut by either. The wrapper takes the layer's
+        // blend with it — a filter isolates what is inside it, so a blend
+        // left on the layer would meet nothing — which brings the effects
+        // down by the blend too, as the engine does.
+        let effects = effect_filter(doc, child, defs);
+        let common = if effects.is_some() {
+            let mut plain = node.clone();
+            plain.blend = BlendMode::Normal;
+            common_attrs(&plain)
+        } else {
+            common_attrs(node)
+        };
+        if let Some(filter) = &effects {
+            let blend = match node.blend {
+                BlendMode::Normal => String::new(),
+                other => format!(r#" style="mix-blend-mode:{}""#, css_blend(other)),
+            };
+            let _ = writeln!(out, r#"{pad}<g filter="url(#{filter})"{blend}>"#);
+        }
         // A mask is authored in the space the layer sits in, so it goes
         // on a wrapper that carries no transform of its own: SVG reads a
         // userSpaceOnUse mask in the space in force where it is
@@ -194,7 +236,11 @@ fn write_node(
         // out: SVG has no clipping to another layer's alpha, so what that
         // layer lets through travels as a mask of its own, on a wrapper
         // outside the layer's own.
-        let confined = clip_attrs(doc, child, defs);
+        let confined = if held {
+            clip_attrs(doc, child, defs)
+        } else {
+            String::new()
+        };
         if !confined.is_empty() {
             let _ = writeln!(out, "{pad}<g{confined}>");
         }
@@ -204,19 +250,45 @@ fn write_node(
         match &node.kind {
             NodeKind::Group => {
                 let _ = writeln!(out, "{pad}<g{common}>");
-                write_children(doc, child, out, depth + 1, defs)?;
+                write_children(
+                    doc,
+                    child,
+                    out,
+                    depth + 1,
+                    defs,
+                    space.compose(node.transform),
+                )?;
                 let _ = writeln!(out, "{pad}</g>");
             }
             // A copy of a clone layer lifts where the copy stands, and the
             // original's markup again would carry what the original lifted
             // to the copy's place — a picture of the wrong part of the
-            // page. It is left out, as the clone itself used to be.
+            // page. So it travels as the clone does, as an image of what
+            // it lays where it stands (`clone_pixels`); where that cannot
+            // be drawn aside it is left out, as it always was.
             NodeKind::Instance { .. } if chitrakar_render::copies_a_clone(doc, child) => {
-                let _ = writeln!(
-                    out,
-                    "{pad}<!-- copy of a clone layer '{}' has no SVG equivalent; omitted -->",
-                    escape_xml(&node.name)
-                );
+                match chitrakar_render::clone_pixels(doc, child) {
+                    Ok(Some(laid)) => {
+                        let (w, h) = (laid.width, laid.height);
+                        let [x, y] = laid.origin;
+                        if let Ok(png) = crate::encode_png(w, h, &laid.rgba8) {
+                            let _ = writeln!(out, "{pad}<g{common}>");
+                            let _ = writeln!(
+                                out,
+                                r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                                base64(&png)
+                            );
+                            let _ = writeln!(out, "{pad}</g>");
+                        }
+                    }
+                    _ => {
+                        let _ = writeln!(
+                            out,
+                            "{pad}<!-- copy of a clone layer '{}' has no SVG equivalent; omitted -->",
+                            escape_xml(&node.name)
+                        );
+                    }
+                }
             }
             NodeKind::Instance { of, .. } => {
                 // Where the copy has layers of its own standing in for
@@ -234,7 +306,15 @@ fn write_node(
                 if !stand_ins.is_empty() {
                     let _ = writeln!(out, "{pad}<g{common}>");
                     for part in stand_ins {
-                        write_node(doc, part, out, depth + 1, defs)?;
+                        write_node(
+                            doc,
+                            part,
+                            out,
+                            depth + 1,
+                            defs,
+                            false,
+                            space.compose(node.transform),
+                        )?;
                     }
                     let _ = writeln!(out, "{pad}</g>");
                 } else {
@@ -262,7 +342,15 @@ fn write_node(
                         );
                         let _ = writeln!(out, "{pad}<g{common}>");
                         let _ = writeln!(out, "{pad}  <g{undo}>");
-                        write_node(doc, *of, out, depth + 2, defs)?;
+                        write_node(
+                            doc,
+                            *of,
+                            out,
+                            depth + 2,
+                            defs,
+                            false,
+                            space.compose(node.transform).compose(back),
+                        )?;
                         let _ = writeln!(out, "{pad}  </g>");
                         let _ = writeln!(out, "{pad}</g>");
                     }
@@ -277,20 +365,67 @@ fn write_node(
                 // A frame is a group cut to a rectangle, which SVG says
                 // with a clipPath in the frame's own space — so it goes
                 // on the same element that carries the frame's transform.
-                let name = format!("frame{}", child.0);
+                // Named for this writing of the frame: a copy writes it
+                // again at another place, where it may round differently.
+                let mut name = format!("frame{}", child.0);
+                let mut k = 0;
+                while defs.contains(&format!(r#"id="{name}""#)) {
+                    k += 1;
+                    name = format!("frame{}_{k}", child.0);
+                }
+                // Cut where the engine cuts it. An upright frame's edge is
+                // a page edge and is rounded to whole pixels of the page
+                // rather than antialiased; written as its exact box, the
+                // last row of a frame at a fraction of a pixel came out
+                // half covered in a reader and whole here. So the box is
+                // rounded on the page and taken back into the frame's
+                // own space; a turned frame's edge is worked out per
+                // pixel here too, and keeps its exact box.
+                let to_page = space.compose(node.transform);
+                let (bx, by, bw, bh) = if to_page.b.abs() < 1e-6
+                    && to_page.c.abs() < 1e-6
+                    && to_page.a.abs() > 1e-6
+                    && to_page.d.abs() > 1e-6
+                {
+                    let (t, a) = (to_page, *width);
+                    let (x0, x1) = (t.e, t.e + t.a * a);
+                    let (y0, y1) = (t.f, t.f + t.d * *height);
+                    let (x0, x1) = (x0.min(x1).round(), x0.max(x1).round());
+                    let (y0, y1) = (y0.min(y1).round(), y0.max(y1).round());
+                    let (lx0, lx1) = ((x0 - t.e) / t.a, (x1 - t.e) / t.a);
+                    let (ly0, ly1) = ((y0 - t.f) / t.d, (y1 - t.f) / t.d);
+                    (
+                        lx0.min(lx1),
+                        ly0.min(ly1),
+                        (lx1 - lx0).abs(),
+                        (ly1 - ly0).abs(),
+                    )
+                } else {
+                    (0.0, 0.0, *width, *height)
+                };
                 let _ = writeln!(
                     defs,
-                    r#"<clipPath id="{name}"><rect width="{width}" height="{height}"/></clipPath>"#
+                    r#"<clipPath id="{name}"><rect x="{bx}" y="{by}" width="{bw}" height="{bh}"/></clipPath>"#
                 );
                 let _ = writeln!(out, r#"{pad}<g{common} clip-path="url(#{name})">"#);
                 if let Some(color) = background {
                     let ground = paint_attrs(doc, Some(color), None, None, child, defs, false);
+                    // Over the box the frame is cut to, which is what the
+                    // engine fills: the ground's own box, where that was
+                    // rounded outward, left a half-covered row at the edge.
                     let _ = writeln!(
                         out,
-                        r#"{pad}  <rect width="{width}" height="{height}"{ground}/>"#
+                        r#"{pad}  <rect x="{bx}" y="{by}" width="{bw}" height="{bh}"{ground}/>"#
                     );
                 }
-                write_children(doc, child, out, depth + 1, defs)?;
+                write_children(
+                    doc,
+                    child,
+                    out,
+                    depth + 1,
+                    defs,
+                    space.compose(node.transform),
+                )?;
                 let _ = writeln!(out, "{pad}</g>");
             }
             NodeKind::Vector {
@@ -419,6 +554,20 @@ fn write_node(
                         // instead of arriving as a flattened polyline.
                         let curved = handles.len() == points.len()
                             && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+                        // And so does a smooth one, whose curve is a
+                        // Catmull-Rom spline through its anchors — exactly
+                        // a cubic per segment (`smooth_handles`). It went
+                        // out as the straight lines between the anchors,
+                        // with a note saying it was meant to be smooth
+                        // that no reader reads: every smooth path in an
+                        // SVG was a polygon.
+                        let inferred;
+                        let (curved, handles) = if !curved && *smooth && points.len() >= 3 {
+                            inferred = chitrakar_render::smooth_handles(points, *closed);
+                            (true, &inferred)
+                        } else {
+                            (curved, handles)
+                        };
                         let mut d = String::new();
                         if curved && points.len() >= 2 {
                             let _ = write!(d, "M{},{}", points[0][0], points[0][1]);
@@ -470,11 +619,12 @@ fn write_node(
                             }
                             d.push_str(" Z");
                         }
-                        let rule = if subpaths.is_empty() {
-                            ""
-                        } else {
-                            r#" fill-rule="evenodd""#
-                        };
+                        // Even-odd for every path, as the engine fills one
+                        // and as the PDF writes one (`f*`). It was said only
+                        // where there were extra rings, so a path that
+                        // crossed itself went out with its overlap filled
+                        // where the page has a hole.
+                        let rule = r#" fill-rule="evenodd""#;
                         let smooth_note = if *smooth {
                             " data-chitrakar-smooth=\"true\""
                         } else {
@@ -671,8 +821,178 @@ fn write_node(
         if !confined.is_empty() {
             let _ = writeln!(out, "{pad}</g>");
         }
+        if effects.is_some() {
+            let _ = writeln!(out, "{pad}</g>");
+        }
     }
     Ok(())
+}
+
+/// A layer's effects as an SVG filter, written into the defs; its id, or
+/// `None` for a layer with none that draw.
+///
+/// Each is built the way the engine builds it (`draw_effect`), from the
+/// layer's silhouette in one flat colour: a drop shadow is the alpha
+/// blurred and moved, under the layer; an outline is the alpha taken at
+/// half of what the layer's opacity makes it and grown, under the layer;
+/// an inner shadow is the hole around the layer blurred and moved and
+/// kept inside it, over the layer. Only the outline is not exact: the
+/// engine grows by a true distance, which is round, and SVG grows by a
+/// box, so round a turned or curved edge a reader's outline reaches
+/// further at the corners.
+///
+/// Before this every effect was left out, so every exported shadow and
+/// outline simply was not there — found by having a reader that is not
+/// us draw the pages nobody wrote and comparing only what they cover.
+fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String> {
+    let node = doc.node(id).ok()?;
+    // What the engine draws effects for: a layer with a silhouette. An
+    // adjustment, a filter and a copy of one have none.
+    if node.effects.is_empty()
+        || matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+        || chitrakar_render::rewrites_what_is_under_it(doc, id)
+    {
+        return None;
+    }
+    let reach = node
+        .effects
+        .iter()
+        .map(chitrakar_doc::Effect::reach)
+        .fold(0.0f32, f32::max);
+    let (x, y, w, h) = match chitrakar_render::bounds_in_parent_space(doc, id).ok()? {
+        chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => (
+            x0 - reach,
+            y0 - reach,
+            (x1 - x0) + 2.0 * reach,
+            (y1 - y0) + 2.0 * reach,
+        ),
+        chitrakar_render::Bounds::None => return None,
+        chitrakar_render::Bounds::Everything => {
+            let big = 4.0 * (doc.meta.width.max(doc.meta.height) as f32 + reach);
+            (-big, -big, 2.0 * big, 2.0 * big)
+        }
+    };
+    // A blur is taken on the page, in device pixels, at the spread this
+    // renderer actually has (see the blur filter above), and written back
+    // in the units of the space the layer sits in.
+    let scale = chitrakar_render::ancestor_space(doc, id)
+        .max_scale()
+        .max(1e-6);
+    let spread = |blur: f32| {
+        let sigma = blur.abs() * scale;
+        if sigma <= 0.01 {
+            return 0.0;
+        }
+        let w = 2.0 * chitrakar_render::blur::plane_radius(sigma) as f32 + 1.0;
+        ((w * w - 1.0).max(0.0)).sqrt() / 2.0 / scale
+    };
+    let tint = |color: &AuthoredColor, opacity: f32| {
+        format!(
+            r#"flood-color="{}" flood-opacity="{}""#,
+            color_hex(doc, color),
+            (color.alpha() * opacity).clamp(0.0, 1.0)
+        )
+    };
+    let blurred = |into: &mut String, from: &str, blur: f32, to: &str| {
+        let s = spread(blur);
+        if s > 0.0 {
+            let _ = write!(
+                into,
+                r#"<feGaussianBlur in="{from}" stdDeviation="{s}" result="{to}"/>"#
+            );
+        } else {
+            let _ = write!(
+                into,
+                r#"<feOffset in="{from}" dx="0" dy="0" result="{to}"/>"#
+            );
+        }
+    };
+    let mut body = String::new();
+    let (mut under, mut over) = (Vec::new(), Vec::new());
+    for (k, effect) in node.effects.iter().enumerate() {
+        let name = format!("fx{k}");
+        match effect {
+            chitrakar_doc::Effect::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+                opacity,
+            } => {
+                if *opacity <= 0.0 {
+                    continue;
+                }
+                blurred(&mut body, "SourceAlpha", *blur, &format!("{name}b"));
+                let _ = write!(
+                    body,
+                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/><feFlood {}/><feComposite in2="{name}o" operator="in" result="{name}"/>"#,
+                    tint(color, *opacity)
+                );
+                under.push(name);
+            }
+            chitrakar_doc::Effect::Outline {
+                width,
+                color,
+                opacity,
+            } => {
+                if *opacity <= 0.0 || *width <= 0.0 {
+                    continue;
+                }
+                // Inside is where the layer is at least half as covered
+                // as its opacity lets it be — a step there, steep enough
+                // to be one at eight bits.
+                let edge = 0.5 * node.opacity.max(1e-3);
+                let _ = write!(
+                    body,
+                    r#"<feComponentTransfer in="SourceAlpha" result="{name}i"><feFuncA type="linear" slope="1000" intercept="{}"/></feComponentTransfer><feMorphology in="{name}i" operator="dilate" radius="{width}" result="{name}g"/><feFlood {}/><feComposite in2="{name}g" operator="in" result="{name}"/>"#,
+                    0.5 - 1000.0 * edge,
+                    tint(color, *opacity)
+                );
+                under.push(name);
+            }
+            chitrakar_doc::Effect::InnerShadow {
+                dx,
+                dy,
+                blur,
+                color,
+                opacity,
+            } => {
+                if *opacity <= 0.0 {
+                    continue;
+                }
+                let _ = write!(
+                    body,
+                    r#"<feComponentTransfer in="SourceAlpha" result="{name}h"><feFuncA type="table" tableValues="1 0"/></feComponentTransfer>"#
+                );
+                blurred(&mut body, &format!("{name}h"), *blur, &format!("{name}b"));
+                let _ = write!(
+                    body,
+                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/><feFlood {}/><feComposite in2="{name}o" operator="in" result="{name}s"/><feComposite in="{name}s" in2="SourceAlpha" operator="in" result="{name}"/>"#,
+                    tint(color, *opacity)
+                );
+                over.push(name);
+            }
+        }
+    }
+    if under.is_empty() && over.is_empty() {
+        return None;
+    }
+    let mut merge = String::from("<feMerge>");
+    for n in under
+        .iter()
+        .map(String::as_str)
+        .chain(["SourceGraphic"])
+        .chain(over.iter().map(String::as_str))
+    {
+        let _ = write!(merge, r#"<feMergeNode in="{n}"/>"#);
+    }
+    merge.push_str("</feMerge>");
+    let filter = format!("effects{}", id.0);
+    let _ = writeln!(
+        defs,
+        r#"<filter id="{filter}" filterUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}">{body}{merge}</filter>"#
+    );
+    Some(filter)
 }
 
 /// A `mask="url(#…)"` attribute, with the mask itself written into the
@@ -869,7 +1189,21 @@ fn stroke_attrs(
     // still take it off or restyle it — a picture of an arrowhead would
     // be a picture. It is written in units of the stroke's width, which
     // is what sizes one from the line here too.
+    // Only a line with ends has anything at them: the engine puts nothing
+    // on a closed ring (`marker_pieces`), and SVG would, at the ring's
+    // first point — an arrowhead on a closed shape that the page does not
+    // have.
+    let open = matches!(
+        doc.node(id).map(|n| &n.kind),
+        Ok(NodeKind::Vector {
+            shape: VectorShape::Path { closed: false, points, .. },
+            ..
+        }) if points.len() >= 2
+    );
     for (marker, at_start) in [(stroke.start_marker, true), (stroke.end_marker, false)] {
+        if !open {
+            break;
+        }
         let Some(shape) = marker_path(marker, at_start) else {
             continue;
         };
@@ -1433,9 +1767,11 @@ mod tests {
             svg.contains(r#"clip-path="url(#frame"#),
             "and the group is cut by it"
         );
+        // Over the box the frame is cut to, which at whole pixels is its
+        // own box.
         assert!(
-            svg.contains(r#"<rect width="60" height="40""#),
-            "with its ground painted inside"
+            svg.contains(r#"<rect x="0" y="0" width="60" height="40""#),
+            "with its ground painted inside: {svg}"
         );
     }
 
@@ -3183,6 +3519,239 @@ mod tests {
                     && theirs.1[k].abs_diff(ours_ink.1[k]) <= 1,
                 "the word sits in {ours_ink:?} here and {theirs:?} there"
             );
+        }
+    }
+
+    /// What a reader that is not us covers, pixel by pixel, when it
+    /// draws the page's SVG onto nothing.
+    fn resvg_alpha(doc: &Document) -> Vec<f32> {
+        resvg_pixels(doc)
+            .chunks(4)
+            .map(|p| p[3] as f32 / 255.0)
+            .collect()
+    }
+
+    /// The same page as a reader draws it: premultiplied eight-bit RGBA.
+    fn resvg_pixels(doc: &Document) -> Vec<u8> {
+        let svg = export_svg(doc).unwrap();
+        let mut opt = usvg::Options::default();
+        opt.fontdb_mut()
+            .load_font_data(include_bytes!("../../render/assets/DejaVuSans.ttf").to_vec());
+        opt.font_family = "DejaVu Sans".to_string();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(doc.meta.width, doc.meta.height).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+        drawn.data().to_vec()
+    }
+
+    /// A page nobody wrote, with what an SVG says only approximately left
+    /// out of both sides, so what is compared is what it can say exactly:
+    ///
+    /// - text, which a reader shapes and sets itself (the witness above
+    ///   holds the box a word's ink sits in);
+    /// - an outline, which SVG grows by a box and the engine by a true
+    ///   distance, so a reader's is square at a turned corner;
+    /// - a filter layer that does not travel — everything but a plain
+    ///   blur is written as a comment;
+    /// - and the ground, so that what a page covers is not everywhere.
+    fn sayable(seed: u64) -> Document {
+        let mut doc = chitrakar_doc::fixture::page(seed);
+        let page = doc.clone();
+        let hidden: Vec<NodeId> = page
+            .nodes()
+            .filter(|(id, n)| {
+                n.name == "ground"
+                    || matches!(n.kind, NodeKind::Text(_))
+                    || (matches!(n.kind, NodeKind::Filter(_)) && softening(&page, **id).is_none())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in hidden {
+            doc.apply(Command::SetVisible { id, visible: false })
+                .unwrap();
+        }
+        for (id, n) in page.nodes() {
+            let outline =
+                |e: &chitrakar_doc::Effect| matches!(e, chitrakar_doc::Effect::Outline { .. });
+            if n.effects.iter().any(outline) {
+                let effects = n.effects.iter().filter(|e| !outline(e)).cloned().collect();
+                doc.apply(Command::SetEffects { id: *id, effects }).unwrap();
+            }
+        }
+        doc
+    }
+
+    /// A reader draws the pages nobody wrote covering what the engine
+    /// covers.
+    ///
+    /// Coverage, not colour: the engine composites in linear light and
+    /// every SVG consumer in the encoding a device shows, which moves
+    /// every half-opaque colour (see PLAN §0) — but how much of a pixel is
+    /// covered is `as + ab(1 - as)` in either, so it is a question with
+    /// one answer. The witness above asks it of one page somebody wrote;
+    /// this asks it of eight hundred nobody did, and the first time it
+    /// was asked half of them disagreed. Among what that found:
+    /// every effect was left out of every SVG; every smooth path went out
+    /// as a polygon; a path that crossed itself was filled where the page
+    /// has a hole; an arrowhead was put on a closed shape; a layer held to
+    /// an empty group, to a copy of one, to a hidden layer or to a clone
+    /// layer was confined wrongly or not at all; a copy of a held layer
+    /// carried the original's hold to its own place; a group holding an
+    /// adjustment lost its mask; an upright frame was cut at its exact
+    /// box where the page rounds it to whole pixels; every exported
+    /// picture off the page's pixel grid was smeared by a reader
+    /// resampling it; and a copy of a clone layer was left out.
+    ///
+    /// What is allowed is a few pixels a page, where two rasterizers
+    /// antialias an edge their own ways or a reader resamples a turned
+    /// picture.
+    #[test]
+    fn a_reader_covers_what_the_engine_covers_on_pages_nobody_wrote() {
+        const SEEDS: u64 = 800;
+        let (mut touched, mut compared) = (0usize, 0usize);
+        for seed in 0..SEEDS {
+            let doc = sayable(seed);
+            let theirs = resvg_alpha(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let (mut bad, mut worst, mut at) = (0usize, 0.0f32, 0usize);
+            for (i, (p, t)) in ours.pixels.iter().zip(&theirs).enumerate() {
+                let d = (p.a - t).abs();
+                if d > 0.5 {
+                    bad += 1;
+                }
+                if d > worst {
+                    worst = d;
+                    at = i;
+                }
+            }
+            let w = doc.meta.width as usize;
+            assert!(
+                bad <= 6,
+                "seed {seed}: {bad} pixels are covered differently by more than half, \
+                 the worst by {worst:.3} at ({}, {}) — a layer drawn in the wrong \
+                 place or not at all, not an edge",
+                at % w,
+                at / w
+            );
+            touched += (bad > 0) as usize;
+            compared += 1;
+        }
+        assert_eq!(compared, SEEDS as usize);
+        // Ten pages have a pixel or five like that when this was written.
+        assert!(
+            touched <= 20,
+            "{touched} pages differ by more than half somewhere"
+        );
+    }
+
+    /// A layer held to a clone layer travels confined to what the clone
+    /// lays. The mask it travels with is the base drawn aside, and a clone
+    /// drawn aside onto nothing lifts nothing: it has to be drawn with
+    /// what is under it (`clone_alone`), as its own export is. The pages
+    /// nobody wrote seldom ask this — with their ground taken away a clone
+    /// on one has little to lift — so it is asked here.
+    #[test]
+    fn a_layer_held_to_a_clone_layer_travels_where_the_clone_laid() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        place(
+            &mut doc,
+            painted(
+                "source",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            [0.0, 0.0],
+        );
+        let mut clone = Node::clone_layer("lift");
+        if let NodeKind::Clone { strokes } = &mut clone.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[20.0, 10.0], [30.0, 10.0]],
+                radii: vec![3.0],
+                color: RED,
+                softness: 0.0,
+                erase: false,
+                source: [-20.0, 0.0],
+                heal: false,
+                clip: None,
+            });
+        }
+        place(&mut doc, clone, [0.0, 0.0]);
+        let held = place(
+            &mut doc,
+            painted(
+                "held",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                BLUE,
+            ),
+            [0.0, 0.0],
+        );
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        for (x, y) in [(25usize, 10usize), (25, 22)] {
+            let (o, t) = (ours.get(x as u32, y as u32).a, theirs[y * 40 + x]);
+            assert!(
+                (o - t).abs() < 0.05,
+                "at ({x}, {y}) the page covers {o} and a reader {t}"
+            );
+        }
+        // And it is the held layer that shows there, over what the clone
+        // laid: coverage alone cannot say so, since the clone covers that
+        // pixel either way.
+        let px = &resvg_pixels(&doc)[(10 * 40 + 25) * 4..(10 * 40 + 25) * 4 + 4];
+        assert!(
+            px[2] > 200 && px[0] < 50,
+            "where the clone laid, the held layer shows over it ({px:?})"
+        );
+    }
+
+    /// Taking any layer away leaves a page that draws and exports.
+    ///
+    /// A copy is left pointing at nothing when what it copies goes, and is
+    /// then drawn as nothing — except that one question asked of it
+    /// (`reads_backdrop`) went looking with `?`, so a layer taken out of a
+    /// symbol whose copy had a stand-in for it, the stand-in being itself
+    /// a copy, left a page that would not draw at all. Found by the audit
+    /// above taking pages apart to find what disagreed.
+    #[test]
+    fn taking_any_layer_away_leaves_a_page_that_draws_and_exports() {
+        for seed in 0..400u64 {
+            let page = chitrakar_doc::fixture::page(seed);
+            let ids: Vec<NodeId> = page
+                .nodes()
+                .map(|(id, _)| *id)
+                .filter(|id| page.parent_of(*id).is_some())
+                .collect();
+            for id in ids {
+                let mut doc = page.clone();
+                if doc.apply(Command::RemoveNode { id }).is_err() {
+                    continue;
+                }
+                assert!(
+                    chitrakar_render::render(&doc).is_ok(),
+                    "seed {seed}: without {id:?} the page does not draw"
+                );
+                assert!(
+                    export_svg(&doc).is_ok(),
+                    "seed {seed}: without {id:?} the page does not export"
+                );
+            }
         }
     }
 }

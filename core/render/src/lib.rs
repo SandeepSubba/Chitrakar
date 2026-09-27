@@ -376,7 +376,15 @@ pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, Doc
                     }
                     continue;
                 }
-                let master = doc.node(*of)?;
+                // A copy of a layer that has since gone draws nothing and
+                // reads nothing — as it draws nothing (`render_child`).
+                // Asked with `?`, the whole page failed to draw: a layer
+                // removed from a symbol whose copy had a stand-in for it,
+                // which is itself a copy, left that stand-in pointing at
+                // nothing, and the question reached it.
+                let Ok(master) = doc.node(*of) else {
+                    continue;
+                };
                 let reads = match &master.kind {
                     NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => true,
                     NodeKind::Group | NodeKind::Artboard { .. } => reads_backdrop(doc, *of)?,
@@ -863,6 +871,37 @@ fn region_at(
     if inside.is_empty() {
         return Ok(());
     }
+    drawn(doc, surface, inside, view, showing)?;
+    // Turned, the page is not the box it was rounded out to above, and the
+    // corners of that box are off the page: its edge is cut per pixel, as
+    // a turned frame's is. Only the box was cut, so a clone layer turned
+    // on the page, drawn aside in its own space to be exported, lifted
+    // artwork from past the page's edge that the page itself never shows.
+    if view.b.abs() > 1e-6 || view.c.abs() > 1e-6 {
+        if let Some(inv) = Inverse::of(view) {
+            let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+            for y in inside.y0..inside.y1 {
+                for x in inside.x0..inside.x1 {
+                    let cov = rect_coverage(w, h, view, inv, x, y);
+                    if cov < 1.0 {
+                        let i = (y * surface.width + x) as usize;
+                        surface.pixels[i] = scale_alpha(surface.pixels[i], cov);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The drawing `region_at` asks for, inside the page's box.
+fn drawn(
+    doc: &Document,
+    surface: &mut Surface,
+    inside: ClipRect,
+    view: Transform,
+    showing: Showing,
+) -> Result<(), DocError> {
     match showing {
         Showing::Alone(id)
             if clone_alone(
@@ -1424,7 +1463,7 @@ fn lay_clone(
     (region, clip): (ClipRect, ClipRect),
     cover: Option<&Cover>,
     parent: Transform,
-) {
+) -> Surface {
     let strokes = behind.strokes;
     let (inner_mask, inner_space) = behind.mask;
     let plane = MaskRef::plane_over(
@@ -1504,6 +1543,7 @@ fn lay_clone(
             node.opacity,
         );
     }
+    laid
 }
 
 /// What a clone layer — or a copy of one, through however many copies —
@@ -1712,6 +1752,7 @@ fn draw_layer(
             && cover.is_none()
             && matches!(node.kind, NodeKind::Instance { .. })
             && !copies_a_clone(doc, child)
+            && !rewrites_what_is_under_it(doc, child)
         {
             if let Some(pad) = capture {
                 render_child(doc, child, dst, clip, parent, node.blend, bare)?;
@@ -1760,7 +1801,9 @@ fn draw_layer(
         // where the copy puts them — and went, for its effects, to a
         // surface of its own, where it had nothing to lift and laid
         // nothing: the copy vanished, shadow and all.
-        let resolved = if node.effects.is_empty() && !worn_below {
+        // And a clone layer something is held to: what is held to it is
+        // confined to what it laid, which only this road has in hand.
+        let resolved = if node.effects.is_empty() && !worn_below && capture.is_none() {
             None
         } else {
             clone_behind(doc, child, parent)
@@ -1773,7 +1816,10 @@ fn draw_layer(
                     .iter()
                     .map(Effect::reach)
                     .fold(0.0f32, f32::max);
-                let region = grow(clip, (reach * scale).ceil() as u32, dst.width, dst.height);
+                // As far as the effects reach, and as far as what is held
+                // to it wants its alpha.
+                let pad = ((reach * scale).ceil() as u32).max(capture.unwrap_or(0));
+                let region = grow(clip, pad, dst.width, dst.height);
                 // Held to the layer under it, it cannot show outside that
                 // layer's window — nor can anything grown from it — so
                 // that is as far as it is drawn, the way every other held
@@ -1786,10 +1832,9 @@ fn draw_layer(
                     None => region,
                 };
                 if region.is_empty() {
-                    return Ok(capture
-                        .map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
+                    return Ok(capture.map(|_| Cover::nothing()));
                 }
-                lay_clone(
+                let laid = lay_clone(
                     doc,
                     behind.wears,
                     behind,
@@ -1799,9 +1844,19 @@ fn draw_layer(
                     cover,
                     parent,
                 );
-                return Ok(
-                    capture.map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height)))
-                );
+                // What is held to a clone layer shows where it laid
+                // something, as over any other layer: it has a shape —
+                // the strokes it lays, at the alpha it lifted them at —
+                // which is what its effects are grown from too. It let
+                // everything through, as an adjustment does, which has
+                // no shape; and the SVG, which draws the base aside to
+                // make the held layer's mask, confined it to nothing.
+                return Ok(capture.map(|_| Cover {
+                    alpha: laid.pixels.iter().map(|p| p.a).collect(),
+                    origin: (0, 0),
+                    width: laid.width,
+                    height: laid.height,
+                }));
             }
         }
         // Applied where it stands and mixed back by its cover — and the
@@ -1826,7 +1881,13 @@ fn draw_layer(
             node.kind,
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
         ) || (!effected && copies_a_clone(doc, child))
-            || (cover.is_some() && rewrites_what_is_under_it(doc, child))
+            // A copy of an adjustment or a filter whether or not it is held
+            // to anything: asked only when it was, a copy of one that
+            // something was held *to* went to a surface of its own to be
+            // read as the cut, drew nothing there, and hid everything held
+            // to it — where the adjustment it copies lets everything
+            // through.
+            || rewrites_what_is_under_it(doc, child)
         {
             if let Some(c) = cover {
                 let region = clip.intersect(c.rect());
@@ -7095,9 +7156,39 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     let Some(base) = clip_base(doc, id)? else {
         return Ok(None);
     };
-    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, base)? else {
-        return Ok(None);
+    // A base that is not drawn shows nothing of what is held to it, as on
+    // the page — whatever kind of layer it is. An adjustment or a filter
+    // hidden was still read as letting everything through.
+    let nothing = || PaintedPixels {
+        width: 1,
+        height: 1,
+        origin: [0.0, 0.0],
+        rgba8: vec![255, 255, 255, 0],
     };
+    let shown = doc.node(base).map(|b| b.visible && b.opacity > 0.0)?;
+    if !shown {
+        return Ok(Some(nothing()));
+    }
+    let (x0, y0, x1, y1) = match bounds_in_parent_space(doc, base)? {
+        Bounds::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
+        // A base that lets everything through confines nothing: an
+        // adjustment, a filter, a copy of one.
+        Bounds::Everything if rewrites_what_is_under_it(doc, base) => return Ok(None),
+        // Anything else said to reach everywhere is only not known to
+        // reach less far — a copy of an empty group is one — and is drawn
+        // over the whole page to find out. Read as confining nothing, a
+        // frame held to a copy of an empty group was whole in an SVG.
+        Bounds::Everything => match parent_box(doc, base)? {
+            Some(b) => b,
+            None => return Ok(None),
+        },
+        // And one that covers nothing — an empty group — confines what is
+        // held to it to nothing, which is what the page shows. Answered
+        // as no confinement, a layer held to an empty group was hidden on
+        // the page and whole in an SVG.
+        Bounds::None => return Ok(Some(nothing())),
+    };
+    let (x0, y0, x1, y1) = on_the_grid(ancestor_space(doc, id), (x0, y0, x1, y1));
     let (w, h) = (
         (x1 - x0).ceil().max(1.0) as u32,
         (y1 - y0).ceil().max(1.0) as u32,
@@ -7110,7 +7201,12 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     let space = Transform::translation(-x0, -y0);
     let mut surface = Surface::new(w, h);
     let clip = surface.full_clip();
-    render_layer(doc, base, &mut surface, clip, space, false)?;
+    // A clone layer is drawn with what it lifts from under it, as it is
+    // on the page: drawn onto nothing it laid nothing, and a layer held to
+    // it was confined to nothing in an SVG.
+    if !clone_alone(doc, base, &mut surface, clip, space)? {
+        render_layer(doc, base, &mut surface, clip, space, false)?;
+    }
     let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
     for p in &surface.pixels {
         rgba8.extend_from_slice(&[255, 255, 255, (p.a.clamp(0.0, 1.0) * 255.0).round() as u8]);
@@ -7286,14 +7382,61 @@ pub fn layer_coverage_at(
 /// alpha — white has luminance 1, so one is the other. For an exporter
 /// whose format has no mask like ours and has to hand one over as a
 /// picture. `None` when the layer has no mask, or no box to draw it in.
+/// A box an exported picture is made over, widened to whole pixels of
+/// the page where the space it is in reaches the page by a plain move.
+///
+/// Such a picture is placed back at its box's corner, and a corner half
+/// a pixel off the page's own grid has a reader resample every pixel of
+/// it — a brush stroke that is crisp on the page came out of an SVG
+/// smeared across a pixel either side, and a mask's edge with it. Laid
+/// on the page's grid its pixels are the page's pixels. Turned or scaled
+/// there is no grid to meet, and the box is left as it is.
+fn on_the_grid(to_page: Transform, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let plain = (to_page.a - 1.0).abs() < 1e-6
+        && (to_page.d - 1.0).abs() < 1e-6
+        && to_page.b.abs() < 1e-6
+        && to_page.c.abs() < 1e-6;
+    if !plain {
+        return (x0, y0, x1, y1);
+    }
+    let (e, f) = (to_page.e, to_page.f);
+    (
+        (x0 + e).floor() - e,
+        (y0 + f).floor() - f,
+        (x1 + e).ceil() - e,
+        (y1 + f).ceil() - f,
+    )
+}
+
+/// Where a layer lands, in the space it sits in: its box, or — for one
+/// said to reach everywhere, as a group holding an adjustment is — the
+/// page, in that space, since nothing past the page is ever seen. `None`
+/// for a layer that lands nowhere. What a mask or a hold is worked out
+/// over for an exporter: read as "no box", a group holding an adjustment
+/// and wearing a mask went out with no mask at all.
+fn parent_box(doc: &Document, id: NodeId) -> Result<Option<(f32, f32, f32, f32)>, DocError> {
+    Ok(match bounds_in_parent_space(doc, id)? {
+        Bounds::Rect(x0, y0, x1, y1) => Some((x0, y0, x1, y1)),
+        Bounds::None => None,
+        Bounds::Everything => {
+            let page = (0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32);
+            match invert(ancestor_space(doc, id)).map(|back| transformed_local_bounds(back, page)) {
+                Some(Bounds::Rect(x0, y0, x1, y1)) => Some((x0, y0, x1, y1)),
+                _ => None,
+            }
+        }
+    })
+}
+
 pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
     let node = doc.node(id)?;
     let Some(mask) = node.mask.as_ref() else {
         return Ok(None);
     };
-    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+    let Some(b) = parent_box(doc, id)? else {
         return Ok(None);
     };
+    let (x0, y0, x1, y1) = on_the_grid(ancestor_space(doc, id), b);
     let (w, h) = (
         (x1 - x0).ceil().max(1.0) as u32,
         (y1 - y0).ceil().max(1.0) as u32,
@@ -7337,16 +7480,37 @@ pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
 /// the strokes as one where the page fades each as it lands, which is
 /// the same picture wherever they do not overlap.
 ///
-/// `None` for anything but a clone layer with strokes on it, and for one
-/// whose surroundings `clone_alone` cannot draw aside.
+/// A copy of one lays the same strokes, in its own space — which a copy
+/// shares with what it copies, the original's placement undone — lifting
+/// from where the copy stands; so it is drawn the same way. It used to be
+/// left out of an SVG altogether.
+///
+/// `None` for anything but a clone layer, or a copy of one, with strokes
+/// on it, and for one whose surroundings `clone_alone` cannot draw aside.
 pub fn clone_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
     let node = doc.node(id)?;
-    let NodeKind::Clone { strokes } = &node.kind else {
+    let mut at = id;
+    let mut found = None;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        match &doc.node(at)?.kind {
+            NodeKind::Clone { strokes } => {
+                found = Some(strokes);
+                break;
+            }
+            NodeKind::Instance { of, .. } => at = *of,
+            _ => return Ok(None),
+        }
+    }
+    let Some(strokes) = found else {
         return Ok(None);
     };
     let Some([x0, y0, x1, y1]) = painted_bounds(strokes) else {
         return Ok(None);
     };
+    let (x0, y0, x1, y1) = on_the_grid(
+        ancestor_space(doc, id).compose(node.transform),
+        (x0, y0, x1, y1),
+    );
     let (w, h) = (
         (x1 - x0).ceil().max(1.0) as u32,
         (y1 - y0).ceil().max(1.0) as u32,
@@ -7409,6 +7573,10 @@ pub fn paint_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>,
     let Some([x0, y0, x1, y1]) = painted_bounds(strokes) else {
         return Ok(None);
     };
+    let (x0, y0, x1, y1) = on_the_grid(
+        ancestor_space(doc, id).compose(node.transform),
+        (x0, y0, x1, y1),
+    );
     let (w, h) = (
         (x1 - x0).ceil().max(1.0) as u32,
         (y1 - y0).ceil().max(1.0) as u32,
@@ -19344,6 +19512,165 @@ mod tests {
     /// and that road drew the strokes and nothing else: the shadow was
     /// missing from the copy with nothing said, and the GPU backend,
     /// which drew it, disagreed on a page nobody wrote (seed 1343).
+    /// What is held to a clone layer shows where the clone laid something.
+    ///
+    /// A clone layer has a shape — the strokes it lays, at the alpha it
+    /// lifted them at — which is what its effects grow from. What was held
+    /// to one was let through everywhere, as it is over an adjustment,
+    /// which has no shape; and an SVG, drawing the clone aside to make the
+    /// held layer's mask, confined it to what the clone laid. The page
+    /// says the second now.
+    #[test]
+    fn a_layer_held_to_a_clone_layer_shows_where_it_laid_something() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("source", 10.0, 30.0, RED),
+        })
+        .unwrap();
+        let mut clone = Node::clone_layer("lift");
+        if let NodeKind::Clone { strokes } = &mut clone.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[20.0, 10.0], [30.0, 10.0]],
+                radii: vec![3.0],
+                color: RED,
+                softness: 0.0,
+                erase: false,
+                source: [-20.0, 0.0],
+                heal: false,
+                clip: None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(clone),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: filled_rect("held", 40.0, 30.0, BLUE),
+        })
+        .unwrap();
+        let held = doc.children_of(root).unwrap()[2];
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let on = page.get(25, 10);
+        assert!(
+            on.b > 0.9 && on.r < 0.1,
+            "where the clone laid red, what is held to it shows ({on:?})"
+        );
+        let off = page.get(25, 22);
+        assert!(off.a < 1e-4, "and nowhere else ({off:?})");
+    }
+
+    /// What is held to a copy of an adjustment shows whole, as over the
+    /// adjustment.
+    ///
+    /// An adjustment has no shape and lets everything held to it through.
+    /// A copy of one, asked for its alpha to cut by, was drawn on a surface
+    /// of its own — where it changes nothing and so covers nothing — and
+    /// everything held to it vanished.
+    #[test]
+    fn a_layer_held_to_a_copy_of_an_adjustment_shows_whole() {
+        let build = |copied: bool| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "brighter",
+                    chitrakar_doc::Adjustment::Exposure { stops: 0.5 },
+                )),
+            })
+            .unwrap();
+            let adjustment = doc.children_of(root).unwrap()[0];
+            if copied {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::instance("again", adjustment)),
+                })
+                .unwrap();
+            }
+            let at = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: filled_rect("held", 20.0, 20.0, RED),
+            })
+            .unwrap();
+            let held = doc.children_of(root).unwrap()[at];
+            doc.apply(Command::SetClipped {
+                id: held,
+                clipped: true,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        assert!(build(false).get(10, 10).r > 0.9, "held to the adjustment");
+        let copy = build(true).get(10, 10);
+        assert!(
+            copy.r > 0.9 && copy.a > 0.99,
+            "held to a copy of it, the same ({copy:?})"
+        );
+    }
+
+    /// Looked at turned, the page's edge is the page's, not the box round
+    /// it.
+    ///
+    /// A region is painted only where the page is, and that was the box
+    /// the turned page is rounded out to, whose corners are off the page:
+    /// artwork past the page's edge showed there. A clone layer turned on
+    /// the page and drawn aside in its own space to be exported lifted it.
+    #[test]
+    fn a_turned_view_shows_nothing_past_the_page_edge() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        // Far past the page on every side.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("wide", 60.0, 60.0, RED),
+        })
+        .unwrap();
+        let only = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: only,
+            transform: Transform::translation(-20.0, -20.0),
+        })
+        .unwrap();
+        // An eighth of a turn about the page's middle, onto a surface
+        // twice its size.
+        let (s, c) = std::f32::consts::FRAC_PI_4.sin_cos();
+        let view = Transform {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            e: 20.0 - (c * 10.0 - s * 10.0),
+            f: 20.0 - (s * 10.0 + c * 10.0),
+        };
+        let mut surface = Surface::new(40, 40);
+        let clip = surface.full_clip();
+        render_region_at(&doc, &mut surface, clip, view).unwrap();
+        assert!(surface.get(20, 20).a > 0.99, "the page's middle is drawn");
+        // Inside the box round the turned page, outside the page.
+        let corner = surface.get(8, 8);
+        assert!(
+            corner.a < 1e-4,
+            "past the page's edge, nothing ({corner:?})"
+        );
+    }
+
     #[test]
     fn a_copy_of_a_clone_layer_casts_the_shadow_it_copies() {
         let page = |shadow: bool, fade: f32| {

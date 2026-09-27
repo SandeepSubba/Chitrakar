@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~531),
+- **Verify before committing:** `cargo test --workspace` (~537),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4282,6 +4282,62 @@ without reading anything else.*
      test, bar one: drawing a turned frame's contents over the laid
      region only, which keeps what a pixelate there averages exactly
      what it was before the surface grew.
+     **And a reader that is not us, on the pages nobody wrote.** The
+     exporters had been held against another reader on one page somebody
+     wrote. `a_reader_covers_what_the_engine_covers_on_pages_nobody_wrote`
+     exports 800 random pages to SVG, has resvg draw them and compares
+     *coverage* with the engine — which composites the same in linear
+     light and in the shown encoding, so it has one answer even where
+     colour legitimately differs (the partial-alpha divergence above).
+     Text, outlines and filters that do not travel are left out of both
+     sides, being approximate there by design. Half the pages disagreed
+     the first time; ten now differ by a few pixels of antialiasing or a
+     turned picture resampled. What it found:
+     - **Every effect was left out of every SVG.** Shadows, outlines and
+       inner shadows now travel as SVG filters on a wrapper outside the
+       layer's transform, mask and hold, carrying its blend (a filter
+       isolates what is inside it). The outline is grown by a box in SVG
+       and by a true distance here, so it is square at a turned corner.
+     - **Every smooth path went out as a polygon** through its anchors,
+       with a note no reader reads; it goes out as the cubic its
+       Catmull-Rom curve is (`smooth_handles`).
+     - **A self-crossing path was filled where the page has a hole**:
+       even-odd was written only for paths with extra rings. Every path
+       is even-odd now, as here and in the PDF (`f*`).
+     - **An arrowhead on a closed shape**, which the engine does not draw.
+     - **Holds.** A layer held to a hidden layer, an empty group, or a
+       copy of one travelled unconfined; one held to a clone layer was
+       confined to nothing (the base drawn aside lifted nothing); a copy
+       of a held layer carried the original's hold to its own place.
+     - **A group holding an adjustment lost its mask** — its box is
+       "everywhere", and the mask was only worked out over a box.
+       `parent_box` works it out over the page.
+     - **An upright frame was cut at its exact box** where the page rounds
+       it to whole pixels, and a copy of one was rounded where the
+       original stands; the writer now carries each writing's placement.
+     - **Every exported picture off the page's pixel grid was smeared** by
+       a reader resampling it — brush layers, clone layers, masks, holds.
+       They start on whole page pixels when their placement is a move
+       (`on_the_grid`).
+     - **A copy of a clone layer was left out**; it travels as what it
+       lays, as the clone does.
+     And three in the renderer itself: **what is held to a clone layer**
+     was let through everywhere, as over an adjustment, though a clone has
+     a shape — its effects already grow from it; **what is held to a copy
+     of an adjustment** vanished, the copy having been drawn aside to be
+     cut by and covering nothing (`a_layer_held_to_a_clone_layer_shows_where_it_laid_something`,
+     `a_layer_held_to_a_copy_of_an_adjustment_shows_whole`); and **a
+     turned view** cut the page at the box round it, so artwork past the
+     page's edge showed in the corners (`a_turned_view_shows_nothing_past_the_page_edge`).
+     Taking the pages apart to find these found one more:
+     **a page that would not draw** after a layer inside a symbol was
+     removed, where the copy's stand-in for it was itself a copy — one
+     question asked of it went looking with `?`. Every layer of 400 pages
+     is now taken away in turn, and each page must still draw and export
+     (`taking_any_layer_away_leaves_a_page_that_draws_and_exports`).
+     Each fix, taken out again, fails an audit or a test; the hold to a
+     clone needed a test of its own reading colour, since the clone
+     covers the same pixels either way.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
