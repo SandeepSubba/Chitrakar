@@ -673,12 +673,14 @@ fn write_node(
                 } else {
                     ""
                 };
-                let decoration = match (spec.underline, spec.strike) {
-                    (true, true) => r#" text-decoration="underline line-through""#,
-                    (true, false) => r#" text-decoration="underline""#,
-                    (false, true) => r#" text-decoration="line-through""#,
-                    (false, false) => "",
-                };
+                // Underline and strike-through go as the engine's own bands
+                // (`text::placed`), drawn after the text in its colours,
+                // as the PDF draws them. Said as `text-decoration`, each
+                // reader chose its own thickness and height from the
+                // font's metrics: resvg's lines had half the weight of the
+                // page's and sat a pixel higher.
+                let bands = chitrakar_render::text::placed(spec).decorations;
+                let decoration = "";
                 let (anchor, x) = match spec.align {
                     chitrakar_doc::TextAlign::Left => ("", block.inset),
                     chitrakar_doc::TextAlign::Center => {
@@ -688,7 +690,49 @@ fn write_node(
                         (r#" text-anchor="end""#, block.inset + block.inner)
                     }
                 };
-                let _ = writeln!(
+                // Along a guide, the guide is defined beside the text in
+                // one group that carries the text's placement. SVG reads
+                // a guide in the text's own space, and at least one
+                // reader reads it where it is defined — which was the top
+                // of the file, so a turned or moved block on a curve came
+                // back from its own SVG at the page's corner. Defined
+                // where the text is, the two readings are the same.
+                let guide = chitrakar_render::text::guide_points(spec);
+                let guide_name = format!("guide{}", child.0);
+                // On a guide the text starts at its offset however the
+                // block is aligned; SVG would centre or end it there
+                // instead, sliding it back along the guide and off its
+                // start.
+                let anchor = if guide.is_some() { "" } else { anchor };
+                let common = match &guide {
+                    Some((points, closed)) => {
+                        let mut d = String::new();
+                        for (i, p) in points.iter().enumerate() {
+                            let _ = write!(
+                                d,
+                                "{}{:.2},{:.2}",
+                                if i == 0 { "M" } else { " L" },
+                                p[0],
+                                p[1]
+                            );
+                        }
+                        if *closed {
+                            d.push_str(" Z");
+                        }
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        let _ = writeln!(
+                            out,
+                            r#"{pad}<defs><path id="{guide_name}" d="{d}"/></defs>"#
+                        );
+                        String::new()
+                    }
+                    None if !bands.is_empty() => {
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        String::new()
+                    }
+                    None => common.clone(),
+                };
+                let _ = write!(
                     out,
                     r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{weight}{decoration}{anchor}{common} fill="{}" xml:space="preserve">"#,
                     if spec.font.is_empty() {
@@ -699,35 +743,26 @@ fn write_node(
                     block.em,
                     color_hex(doc, &spec.fill),
                 );
-                // No indentation inside: the block preserves its space
-                // (an indent typed into a line is meant), so the only
-                // whitespace between the tags is the newline.
+                // Nothing at all between the tags inside: the block
+                // preserves its space (an indent typed into a line is
+                // meant), and under `xml:space="preserve"` a newline
+                // between two tspans is a space in the text. It was
+                // there, one after every line, and a line set to the
+                // right or the middle ended a space's width short of
+                // where the page ends it — invisible only at the left.
                 // Along a guide the text is one run on a textPath: the
                 // guide goes into the defs as the renderer flattens it,
                 // with the offset as startOffset.
-                if let Some((points, closed)) = chitrakar_render::text::guide_points(spec) {
-                    let name = format!("guide{}", child.0);
-                    let mut d = String::new();
-                    for (i, p) in points.iter().enumerate() {
-                        let _ = write!(
-                            d,
-                            "{}{:.2},{:.2}",
-                            if i == 0 { "M" } else { " L" },
-                            p[0],
-                            p[1]
-                        );
-                    }
-                    if closed {
-                        d.push_str(" Z");
-                    }
-                    let _ = writeln!(defs, r#"<path id="{name}" d="{d}"/>"#);
-                    let _ = writeln!(
+                if guide.is_some() {
+                    let _ = write!(
                         out,
-                        r##"<textPath href="#{name}" startOffset="{:.2}">{}</textPath>"##,
+                        r##"<textPath href="#{guide_name}" startOffset="{:.2}">{}</textPath>"##,
                         spec.along_offset,
                         escape_xml(&spec.text.replace('\n', " "))
                     );
                     let _ = writeln!(out, "</text>");
+                    write_bands(doc, &bands, &pad, out);
+                    let _ = writeln!(out, "{pad}</g>");
                 } else {
                     for (i, set) in block.lines.iter().enumerate() {
                         let y = block.ascent + i as f32 * block.step;
@@ -744,7 +779,7 @@ fn write_node(
                             } else {
                                 String::new()
                             };
-                            let _ = writeln!(
+                            let _ = write!(
                                 out,
                                 "<tspan{at}{}>{}</tspan>",
                                 run_attrs(doc, spec, *run),
@@ -753,6 +788,10 @@ fn write_node(
                         }
                     }
                     let _ = writeln!(out, "</text>");
+                    if !bands.is_empty() {
+                        write_bands(doc, &bands, &pad, out);
+                        let _ = writeln!(out, "{pad}</g>");
+                    }
                 }
             }
             // A clone layer has no picture of its own either — it paints
@@ -1015,6 +1054,26 @@ fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
         base64(&png)
     );
     format!(r#" mask="url(#{name})""#)
+}
+
+/// Underline and strike-through bands, in the text's own space, each in
+/// its stretch's colour.
+fn write_bands(doc: &Document, bands: &[([f32; 4], AuthoredColor)], pad: &str, out: &mut String) {
+    for ([x0, y0, x1, y1], fill) in bands {
+        let a = fill.alpha();
+        let opacity = if a < 1.0 {
+            format!(r#" fill-opacity="{a}""#)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            out,
+            r#"{pad}<rect x="{x0}" y="{y0}" width="{}" height="{}" fill="{}"{opacity}/>"#,
+            x1 - x0,
+            y1 - y0,
+            color_hex(doc, fill)
+        );
+    }
 }
 
 /// The CSS name for a blend mode: the spec's, hyphenated where it has
@@ -1356,13 +1415,8 @@ fn run_attrs(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>)
     if let Some(font) = &run.font {
         let _ = write!(out, r#" font-family="{}, sans-serif""#, escape_xml(font));
     }
-    match (run.underline, run.strike) {
-        (Some(true), Some(true)) => out.push_str(r#" text-decoration="underline line-through""#),
-        (Some(true), _) => out.push_str(r#" text-decoration="underline""#),
-        (_, Some(true)) => out.push_str(r#" text-decoration="line-through""#),
-        (Some(false), _) | (_, Some(false)) => out.push_str(r#" text-decoration="none""#),
-        (None, None) => {}
-    }
+    // Underline and strike-through are not said here: they are drawn as
+    // the engine's own bands beside the text (see the text arm).
     out
 }
 
@@ -1979,9 +2033,12 @@ mod tests {
             "tracking in ems -> px"
         );
         assert!(svg.contains(">one</tspan>") && svg.contains(">two</tspan>"));
+        // Read tspan by tspan: nothing is between them, not even a
+        // newline, since one would be a space in the text.
         let baselines: Vec<f32> = svg
-            .lines()
-            .filter(|l| l.contains("<tspan") && (l.contains(">one<") || l.contains(">two<")))
+            .split("<tspan")
+            .skip(1)
+            .filter(|l| l.contains(">one<") || l.contains(">two<"))
             .filter_map(|l| {
                 let at = l.find(r#"y=""#)? + 3;
                 l[at..].split('"').next()?.parse().ok()
@@ -2017,12 +2074,12 @@ mod tests {
         })
         .unwrap();
         let svg = export_svg(&doc).unwrap();
+        // The whole text element is one line now (see above).
         let block = svg
             .lines()
-            .skip_while(|l| !l.contains(r#"text-anchor="middle""#))
-            .take_while(|l| !l.contains("</text>"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .find(|l| l.contains(r#"text-anchor="middle""#))
+            .unwrap_or_default()
+            .to_string();
         assert!(
             block.contains(r#"<tspan x="45.00""#),
             "centred in the 90px block: {block}"
@@ -2039,11 +2096,23 @@ mod tests {
             node: Box::new(Node::text("t4", struck)),
         })
         .unwrap();
+        // Decorations go as the engine's own bands — two of them, beside
+        // the text in the group carrying its placement — not as
+        // `text-decoration`, whose thickness and height a reader chooses.
+        let svg = export_svg(&doc).unwrap();
         assert!(
-            export_svg(&doc)
-                .unwrap()
-                .contains(r#" text-decoration="underline line-through""#),
-            "decorations ride on the text element"
+            !svg.contains("text-decoration"),
+            "no reader is left to draw its own lines: {svg}"
+        );
+        let group = svg
+            .split("<g")
+            .find(|g| g.contains(">x</tspan>"))
+            .and_then(|g| g.split("</g>").next())
+            .unwrap_or_default();
+        assert_eq!(
+            group.matches("<rect ").count(),
+            2,
+            "an underline and a strike-through, drawn: {group}"
         );
         // Text along a guide is a textPath over a path in the defs.
         let along = {
@@ -3531,8 +3600,9 @@ mod tests {
     /// A page nobody wrote, with what an SVG says only approximately left
     /// out of both sides, so what is compared is what it can say exactly:
     ///
-    /// - text, which a reader shapes and sets itself (the witness above
-    ///   holds the box a word's ink sits in);
+    /// - text on a closed guide, which SVG cannot wrap past the guide's
+    ///   start, and a synthesized italic or bold, which a reader does not
+    ///   synthesize (DejaVu has neither of its own);
     /// - an outline, which SVG grows by a box and the engine by a true
     ///   distance, so a reader's is square at a turned corner;
     /// - a filter layer that does not travel — everything but a plain
@@ -3544,8 +3614,17 @@ mod tests {
         let hidden: Vec<NodeId> = page
             .nodes()
             .filter(|(id, n)| {
+                let closed_guide = matches!(
+                    &n.kind,
+                    NodeKind::Text(t) if matches!(
+                        t.along,
+                        Some(VectorShape::Ellipse { .. })
+                            | Some(VectorShape::Rect { .. })
+                            | Some(VectorShape::Path { closed: true, .. })
+                    )
+                );
                 n.name == "ground"
-                    || matches!(n.kind, NodeKind::Text(_))
+                    || closed_guide
                     || (matches!(n.kind, NodeKind::Filter(_)) && softening(&page, **id).is_none())
             })
             .map(|(id, _)| *id)
@@ -3555,6 +3634,20 @@ mod tests {
                 .unwrap();
         }
         for (id, n) in page.nodes() {
+            if let NodeKind::Text(t) = &n.kind {
+                let mut t = t.clone();
+                t.italic = false;
+                t.bold = false;
+                for r in &mut t.runs {
+                    r.italic = None;
+                    r.bold = None;
+                }
+                doc.apply(Command::SetKind {
+                    id: *id,
+                    kind: Box::new(NodeKind::Text(t)),
+                })
+                .unwrap();
+            }
             let outline =
                 |e: &chitrakar_doc::Effect| matches!(e, chitrakar_doc::Effect::Outline { .. });
             if n.effects.iter().any(outline) {
@@ -3584,7 +3677,11 @@ mod tests {
     /// adjustment lost its mask; an upright frame was cut at its exact
     /// box where the page rounds it to whole pixels; every exported
     /// picture off the page's pixel grid was smeared by a reader
-    /// resampling it; and a copy of a clone layer was left out.
+    /// resampling it; and a copy of a clone layer was left out. With text
+    /// let in, a newline between two runs was a space to a reader, text on
+    /// a guide slid back by its anchor, underlines were left to the
+    /// reader's font tables — and the engine smeared every block placed
+    /// off its own pixel grid.
     ///
     /// What is allowed is a few pixels a page, where two rasterizers
     /// antialias an edge their own ways or a reader resamples a turned

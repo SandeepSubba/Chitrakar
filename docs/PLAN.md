@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~540),
+- **Verify before committing:** `cargo test --workspace` (~544),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4384,6 +4384,48 @@ without reading anything else.*
      it was taken back out. And an upright frame drawn live in a PDF keeps
      its exact box: rounding it to whole 72-dpi pixels, as the SVG does,
      is a screen's rule, and the audit could not tell the two apart.
+     **And back in again: an exported page, brought back, covers what it
+     covered.** `a_page_exported_and_brought_back_covers_what_it_covered`
+     exports 400 random pages to SVG, places each back the way
+     `Session::place_svg` does and asks the engine to draw both. The
+     first time, 110 pages disagreed, all for one reason and one more:
+     - **A clip or a mask on a placed group came in at the page's
+       origin.** usvg keeps a clip's and a mask's contents in the space
+       of the group that refers to them, not placed; the region is now
+       carried through the group's transform (and the clip path's own)
+       (`a_clip_on_a_placed_group_lands_where_the_group_is`).
+     - **Text in a placed group came in at the page's origin** for the
+       same reason: flattened glyph outlines carry none of the text's
+       placement (`text_in_a_placed_group_comes_in_where_it_stands`).
+     **And text, which the reader audit had left out.** Once it was put
+     in, every piece of it that disagreed was ours:
+     - **A newline between two tspans was a space** under
+       `xml:space="preserve"`, so every right- or centre-set line ended a
+       space further left in a reader. Nothing is written between them.
+     - **Text on a guide slid back along it** by its `text-anchor`, which
+       a reader applies again on top of the offset already worked out.
+     - **A guide in the root `defs` was read in the root's space** by
+       some readers and the text's by others; it is written beside the
+       text, inside the text's own group.
+     - **Underline and strike-through were left to the reader**, which
+       puts them where its own font tables say; they go out as the
+       engine's own bands, one rectangle each.
+     - **The engine smeared every block placed off the pixel grid.** A
+       block was rasterized on a grid of its own and read off it between
+       texels, so half a pixel's nudge drew every stem across two pixels
+       at half strength — on screen, not only in the audit. The raster is
+       now laid on the grid the block is seen on (`grid_phase`, for text
+       upright, turned a quarter or mirrored), and the GPU, which reads
+       the same raster through its `origin`, follows. Its underline,
+       rounded to whole texels, lay up to half a row from where every
+       exporter puts it; bands now cover what their rectangles cover, the
+       pieces a run boundary cuts one into adding up at the seam
+       (`text_off_the_pixel_grid_is_as_sharp_as_text_on_it`).
+     With text in, the reader audit touches fewer pages than it did
+     without it — fourteen, none by more than five pixels. Text on a
+     closed guide stays out (SVG cannot wrap past the guide's start), as
+     does synthesized italic and bold, which a reader does not
+     synthesize. Each fix, taken out again, fails an audit or its test.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

@@ -6427,7 +6427,36 @@ pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextR
     let natural = (bx1 - bx0, by1 - by0);
     let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
     let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
-    (text::rasterize_at(spec, scale), scale)
+    (
+        text::rasterize_on_grid(spec, scale, grid_phase(t, scale)),
+        scale,
+    )
+}
+
+/// Where a block's origin falls between the pixels it is seen on, along
+/// each of its own axes, in raster pixels at `scale` — for a block whose
+/// axes each run along one of the page's at exactly that scale, which is
+/// text upright, turned a quarter or mirrored at any whole-page zoom.
+/// Anything else is read between texels whatever grid it is laid on, and
+/// gets none.
+fn grid_phase(t: Transform, scale: f32) -> [f32; 2] {
+    // Along which of the page's axes each of the block's runs, how far
+    // per unit, and where that axis starts.
+    let (x, y) = if t.b == 0.0 && t.c == 0.0 {
+        ((t.a, t.e), (t.d, t.f))
+    } else if t.a == 0.0 && t.d == 0.0 {
+        ((t.b, t.f), (t.c, t.e))
+    } else {
+        return [0.0, 0.0];
+    };
+    let phase = |(k, o): (f32, f32)| {
+        if (k.abs() - scale).abs() > scale * 1e-4 {
+            return 0.0;
+        }
+        let o = o * k.signum();
+        o - o.floor()
+    };
+    [phase(x), phase(y)]
 }
 
 /// How much paint a stroke lays at a point of the layer's own space.
@@ -21594,6 +21623,79 @@ mod tests {
                 (mid[i] - want).abs() < 0.02,
                 "at half opacity the copy gives {mid:?}, which is not between \
                  {applied:?} and {hidden:?}"
+            );
+        }
+    }
+
+    /// Text placed a fraction off the page's pixels is drawn as sharp as
+    /// text on them, and its underline lies where its rectangle does.
+    ///
+    /// The block used to be rasterized on a grid of its own and read off
+    /// it between texels, so a block nudged by half a pixel had every stem
+    /// smeared over two pixels at half strength, and its underline —
+    /// rounded to whole texels first — lay up to half a row from where the
+    /// SVG and PDF exports put it. An exported page and a reader's picture
+    /// of it disagreed on text for that alone.
+    #[test]
+    fn text_off_the_pixel_grid_is_as_sharp_as_text_on_it() {
+        let draw = |spec: &chitrakar_doc::TextSpec, t: Transform| {
+            let mut doc = Document::new(120, 60, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::text("t", spec.clone());
+            node.transform = t;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let energy = |s: &Surface| s.pixels.iter().map(|p| p.a * p.a).sum::<f32>();
+        let spec = chitrakar_doc::TextSpec::new("Hill", 24.0, RED);
+        let at = |e, f| Transform {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e,
+            f,
+        };
+        let turned = |e, f| Transform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e,
+            f,
+        };
+        for (on, off) in [
+            (at(10.0, 5.0), at(10.5, 5.5)),
+            (turned(50.0, 2.0), turned(50.5, 2.5)),
+        ] {
+            let (sharp, nudged) = (energy(&draw(&spec, on)), energy(&draw(&spec, off)));
+            assert!(
+                nudged > sharp * 0.9,
+                "half a pixel off the grid keeps {:.0}% of the ink's contrast",
+                100.0 * nudged / sharp
+            );
+        }
+
+        // An underline under nothing but spaces: every column of it is the
+        // band alone, and each row covers what the band covers of it.
+        let mut spaces = chitrakar_doc::TextSpec::new("      ", 24.0, RED);
+        spaces.underline = true;
+        let (e, f) = (10.0, 5.3);
+        let drawn = draw(&spaces, at(e, f));
+        let [x0, y0, x1, y1] = text::placed(&spaces).decorations[0].0;
+        let (y0, y1) = (y0 + f, y1 + f);
+        let x = (e + (x0 + x1) / 2.0) as u32;
+        for y in 0..60u32 {
+            let want = (y1.min(y as f32 + 1.0) - y0.max(y as f32)).max(0.0);
+            let got = drawn.pixels[(y * 120 + x) as usize].a;
+            assert!(
+                (got - want).abs() < 0.02,
+                "row {y}: the underline covers {got:.3} where its band covers {want:.3}"
             );
         }
     }

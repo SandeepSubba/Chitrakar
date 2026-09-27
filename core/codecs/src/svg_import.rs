@@ -127,7 +127,29 @@ fn mask_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
             acc = both;
         }
     }
-    Some(acc)
+    Some(placed(acc, group.abs_transform()))
+}
+
+/// A clip's or a mask's region carried from the space of the group that
+/// refers to it to the document's. usvg leaves what is inside a clip
+/// path or a mask in that group's own user space — the one clip path can
+/// serve any number of groups, each placed differently — so the region
+/// came out where the group would be with no placement at all: a frame
+/// exported and brought back in was cut to a rectangle at the page's
+/// corner rather than its own.
+fn placed(rings: Vec<Vec<[f32; 2]>>, t: usvg::Transform) -> Vec<Vec<[f32; 2]>> {
+    rings
+        .into_iter()
+        .map(|ring| {
+            ring.into_iter()
+                .map(|[x, y]| {
+                    let mut p = usvg::tiny_skia_path::Point::from_xy(x, y);
+                    t.map_point(&mut p);
+                    [p.x, p.y]
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Whether everything in a mask is fully showing, so its coverage is a
@@ -202,7 +224,11 @@ fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
             acc = both;
         }
     }
-    Some(acc)
+    // The clip path's own `transform` goes inside the group's placement.
+    Some(placed(
+        acc,
+        group.abs_transform().pre_concat(cp.transform()),
+    ))
 }
 
 fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<[f32; 2]>>) {
@@ -298,8 +324,31 @@ fn walk(
                     }
                 }
             }
-            // Text arrives as the outlines usvg set it in.
-            usvg::Node::Text(t) => walk(t.flattened(), opacity, clip, out, pics),
+            // Text arrives as the outlines usvg set it in — in the text's
+            // own space, not the document's: what usvg flattens a text
+            // into carries none of the text's placement or its groups'.
+            // Every block came in where it would stand with none at all,
+            // so text in a moved or turned group, or moved itself, landed
+            // at the page's corner. The placement goes onto each outline
+            // as its own transform, which carries its gradient and its
+            // stroke with it; a clip is in the space the layer sits in and
+            // stays where it is.
+            usvg::Node::Text(t) => {
+                let before = out.len();
+                walk(t.flattened(), opacity, clip, out, pics);
+                let a = t.abs_transform();
+                let placed = chitrakar_doc::Transform {
+                    a: a.sx,
+                    b: a.ky,
+                    c: a.kx,
+                    d: a.sy,
+                    e: a.tx,
+                    f: a.ty,
+                };
+                for node in &mut out[before..] {
+                    node.transform = placed.compose(node.transform);
+                }
+            }
             // A picture the file carries, which used to be dropped on the
             // floor: an SVG with a photograph in it came in as the shapes
             // around the photograph and nothing where it was, silently.
@@ -1572,6 +1621,237 @@ mod tests {
         assert!(
             ours.get(45, 20).a > 0.5,
             "still whole outside a grey mask, which is the loss kept"
+        );
+    }
+
+    /// A page nobody wrote, cut down to what an SVG and this importer
+    /// both carry: shapes, paths, strokes, gradients, pictures, groups,
+    /// frames, copies and text. Left out, because the importer does not
+    /// bring them in (masks travel as pictures, which it passes over as
+    /// greyscale; effects and blends it has no layer for; a group's
+    /// opacity it folds into each of its layers, which is the same only
+    /// where they do not overlap): masks, blends, effects, holds, faded
+    /// groups, frames and copies, and the layers that work on what is
+    /// under them. Text keeps what a reader can set exactly — not a
+    /// synthesized italic or bold, which the bundled face has no cut for
+    /// and a reader will not fake, nor text round a closed guide, which
+    /// the page wraps past the guide's start and SVG cannot.
+    fn portable(seed: u64) -> Document {
+        let mut doc = chitrakar_doc::fixture::page(seed);
+        let page = doc.clone();
+        for (id, n) in page.nodes() {
+            let id = *id;
+            if page.parent_of(id).is_none() {
+                continue;
+            }
+            for c in [
+                Command::SetMask { id, mask: None },
+                Command::SetBlendMode {
+                    id,
+                    blend: chitrakar_doc::BlendMode::Normal,
+                },
+                Command::SetEffects {
+                    id,
+                    effects: vec![],
+                },
+                Command::SetClipped { id, clipped: false },
+            ] {
+                doc.apply(c).unwrap();
+            }
+            let closed_guide = matches!(
+                &n.kind,
+                NodeKind::Text(t) if matches!(
+                    t.along,
+                    Some(VectorShape::Ellipse { .. })
+                        | Some(VectorShape::Rect { .. })
+                        | Some(VectorShape::Path { closed: true, .. })
+                )
+            );
+            let gone = n.name == "ground"
+                || closed_guide
+                || matches!(
+                    n.kind,
+                    NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
+                )
+                || chitrakar_render::copies_a_clone(&page, id)
+                || chitrakar_render::rewrites_what_is_under_it(&page, id);
+            if gone {
+                doc.apply(Command::SetVisible { id, visible: false })
+                    .unwrap();
+            }
+            if n.kind.holds_children() {
+                doc.apply(Command::SetOpacity { id, opacity: 1.0 }).unwrap();
+            }
+            if let NodeKind::Text(t) = &n.kind {
+                let mut t = t.clone();
+                t.italic = false;
+                t.bold = false;
+                for r in &mut t.runs {
+                    r.italic = None;
+                    r.bold = None;
+                }
+                doc.apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Text(t)),
+                })
+                .unwrap();
+            }
+        }
+        doc
+    }
+
+    /// The page exported, and the export brought back in the way
+    /// `Session::place_svg` brings a file in: pictures pooled, and put
+    /// back among the shapes where each one was.
+    fn round_trip(doc: &Document) -> Document {
+        let svg = crate::export_svg(doc).unwrap();
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        let mut out = Document::new(
+            doc.meta.width,
+            doc.meta.height,
+            chitrakar_color::ColorMode::Rgb,
+        );
+        let root = out.root();
+        let mut pictures: Vec<(usize, Node)> = imported
+            .images
+            .into_iter()
+            .map(|pic| {
+                let resource_id = out.add_resource(pic.width, pic.height, pic.rgba);
+                let mut node = Node::raster(
+                    &pic.name,
+                    chitrakar_doc::RasterRef {
+                        resource_id,
+                        width: pic.width,
+                        height: pic.height,
+                    },
+                );
+                node.transform = pic.transform;
+                node.opacity = pic.opacity;
+                node.mask = pic.clip;
+                (pic.below, node)
+            })
+            .collect();
+        pictures.reverse();
+        let mut at = 0usize;
+        let mut push = |out: &mut Document, node: Node| {
+            out.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: Box::new(node),
+            })
+            .unwrap();
+            at += 1;
+        };
+        for (i, shape) in imported.shapes.into_iter().enumerate() {
+            while pictures.last().is_some_and(|(below, _)| *below <= i) {
+                let (_, pic) = pictures.pop().unwrap();
+                push(&mut out, pic);
+            }
+            push(&mut out, shape);
+        }
+        while let Some((_, pic)) = pictures.pop() {
+            push(&mut out, pic);
+        }
+        out
+    }
+
+    /// A page exported and brought back in covers what it covered.
+    ///
+    /// The exporter and the importer had each been asked about files
+    /// somebody wrote, and never about each other. Asked of four hundred
+    /// pages nobody wrote, cut down to what both carry (`portable`), a
+    /// third came back wrong, and all of it was placement: a clip path's
+    /// region came in where the group it cut would stand with no
+    /// placement at all, since usvg leaves a clip's outlines in the space
+    /// of the group that refers to it — every frame in a moved group came
+    /// back cut to a rectangle at the page's corner; text came in the same
+    /// way, usvg's outlines of it carrying none of the text's placement;
+    /// and the export itself put a space after every line of text (a
+    /// newline between tspans, under `xml:space="preserve"`), wrote its
+    /// guide where a reader reads it differently from the page, anchored
+    /// text on a guide that the page does not, and left underline and
+    /// strike-through to each reader's own idea of them.
+    #[test]
+    fn a_page_exported_and_brought_back_covers_what_it_covered() {
+        let mut touched = 0usize;
+        for seed in 0..400u64 {
+            let page = portable(seed);
+            let before = chitrakar_render::render(&page).unwrap();
+            let after = chitrakar_render::render(&round_trip(&page)).unwrap();
+            let (mut bad, mut worst, mut at) = (0usize, 0.0f32, 0usize);
+            for (i, (p, q)) in before.pixels.iter().zip(&after.pixels).enumerate() {
+                let d = (p.a - q.a).abs();
+                if d > 0.5 {
+                    bad += 1;
+                }
+                if d > worst {
+                    worst = d;
+                    at = i;
+                }
+            }
+            let w = page.meta.width as usize;
+            assert!(
+                bad <= 10,
+                "seed {seed}: {bad} pixels are covered differently by more than half, \
+                 the worst by {worst:.3} at ({}, {})",
+                at % w,
+                at / w
+            );
+            touched += (bad > 0) as usize;
+        }
+        assert!(
+            touched <= 16,
+            "{touched} pages came back different somewhere"
+        );
+    }
+
+    /// A clip or a mask on a group that is placed lands where the group
+    /// is, and a clip path's own transform goes inside that.
+    #[test]
+    fn a_clip_on_a_placed_group_lands_where_the_group_is() {
+        let region = |svg: &[u8]| -> Vec<[f32; 2]> {
+            let imported = import_svg(svg).unwrap();
+            match &imported.shapes[0].mask {
+                Some(chitrakar_doc::Mask {
+                    kind:
+                        chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Path { points, .. },
+                            ..
+                        },
+                    ..
+                }) => points.clone(),
+                other => panic!("a region: {other:?}"),
+            }
+        };
+        let square = |x: f32, y: f32| vec![[x, y], [x + 5.0, y], [x + 5.0, y + 5.0], [x, y + 5.0]];
+        assert_eq!(
+            region(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><clipPath id="c"><rect width="5" height="5"/></clipPath></defs><g transform="translate(10 10)" clip-path="url(#c)"><rect width="20" height="20" fill="red"/></g></svg>"#),
+            square(10.0, 10.0),
+            "a clip on a moved group"
+        );
+        assert_eq!(
+            region(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><clipPath id="c" transform="translate(2 0)"><rect width="5" height="5"/></clipPath></defs><g transform="translate(10 10)" clip-path="url(#c)"><rect width="20" height="20" fill="red"/></g></svg>"#),
+            square(12.0, 10.0),
+            "with a transform of its own inside the group's"
+        );
+        assert_eq!(
+            region(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><mask id="m"><rect width="5" height="5" fill="white"/></mask></defs><g transform="translate(10 10)" mask="url(#m)"><rect width="20" height="20" fill="red"/></g></svg>"#),
+            square(10.0, 10.0),
+            "and a mask the same"
+        );
+    }
+
+    /// Text in a placed group comes in where the group puts it.
+    #[test]
+    fn text_in_a_placed_group_comes_in_where_it_stands() {
+        let place = |svg: &[u8]| {
+            let imported = import_svg(svg).unwrap();
+            let n = &imported.shapes[0];
+            (n.transform.e, n.transform.f)
+        };
+        assert_eq!(
+            place(br#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40"><g transform="translate(20 10)"><text font-family="DejaVu Sans" font-size="10" transform="translate(5 0)" x="0" y="10">Hi</text></g></svg>"#),
+            (25.0, 10.0)
         );
     }
 }

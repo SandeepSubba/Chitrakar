@@ -729,7 +729,14 @@ fn turned(
 
 /// The glyphs of a block along its guide as outlines ready to draw, at
 /// `scale`, with the box they cover: `(outlines, [x0, y0, x1, y1])`.
-fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<(ab_glyph::OutlinedGlyph, u8)>, [f32; 4]) {
+///
+/// `phase` slides every glyph by that much, in raster pixels, for a
+/// raster laid on the grid the block is seen on (see `rasterize_on_grid`).
+fn along_outlines(
+    spec: &TextSpec,
+    scale: f32,
+    phase: [f32; 2],
+) -> (Vec<(ab_glyph::OutlinedGlyph, u8)>, [f32; 4]) {
     let px = spec.size.max(0.1) * scale;
     let cuts = Palette::of(spec, scale);
     let (glyphs, _) = along_glyphs(spec, scale);
@@ -744,7 +751,10 @@ fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<(ab_glyph::OutlinedGlyph,
         for shift in &cut.passes {
             let glyph = g.id.with_scale_and_position(
                 px,
-                ab_glyph::point(g.origin[0] + shift * cos, g.origin[1] + shift * sin),
+                ab_glyph::point(
+                    g.origin[0] + shift * cos + phase[0],
+                    g.origin[1] + shift * sin + phase[1],
+                ),
             );
             if let Some(outlined) =
                 turned(font.font, glyph, cut.slant, g.angle, font.scale_factor())
@@ -771,7 +781,7 @@ fn along_outlines(spec: &TextSpec, scale: f32) -> (Vec<(ab_glyph::OutlinedGlyph,
 /// guide.
 pub fn bounds(spec: &TextSpec) -> [f32; 4] {
     if spec.along.is_some() {
-        let (_, b) = along_outlines(spec, 1.0);
+        let (_, b) = along_outlines(spec, 1.0, [0.0, 0.0]);
         [
             b[0].floor(),
             b[1].floor(),
@@ -1304,12 +1314,23 @@ pub fn rasterize(spec: &TextSpec) -> TextRaster {
 /// letter. Callers pass the scale their transform imposes and index the
 /// result by natural-size coordinates times the same scale.
 pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
+    rasterize_on_grid(spec, scale, [0.0, 0.0])
+}
+
+/// Rasterize the block at `scale`, with its grid slid by `phase` raster
+/// pixels (each in `0..1`): where the block's origin falls between the
+/// pixels it will be seen on. A raster laid on that grid is read at its
+/// texel centres, so a block placed a fraction off the page's pixels is
+/// drawn as sharp as one on them — read off a grid of its own it was
+/// interpolated between texels, and every stem was smeared across two
+/// pixels at half strength. `origin` says where the slid grid starts.
+pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
     let scale = scale.max(0.01);
     if spec.along.is_some() {
-        return rasterize_along(spec, scale);
+        return rasterize_along(spec, scale, phase);
     }
     let l = layout(spec, scale);
-    let (w, h) = (l.width, l.height);
+    let (w, h) = (l.width + phase[0], l.height + phase[1]);
     let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
     let mut coverage = vec![0f32; (width * height) as usize];
     // Every metric below comes from the scaled font, so advances, kerning
@@ -1334,11 +1355,11 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
     };
 
     for (line_no, (line, at)) in l.lines.iter().enumerate() {
-        let baseline = line_no as f32 * step + font.ascent();
+        let baseline = line_no as f32 * step + font.ascent() + phase[1];
         let (glyphs, _) = shape_line(line, *at, spec, scale);
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
-        let start = line_start(spec, &l, line_no);
+        let start = line_start(spec, &l, line_no) + phase[0];
         for g in glyphs {
             let cut = cuts.cut(g.run);
             let face = cut.fonts.font.as_scaled(spec.size.max(0.1) * scale);
@@ -1367,21 +1388,37 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         }
     }
     // Underline and strike-through: solid bands, clipped to the raster,
-    // that also draw the space a line is spaced with.
+    // that also draw the space a line is spaced with. Each covers what
+    // its rectangle covers of a pixel — rounded to whole pixels, a band
+    // lay a row away from where every exporter puts it — and the pieces
+    // a line's bands are cut into by its runs add up where they meet, so
+    // the seam between two colours is not a notch.
+    // Kept by pixel, since bands are thin and the raster can be huge.
+    let mut laid: std::collections::HashMap<u32, (f32, f32, u8)> = Default::default();
+    let share = |p: u32, lo: f32, hi: f32| (hi.min(p as f32 + 1.0) - lo.max(p as f32)).max(0.0);
     for (band, whose) in decoration_bands(spec, &l, scale) {
-        let [x0, y0, x1, y1] = band;
-        let (cx0, cx1) = (
-            (x0.round().max(0.0)) as u32,
-            (x1.round().max(0.0) as u32).min(width),
-        );
-        let (cy0, cy1) = (
-            (y0.round().max(0.0)) as u32,
-            (y1.round().max(0.0) as u32).min(height),
-        );
-        for y in cy0..cy1 {
-            for x in cx0..cx1 {
-                ink(x as i32, y as i32, 1.0, cuts.cut(whose).tint);
+        let [x0, y0, x1, y1] = [
+            band[0] + phase[0],
+            band[1] + phase[1],
+            band[2] + phase[0],
+            band[3] + phase[1],
+        ];
+        let tint = cuts.cut(whose).tint;
+        for y in (y0.floor().max(0.0) as u32)..(y1.ceil().max(0.0) as u32).min(height) {
+            let cy = share(y, y0, y1);
+            for x in (x0.floor().max(0.0) as u32)..(x1.ceil().max(0.0) as u32).min(width) {
+                let c = share(x, x0, x1) * cy;
+                let (sum, most, by) = laid.entry(y * width + x).or_default();
+                *sum += c;
+                if c > *most {
+                    (*most, *by) = (c, tint);
+                }
             }
+        }
+    }
+    for (i, (sum, _, by)) in laid {
+        if sum > 0.0 {
+            ink((i % width) as i32, (i / width) as i32, sum.min(1.0), by);
         }
     }
     let colors = cuts.colors();
@@ -1391,14 +1428,14 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
         coverage,
         colors,
         tint,
-        origin: (0.0, 0.0),
+        origin: (-phase[0] / scale, -phase[1] / scale),
     }
 }
 
 /// Text along its guide: the turned outlines, drawn into a raster just
 /// big enough for where they land.
-fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
-    let (outlines, b) = along_outlines(spec, scale);
+fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
+    let (outlines, b) = along_outlines(spec, scale, phase);
     let (x0, y0) = (b[0].floor(), b[1].floor());
     let (width, height) = (
         (b[2].ceil() - x0).max(1.0) as u32,
@@ -1429,7 +1466,7 @@ fn rasterize_along(spec: &TextSpec, scale: f32) -> TextRaster {
         coverage,
         colors,
         tint,
-        origin: (x0 / scale, y0 / scale),
+        origin: ((x0 - phase[0]) / scale, (y0 - phase[1]) / scale),
     }
 }
 
