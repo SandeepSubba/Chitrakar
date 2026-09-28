@@ -1090,8 +1090,11 @@ fn fs_brush(in: VsOut) -> @location(0) vec4f {
     if r <= 0.0 {
         return vec4f(0.0, 0.0, 0.0, 0.0);
     }
-    let fade = max(r * in.grad.z, in.grad.w);
-    let c = clamp((r - seg_distance(in.local, a, b)) / fade, 0.0, 1.0);
+    // `brush_edge` in the reference renderer: the fade the softness asks
+    // for inside the radius, and the pixel's antialiasing centred on its
+    // ends rather than tucked inside them.
+    let w = in.grad.w;
+    let c = clamp((r + 0.5 * w - seg_distance(in.local, a, b)) / (r * in.grad.z + w), 0.0, 1.0);
     return vec4f(c, c, c, c);
 }
 

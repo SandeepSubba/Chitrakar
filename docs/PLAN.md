@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~547),
+- **Verify before committing:** `cargo test --workspace` (~549),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4480,6 +4480,40 @@ without reading anything else.*
      through `tail`, which hid the exit status. The suite reads a PDF's
      drawing inflated now (`pdfDrawing`), and a build is checked by its
      own exit code before the suite is believed.
+     **A brush stroke was thinner than its size, by the zoom.** Looking
+     at what an SVG would need to carry a brush stroke as vectors started
+     with the stroke's exact edge, and the edge was not where the stroke
+     is: a hard stroke's antialiasing ramp, one device pixel wide, sat
+     wholly inside its radius, so the stroke was drawn half a device
+     pixel thinner on each side than it is — and since that half pixel is
+     the view's, not the page's, how thin depended on the zoom. A stroke
+     two across laid 115 pixels of ink at 100% against 157 of geometry,
+     146 at 400% and 151 at 800%: the same stroke visibly thickened as
+     the view zoomed in, and was a quarter lighter on the page than in
+     anything that drew it from its shape. The ramp is centred on the
+     edge now (`brush_edge`, and `fs_brush` beside it), so the ink is the
+     geometry at every zoom (156.9, 156.7, 156.6, 156.6); a soft stroke
+     keeps its fade inside the radius, widened by the same half pixel
+     each side. The GPU's segment quads grew by a band, since a quad
+     draws only the pixels it covers and the edge now reaches past `r`;
+     the CPU's boxes needed nothing, rounding outward already takes in
+     exactly the pixels whose centres are within half a pixel of the
+     edge. One test had been reading the old thinning — an edge falling
+     on a pixel boundary has no partly covered pixel to call a rim — and
+     now draws its stroke off the grid.
+     And one audit stopped holding, which was the finding that mattered:
+     **a blended clone layer blended each stroke as it landed**, so where
+     two strokes overlapped the second was screened against the first as
+     well as against the page, while the same layer drawn aside — as a
+     shadow at no opacity sends it — blended once. The moved edge put an
+     overlap onto a page the no-op-effect audit reads. Blend-once is what
+     every other kind gets, brush layers included, so a clone with a
+     blend now goes aside in both renderers (`worn` in the GPU backend:
+     it wears its mask and opacity on its strokes, as one with effects
+     does).
+     Written down with it: the browser suite now refuses to start on an
+     `app/dist` older than any engine or UI source, naming the file — the
+     stale build that let the last chunk's broken check read green.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

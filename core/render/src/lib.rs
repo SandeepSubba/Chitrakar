@@ -1803,7 +1803,16 @@ fn draw_layer(
         // nothing: the copy vanished, shadow and all.
         // And a clone layer something is held to: what is held to it is
         // confined to what it laid, which only this road has in hand.
-        let resolved = if node.effects.is_empty() && !worn_below && capture.is_none() {
+        // And a clone layer with a blend, for the same reason and with no
+        // effect at all: stroke by stroke, where two strokes overlapped
+        // the second was blended with the first as well as with the page
+        // — screened twice — and putting a shadow at no opacity on the
+        // layer, which sends it here, changed what it drew.
+        let resolved = if node.effects.is_empty()
+            && node.blend == BlendMode::Normal
+            && !worn_below
+            && capture.is_none()
+        {
             None
         } else {
             clone_behind(doc, child, parent)
@@ -6487,14 +6496,29 @@ fn stroke_coverage(stroke: &chitrakar_doc::PaintStroke, band: f32, x: f32, y: f3
         if r <= 0.0 {
             continue;
         }
-        let fade = (r * softness).max(band);
         let d = segment_distance(x, y, a, b);
-        most = most.max(((r - d) / fade).clamp(0.0, 1.0));
+        most = most.max(brush_edge(r, d, softness, band));
         if most >= 1.0 {
             return 1.0;
         }
     }
     most
+}
+
+/// How much of a pixel a brush's edge covers, `d` from the middle of a
+/// stroke `r` across: solid inside `r` less the fade the softness asks
+/// for, nothing past `r`, and the pixel's own antialiasing — `band`, one
+/// device pixel — centred on that ramp's ends rather than tucked inside
+/// them.
+///
+/// Tucked inside, as it was, a hard stroke's edge fell half a device
+/// pixel inside its radius, so a stroke was drawn thinner than it is by
+/// an amount that depended on the zoom: a stroke two across at 100%
+/// was three pixels wide, and grew toward four as the view zoomed in —
+/// a quarter less ink on the page than at 800%, and less than any file
+/// it went into carried.
+fn brush_edge(r: f32, d: f32, softness: f32, band: f32) -> f32 {
+    ((r + band * 0.5 - d) / (r * softness + band)).clamp(0.0, 1.0)
 }
 
 /// Coverage worked out ahead of a mask being read, for a mask that
@@ -6641,8 +6665,7 @@ fn stroke_cover(
                 if r <= 0.0 {
                     continue;
                 }
-                let fade = (r * softness).max(band);
-                let c = ((r - segment_distance(lx, ly, a, b)) / fade).clamp(0.0, 1.0);
+                let c = brush_edge(r, segment_distance(lx, ly, a, b), softness, band);
                 let k = ((py - bbox.y0) * w + (px - bbox.x0)) as usize;
                 if c > cover[k] {
                     cover[k] = c;
@@ -10385,7 +10408,10 @@ mod tests {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
         painted(
             &mut doc,
-            vec![stroke(&[[8.0, 20.0], [32.0, 20.0]], 5.0, RED)],
+            // A little off the pixel grid, so that the edge falls inside a
+            // pixel rather than between two, where no pixel is partly
+            // covered and there is no rim to see.
+            vec![stroke(&[[8.0, 20.3], [32.0, 20.3]], 5.0, RED)],
         );
         let s = render(&doc).unwrap();
         assert_eq!(s.get(20, 20).to_srgb8(), [255, 0, 0, 255], "on the line");
@@ -21736,5 +21762,114 @@ mod tests {
             (four / one - 1.0).abs() < 0.05,
             "the underline covers {one:.2} pixels of the page at one and {four:.2} at four"
         );
+    }
+
+    /// A brush stroke lays the ink its shape covers, at every zoom.
+    ///
+    /// Its antialiasing was tucked inside the radius, a device pixel
+    /// wide, so a stroke was drawn half a device pixel thinner each side
+    /// than it is — by the view's pixel, so by the zoom: a hard stroke two
+    /// across laid 115 pixels of ink at 100% against 157 of geometry, and
+    /// thickened toward it as the view zoomed in (`brush_edge`).
+    #[test]
+    fn a_brush_stroke_lays_its_shape_at_every_zoom() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        painted(
+            &mut doc,
+            vec![stroke(&[[6.0, 18.0], [42.0, 18.0]], 2.0, RED)],
+        );
+        // A band 36 long and 4 across, and a round end at each stop.
+        let shape = 36.0 * 4.0 + std::f32::consts::PI * 4.0;
+        for k in [1u32, 2, 4, 8] {
+            let mut big = Surface::new(48 * k, 36 * k);
+            let clip = big.full_clip();
+            let view = Transform {
+                a: k as f32,
+                d: k as f32,
+                ..Default::default()
+            };
+            render_region_at(&doc, &mut big, clip, view).unwrap();
+            let ink = big.pixels.iter().map(|p| p.a).sum::<f32>() / (k * k) as f32;
+            assert!(
+                (ink / shape - 1.0).abs() < 0.01,
+                "at {k}×, {ink:.1} pixels of ink for a shape of {shape:.1}"
+            );
+        }
+    }
+
+    /// A clone layer with a blend meets what is under it once, as the
+    /// whole of what it laid — the way every other layer with a blend
+    /// does, a brush layer's strokes included.
+    ///
+    /// Stroke by stroke, where two strokes overlapped the second was
+    /// blended with the first as well as with the page: screened twice,
+    /// brighter where they met. And the same layer drawn aside, as a
+    /// shadow at no opacity sends it, blended once — so putting on an
+    /// effect that draws nothing changed what the layer drew.
+    #[test]
+    fn a_blended_clone_meets_the_page_once() {
+        let grey = AuthoredColor::Srgb {
+            r: 0.4,
+            g: 0.4,
+            b: 0.4,
+            a: 1.0,
+        };
+        let build = |effects: Vec<chitrakar_doc::Effect>| {
+            let mut doc = Document::new(40, 40, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", 40.0, 40.0, grey.clone()),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[1];
+            // Two dabs that overlap, each lifting the plain grey well
+            // above where either lands.
+            for (i, x) in [16.0f32, 24.0].into_iter().enumerate() {
+                let mut dab = stroke(&[[x, 26.0]], 6.0, RED);
+                dab.source = [0.0, -18.0];
+                doc.apply(Command::AddStroke {
+                    id: clone,
+                    index: i,
+                    stroke: Box::new(dab),
+                    on_mask: false,
+                })
+                .unwrap();
+            }
+            doc.apply(Command::SetBlendMode {
+                id: clone,
+                blend: BlendMode::Screen,
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects { id: clone, effects })
+                .unwrap();
+            render(&doc).unwrap()
+        };
+        let plain = build(Vec::new());
+        let (one, both) = (plain.get(12, 26), plain.get(20, 26));
+        assert!(
+            (one.r - both.r).abs() < 1e-4,
+            "where the two dabs overlap is what one lays: {one:?} vs {both:?}"
+        );
+        let shadowed = build(vec![chitrakar_doc::Effect::DropShadow {
+            dx: 4.0,
+            dy: 4.0,
+            blur: 2.0,
+            color: RED,
+            opacity: 0.0,
+        }]);
+        for (a, b) in plain.pixels.iter().zip(&shadowed.pixels) {
+            assert!(
+                (a.r - b.r).abs() < 1e-4 && (a.a - b.a).abs() < 1e-4,
+                "a shadow at no opacity changes nothing: {a:?} vs {b:?}"
+            );
+        }
     }
 }

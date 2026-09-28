@@ -10,8 +10,46 @@
 import { chromium } from "playwright";
 import { createServer } from "http";
 import { readFile, mkdir } from "fs/promises";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync, statSync } from "fs";
 import { inflateSync } from "zlib";
+
+import { join, extname, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const DIST = join(HERE, "..", "dist");
+
+// The suite drives what `dist` holds, not what the sources say, so a
+// build that did not happen — or failed where nothing was looking at its
+// exit status — is a green run of yesterday's engine. That happened: a
+// change that broke two checks here was called green against a stale
+// build. So the suite will not start on a `dist` older than any source
+// that goes into it.
+{
+  const built = statSync(join(DIST, "index.html"), { throwIfNoEntry: false });
+  if (!built) {
+    console.error("no app/dist: run `npm run build` first");
+    process.exit(1);
+  }
+  const roots = [join(HERE, "..", "src"), join(HERE, "..", "..", "core")];
+  let newest = { at: 0, path: "" };
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== "wasm-pkg" && e.name !== "target" && e.name !== "node_modules") walk(p);
+      } else if (/\.(rs|ts|tsx|css|toml)$/.test(e.name)) {
+        const at = statSync(p).mtimeMs;
+        if (at > newest.at) newest = { at, path: p };
+      }
+    }
+  };
+  roots.forEach(walk);
+  if (newest.at > built.mtimeMs) {
+    console.error(`app/dist is older than ${newest.path}: run \`npm run build\` (and check it succeeded) first`);
+    process.exit(1);
+  }
+}
 
 // What a PDF's pages draw: every Flate stream in it that inflates, as
 // text, joined. The drawing is compressed, so it cannot be read off the
@@ -28,11 +66,6 @@ function pdfDrawing(bytes) {
   }
   return drawn;
 }
-import { join, extname, dirname } from "path";
-import { fileURLToPath } from "url";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const DIST = join(HERE, "..", "dist");
 const OUT = join(HERE, "out");
 await mkdir(OUT, { recursive: true });
 const MIME = {

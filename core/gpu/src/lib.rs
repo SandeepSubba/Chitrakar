@@ -2893,7 +2893,16 @@ fn one(
     // one after all, and each stroke reads the surface it will come down
     // onto as well as what the strokes before it laid (`fs_clone_aside`),
     // which is the reference renderer's picture of it drawn aside.
-    let alone = alone && !(matches!(node.kind, NodeKind::Clone { .. }) && shadings.is_empty());
+    //
+    // Or wears a blend. A blend is the layer meeting what is under it
+    // once, as the whole of itself; taken stroke by stroke, where two
+    // strokes overlapped the second was blended with the first as well as
+    // with the page — screened twice — and the same layer drawn aside,
+    // for a shadow at no opacity, came out otherwise. So a blended clone
+    // goes aside too, as the reference renderer sends it.
+    let clone = matches!(node.kind, NodeKind::Clone { .. });
+    let worn = !shadings.is_empty() || (clone && node.blend != BlendMode::Normal);
+    let alone = alone && (worn || !clone);
     if alone {
         out.draws.push(Item::of(Draw::Open));
     }
@@ -2949,7 +2958,7 @@ fn one(
     // there the mask rides the layer's own drawing so that the
     // silhouette a shadow is cast from is the masked one; and a clone
     // layer, never on a surface of its own, always folds.
-    let held = if alone && shadings.is_empty() {
+    let held = if alone && !worn {
         Held {
             mask: None,
             to: None,
@@ -3470,7 +3479,7 @@ fn one(
     };
     let down = framed.unwrap_or(out.page);
     if alone {
-        if shadings.is_empty() {
+        if !worn {
             // The mask and the opacity go on the quad that lays the
             // surface down, not on what was drawn into it.
             mark = (out.vertices.len(), out.draws.len());
@@ -3670,10 +3679,12 @@ fn stroke_segments(
         let j = (i + 1).min(n - 1);
         let (a, b) = (stroke.points[i], stroke.points[j]);
         let (ra, rb) = (stroke.radius(i), stroke.radius(j));
-        let reach = ra.max(rb);
-        if reach <= 0.0 {
+        if ra.max(rb) <= 0.0 {
             continue;
         }
+        // The edge's antialiasing reaches half a device pixel past the
+        // radius, and a quad draws only the pixels it covers.
+        let reach = ra.max(rb) + band;
         let box_ = [
             a[0].min(b[0]) - reach,
             a[1].min(b[1]) - reach,
