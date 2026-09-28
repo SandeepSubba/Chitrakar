@@ -21699,4 +21699,42 @@ mod tests {
             );
         }
     }
+
+    /// An underline is as thick at every zoom. Its floor of a pixel was a
+    /// pixel of the raster, so under a view zoomed in four times a small
+    /// block's underline was less than half as thick on the page as the
+    /// same block's at one — and as the exporters, which set it at the
+    /// page's own scale, write it.
+    #[test]
+    fn an_underline_is_as_thick_at_every_zoom() {
+        let mut spaces = chitrakar_doc::TextSpec::new("      ", 10.0, RED);
+        spaces.underline = true;
+        let mut doc = Document::new(40, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::text("t", spaces);
+        node.transform.e = 2.0;
+        node.transform.f = 2.0;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let ink = |k: u32| {
+            let mut s = Surface::new(40 * k, 20 * k);
+            let clip = s.full_clip();
+            let view = Transform {
+                a: k as f32,
+                d: k as f32,
+                ..Default::default()
+            };
+            render_region_at(&doc, &mut s, clip, view).unwrap();
+            s.pixels.iter().map(|p| p.a).sum::<f32>() / (k * k) as f32
+        };
+        let (one, four) = (ink(1), ink(4));
+        assert!(
+            (four / one - 1.0).abs() < 0.05,
+            "the underline covers {one:.2} pixels of the page at one and {four:.2} at four"
+        );
+    }
 }

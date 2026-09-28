@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~544),
+- **Verify before committing:** `cargo test --workspace` (~547),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4375,10 +4375,10 @@ without reading anything else.*
      - **A regular stretch after a bold one was stroked**: the text render
        mode is graphics state and outlives `ET`
        (`a_regular_stretch_after_a_bold_one_is_not_stroked`).
-     Left open, measured: a synthesized bold in a PDF is the outline
-     stroked, which grows every edge both ways, where the engine smears
-     the outline sideways — ghostscript puts on twice the ink the engine
-     does. A stroke under a space squashed flat grows sideways only, and
+     Left open, measured (and since closed, below): a synthesized bold
+     in a PDF is the outline stroked, which grows every edge both ways,
+     where the engine smears the outline sideways — ghostscript puts on
+     twice the ink the engine does. A stroke under a space squashed flat grows sideways only, and
      was written, but ghostscript draws a sub-pixel stroke as a hairline
      whatever its shape, so nothing here could say whether it was right;
      it was taken back out. And an upright frame drawn live in a PDF keeps
@@ -4426,6 +4426,34 @@ without reading anything else.*
      closed guide stays out (SVG cannot wrap past the guide's start), as
      does synthesized italic and bold, which a reader does not
      synthesize. Each fix, taken out again, fails an audit or its test.
+     **And text in the PDF audit.** It had been left out because
+     ghostscript "sets it lighter and half a pixel right". Neither was
+     the PDF. Ghostscript's type at the page's own 72 dpi is a quarter
+     lighter than the same file at 288 or 1152 — its rasterizer at small
+     sizes — so ghostscript is now read at four times and averaged, as
+     the engine's side already was. What was left was ours:
+     - **An underline thinned as the view zoomed in.** Its floor of one
+       pixel was a pixel of the raster, so at 400% a 10 px block's
+       underline was 0.45 page pixels thick where the exporters write 1
+       (`an_underline_is_as_thick_at_every_zoom`).
+     - **A synthesized bold was a fifth heavier in every PDF** — the
+       "left open" above. It was stroked (`2 Tr`) with a round pen that
+       grows the outline up and down as much as sideways; squashing the
+       pen flat does not survive a reader, which strokes text under the
+       text matrix and undoes the squash (ghostscript does, measured).
+       The ink is now drawn as the page draws it: the outline swept
+       along the baseline is exactly the outline plus the band each of
+       its edges sweeps — a curve cut where it turns back across the
+       sweep, so each band runs one way (`one_way_across`) — one path
+       wound one way and filled once (`heavy_run`), with the text set
+       invisibly (`3 Tr`) over it so it is still found and copied. One
+       paint also fades a faded bold once, where fill and stroke
+       overlapped and faded twice
+       (`a_synthesized_bold_puts_on_the_ink_the_page_does`). Outlines are
+       text-heavy, so page content is now compressed: a bold sentence's
+       PDF went from 111 KB to 39 KB, and a plain one shrank too.
+     With text in — bold, italic, on guides — none of the 300 pages
+     differs anywhere by more than half a pixel's coverage.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

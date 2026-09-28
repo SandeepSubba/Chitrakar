@@ -480,7 +480,9 @@ fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
 /// The bands an underline and a strike-through paint, `[x0, y0, x1, y1]`
 /// in raster pixels at `scale`: one per line of text that has any
 /// width, under its baseline or through its x-height, as thick as a
-/// twentieth of the em and never thinner than a pixel.
+/// twentieth of the em and never thinner than a pixel of the page — of
+/// the page, not of the raster, or the band would thin as the view zoomed
+/// in, to less than half what the exporters write at four times.
 fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], Option<usize>)> {
     let anywhere = spec.underline
         || spec.strike
@@ -495,7 +497,7 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], O
     let px = spec.size.max(0.1) * scale;
     let font = fonts.font.as_scaled(px);
     let em = px * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled();
-    let thickness = (em * 0.05).max(1.0);
+    let thickness = (em * 0.05).max(scale);
     let step = line_step(&font, spec);
     let mut bands = Vec::new();
     for (line_no, (line, at)) in l.lines.iter().enumerate() {
@@ -818,6 +820,40 @@ impl FaceFile {
             * 1000.0
             / self.units_per_em
     }
+
+    /// A glyph's outline in font units, y up: its contours one after
+    /// another, each piece starting where the one before it ended until
+    /// a new contour begins somewhere else. Empty for a glyph with no
+    /// ink, as a space has none.
+    pub fn outline(&self, glyph: u16) -> Vec<GlyphCurve> {
+        use ab_glyph::OutlineCurve;
+        let p = |q: ab_glyph::Point| [q.x, q.y];
+        fonts_named(&self.name)
+            .font
+            .outline(ab_glyph::GlyphId(glyph))
+            .map(|o| {
+                o.curves
+                    .iter()
+                    .map(|c| match *c {
+                        OutlineCurve::Line(a, b) => GlyphCurve::Line(p(a), p(b)),
+                        OutlineCurve::Quad(a, b, c) => GlyphCurve::Quad(p(a), p(b), p(c)),
+                        OutlineCurve::Cubic(a, b, c, d) => {
+                            GlyphCurve::Cubic(p(a), p(b), p(c), p(d))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// One piece of a glyph's outline: a line, or a quadratic or cubic
+/// curve through its control points, from the first point to the last.
+#[derive(Clone, Copy, Debug)]
+pub enum GlyphCurve {
+    Line([f32; 2], [f32; 2]),
+    Quad([f32; 2], [f32; 2], [f32; 2]),
+    Cubic([f32; 2], [f32; 2], [f32; 2], [f32; 2]),
 }
 
 /// One glyph as placed: which, where its origin sits (document pixels

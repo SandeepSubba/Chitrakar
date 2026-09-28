@@ -757,6 +757,173 @@ impl Page {
         Some(name)
     }
 
+    /// A stretch set in a bold no face could supply, thickened the way
+    /// the page thickens it: the outline swept `thicken` along its own
+    /// baseline, which widens the stems and leaves the height alone.
+    ///
+    /// PDF's own way to thicken text is to stroke it as well as fill it
+    /// (`2 Tr`), and that is not this: a pen is round, so the outline grows
+    /// as much up and down as sideways, and ghostscript put a fifth more
+    /// ink on than the page did at any resolution. Squashing the pen flat
+    /// does not survive a reader either, which strokes text under the
+    /// text matrix and so undoes whatever squashed it. So the ink is drawn
+    /// as what the page draws — the outline swept along the baseline,
+    /// which is exactly the outline where the sweep starts and the band
+    /// each of its edges sweeps (whatever the sweep reaches that the
+    /// outline does not, it reached by crossing an edge) — as one path,
+    /// all wound the same way and filled once. One paint puts
+    /// a faded or blended bold down once, where fill and stroke overlapped
+    /// and put it down twice. The text itself is set over it invisibly,
+    /// so it can still be found and copied.
+    fn heavy_run(
+        &mut self,
+        run: &chitrakar_render::text::PlacedRun,
+        font: &str,
+    ) -> Result<(), PdfError> {
+        use chitrakar_render::text::GlyphCurve;
+        let _ = writeln!(self.content, "BT\n/{font} {} Tf\n3 Tr", num(run.em));
+        for g in &run.glyphs {
+            let (sin, cos) = g.angle.sin_cos();
+            let lean = run.lean;
+            let _ = writeln!(
+                self.content,
+                "{} {} {} {} {} {} Tm <{:04X}> Tj",
+                num(cos),
+                num(sin),
+                num(lean * cos + sin),
+                num(lean * sin - cos),
+                num(g.x),
+                num(g.y),
+                g.id
+            );
+        }
+        self.content.push_str("ET\n");
+
+        let k = run.em / run.face.units_per_em;
+        let mut path = String::new();
+        for g in &run.glyphs {
+            let curves = run.face.outline(g.id);
+            if curves.is_empty() {
+                continue;
+            }
+            let (sin, cos) = g.angle.sin_cos();
+            // Font units, y up, to the page: scaled, leaned, turned back
+            // up, turned the way the baseline runs.
+            let place = |p: [f32; 2]| {
+                let (x, y) = (k * (p[0] + run.lean * p[1]), -k * p[1]);
+                [g.x + x * cos - y * sin, g.y + x * sin + y * cos]
+            };
+            let at = |p: [f32; 2]| format!("{} {}", num(p[0]), num(p[1]));
+            // The outline where the sweep starts.
+            let mut last: Option<[f32; 2]> = None;
+            for c in &curves {
+                let (from, to) = match *c {
+                    GlyphCurve::Line(a, b) => (a, b),
+                    GlyphCurve::Quad(a, _, b) => (a, b),
+                    GlyphCurve::Cubic(a, _, _, b) => (a, b),
+                };
+                if last != Some(from) {
+                    if last.is_some() {
+                        path.push_str("h\n");
+                    }
+                    let _ = writeln!(path, "{} m", at(place(from)));
+                }
+                let _ = match *c {
+                    GlyphCurve::Line(_, b) => writeln!(path, "{} l", at(place(b))),
+                    // A quadratic is the cubic with its handles two
+                    // thirds of the way to the control point.
+                    GlyphCurve::Quad(a, q, b) => {
+                        let third = |e: [f32; 2]| {
+                            [
+                                e[0] + (q[0] - e[0]) * 2.0 / 3.0,
+                                e[1] + (q[1] - e[1]) * 2.0 / 3.0,
+                            ]
+                        };
+                        writeln!(
+                            path,
+                            "{} {} {} c",
+                            at(place(third(a))),
+                            at(place(third(b))),
+                            at(place(b))
+                        )
+                    }
+                    GlyphCurve::Cubic(_, p, q, b) => {
+                        writeln!(path, "{} {} {} c", at(place(p)), at(place(q)), at(place(b)))
+                    }
+                };
+                last = Some(to);
+            }
+            path.push_str("h\n");
+            // The band each edge sweeps: between the edge and the edge
+            // moved along, closed across its ends — exactly the swept
+            // region wherever the edge runs one way across the sweep, so
+            // a curve is cut where it turns back. Each band is wound the
+            // way the outline is, so that under the nonzero rule nothing
+            // cancels. Where the outline winds is read off its control
+            // polygon, which outer contours dominate.
+            let pieces: Vec<[[f32; 2]; 4]> = curves
+                .iter()
+                .flat_map(|c| {
+                    let cubic = match *c {
+                        GlyphCurve::Line(a, b) => {
+                            let (a, b) = (place(a), place(b));
+                            return vec![[a, a, b, b]];
+                        }
+                        GlyphCurve::Quad(a, q, b) => {
+                            let third = |e: [f32; 2]| {
+                                [
+                                    e[0] + (q[0] - e[0]) * 2.0 / 3.0,
+                                    e[1] + (q[1] - e[1]) * 2.0 / 3.0,
+                                ]
+                            };
+                            [place(a), place(third(a)), place(third(b)), place(b)]
+                        }
+                        GlyphCurve::Cubic(a, p, q, b) => [place(a), place(p), place(q), place(b)],
+                    };
+                    one_way_across(cubic, [-sin, cos])
+                })
+                .collect();
+            let cross = |a: [f32; 2], b: [f32; 2]| a[0] * b[1] - a[1] * b[0];
+            let winding: f32 = pieces
+                .iter()
+                .map(|c| cross(c[0], c[1]) + cross(c[1], c[2]) + cross(c[2], c[3]))
+                .sum();
+            let d = [run.thicken * cos, run.thicken * sin];
+            let plus = |p: [f32; 2]| [p[0] + d[0], p[1] + d[1]];
+            for c in &pieces {
+                let turn = cross([c[3][0] - c[0][0], c[3][1] - c[0][1]], d);
+                if turn.abs() < 1e-6 {
+                    continue;
+                }
+                let c = if (turn > 0.0) == (winding > 0.0) {
+                    *c
+                } else {
+                    [c[3], c[2], c[1], c[0]]
+                };
+                let _ = writeln!(
+                    path,
+                    "{} m {} {} {} c {} l {} {} {} c h",
+                    at(c[0]),
+                    at(c[1]),
+                    at(c[2]),
+                    at(c[3]),
+                    at(plus(c[3])),
+                    at(plus(c[2])),
+                    at(plus(c[1])),
+                    at(plus(c[0]))
+                );
+            }
+        }
+        if !path.is_empty() {
+            let _ = write!(
+                self.content,
+                "{}\n{path}f\n",
+                self.color_op(&run.fill, false)?
+            );
+        }
+        Ok(())
+    }
+
     /// The operator setting a colour, for filling (`stroke` false) or
     /// stroking: ink when the document is in ink, sRGB otherwise. Alpha
     /// is not here; it goes into the graphics state.
@@ -1056,28 +1223,17 @@ impl Page {
                 // shown, rather than switched per letter.
                 for run in &typeset.runs {
                     let font = self.font_resource(run.face.clone(), &run.glyphs);
-                    // A bold no face could supply is drawn the way a page
-                    // does it: the glyphs filled and then stroked in the
-                    // same colour, which puts the weight on that the
-                    // raster puts on by laying the outline down again
-                    // beside itself.
-                    let heavy = if run.thicken > 0.0 {
-                        format!(
-                            "\n{}\n{} w\n2 Tr",
-                            self.color_op(&run.fill, true)?,
-                            num(run.thicken)
-                        )
-                    } else {
-                        // Said every time: the mode is graphics state, not
-                        // the text object's, and outlives `ET` — so a
-                        // stretch set after a bold one was stroked too, and
-                        // the regular letters of a word came out as heavy
-                        // as the rest.
-                        "\n0 Tr".to_string()
-                    };
+                    if run.thicken > 0.0 {
+                        self.heavy_run(run, &font)?;
+                        continue;
+                    }
+                    // Said every time: the mode is graphics state, not the
+                    // text object's, and outlives `ET` — so a stretch set
+                    // after a bold one was stroked too, and the regular
+                    // letters of a word came out as heavy as the rest.
                     let _ = writeln!(
                         self.content,
-                        "BT\n/{font} {} Tf\n{}{heavy}",
+                        "BT\n/{font} {} Tf\n{}\n0 Tr",
                         num(run.em),
                         self.color_op(&run.fill, false)?
                     );
@@ -1298,7 +1454,12 @@ impl Page {
                 num(-box_[0] * pt),
                 num(box_[3] * pt)
             );
-            let stream = self.push(&stream_object("<<", content.as_bytes()));
+            // Compressed: the content is text, and a bold no face supplies
+            // is drawn as its outlines, which fill a page's worth of it.
+            let stream = self.push(&stream_object(
+                "<< /Filter /FlateDecode",
+                &deflate(content.as_bytes())?,
+            ));
             let page = self.push(
                 format!(
                     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
@@ -1408,6 +1569,54 @@ fn marker_outlines(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec<S
             chitrakar_render::StrokePiece::Band { .. } => None,
         })
         .collect()
+}
+
+/// A cubic cut where it turns back across `n`: the pieces each run one
+/// way along `n` from start to end, with no turning point strictly
+/// inside.
+fn one_way_across(c: [[f32; 2]; 4], n: [f32; 2]) -> Vec<[[f32; 2]; 4]> {
+    let along: Vec<f32> = c.iter().map(|p| p[0] * n[0] + p[1] * n[1]).collect();
+    // Where the derivative along `n` is zero: a quadratic in t.
+    let (e0, e1, e2) = (
+        along[1] - along[0],
+        along[2] - along[1],
+        along[3] - along[2],
+    );
+    let (qa, qb, qc) = (e0 - 2.0 * e1 + e2, 2.0 * (e1 - e0), e0);
+    let mut ts: Vec<f32> = if qa.abs() < 1e-9 {
+        if qb.abs() < 1e-9 {
+            vec![]
+        } else {
+            vec![-qc / qb]
+        }
+    } else {
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc < 0.0 {
+            vec![]
+        } else {
+            let r = disc.sqrt();
+            vec![(-qb - r) / (2.0 * qa), (-qb + r) / (2.0 * qa)]
+        }
+    };
+    ts.retain(|t| *t > 1e-4 && *t < 1.0 - 1e-4);
+    ts.sort_by(f32::total_cmp);
+    let mut out = Vec::new();
+    let (mut rest, mut from) = (c, 0.0f32);
+    for t in ts {
+        // De Casteljau at the turning point, measured along what is left.
+        let local = (t - from) / (1.0 - from);
+        let lerp =
+            |a: [f32; 2], b: [f32; 2]| [a[0] + (b[0] - a[0]) * local, a[1] + (b[1] - a[1]) * local];
+        let [p0, p1, p2, p3] = rest;
+        let (a, b, cc) = (lerp(p0, p1), lerp(p1, p2), lerp(p2, p3));
+        let (ab, bc) = (lerp(a, b), lerp(b, cc));
+        let mid = lerp(ab, bc);
+        out.push([p0, a, ab, mid]);
+        rest = [mid, bc, cc, p3];
+        from = t;
+    }
+    out.push(rest);
+    out
 }
 
 fn num(v: f32) -> String {
@@ -1705,20 +1914,39 @@ mod tests {
     /// number — the pages are written last, so their numbers depend on
     /// how much the file holds.
     fn page_content(pdf: &[u8], nth: usize) -> String {
-        let text = String::from_utf8_lossy(pdf);
-        let refs: Vec<usize> = text
-            .match_indices("/Contents ")
-            .map(|(at, _)| {
-                let rest = &text[at + "/Contents ".len()..];
-                rest[..rest.find(' ').unwrap()].parse::<usize>().unwrap()
-            })
-            .collect();
-        let obj = text
-            .find(&format!("\n{} 0 obj", refs[nth]))
-            .expect("content object");
-        let start = text[obj..].find("stream\n").unwrap() + obj + 7;
-        let end = text[start..].find("endstream").unwrap() + start;
-        text[start..end].to_string()
+        // Bytes throughout: a compressed stream is not text, and read as
+        // text its offsets are not the file's.
+        let find = |from: usize, what: &str| {
+            pdf[from..]
+                .windows(what.len())
+                .position(|w| w == what.as_bytes())
+                .map(|at| at + from)
+        };
+        let mut refs = Vec::new();
+        let mut from = 0;
+        while let Some(at) = find(from, "/Contents ") {
+            let rest = &pdf[at + "/Contents ".len()..];
+            let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+            refs.push(
+                std::str::from_utf8(&rest[..digits])
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+            );
+            from = at + 1;
+        }
+        let obj = find(0, &format!("\n{} 0 obj", refs[nth])).expect("content object");
+        let start = find(obj, "stream\n").unwrap() + 7;
+        let flate = String::from_utf8_lossy(&pdf[obj..start]).contains("/FlateDecode");
+        let end = find(start, "\nendstream").unwrap();
+        let data = &pdf[start..end];
+        if flate {
+            let mut out = String::new();
+            ZlibDecoder::new(data).read_to_string(&mut out).unwrap();
+            out
+        } else {
+            String::from_utf8_lossy(data).into_owned()
+        }
     }
 
     const RED: AuthoredColor = AuthoredColor::Srgb {
@@ -3115,13 +3343,14 @@ mod tests {
         .unwrap();
     }
 
-    /// A regular stretch after a bold one is not stroked. The text render
-    /// mode is graphics state, not the text object's, and outlives `ET`,
-    /// so a stretch that did not say its own mode was drawn in the one
-    /// before it: a word whose last letters were set regular came out
-    /// heavy to the end.
+    /// A regular stretch after a bold one is drawn. The text render mode
+    /// is graphics state, not the text object's, and outlives `ET`, so a
+    /// stretch that did not say its own mode was drawn in the one before
+    /// it: when a bold was stroked, a word whose last letters were set
+    /// regular came out heavy to the end, and with a bold's text set
+    /// invisibly over its ink they would not come out at all.
     #[test]
-    fn a_regular_stretch_after_a_bold_one_is_not_stroked() {
+    fn a_regular_stretch_after_a_bold_one_is_drawn() {
         let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
         let mut spec = chitrakar_doc::TextSpec::new("Heavy", 20.0, BLUE);
         spec.bold = true;
@@ -3130,24 +3359,31 @@ mod tests {
         spec.runs = vec![run];
         add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
         let content = content_of(&export_pdf_document(&doc).unwrap());
-        let heavy = content.find("2 Tr").expect("the bold stretch is stroked");
+        let heavy = content
+            .find("3 Tr")
+            .expect("the bold stretch's text is invisible");
         assert!(
             content[heavy..].contains("0 Tr"),
             "and the regular one after it says it is not: {content}"
         );
     }
 
+    /// A bold no face supplies goes as its ink drawn — outlines, not a
+    /// picture of them — with the text set invisibly over it, and nothing
+    /// stroked (see `heavy_run`).
     #[test]
-    fn a_synthesized_bold_is_stroked_rather_than_faked_with_pixels() {
+    fn a_synthesized_bold_is_drawn_rather_than_faked_with_pixels() {
         let mut doc = Document::new(120, 40, chitrakar_color::ColorMode::Rgb);
         let mut spec = chitrakar_doc::TextSpec::new("Heavy", 20.0, BLUE);
         spec.bold = true;
         add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
         let content = content_of(&export_pdf_document(&doc).unwrap());
         assert!(
-            content.contains("2 Tr") && content.contains(" w\n2 Tr"),
-            "filled and stroked, with a width: {content}"
+            content.contains("3 Tr") && content.contains(" c\n") && content.contains("h\nf\n"),
+            "the text invisible and the outlines filled: {content}"
         );
+        assert!(!content.contains("2 Tr"), "and nothing stroked: {content}");
+        assert!(!content.contains("/Im"), "and no picture: {content}");
         // Still text, not a picture of text: the glyphs are shown.
         assert!(
             content.contains(" Tm <") && content.contains("> Tj"),
@@ -3171,9 +3407,67 @@ mod tests {
         add(&mut doc, chitrakar_doc::Node::text("t", spec), [4.0, 4.0]);
         let content = content_of(&export_pdf_document(&doc).unwrap());
         assert!(
-            !content.contains("2 Tr"),
-            "a real bold cut needs no stroking: {content}"
+            !content.contains("3 Tr"),
+            "a real bold cut is set as itself: {content}"
         );
+    }
+
+    /// Ghostscript draws a bold no face supplies with the ink the page
+    /// puts on it, faded once, and reads its words back.
+    ///
+    /// Stroked with PDF's round pen, the outline grew up and down as
+    /// much as sideways, and ghostscript laid a fifth more ink than the
+    /// page — at four times the page's resolution and at sixteen, so the
+    /// pen and not the reader. And a faded one was darker at every edge,
+    /// where the fill and the stroke over it were each faded and laid
+    /// down twice.
+    #[test]
+    fn a_synthesized_bold_puts_on_the_ink_the_page_does() {
+        let page = |opacity: f32| {
+            let mut doc = Document::new(64, 36, chitrakar_color::ColorMode::Rgb);
+            let mut spec = chitrakar_doc::TextSpec::new("Wave hi", 18.0, BLUE);
+            spec.bold = true;
+            let mut node = chitrakar_doc::Node::text("t", spec);
+            node.opacity = opacity;
+            add(&mut doc, node, [1.0, 9.0]);
+            doc
+        };
+        let docs = [page(1.0), page(0.5)];
+        let Some(theirs) = ghostscript_alpha(&docs) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let (ours, gs): (f32, f32) = (engine_alpha(&docs[0]).iter().sum(), theirs[0].iter().sum());
+        assert!(
+            (gs / ours - 1.0).abs() < 0.08,
+            "ghostscript lays {gs:.1} pixels of ink where the page lays {ours:.1}"
+        );
+        let most = theirs[1].iter().cloned().fold(0.0f32, f32::max);
+        assert!(
+            most < 0.55,
+            "faded to half, nothing is covered more than half: {most:.3}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("chitrakar-pdfbold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bold.pdf");
+        std::fs::write(&path, export_pdf_document(&docs[0]).unwrap()).unwrap();
+        let out = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=txtwrite",
+                "-o",
+                "-",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let read = String::from_utf8_lossy(&out.stdout);
+        assert!(read.contains("Wave hi"), "the words come back: {read:?}");
     }
 
     /// them back through the ToUnicode map. Self-skips without `gs`.
@@ -3407,17 +3701,26 @@ mod tests {
     /// PDF onto nothing: one run of ghostscript for all of them, since
     /// starting it is most of what it costs. `None` without ghostscript.
     ///
+    /// Drawn at four times the page's resolution and averaged down, as
+    /// the engine's side is. At the page's own resolution ghostscript sets
+    /// type a quarter lighter than it does at four times or sixteen —
+    /// its own rasterizer at small sizes, which is the reader and not
+    /// what is being asked about — and that, with an underline thinned
+    /// by the engine, was all that had kept text out of this audit.
+    ///
     /// Images are interpolated. A picture the exporter places is rendered
     /// at up to four times the page's resolution for print, and without
     /// interpolation ghostscript brings it down by taking one sample in
-    /// sixteen, which aliases every edge in it; that is the reader, and it
-    /// is not what is being asked about.
+    /// sixteen, which aliases every edge in it; that is the reader too.
     fn ghostscript_alpha(docs: &[Document]) -> Option<Vec<Vec<f32>>> {
         std::process::Command::new("gs")
             .arg("--version")
             .output()
             .ok()?;
-        let dir = std::env::temp_dir().join(format!("chitrakar-pdf-cover-{}", std::process::id()));
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("chitrakar-pdf-cover-{}-{call}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut paths = Vec::new();
@@ -3433,7 +3736,7 @@ mod tests {
                 "-dBATCH",
                 "-dSAFER",
                 "-sDEVICE=pngalpha",
-                "-r72",
+                "-r288",
                 "-dGraphicsAlphaBits=4",
                 "-dTextAlphaBits=4",
                 "-dDOINTERPOLATE",
@@ -3447,7 +3750,22 @@ mod tests {
             .map(|k| {
                 let png = std::fs::read(dir.join(format!("o{k:04}.png"))).unwrap();
                 let img = crate::decode(&png).unwrap();
-                img.rgba8.chunks(4).map(|p| p[3] as f32 / 255.0).collect()
+                let (w, h) = (img.width / 4, img.height / 4);
+                let mut out = Vec::with_capacity((w * h) as usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut a = 0u32;
+                        for j in 0..4 {
+                            for i in 0..4 {
+                                a += img.rgba8
+                                    [(((y * 4 + j) * img.width + x * 4 + i) * 4 + 3) as usize]
+                                    as u32;
+                            }
+                        }
+                        out.push(a as f32 / (255.0 * 16.0));
+                    }
+                }
+                out
             })
             .collect();
         let _ = std::fs::remove_dir_all(&dir);
@@ -3495,10 +3813,11 @@ mod tests {
     /// `a_reader_covers_what_the_engine_covers_on_pages_nobody_wrote`
     /// asks, and for the same reason in coverage rather than colour.
     ///
-    /// Text is left out: ghostscript sets it lighter and about half a
-    /// pixel right of both the engine and resvg, which agree with each
-    /// other to a tenth of one — the witness on the page somebody wrote
-    /// reads colour where that matters. So is the ground, so that what a
+    /// Text is in, bold, italic and on a guide: every one of the three
+    /// hundred pages agrees once ghostscript is read at four times,
+    /// the underline is as thick at every zoom, and a bold no face
+    /// supplies is drawn as the page draws it (`heavy_run`) rather than
+    /// stroked with a round pen. The ground is left out, so that what a
     /// page covers is not everywhere.
     ///
     /// Two thirds of the pages disagreed the first time. Among what that
@@ -3519,7 +3838,7 @@ mod tests {
                 let mut doc = chitrakar_doc::fixture::page(seed);
                 let page = doc.clone();
                 for (id, n) in page.nodes() {
-                    if n.name == "ground" || matches!(n.kind, NodeKind::Text(_)) {
+                    if n.name == "ground" {
                         doc.apply(Command::SetVisible {
                             id: *id,
                             visible: false,
@@ -3559,9 +3878,40 @@ mod tests {
             );
             touched += (bad > 0) as usize;
         }
+        // None do when this was written.
         assert!(
-            touched <= 15,
+            touched <= 3,
             "{touched} pages differ by more than half somewhere"
         );
+    }
+
+    /// A curve that turns back across the sweep is cut where it turns, so
+    /// that each band a bold's edges sweep runs one way: a band between an
+    /// arch and the arch moved sideways folds over itself at the top, and
+    /// half of it winds against the rest.
+    #[test]
+    fn a_curve_is_cut_where_it_turns_back() {
+        let arch = [[0.0, 0.0], [1.0, 2.0], [2.0, 2.0], [3.0, 0.0]];
+        let pieces = one_way_across(arch, [0.0, 1.0]);
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        assert_eq!(pieces[0][0], arch[0]);
+        assert_eq!(pieces[1][3], arch[3]);
+        assert_eq!(pieces[0][3], pieces[1][0], "the pieces meet");
+        let top = pieces[0][3];
+        assert!(
+            (top[0] - 1.5).abs() < 1e-5 && (top[1] - 1.5).abs() < 1e-5,
+            "{top:?}"
+        );
+        for p in &pieces {
+            let ys: Vec<f32> = p.iter().map(|q| q[1]).collect();
+            let up = ys.windows(2).all(|w| w[1] >= w[0] - 1e-6);
+            let down = ys.windows(2).all(|w| w[1] <= w[0] + 1e-6);
+            assert!(up || down, "each piece runs one way: {ys:?}");
+        }
+        // Across the other way, the arch already runs one way.
+        assert_eq!(one_way_across(arch, [1.0, 0.0]).len(), 1);
+        // An S turns twice.
+        let s = [[0.0, 0.0], [3.0, 3.0], [-3.0, 3.0], [0.0, 0.0]];
+        assert_eq!(one_way_across(s, [1.0, 0.0]).len(), 3);
     }
 }
