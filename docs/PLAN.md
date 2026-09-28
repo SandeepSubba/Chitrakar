@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~549),
+- **Verify before committing:** `cargo test --workspace` (~554),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4514,6 +4514,30 @@ without reading anything else.*
      Written down with it: the browser suite now refuses to start on an
      `app/dist` older than any engine or UI source, naming the file — the
      stale build that let the last chunk's broken check read green.
+     **And then the brush strokes themselves leave as curves.** With the
+     edge where the stroke is, what a hard stroke covers is a shape a
+     path says exactly: for each segment, a band whose sides run
+     straight from one end's radius to the other's, with a half disc on
+     each end — nothing more, since past an end the renderer holds that
+     end's radius — and a stroke is the union of its segments', one path
+     wound one way under the nonzero rule (`codecs/src/strokes.rs`, the
+     half discs as quarter-turn cubics, off the circle by three
+     ten-thousandths of the radius). An SVG writes each stroke as a path
+     in its colour inside the layer's group, and a reader drawing it four
+     times larger now agrees with the page pixel for pixel
+     (`a_hard_brush_stays_sharp_however_large_it_is_drawn`); it was a
+     picture at the page's resolution, which Chromium, reading the
+     random pages at 4×, had shown smeared. A PDF draws the same paths
+     live — each stroke in a state of its own, since a translucent
+     stroke's alpha is graphics state and otherwise faded the opaque one
+     after it (the only test that noticed, when that was taken out, was
+     the one written for it) — so long as the layer's fade and blend are
+     taken once: over one stroke, or not at all
+     (`a_hard_brush_goes_live_as_the_curves_it_covers`). A soft stroke,
+     an eraser or a stroke confined to a region still goes as pixels. Of
+     the 472 brush layers on the reader audit's 800 pages, 161 now go as
+     curves, and every audit holds — resvg's, ghostscript's, and the
+     round trip back in.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

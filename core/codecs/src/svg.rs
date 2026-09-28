@@ -632,8 +632,54 @@ fn write_node(
                     }
                 }
             }
-            // SVG has no brush, so a paint layer travels as the pixels
-            // it paints, placed where its paint actually sits.
+            // A brush layer of hard strokes travels as what each stroke
+            // covers, a path in its colour, in the order they were laid —
+            // exactly the renderer's shape (`strokes`), so it stays sharp
+            // however far a reader zooms. It went as a picture at the
+            // page's resolution, which a browser drawing the SVG larger
+            // blurred. The layer's own fade, blend and mask are on the
+            // group, over the strokes together, as the renderer takes them.
+            NodeKind::Paint { strokes } if crate::strokes::sayable(strokes) => {
+                let _ = writeln!(out, "{pad}<g{common}>");
+                for stroke in strokes {
+                    let mut d = String::new();
+                    for o in crate::strokes::outlines(stroke) {
+                        let _ = write!(d, "M{:.3},{:.3}", o.start[0], o.start[1]);
+                        for p in &o.pieces {
+                            let _ = match p {
+                                crate::strokes::Piece::Line(e) => {
+                                    write!(d, " L{:.3},{:.3}", e[0], e[1])
+                                }
+                                crate::strokes::Piece::Cubic(c1, c2, e) => write!(
+                                    d,
+                                    " C{:.3},{:.3} {:.3},{:.3} {:.3},{:.3}",
+                                    c1[0], c1[1], c2[0], c2[1], e[0], e[1]
+                                ),
+                            };
+                        }
+                        d.push_str(" Z ");
+                    }
+                    if d.is_empty() {
+                        continue;
+                    }
+                    let a = stroke.color.alpha();
+                    let opacity = if a < 1.0 {
+                        format!(r#" fill-opacity="{a}""#)
+                    } else {
+                        String::new()
+                    };
+                    let _ = writeln!(
+                        out,
+                        r#"{pad}  <path d="{}" fill="{}"{opacity}/>"#,
+                        d.trim_end(),
+                        color_hex(doc, &stroke.color)
+                    );
+                }
+                let _ = writeln!(out, "{pad}</g>");
+            }
+            // A soft stroke fades over its radius and an eraser takes paint
+            // off, which SVG has no brush to say, so a layer holding either
+            // travels as the pixels it paints, placed where they sit.
             NodeKind::Paint { .. } => {
                 if let Ok(Some(painted)) = chitrakar_render::paint_pixels(doc, child) {
                     let (w, h) = (painted.width, painted.height);
@@ -3849,5 +3895,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A brush layer of hard strokes leaves as the curves they cover, and
+    /// a reader drawing the SVG larger draws them as sharp as the page
+    /// does at that size. It went as a picture at the page's resolution,
+    /// which a browser zoomed in on smeared into a blur. A soft stroke,
+    /// which fades over its radius, still goes as pixels.
+    #[test]
+    fn a_hard_brush_stays_sharp_however_large_it_is_drawn() {
+        let brush = |softness: f32| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            let stroke = |points: &[[f32; 2]], radii: &[f32], color: AuthoredColor| {
+                chitrakar_doc::PaintStroke {
+                    points: points.to_vec(),
+                    radii: radii.to_vec(),
+                    color,
+                    softness,
+                    erase: false,
+                    source: [0.0, 0.0],
+                    heal: false,
+                    clip: None,
+                }
+            };
+            let mut node = Node::paint("ink");
+            node.kind = NodeKind::Paint {
+                strokes: vec![
+                    // Pressed harder toward its end, and bent twice.
+                    stroke(
+                        &[[4.0, 6.0], [20.0, 9.0], [26.0, 22.0], [35.0, 24.0]],
+                        &[1.5, 2.5, 4.0, 1.0],
+                        RED,
+                    ),
+                    // A translucent dab over it.
+                    stroke(
+                        &[[22.0, 14.0]],
+                        &[5.0],
+                        AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 1.0,
+                            a: 0.5,
+                        },
+                    ),
+                ],
+            };
+            node.transform = chitrakar_doc::Transform {
+                a: 0.9,
+                b: 0.2,
+                c: -0.2,
+                d: 0.9,
+                e: 3.3,
+                f: 1.7,
+            };
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc
+        };
+        let soft = export_svg(&brush(0.5)).unwrap();
+        assert!(
+            soft.contains("<image"),
+            "a soft brush goes as pixels: {soft}"
+        );
+
+        let doc = brush(0.0);
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            !svg.contains("<image") && svg.contains(" C") && svg.contains(r#"fill-opacity="0.5""#),
+            "{svg}"
+        );
+        let k = 4u32;
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(40 * k, 30 * k).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(k as f32, k as f32),
+            &mut drawn.as_mut(),
+        );
+        let mut ours = chitrakar_render::Surface::new(40 * k, 30 * k);
+        let clip = ours.full_clip();
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut ours,
+            clip,
+            chitrakar_doc::Transform {
+                a: k as f32,
+                d: k as f32,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let theirs: Vec<f32> = drawn
+            .data()
+            .chunks(4)
+            .map(|p| p[3] as f32 / 255.0)
+            .collect();
+        let (mut bad, mut ink) = (0usize, (0.0f32, 0.0f32));
+        for (p, t) in ours.pixels.iter().zip(&theirs) {
+            bad += ((p.a - t).abs() > 0.5) as usize;
+            ink = (ink.0 + p.a, ink.1 + t);
+        }
+        assert_eq!(
+            bad, 0,
+            "drawn four times larger, the two agree pixel for pixel"
+        );
+        assert!(
+            (ink.0 / ink.1 - 1.0).abs() < 0.005,
+            "and on the ink: {:.1} against {:.1}",
+            ink.0,
+            ink.1
+        );
     }
 }

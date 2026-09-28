@@ -523,12 +523,20 @@ impl Page {
                     live
                 }
             }
-            // A brush layer has no live form in PDF, so it goes over as
-            // the pixels it paints.
-            NodeKind::Paint { .. }
-            | NodeKind::Clone { .. }
-            | NodeKind::Adjustment(_)
-            | NodeKind::Filter(_) => false,
+            // A brush layer of hard strokes is what each stroke covers
+            // (`strokes`), filled in its colour — so long as the layer's
+            // fade and blend, taken on each fill, are taken once: over one
+            // stroke, or not at all. The renderer lays the strokes first
+            // and fades and blends the finished layer, and two strokes
+            // each faded where they overlap are faded twice there.
+            NodeKind::Paint { strokes } => {
+                crate::strokes::sayable(strokes)
+                    && (strokes.len() == 1
+                        || (node.opacity >= 1.0 && node.blend == BlendMode::Normal))
+            }
+            // A soft stroke, an eraser, a clone's lifting: no live form in
+            // PDF, so the layer goes over as the pixels it paints.
+            NodeKind::Clone { .. } | NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
         })
     }
 
@@ -996,8 +1004,56 @@ impl Page {
             );
         }
         match &node.kind {
+            // Hard strokes, each a filled path of what it covers, in the
+            // order they were laid (see `is_live`).
+            NodeKind::Paint { strokes } => {
+                for stroke in strokes {
+                    let outlines = crate::strokes::outlines(stroke);
+                    if outlines.is_empty() {
+                        continue;
+                    }
+                    // A state of its own: a translucent stroke's alpha is
+                    // graphics state, and would otherwise outlive it onto
+                    // an opaque one after it.
+                    self.content.push_str("q\n");
+                    if let Some(gs) =
+                        self.gstate(node.opacity * stroke.color.alpha(), 1.0, node.blend)
+                    {
+                        let _ = writeln!(self.content, "/{gs} gs");
+                    }
+                    let mut path = String::new();
+                    for o in outlines {
+                        let _ = writeln!(path, "{} {} m", num(o.start[0]), num(o.start[1]));
+                        for p in &o.pieces {
+                            let _ = match p {
+                                crate::strokes::Piece::Line(e) => {
+                                    writeln!(path, "{} {} l", num(e[0]), num(e[1]))
+                                }
+                                crate::strokes::Piece::Cubic(c1, c2, e) => writeln!(
+                                    path,
+                                    "{} {} {} {} {} {} c",
+                                    num(c1[0]),
+                                    num(c1[1]),
+                                    num(c2[0]),
+                                    num(c2[1]),
+                                    num(e[0]),
+                                    num(e[1])
+                                ),
+                            };
+                        }
+                        path.push_str("h\n");
+                    }
+                    // Nonzero: the outlines of one stroke overlap where its
+                    // segments meet, and a stroke lays its paint once.
+                    let _ = write!(
+                        self.content,
+                        "{}\n{path}f\nQ\n",
+                        self.color_op(&stroke.color, false)?
+                    );
+                }
+            }
             // `is_live` already sent these down the pixel path.
-            NodeKind::Paint { .. } | NodeKind::Clone { .. } => {}
+            NodeKind::Clone { .. } => {}
             NodeKind::Group => {
                 // Full opacity and the default blend by construction (see
                 // is_live): nothing to set, just the children in order.
@@ -3913,5 +3969,63 @@ mod tests {
         // An S turns twice.
         let s = [[0.0, 0.0], [3.0, 3.0], [-3.0, 3.0], [0.0, 0.0]];
         assert_eq!(one_way_across(s, [1.0, 0.0]).len(), 3);
+    }
+
+    /// A brush layer of hard strokes goes as the curves they cover, live
+    /// on the page rather than a picture of it — unless it is faded or
+    /// blended and has more than one stroke, where a fade taken on each
+    /// fill would be taken twice where two strokes meet. Each stroke keeps
+    /// its own alpha to itself: an opaque stroke after a translucent one is
+    /// opaque.
+    #[test]
+    fn a_hard_brush_goes_live_as_the_curves_it_covers() {
+        let dab = |at: [f32; 2], alpha: f32| chitrakar_doc::PaintStroke {
+            points: vec![at, [at[0] + 6.0, at[1] + 2.0]],
+            radii: vec![3.0],
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: alpha,
+            },
+            softness: 0.0,
+            erase: false,
+            source: [0.0, 0.0],
+            heal: false,
+            clip: None,
+        };
+        let page = |strokes: Vec<chitrakar_doc::PaintStroke>, opacity: f32| {
+            let mut doc = Document::new(40, 20, chitrakar_color::ColorMode::Rgb);
+            let mut node = chitrakar_doc::Node::paint("ink");
+            node.kind = NodeKind::Paint { strokes };
+            node.opacity = opacity;
+            add(&mut doc, node, [0.0, 0.0]);
+            doc
+        };
+        let live = page(vec![dab([6.0, 8.0], 0.5), dab([24.0, 8.0], 1.0)], 1.0);
+        let content = content_of(&export_pdf_document(&live).unwrap());
+        assert!(
+            content.contains(" c\n") && content.contains("f\nQ") && !content.contains("/Im"),
+            "{content}"
+        );
+        let faded = page(vec![dab([6.0, 8.0], 1.0), dab([9.0, 8.0], 1.0)], 0.5);
+        assert!(
+            content_of(&export_pdf_document(&faded).unwrap()).contains("/Im"),
+            "faded, two strokes go as the one picture they make"
+        );
+        let one = page(vec![dab([6.0, 8.0], 1.0)], 0.5);
+        assert!(!content_of(&export_pdf_document(&one).unwrap()).contains("/Im"));
+
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&live)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let at = |x: usize, y: usize| theirs[0][y * 40 + x];
+        assert!(
+            (at(9, 9) - 0.5).abs() < 0.05,
+            "the translucent stroke: {}",
+            at(9, 9)
+        );
+        assert!(at(27, 9) > 0.98, "the opaque one after it: {}", at(27, 9));
     }
 }

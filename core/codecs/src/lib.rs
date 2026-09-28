@@ -7,6 +7,7 @@
 
 pub mod container;
 pub mod pdf;
+mod strokes;
 mod subset;
 pub mod svg;
 pub mod svg_import;
