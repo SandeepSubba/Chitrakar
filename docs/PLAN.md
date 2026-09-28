@@ -4454,6 +4454,32 @@ without reading anything else.*
        PDF went from 111 KB to 39 KB, and a plain one shrank too.
      With text in — bold, italic, on guides — none of the 300 pages
      differs anywhere by more than half a pixel's coverage.
+     **And two more readers.** MuPDF, installed for the purpose, read
+     the same 300 PDFs at four times and agreed with the engine on every
+     page but one pixel — two independent readers now say the PDF is
+     what the page is, so it was not made a standing test. Chromium read
+     the 800 SVGs (Playwright, the repository's own DejaVu pinned by
+     `@font-face`) and found one thing that was ours: **a browser counts
+     letter-spacing after a line's last letter**, so every right-set line
+     with spacing sat one space left of the page's and every centred one
+     half a space, where resvg, which does not, agreed. No line is left
+     to `text-anchor` any more: each starts at the x the engine's layout
+     starts it at, so a reader has only to agree on advances. Split so
+     that neither side's resolution is what is measured — everything
+     but text at 1× (at 4× a browser upsamples the brush strokes and
+     masks an SVG carries as pictures, which the engine draws from
+     geometry), text at 4× (at 1× Skia's text contrast thickens every
+     stem) — Chromium differs on 11 and 15 of 800 pages by at most a few
+     pixels. What it still does its own way, measured and left: a frame
+     is rounded to the page's pixels in the SVG and to the view's in the
+     engine, and a shadow on text along a guide it blurs wider.
+     And a correction to the chunk before: compressing the PDF's pages
+     broke two of the browser suite's checks, which read operators off
+     the file's raw bytes, and the run that called it green was against
+     an engine build that had not been redone — its build was piped
+     through `tail`, which hid the exit status. The suite reads a PDF's
+     drawing inflated now (`pdfDrawing`), and a build is checked by its
+     own exit code before the suite is believed.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

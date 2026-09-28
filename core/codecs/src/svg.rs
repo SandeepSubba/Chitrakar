@@ -653,9 +653,9 @@ fn write_node(
                 // SVG text is baseline-anchored and single-line; our node
                 // origin is the block's top and its text can hold newlines
                 // and wrap. The renderer says where every line lands, so
-                // each becomes a tspan on its own baseline, aligned by
-                // text-anchor at the same x the raster aligns it at, and
-                // the font-size is the em the face is really scaled to.
+                // each becomes a tspan on its own baseline starting at the
+                // x the raster starts it at, and the font-size is the em
+                // the face is really scaled to.
                 let block = chitrakar_render::text::set(spec);
                 let track = spec.letter_spacing * spec.size;
                 let spacing = if track.abs() > 1e-4 {
@@ -681,14 +681,18 @@ fn write_node(
                 // page's and sat a pixel higher.
                 let bands = chitrakar_render::text::placed(spec).decorations;
                 let decoration = "";
-                let (anchor, x) = match spec.align {
-                    chitrakar_doc::TextAlign::Left => ("", block.inset),
-                    chitrakar_doc::TextAlign::Center => {
-                        (r#" text-anchor="middle""#, block.inset + block.inner / 2.0)
-                    }
-                    chitrakar_doc::TextAlign::Right => {
-                        (r#" text-anchor="end""#, block.inset + block.inner)
-                    }
+                // Every line is set from where it starts, however the block
+                // is aligned: the engine has already worked out where that
+                // is. Left to `text-anchor`, a reader measures the line
+                // itself, and readers do not agree on what a line's width
+                // is — a browser counts letter-spacing after the last
+                // letter too, so every right-set line with spacing sat a
+                // space to the left of the page's and every centred one
+                // half a space.
+                let slack = match spec.align {
+                    chitrakar_doc::TextAlign::Left => 0.0,
+                    chitrakar_doc::TextAlign::Center => 0.5,
+                    chitrakar_doc::TextAlign::Right => 1.0,
                 };
                 // Along a guide, the guide is defined beside the text in
                 // one group that carries the text's placement. SVG reads
@@ -699,11 +703,6 @@ fn write_node(
                 // where the text is, the two readings are the same.
                 let guide = chitrakar_render::text::guide_points(spec);
                 let guide_name = format!("guide{}", child.0);
-                // On a guide the text starts at its offset however the
-                // block is aligned; SVG would centre or end it there
-                // instead, sliding it back along the guide and off its
-                // start.
-                let anchor = if guide.is_some() { "" } else { anchor };
                 let common = match &guide {
                     Some((points, closed)) => {
                         let mut d = String::new();
@@ -734,7 +733,7 @@ fn write_node(
                 };
                 let _ = write!(
                     out,
-                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{weight}{decoration}{anchor}{common} fill="{}" xml:space="preserve">"#,
+                    r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{weight}{decoration}{common} fill="{}" xml:space="preserve">"#,
                     if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {
@@ -766,6 +765,7 @@ fn write_node(
                 } else {
                     for (i, set) in block.lines.iter().enumerate() {
                         let y = block.ascent + i as f32 * block.step;
+                        let x = block.inset + (block.inner - set.width) * slack;
                         // A line no style run touches is one tspan, as it
                         // always was. One a run crosses is cut where the
                         // run starts and stops, each piece carrying only
@@ -2060,30 +2060,36 @@ mod tests {
             "the second line sits the renderer's line step down: {baselines:?} vs {step}"
         );
 
-        // Alignment lands on text-anchor at the x the raster aligns at,
-        // and a wrap width folds the words into more tspans.
+        // Alignment is the x each line starts at, where the raster starts
+        // it, and never left to a reader's `text-anchor` — a browser
+        // counts letter-spacing after the last letter, so an anchored
+        // line with spacing sat short of the page's. A wrap width folds
+        // the words into more tspans.
+        let centred = {
+            let mut spec = chitrakar_doc::TextSpec::new("the quick brown fox", 20.0, RED);
+            spec.align = chitrakar_doc::TextAlign::Center;
+            spec.width = 90.0;
+            spec.letter_spacing = 0.1;
+            spec
+        };
         doc.apply(Command::AddNode {
             parent: root,
             index: 3,
-            node: Box::new(Node::text("t3", {
-                let mut spec = chitrakar_doc::TextSpec::new("the quick brown fox", 20.0, RED);
-                spec.align = chitrakar_doc::TextAlign::Center;
-                spec.width = 90.0;
-                spec
-            })),
+            node: Box::new(Node::text("t3", centred.clone())),
         })
         .unwrap();
         let svg = export_svg(&doc).unwrap();
-        // The whole text element is one line now (see above).
-        let block = svg
-            .lines()
-            .find(|l| l.contains(r#"text-anchor="middle""#))
-            .unwrap_or_default()
-            .to_string();
-        assert!(
-            block.contains(r#"<tspan x="45.00""#),
-            "centred in the 90px block: {block}"
-        );
+        assert!(!svg.contains("text-anchor"), "{svg}");
+        let set = chitrakar_render::text::set(&centred);
+        assert!(set.lines.len() > 1, "the width wraps it");
+        for line in &set.lines {
+            let x = set.inset + (set.inner - line.width) / 2.0;
+            assert!(
+                svg.contains(&format!(r#"<tspan x="{x:.2}""#)),
+                "{:?} starts at {x:.2}: {svg}",
+                line.text
+            );
+        }
         let struck = {
             let mut spec = chitrakar_doc::TextSpec::new("x", 20.0, RED);
             spec.underline = true;
@@ -2137,10 +2143,12 @@ mod tests {
                 && svg.contains(r#" startOffset="12.00">round</textPath>"#),
             "{svg}"
         );
-        assert!(
-            block.matches("<tspan").count() >= 2 && block.contains(">the quick<"),
-            "wrapped at the width, as typed: {block}"
-        );
+        for line in &set.lines {
+            assert!(
+                svg.contains(&format!(">{}</tspan>", line.text)),
+                "wrapped at the width, as typed: {svg}"
+            );
+        }
     }
 
     #[test]

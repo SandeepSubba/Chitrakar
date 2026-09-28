@@ -11,6 +11,23 @@ import { chromium } from "playwright";
 import { createServer } from "http";
 import { readFile, mkdir } from "fs/promises";
 import { readFileSync } from "fs";
+import { inflateSync } from "zlib";
+
+// What a PDF's pages draw: every Flate stream in it that inflates, as
+// text, joined. The drawing is compressed, so it cannot be read off the
+// file's bytes as they stand.
+function pdfDrawing(bytes) {
+  const text = bytes.toString("latin1");
+  let drawn = "";
+  for (let at = text.indexOf("stream\n"); at >= 0; at = text.indexOf("stream\n", at + 1)) {
+    if (text.startsWith("end", at - 3)) continue;
+    if (!text.slice(text.lastIndexOf("obj", at), at).includes("/FlateDecode")) continue;
+    try {
+      drawn += inflateSync(bytes.subarray(at + 7, text.indexOf("\nendstream", at))).toString("latin1");
+    } catch {}
+  }
+  return drawn;
+}
 import { join, extname, dirname } from "path";
 import { fileURLToPath } from "url";
 
@@ -4607,8 +4624,9 @@ assert(pdfBytes.subarray(-6).toString("latin1") === "%%EOF\n", "PDF trailer");
 const pdfText = pdfBytes.toString("latin1");
 assert(pdfText.includes("/ICCBased"), "PDF carries an ICC colorspace");
 assert(pdfText.includes("/N 4"), "PDF image is 4-channel CMYK");
+const drawn = pdfDrawing(pdfBytes);
 assert(
-  pdfText.includes(" re\n") && pdfText.includes("/CS0 cs") && pdfText.includes("/OutputIntents"),
+  drawn.includes(" re\n") && drawn.includes("/CS0 cs") && pdfText.includes("/OutputIntents"),
   "PDF carries live paths in ink, with the profile as its output intent",
 );
 }
@@ -4626,9 +4644,10 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(250);
   const dl = await exportAs("PDF");
-  const text = (await readFile(await dl.path())).toString("latin1");
+  const bytes = await readFile(await dl.path());
+  const text = bytes.toString("latin1");
   assert(
-    text.includes("/MediaBox [0 0 144.000 96.000]") && text.includes(" re\n"),
+    text.includes("/MediaBox [0 0 144.000 96.000]") && pdfDrawing(bytes).includes(" re\n"),
     "the PDF page is sized by the resolution, with the rect live on it",
   );
 }
