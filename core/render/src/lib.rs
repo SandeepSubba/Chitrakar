@@ -2798,41 +2798,96 @@ fn render_child(
                         .as_ref()
                         .map(|c| Paint::Solid(scale_alpha(resolve_color(doc, c), node.opacity))),
                 };
-                if let Some(paint) = fill_paint {
-                    paint_shape(dst, doc, shape, t, &paint, blend, clip, None, mask);
-                }
-                if let Some(stroke) = stroke {
-                    let color = scale_alpha(resolve_color(doc, &stroke.color), node.opacity);
-                    // The shape as it was authored, not flattened first:
-                    // `stroke_pieces` flattens for itself, and what it
-                    // needs the curves for is the *widths*. A stroke's
-                    // per-anchor widths are indexed by the shape's own
-                    // anchors, so `flatten_widths` resamples them onto the
-                    // flattened polyline — and it can only tell which
-                    // anchor is which while the anchors are still there.
-                    // Handed a polyline it found more points than widths,
-                    // read that as "this stroke does not vary", and drew
-                    // the whole line at full width. Which is what a
-                    // pressure pen's taper came out as on any curve: gone.
-                    // Every other caller — the hit test, the PDF exporter,
-                    // the GPU backend — passed the shape itself already.
-                    let pieces = stroke_pieces(shape, stroke);
-                    paint_shape(
-                        dst,
-                        doc,
-                        shape,
-                        t,
-                        &Paint::Solid(color),
-                        blend,
-                        clip,
-                        Some(&StrokeGeom {
-                            width: stroke.width,
-                            align: stroke_align(shape, stroke),
-                            pad: stroke_pad(shape, stroke),
-                            pieces: &pieces,
-                        }),
-                        mask,
+                let lay = |target: &mut Surface,
+                           t: Transform,
+                           clip: ClipRect,
+                           blend: BlendMode,
+                           mask: MaskRef<'_>| {
+                    if let Some(paint) = &fill_paint {
+                        paint_shape(target, doc, shape, t, paint, blend, clip, None, mask);
+                    }
+                    if let Some(stroke) = stroke {
+                        let color = scale_alpha(resolve_color(doc, &stroke.color), node.opacity);
+                        // The shape as it was authored, not flattened first:
+                        // `stroke_pieces` flattens for itself, and what it
+                        // needs the curves for is the *widths*. A stroke's
+                        // per-anchor widths are indexed by the shape's own
+                        // anchors, so `flatten_widths` resamples them onto
+                        // the flattened polyline — and it can only tell
+                        // which anchor is which while the anchors are still
+                        // there. Handed a polyline it found more points than
+                        // widths, read that as "this stroke does not vary",
+                        // and drew the whole line at full width. Which is
+                        // what a pressure pen's taper came out as on any
+                        // curve: gone. Every other caller — the hit test,
+                        // the PDF exporter, the GPU backend — passed the
+                        // shape itself already.
+                        let pieces = stroke_pieces(shape, stroke);
+                        paint_shape(
+                            target,
+                            doc,
+                            shape,
+                            t,
+                            &Paint::Solid(color),
+                            blend,
+                            clip,
+                            Some(&StrokeGeom {
+                                width: stroke.width,
+                                align: stroke_align(shape, stroke),
+                                pad: stroke_pad(shape, stroke),
+                                pieces: &pieces,
+                            }),
+                            mask,
+                        );
+                    }
+                };
+                // A fill and a stroke over it are two paints, and a mask or
+                // a blend belongs to the layer: taken as each paints, the
+                // stroke over the fill was masked twice where they overlap
+                // — an opaque shape under a mask letting through 0.475 came
+                // out 0.724 there, where the mask says what shows — and
+                // blended with the fill as well as with the page. So such a
+                // shape is laid aside, each paint faded as it goes as ever,
+                // and comes down once through the mask with the blend. The
+                // GPU backend had taken the blend once and the mask twice;
+                // it takes both once now, and the SVG always had.
+                if fill_paint.is_some()
+                    && stroke.is_some()
+                    && (mask.mask.is_some() || blend != BlendMode::Normal)
+                    && !clip.is_empty()
+                {
+                    let (ox, oy) = (clip.x0, clip.y0);
+                    let window = Transform::translation(-(ox as f32), -(oy as f32));
+                    let inner = ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: clip.x1 - ox,
+                        y1: clip.y1 - oy,
+                    };
+                    let mut aside = Surface::new(inner.x1, inner.y1);
+                    lay(
+                        &mut aside,
+                        window.compose(t),
+                        inner,
+                        BlendMode::Normal,
+                        MaskRef::new(None, Transform::default()),
                     );
+                    for py in clip.y0..clip.y1 {
+                        for px in clip.x0..clip.x1 {
+                            let src = aside.pixels[((py - oy) * aside.width + (px - ox)) as usize];
+                            if src.a <= 0.0 && src.r == 0.0 && src.g == 0.0 && src.b == 0.0 {
+                                continue;
+                            }
+                            let c = coverage_at(doc, mask, px, py);
+                            if c <= 0.0 {
+                                continue;
+                            }
+                            let i = (py * dst.width + px) as usize;
+                            dst.pixels[i] = blend_pixel(scale_alpha(src, c), dst.pixels[i], blend);
+                        }
+                    }
+                } else {
+                    lay(dst, t, clip, blend, mask);
                 }
             }
             NodeKind::Raster(raster) => {
@@ -7506,6 +7561,20 @@ fn parent_box(doc: &Document, id: NodeId) -> Result<Option<(f32, f32, f32, f32)>
 }
 
 pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    mask_pixels_at(doc, id, 1.0)
+}
+
+/// The same picture at `scale` pixels to a unit, for an exporter that
+/// wants it finer than the page — a PDF, whose other pictures are drawn
+/// for print, and whose mask at one pixel a unit stepped along every
+/// edge a reader enlarged. `origin` stays in units; the picture covers
+/// `width / scale` by `height / scale` of them.
+pub fn mask_pixels_at(
+    doc: &Document,
+    id: NodeId,
+    scale: f32,
+) -> Result<Option<PaintedPixels>, DocError> {
+    let scale = scale.max(1e-3);
     let node = doc.node(id)?;
     let Some(mask) = node.mask.as_ref() else {
         return Ok(None);
@@ -7513,17 +7582,34 @@ pub fn mask_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     let Some(b) = parent_box(doc, id)? else {
         return Ok(None);
     };
+    // A feathered mask is blurred, and the blur reads past the layer's
+    // box: worked out over the box alone it found nothing beyond its own
+    // edge and held the coverage up there, so a masked layer's feathered
+    // edge came out in every SVG and PDF lighter than on the page — 0.78
+    // where the page says 0.61. The picture takes in as far as the blur
+    // reaches, which a reader showing it past the layer's edge is shown
+    // nothing of anyway.
+    let pad = feather_of(mask, Transform::default())
+        .map(|sigma| (blur::plane_reach(sigma * scale) as f32 + 1.0) / scale)
+        .unwrap_or(0.0);
+    let b = (b.0 - pad, b.1 - pad, b.2 + pad, b.3 + pad);
     let (x0, y0, x1, y1) = on_the_grid(ancestor_space(doc, id), b);
     let (w, h) = (
-        (x1 - x0).ceil().max(1.0) as u32,
-        (y1 - y0).ceil().max(1.0) as u32,
+        ((x1 - x0) * scale).ceil().max(1.0) as u32,
+        ((y1 - y0) * scale).ceil().max(1.0) as u32,
     );
     if w > 16384 || h > 16384 {
         return Ok(None);
     }
     // A mask is authored in the space the layer sits in, so the image's
     // top-left corner is where that box starts.
-    let space = Transform::translation(-x0, -y0);
+    let space = Transform {
+        a: scale,
+        d: scale,
+        e: -x0 * scale,
+        f: -y0 * scale,
+        ..Default::default()
+    };
     let clip = ClipRect {
         x0: 0,
         y0: 0,
@@ -21871,5 +21957,93 @@ mod tests {
                 "a shadow at no opacity changes nothing: {a:?} vs {b:?}"
             );
         }
+    }
+
+    /// A mask and a blend belong to a shape as a whole, fill and stroke
+    /// together: an opaque stroked shape under a mask shows exactly what
+    /// the mask lets through, and a blended one meets the page once.
+    ///
+    /// Each was taken as each paint went down, so where the stroke lay
+    /// over the fill the mask was taken twice — an opaque shape under a
+    /// mask letting through 0.475 came out 0.724 there — and the stroke
+    /// was blended with the fill as well as with the page. The SVG took
+    /// both once, the GPU backend the blend; the audits, held to half a
+    /// pixel, could not see the difference of a quarter.
+    #[test]
+    fn a_shapes_mask_and_blend_are_taken_once() {
+        let build = |mask: bool, stroke: bool, blend: BlendMode| {
+            let mut doc = Document::new(64, 40, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect(
+                    "ground",
+                    64.0,
+                    40.0,
+                    AuthoredColor::Srgb {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            let mut node = *filled_rect("r", 30.0, 20.0, RED);
+            node.transform = Transform::translation(10.0, 10.0);
+            node.blend = blend;
+            if stroke {
+                if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                    *stroke = Some(chitrakar_doc::Stroke {
+                        color: RED,
+                        width: 6.0,
+                        widths: Vec::new(),
+                        dash: Vec::new(),
+                        cap: Default::default(),
+                        join: Default::default(),
+                        start_marker: Default::default(),
+                        end_marker: Default::default(),
+                        align: None,
+                    });
+                }
+            }
+            if mask {
+                node.mask = Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 14.0, ry: 11.0 },
+                        transform: Transform::translation(10.0, 9.0),
+                    },
+                    invert: false,
+                    feather: 3.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // Across the stroke, which lies inside the outline over the fill.
+        let row = |s: &Surface| (10..16).map(|x| s.get(x, 20)).collect::<Vec<_>>();
+        let close = |a: &[LinearRgba], b: &[LinearRgba]| {
+            a.iter().zip(b).all(|(p, q)| {
+                (p.r - q.r).abs() < 1e-4 && (p.g - q.g).abs() < 1e-4 && (p.a - q.a).abs() < 1e-4
+            })
+        };
+        let masked = row(&build(true, true, BlendMode::Normal));
+        let bare = row(&build(true, false, BlendMode::Normal));
+        assert!(
+            close(&masked, &bare),
+            "masked: {masked:?} vs the fill alone {bare:?}"
+        );
+        let blended = row(&build(false, true, BlendMode::Multiply));
+        let fill_only = row(&build(false, false, BlendMode::Multiply));
+        assert!(
+            close(&blended, &fill_only),
+            "multiplied: {blended:?} vs the fill alone {fill_only:?}"
+        );
     }
 }

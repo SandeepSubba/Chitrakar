@@ -74,8 +74,17 @@ fn adding_a_layer_costs_one_layer() {
     // parallel run of the workspace — the GPU's tests among it — moved
     // a two-millisecond reading past any ceiling that was not slack.
     let _ = build(400);
-    let small = build(800);
-    let large = build(3200);
+    // The fastest of five of each, taken turn about: a busy machine only
+    // ever adds time, so the least a size took is the nearest reading of
+    // what the work costs, and taking them in turn puts whatever else is
+    // running on both. Read once each, a full parallel run of the
+    // workspace pushed the ratio past its ceiling twice in a day, with
+    // nothing in this crate changed.
+    let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        small = small.min(build(800));
+        large = large.min(build(3200));
+    }
     // Four times the layers. Linear is four times the work; the walks
     // this replaced made it sixteen, and measured they made it more —
     // 17.8ms against 300ms with one of the two still in.

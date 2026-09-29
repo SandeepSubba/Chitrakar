@@ -330,7 +330,8 @@ struct Page {
     /// Transparency groups: the object number reserved for each and what
     /// it draws. Written at the end, once the resources every content
     /// stream shares are known.
-    forms: Vec<(usize, String)>,
+    /// A soft mask's group is the third: grey, read for its luminosity.
+    forms: Vec<(usize, String, bool)>,
     gstates: Vec<(String, usize)>,
     content: String,
     /// (profile stream, colour space array) object numbers, in ink.
@@ -462,7 +463,9 @@ impl Page {
     /// opacity, and every visible child live in turn), a placed image.
     fn is_live(&self, id: NodeId) -> Result<bool, PdfError> {
         let node = self.doc.node(id)?;
-        if node.mask.is_some() || !node.effects.is_empty() {
+        // A mask is a soft mask on a transparency group (`soft_mask`); an
+        // effect has no live form here.
+        if !node.effects.is_empty() {
             return Ok(false);
         }
         // A layer confined to the one below it, and the layer it is
@@ -726,9 +729,26 @@ impl Page {
     /// A graphics state carrying the opacity and blend a node paints with,
     /// or nothing when both are the defaults.
     fn gstate(&mut self, fill_alpha: f32, stroke_alpha: f32, blend: BlendMode) -> Option<String> {
-        if fill_alpha >= 1.0 && stroke_alpha >= 1.0 && blend == BlendMode::Normal {
+        self.gstate_masked(fill_alpha, stroke_alpha, blend, None)
+    }
+
+    /// The same, and a soft mask: `mask` is the luminosity group whose
+    /// grey says how much of what is painted under this state shows.
+    fn gstate_masked(
+        &mut self,
+        fill_alpha: f32,
+        stroke_alpha: f32,
+        blend: BlendMode,
+        mask: Option<usize>,
+    ) -> Option<String> {
+        if fill_alpha >= 1.0 && stroke_alpha >= 1.0 && blend == BlendMode::Normal && mask.is_none()
+        {
             return None;
         }
+        let soft = match mask {
+            Some(g) => format!(" /SMask << /Type /Mask /S /Luminosity /G {g} 0 R >>"),
+            None => String::new(),
+        };
         let mode = match blend {
             BlendMode::Normal => "Normal",
             BlendMode::Multiply => "Multiply",
@@ -750,7 +770,7 @@ impl Page {
         };
         let obj = self.push(
             format!(
-                "<< /Type /ExtGState /ca {} /CA {} /BM /{mode} >>",
+                "<< /Type /ExtGState /ca {} /CA {} /BM /{mode}{soft} >>",
                 num(fill_alpha),
                 num(stroke_alpha)
             )
@@ -1006,19 +1026,33 @@ impl Page {
         // once with the fade and the blend. Its parts drawn one by one
         // would each take the fade, twice where two overlap, and each
         // blend against the others; so such a layer went as pixels.
-        let isolate = (node.opacity < 1.0 || node.blend != BlendMode::Normal)
-            && match &node.kind {
-                NodeKind::Group | NodeKind::Artboard { .. } | NodeKind::Instance { .. } => true,
-                NodeKind::Paint { strokes } => strokes.len() > 1,
-                _ => false,
-            };
+        //
+        // And any layer with a mask, which the engine takes once over the
+        // layer's own surface: a shape's fill and its stroke masked each
+        // as it painted would be masked twice where they overlap. The mask
+        // goes on the group as it lands, as a soft mask (`soft_mask`).
+        let composite = matches!(
+            &node.kind,
+            NodeKind::Group
+                | NodeKind::Artboard { .. }
+                | NodeKind::Instance { .. }
+                | NodeKind::Paint { .. }
+        );
+        let many = match &node.kind {
+            NodeKind::Paint { strokes } => strokes.len() > 1,
+            _ => composite,
+        };
+        let isolate = node.mask.is_some()
+            || (many && (node.opacity < 1.0 || node.blend != BlendMode::Normal));
         let outer = isolate.then(|| std::mem::take(&mut self.content));
-        // Inside the group, what it draws goes down plainly; the fade and
-        // the blend are the group's, taken as it lands.
-        let (opacity, blend) = if isolate {
-            (1.0, BlendMode::Normal)
-        } else {
-            (node.opacity, node.blend)
+        // Inside the group, what it draws goes down plainly and the blend
+        // is the group's, taken as it lands. So is the fade of a layer the
+        // engine fades once, over the whole of it; a shape, a picture or
+        // type is faded as it paints, there as here, and keeps its fade.
+        let (opacity, blend) = match (isolate, composite) {
+            (false, _) => (node.opacity, node.blend),
+            (true, true) => (1.0, BlendMode::Normal),
+            (true, false) => (node.opacity, BlendMode::Normal),
         };
         match &node.kind {
             // Hard strokes, each a filled path of what it covers, in the
@@ -1165,9 +1199,9 @@ impl Page {
             } => {
                 let alpha = |c: Option<&AuthoredColor>| c.map_or(1.0, |c| c.alpha());
                 let gs = self.gstate(
-                    node.opacity * alpha(fill.as_ref()),
-                    node.opacity * alpha(stroke.as_ref().map(|s| &s.color)),
-                    node.blend,
+                    opacity * alpha(fill.as_ref()),
+                    opacity * alpha(stroke.as_ref().map(|s| &s.color)),
+                    blend,
                 );
                 if let Some(gs) = gs {
                     let _ = writeln!(self.content, "/{gs} gs");
@@ -1268,7 +1302,7 @@ impl Page {
             NodeKind::Raster(raster) => {
                 if let Some(res) = self.doc.resource(&raster.resource_id).cloned() {
                     if !res.rgba8.is_empty() {
-                        if let Some(gs) = self.gstate(node.opacity, node.opacity, node.blend) {
+                        if let Some(gs) = self.gstate(opacity, opacity, blend) {
                             let _ = writeln!(self.content, "/{gs} gs");
                         }
                         let name = self.image(res.width, res.height, &res.rgba8)?;
@@ -1286,7 +1320,7 @@ impl Page {
             }
             NodeKind::Text(spec) => {
                 let alpha = spec.fill.alpha();
-                if let Some(gs) = self.gstate(node.opacity * alpha, 1.0, node.blend) {
+                if let Some(gs) = self.gstate(opacity * alpha, 1.0, blend) {
                     let _ = writeln!(self.content, "/{gs} gs");
                 }
                 let typeset = chitrakar_render::text::placed(spec);
@@ -1354,14 +1388,68 @@ impl Page {
             let obj = self.push(&[]);
             let name = format!("Fm{}", self.forms.len());
             self.xobjects.push((name.clone(), obj));
-            self.forms.push((obj, inner));
-            if let Some(gs) = self.gstate(node.opacity, node.opacity, node.blend) {
+            self.forms.push((obj, inner, false));
+            let mask = match node.mask {
+                Some(_) => Some(self.soft_mask(id, node.transform)?),
+                None => None,
+            };
+            let alpha = if composite { node.opacity } else { 1.0 };
+            if let Some(gs) = self.gstate_masked(alpha, alpha, node.blend, mask) {
                 let _ = writeln!(self.content, "/{gs} gs");
             }
             let _ = writeln!(self.content, "/{name} Do");
         }
         self.content.push_str("Q\n");
         Ok(())
+    }
+
+    /// A layer's mask as a soft mask: a luminosity group drawing what the
+    /// mask lets through as grey — the engine's own reading of it
+    /// (`mask_pixels`, the picture the SVG carries too), one pixel to a
+    /// unit of the space the layer sits in. `t` is the layer's own
+    /// transform, which is in force where the mask is set, and which the
+    /// group undoes, since a mask is authored in the space around the
+    /// layer rather than in the layer's. Outside the picture it is black,
+    /// and lets nothing through; a mask the engine can make no picture of
+    /// is black everywhere, which is what it shows.
+    fn soft_mask(&mut self, id: NodeId, t: Transform) -> Result<usize, PdfError> {
+        let mut content = String::new();
+        // As fine as the pictures placed for print (`place_rendered`).
+        let over = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0).round();
+        if let (Some(m), Some(back)) = (
+            chitrakar_render::mask_pixels_at(&self.doc, id, over)?,
+            chitrakar_render::invert(t),
+        ) {
+            let grey: Vec<u8> = m.rgba8.chunks(4).map(|p| p[3]).collect();
+            let img = self.push(&stream_object(
+                &format!(
+                    "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
+                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                    m.width, m.height
+                ),
+                &deflate(&grey)?,
+            ));
+            let name = format!("Mk{}", self.xobjects.len() + 1);
+            self.xobjects.push((name.clone(), img));
+            let [x, y] = m.origin;
+            let _ = write!(
+                content,
+                "{} {} {} {} {} {} cm\n{} 0 0 {} {} {} cm\n/{name} Do\n",
+                num(back.a),
+                num(back.b),
+                num(back.c),
+                num(back.d),
+                num(back.e),
+                num(back.f),
+                num(m.width as f32 / over),
+                num(-(m.height as f32) / over),
+                num(x),
+                num(y + m.height as f32 / over)
+            );
+        }
+        let obj = self.push(&[]);
+        self.forms.push((obj, content, true));
+        Ok(obj)
     }
 
     /// The resource name of the font a face is embedded as, noting the
@@ -1533,12 +1621,16 @@ impl Page {
         } else {
             "/DeviceRGB"
         };
-        for (obj, inner) in std::mem::take(&mut self.forms) {
+        for (obj, inner, luminosity) in std::mem::take(&mut self.forms) {
+            let group = if luminosity {
+                "/S /Transparency /CS /DeviceGray".to_string()
+            } else {
+                format!("/S /Transparency /I true /CS {space}")
+            };
             self.objects[obj - 1] = stream_object(
                 &format!(
                     "<< /Type /XObject /Subtype /Form /BBox [-100000 -100000 100000 100000] \
-                     /Group << /S /Transparency /I true /CS {space} >> \
-                     /Resources <<{resources} >> /Filter /FlateDecode"
+                     /Group << {group} >> /Resources <<{resources} >> /Filter /FlateDecode"
                 ),
                 &deflate(inner.as_bytes())?,
             );
@@ -4154,5 +4246,132 @@ mod tests {
             at(9, 9)
         );
         assert!(at(27, 9) > 0.98, "the opaque one after it: {}", at(27, 9));
+    }
+
+    /// A masked layer goes live, the mask a soft mask on it as one
+    /// transparency group: a faded shape whose stroke overlaps its fill is
+    /// faded as it paints and then masked once, as the engine does it, and
+    /// masked type is still type. Both went as pictures. The pages nobody
+    /// wrote could not tell a mask taken twice from one taken once — at a
+    /// feathered edge that is a tenth of a pixel's coverage — so this
+    /// reads ghostscript against the engine to three hundredths, across
+    /// the feather.
+    #[test]
+    fn a_masked_layer_goes_live_under_a_soft_mask() {
+        let mut doc = Document::new(64, 40, chitrakar_color::ColorMode::Rgb);
+        let mut boxed = shape(
+            "boxed",
+            VectorShape::Rect {
+                width: 30.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut boxed.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        boxed.opacity = 0.6;
+        // An oval over the left of it, feathered, written in the space the
+        // layer sits in — the page's.
+        boxed.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx: 14.0, ry: 11.0 },
+                transform: Transform::translation(10.0, 9.0),
+            },
+            invert: false,
+            feather: 3.0,
+        });
+        add(&mut doc, boxed, [10.0, 10.0]);
+        let mut word =
+            chitrakar_doc::Node::text("word", chitrakar_doc::TextSpec::new("Ab", 12.0, BLUE));
+        word.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 8.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(46.0, 0.0),
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        add(&mut doc, word, [44.0, 2.0]);
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert!(
+            content.matches("/Fm").count() == 2 && !content.contains("/Im"),
+            "{content}"
+        );
+        assert!(String::from_utf8_lossy(&pdf).contains("/S /Luminosity"));
+        assert!(
+            pdfish_text(&pdf).contains("Tj"),
+            "the masked word is still type"
+        );
+
+        let ours = engine_alpha(&doc);
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        // Along the middle of the box, from the stroke over the fill into
+        // the feather and out of it; and down its left side.
+        let points: Vec<(usize, usize)> = (8..36)
+            .map(|x| (x, 20))
+            .chain((8..32).map(|y| (12, y)))
+            .collect();
+        for (x, y) in points {
+            let (o, g) = (ours[y * 64 + x], theirs[0][y * 64 + x]);
+            assert!(
+                (o - g).abs() < 0.03,
+                "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"
+            );
+        }
+    }
+
+    /// Every content stream in a PDF, inflated and joined: a form's
+    /// drawing is in its own stream rather than the page's.
+    fn pdfish_text(pdf: &[u8]) -> String {
+        // Bytes throughout: read as text, a compressed stream's offsets
+        // are not the file's.
+        let find = |from: usize, what: &[u8]| {
+            pdf[from..]
+                .windows(what.len())
+                .position(|w| w == what)
+                .map(|at| at + from)
+        };
+        let mut out = String::new();
+        let mut from = 0;
+        while let Some(at) = find(from, b"stream\n") {
+            let start = at + 7;
+            if at >= 3 && &pdf[at - 3..at] == b"end" {
+                from = start;
+                continue;
+            }
+            let Some(end) = find(start, b"\nendstream") else {
+                break;
+            };
+            let mut inflated = String::new();
+            if ZlibDecoder::new(&pdf[start..end])
+                .read_to_string(&mut inflated)
+                .is_ok()
+            {
+                out.push_str(&inflated);
+            }
+            from = end;
+        }
+        out
     }
 }

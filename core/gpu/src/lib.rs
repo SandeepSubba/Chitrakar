@@ -2871,6 +2871,17 @@ fn one(
         // of them is.
         || matches!(node.kind, NodeKind::Paint { .. })
         || (node.blend != BlendMode::Normal && !rewrites)
+        // A shape that paints twice — a fill and a stroke over it — under
+        // a mask: the mask is the layer's, taken once over the two, as the
+        // reference renderer takes it (`a_shapes_mask_and_blend_are_taken_
+        // once`). Folded into each paint, the stroke over the fill was
+        // masked twice where they overlap.
+        || (node.mask.is_some()
+            && matches!(
+                &node.kind,
+                NodeKind::Vector { fill, gradient, stroke: Some(_), .. }
+                    if fill.is_some() || gradient.is_some()
+            ))
         || (matches!(node.kind, NodeKind::Group)
             && (node.opacity < 1.0
                 || node.mask.is_some()

@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~555),
+- **Verify before committing:** `cargo test --workspace` (~557),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4556,6 +4556,37 @@ without reading anything else.*
      ghostscript against the engine to two hundredths
      (`a_faded_group_goes_live_as_one_transparency_group`).
      MuPDF, reading the same page, agrees.
+     **And a mask, too — which turned up the engine taking it twice.** A
+     masked layer went into every PDF as pixels. It is now a transparency
+     group laid down under a soft mask (`soft_mask`: a luminosity group
+     drawing the engine's own picture of the mask, `mask_pixels_at`, at
+     the density the PDF's other pictures are drawn for print — at one
+     pixel a unit a reader enlarged it into steps). A shape, a picture or
+     type keeps the fade it takes as it paints; a group, a copy or a brush
+     layer takes its fade once, as it lands. Held to three hundredths of
+     ghostscript across a feathered edge
+     (`a_masked_layer_goes_live_under_a_soft_mask`), which found two
+     things, neither in the PDF:
+     - **Every exported mask was too light at a feathered edge.** The
+       picture of a mask was worked out over the layer's box alone, and
+       the blur found nothing past it: 0.78 at the edge where the page
+       says 0.47. It takes in the blur's reach now, in the SVG as in the
+       PDF.
+     - **The engine masked a shape twice where its stroke lies over its
+       fill**, and blended it twice there: the fill and then the stroke
+       were each masked and blended as they painted, so an opaque shape
+       under a mask letting through 0.475 came out 0.724 in the overlap.
+       A mask says what of the *layer* shows. Such a shape is laid aside
+       now and comes down once through its mask with its blend
+       (`a_shapes_mask_and_blend_are_taken_once`), as the SVG had always
+       drawn it; the audits, held to half a pixel, could not see a
+       quarter. The GPU backend took the blend once already and the mask
+       per paint, like the reference; the random pages found the two
+       parting on the first page where it mattered (seed 766, a
+       rotated, feathered, stroked ellipse), and a shape like that goes on
+       a surface of its own there now, masked as it comes down.
+     The fade stays as it was on purpose: a shape's opacity is taken as
+     each paint goes down, by the engine's own long-standing rule.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
