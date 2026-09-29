@@ -204,6 +204,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         objects: Vec::new(),
         pages: Vec::new(),
         xobjects: Vec::new(),
+        forms: Vec::new(),
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -264,6 +265,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         objects: Vec::new(),
         pages: Vec::new(),
         xobjects: Vec::new(),
+        forms: Vec::new(),
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -325,6 +327,10 @@ struct Page {
     /// or one per frame.
     pages: Vec<(String, [f32; 4])>,
     xobjects: Vec<(String, usize)>,
+    /// Transparency groups: the object number reserved for each and what
+    /// it draws. Written at the end, once the resources every content
+    /// stream shares are known.
+    forms: Vec<(usize, String)>,
     gstates: Vec<(String, usize)>,
     content: String,
     /// (profile stream, colour space array) object numbers, in ink.
@@ -470,13 +476,9 @@ impl Page {
             // A frame is a group with a rectangle clipped round it, and
             // PDF clips to a rectangle natively, so it stays live on the
             // same terms a group does.
+            // Less than full opacity, or a blend, applies to the group's
+            // composite, which is a transparency group (`draw_node`).
             NodeKind::Group | NodeKind::Artboard { .. } => {
-                // Less than full opacity, or a blend, applies to the
-                // group's composite; its children drawn one by one would
-                // each apply it against each other.
-                if node.opacity < 1.0 || node.blend != BlendMode::Normal {
-                    return Ok(false);
-                }
                 for &child in &self.doc.children_of(id)?.to_vec() {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 && !self.is_live(child)? {
@@ -500,12 +502,10 @@ impl Page {
                     Vec::new()
                 };
                 // Faded or blended, a copy is composited as one picture,
-                // as a group is — and drawn live nothing applied its
-                // opacity at all: a copy faded to a third was solid in
-                // every PDF.
-                if node.opacity < 1.0 || node.blend != BlendMode::Normal {
-                    false
-                } else if self.doc.node(*of).is_err() {
+                // as a group is — a transparency group (`draw_node`). Drawn
+                // live without one, nothing applied its opacity at all: a
+                // copy faded to a third was solid in every PDF.
+                if self.doc.node(*of).is_err() {
                     // A copy of a layer that has since gone draws
                     // nothing, which PDF says as well as anything.
                     true
@@ -524,16 +524,12 @@ impl Page {
                 }
             }
             // A brush layer of hard strokes is what each stroke covers
-            // (`strokes`), filled in its colour — so long as the layer's
-            // fade and blend, taken on each fill, are taken once: over one
-            // stroke, or not at all. The renderer lays the strokes first
-            // and fades and blends the finished layer, and two strokes
-            // each faded where they overlap are faded twice there.
-            NodeKind::Paint { strokes } => {
-                crate::strokes::sayable(strokes)
-                    && (strokes.len() == 1
-                        || (node.opacity >= 1.0 && node.blend == BlendMode::Normal))
-            }
+            // (`strokes`), filled in its colour. The renderer lays the
+            // strokes first and fades and blends the finished layer, so
+            // several strokes faded or blended are a transparency group
+            // (`draw_node`); two strokes each faded where they overlap
+            // would be faded twice there.
+            NodeKind::Paint { strokes } => crate::strokes::sayable(strokes),
             // A soft stroke, an eraser, a clone's lifting: no live form in
             // PDF, so the layer goes over as the pixels it paints.
             NodeKind::Clone { .. } | NodeKind::Adjustment(_) | NodeKind::Filter(_) => false,
@@ -1003,6 +999,27 @@ impl Page {
                 num(t.f)
             );
         }
+        // A layer the engine composites as one picture — a group, a frame,
+        // a copy, a brush layer's several strokes — and then fades or
+        // blends, is a transparency group here: drawn into a form of its
+        // own, isolated as the engine isolates it, and that form laid down
+        // once with the fade and the blend. Its parts drawn one by one
+        // would each take the fade, twice where two overlap, and each
+        // blend against the others; so such a layer went as pixels.
+        let isolate = (node.opacity < 1.0 || node.blend != BlendMode::Normal)
+            && match &node.kind {
+                NodeKind::Group | NodeKind::Artboard { .. } | NodeKind::Instance { .. } => true,
+                NodeKind::Paint { strokes } => strokes.len() > 1,
+                _ => false,
+            };
+        let outer = isolate.then(|| std::mem::take(&mut self.content));
+        // Inside the group, what it draws goes down plainly; the fade and
+        // the blend are the group's, taken as it lands.
+        let (opacity, blend) = if isolate {
+            (1.0, BlendMode::Normal)
+        } else {
+            (node.opacity, node.blend)
+        };
         match &node.kind {
             // Hard strokes, each a filled path of what it covers, in the
             // order they were laid (see `is_live`).
@@ -1016,9 +1033,7 @@ impl Page {
                     // graphics state, and would otherwise outlive it onto
                     // an opaque one after it.
                     self.content.push_str("q\n");
-                    if let Some(gs) =
-                        self.gstate(node.opacity * stroke.color.alpha(), 1.0, node.blend)
-                    {
+                    if let Some(gs) = self.gstate(opacity * stroke.color.alpha(), 1.0, blend) {
                         let _ = writeln!(self.content, "/{gs} gs");
                     }
                     let mut path = String::new();
@@ -1055,8 +1070,9 @@ impl Page {
             // `is_live` already sent these down the pixel path.
             NodeKind::Clone { .. } => {}
             NodeKind::Group => {
-                // Full opacity and the default blend by construction (see
-                // is_live): nothing to set, just the children in order.
+                // The group's own fade and blend, if it has either, are
+                // the transparency group it is drawn into: nothing to set
+                // here, just the children in order.
                 for &child in &self.doc.children_of(id)?.to_vec() {
                     let c = self.doc.node(child)?;
                     if c.visible && c.opacity > 0.0 {
@@ -1332,6 +1348,18 @@ impl Page {
                 unreachable!("not live: see is_live")
             }
         }
+        if let Some(outer) = outer {
+            let inner = std::mem::replace(&mut self.content, outer);
+            // The number now, the stream at the end (`finish`).
+            let obj = self.push(&[]);
+            let name = format!("Fm{}", self.forms.len());
+            self.xobjects.push((name.clone(), obj));
+            self.forms.push((obj, inner));
+            if let Some(gs) = self.gstate(node.opacity, node.opacity, node.blend) {
+                let _ = writeln!(self.content, "/{gs} gs");
+            }
+            let _ = writeln!(self.content, "/{name} Do");
+        }
         self.content.push_str("Q\n");
         Ok(())
     }
@@ -1493,6 +1521,27 @@ impl Page {
                 let _ = write!(resources, " /{name} {obj} 0 R");
             }
             resources.push_str(" >>");
+        }
+        // Each transparency group: what it draws, in the space it is laid
+        // down in, sharing the page's resources. Isolated — what is inside
+        // meets only what is inside, then the whole meets the page — and
+        // blended in the page's own colour: ink in ink. Its box is the
+        // largest a reader should need, since what a group draws is cut
+        // by the page in any case; it only has to hold everything.
+        let space = if self.separate.is_some() {
+            "/DeviceCMYK"
+        } else {
+            "/DeviceRGB"
+        };
+        for (obj, inner) in std::mem::take(&mut self.forms) {
+            self.objects[obj - 1] = stream_object(
+                &format!(
+                    "<< /Type /XObject /Subtype /Form /BBox [-100000 -100000 100000 100000] \
+                     /Group << /S /Transparency /I true /CS {space} >> \
+                     /Resources <<{resources} >> /Filter /FlateDecode"
+                ),
+                &deflate(inner.as_bytes())?,
+            );
         }
         // Each page: its content in points with y downwards from its own
         // top-left corner, and a box the size of what it shows. A page
@@ -3941,6 +3990,83 @@ mod tests {
         );
     }
 
+    /// A faded group goes live, as one transparency group: what is inside
+    /// meets only what is inside, and the whole is faded once as it lands,
+    /// so where two of its layers overlap it is no darker than where one
+    /// is. A copy of it goes the same way. Both went as pictures, since
+    /// drawn one by one each layer took the fade, twice where two met —
+    /// which the pages nobody wrote cannot see, a quarter's difference
+    /// being under the half they are held to.
+    #[test]
+    fn a_faded_group_goes_live_as_one_transparency_group() {
+        let mut doc = Document::new(64, 24, chitrakar_color::ColorMode::Rgb);
+        let group = add(&mut doc, chitrakar_doc::Node::group("pair"), [2.0, 4.0]);
+        for (i, x) in [0.0f32, 6.0].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: i,
+                node: Box::new(shape(
+                    "square",
+                    VectorShape::Rect {
+                        width: 12.0,
+                        height: 12.0,
+                        radius: 0.0,
+                    },
+                    Some(BLUE),
+                )),
+            })
+            .unwrap();
+            let id = doc.children_of(group).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, 0.0),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::SetOpacity {
+            id: group,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let copy = add(
+            &mut doc,
+            chitrakar_doc::Node::instance("again", group),
+            [34.0, 4.0],
+        );
+        doc.apply(Command::SetBlendMode {
+            id: copy,
+            blend: BlendMode::Multiply,
+        })
+        .unwrap();
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        // Two groups on the page — the copy's holding the original's again,
+        // which is what it draws — and no pictures.
+        assert!(
+            content.matches("/Fm").count() == 2 && !content.contains("/Im"),
+            "{content}"
+        );
+        assert!(String::from_utf8_lossy(&pdf).contains("/Group << /S /Transparency /I true"));
+
+        let ours = engine_alpha(&doc);
+        let at = |a: &[f32], x: usize, y: usize| a[y * 64 + x];
+        assert!(
+            (at(&ours, 10, 10) - at(&ours, 4, 10)).abs() < 1e-3,
+            "the engine's overlap is its single part"
+        );
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        for (x, y) in [(4, 10), (10, 10), (16, 10), (36, 10), (42, 10), (48, 10)] {
+            let (o, g) = (at(&ours, x, y), at(&theirs[0], x, y));
+            assert!(
+                (o - g).abs() < 0.02,
+                "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"
+            );
+        }
+    }
+
     /// A curve that turns back across the sweep is cut where it turns, so
     /// that each band a bold's edges sweep runs one way: a band between an
     /// arch and the arch moved sideways folds over itself at the top, and
@@ -3972,11 +4098,11 @@ mod tests {
     }
 
     /// A brush layer of hard strokes goes as the curves they cover, live
-    /// on the page rather than a picture of it — unless it is faded or
-    /// blended and has more than one stroke, where a fade taken on each
-    /// fill would be taken twice where two strokes meet. Each stroke keeps
-    /// its own alpha to itself: an opaque stroke after a translucent one is
-    /// opaque.
+    /// on the page rather than a picture of it — faded or blended with
+    /// more than one stroke, as a transparency group, since a fade taken
+    /// on each fill would be taken twice where two strokes meet. Each
+    /// stroke keeps its own alpha to itself: an opaque stroke after a
+    /// translucent one is opaque.
     #[test]
     fn a_hard_brush_goes_live_as_the_curves_it_covers() {
         let dab = |at: [f32; 2], alpha: f32| chitrakar_doc::PaintStroke {
@@ -4009,9 +4135,10 @@ mod tests {
             "{content}"
         );
         let faded = page(vec![dab([6.0, 8.0], 1.0), dab([9.0, 8.0], 1.0)], 0.5);
+        let content = content_of(&export_pdf_document(&faded).unwrap());
         assert!(
-            content_of(&export_pdf_document(&faded).unwrap()).contains("/Im"),
-            "faded, two strokes go as the one picture they make"
+            content.contains("/Fm0 Do") && !content.contains("/Im"),
+            "faded, two strokes go as the one group they make: {content}"
         );
         let one = page(vec![dab([6.0, 8.0], 1.0)], 0.5);
         assert!(!content_of(&export_pdf_document(&one).unwrap()).contains("/Im"));

@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~554),
+- **Verify before committing:** `cargo test --workspace` (~555),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4538,6 +4538,24 @@ without reading anything else.*
      the 472 brush layers on the reader audit's 800 pages, 161 now go as
      curves, and every audit holds — resvg's, ghostscript's, and the
      round trip back in.
+     **And what composites as one picture stays live in a PDF too.** A
+     faded or blended group, frame or copy — and, since the last entry,
+     a brush layer of several strokes — went into every PDF as pixels,
+     because drawn one part at a time each part took the fade, twice
+     where two overlapped, and blended against the others. PDF says the
+     engine's own rule for these directly: a transparency group. Such a
+     layer is drawn into a form of its own (`/Group << /S /Transparency
+     /I true >>`, blending in the page's colour — ink in ink), isolated as
+     the engine isolates it, and that form laid down once with the fade
+     and the blend (`draw_node`, `forms`, written in `finish` once the
+     resources every stream shares are known). Vectors, type and brush
+     strokes inside stay vectors, type and curves. Worth knowing for the
+     next audit: the pages nobody wrote could not have seen the doubled
+     fade — a quarter's difference in coverage, under the half those
+     pages are held to — so it is held by a test of its own that reads
+     ghostscript against the engine to two hundredths
+     (`a_faded_group_goes_live_as_one_transparency_group`).
+     MuPDF, reading the same page, agrees.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
