@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~557),
+- **Verify before committing:** `cargo test --workspace` (~558),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4587,6 +4587,22 @@ without reading anything else.*
        a surface of its own there now, masked as it comes down.
      The fade stays as it was on purpose: a shape's opacity is taken as
      each paint goes down, by the engine's own long-standing rule.
+     **And a layer held to the one under it.** A run of held layers went
+     into every PDF as one picture. The engine confines a held layer to
+     the alpha of the layer under it as drawn (`Cover`), and PDF can say
+     exactly that: a soft mask read by its *alpha* (`/S /Alpha`) whose
+     group is the layer under it drawn again (`as_group`). Set in the
+     space the two share, before the held layer's own placement, with
+     the held layer laid down as one isolated group under it — so a fill
+     and a stroke over it are held once, and whatever the layer under it
+     is (faded, masked, a group) is what holds (`draw_siblings`,
+     `a_held_layer_goes_live_under_the_alpha_of_the_one_under_it`, read
+     against ghostscript to three hundredths). A layer held to one that
+     draws nothing draws nothing, as on the page; a held layer that also
+     wears a mask of its own still goes as pixels, the two wanting the
+     one soft mask a state has. Taken out one at a time, the hold, the
+     space it is set in, the isolation and the hidden base each fail a
+     test.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

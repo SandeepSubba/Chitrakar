@@ -401,6 +401,12 @@ impl Page {
             next = end;
             if end > i + 1 {
                 let run = &children[i..end];
+                // Held live, where every layer of the run can be.
+                if self.siblings_live(run)? {
+                    self.flush(&mut pending)?;
+                    self.draw_siblings(run)?;
+                    continue;
+                }
                 let mut whole = false;
                 for &c in run {
                     let n = self.doc.node(c)?;
@@ -468,13 +474,9 @@ impl Page {
         if !node.effects.is_empty() {
             return Ok(false);
         }
-        // A layer confined to the one below it, and the layer it is
-        // confined to: neither can be drawn on its own, so both go to
-        // pixels — and, being neighbours, into the same picture, where
-        // the engine works the confinement out as it always does.
-        if self.in_clip_run(id)? {
-            return Ok(false);
-        }
+        // A layer held to the one below it is drawn under a soft mask of
+        // that one (`draw_siblings`); whether a run can be is asked of the
+        // run, by whoever holds it (`siblings_live`).
         Ok(match &node.kind {
             // A frame is a group with a rectangle clipped round it, and
             // PDF clips to a rectangle natively, so it stays live on the
@@ -482,13 +484,7 @@ impl Page {
             // Less than full opacity, or a blend, applies to the group's
             // composite, which is a transparency group (`draw_node`).
             NodeKind::Group | NodeKind::Artboard { .. } => {
-                for &child in &self.doc.children_of(id)?.to_vec() {
-                    let c = self.doc.node(child)?;
-                    if c.visible && c.opacity > 0.0 && !self.is_live(child)? {
-                        return Ok(false);
-                    }
-                }
-                true
+                self.siblings_live(self.doc.children_of(id)?)?
             }
             NodeKind::Vector {
                 gradient, stroke, ..
@@ -515,15 +511,7 @@ impl Page {
                 } else if stand_ins.is_empty() {
                     self.is_live(*of)?
                 } else {
-                    let mut live = true;
-                    for part in stand_ins {
-                        let c = self.doc.node(part)?;
-                        if c.visible && c.opacity > 0.0 && !self.is_live(part)? {
-                            live = false;
-                            break;
-                        }
-                    }
-                    live
+                    self.siblings_live(&stand_ins)?
                 }
             }
             // A brush layer of hard strokes is what each stroke covers
@@ -543,27 +531,6 @@ impl Page {
     /// and place what comes out as an image, trimmed to its ink, landing
     /// with `blend`. Opacity is already in the pixels; a blend is not, as
     /// there was nothing under them to blend with.
-    /// Whether the node is part of a run of clipped layers — either one
-    /// of the clipped layers, or the one they are all confined to.
-    fn in_clip_run(&self, id: NodeId) -> Result<bool, PdfError> {
-        let Some(parent) = self.doc.parent_of(id) else {
-            return Ok(false);
-        };
-        let siblings = self.doc.children_of(parent)?;
-        let Some(at) = siblings.iter().position(|&s| s == id) else {
-            return Ok(false);
-        };
-        // The bottom-most layer has nothing under it, so a flag on it
-        // confines nothing — exactly as the renderer reads it.
-        if at > 0 && self.doc.node(id)?.clipped {
-            return Ok(true);
-        }
-        Ok(siblings
-            .get(at + 1)
-            .map(|&above| self.doc.node(above).map(|n| n.clipped).unwrap_or(false))
-            .unwrap_or(false))
-    }
-
     fn place_rendered(&mut self, shown: &[NodeId], blend: BlendMode) -> Result<(), PdfError> {
         // Everything else is put aside into a hidden group rather than
         // hidden itself: a copy draws what it copies only while that is
@@ -732,21 +699,23 @@ impl Page {
         self.gstate_masked(fill_alpha, stroke_alpha, blend, None)
     }
 
-    /// The same, and a soft mask: `mask` is the luminosity group whose
-    /// grey says how much of what is painted under this state shows.
+    /// The same, and a soft mask: a group and how it is read — its grey
+    /// (`Luminosity`, a mask's picture) or its alpha (`Alpha`, the layer a
+    /// held one is held to) — saying how much of what is painted under
+    /// this state shows.
     fn gstate_masked(
         &mut self,
         fill_alpha: f32,
         stroke_alpha: f32,
         blend: BlendMode,
-        mask: Option<usize>,
+        mask: Option<(usize, &str)>,
     ) -> Option<String> {
         if fill_alpha >= 1.0 && stroke_alpha >= 1.0 && blend == BlendMode::Normal && mask.is_none()
         {
             return None;
         }
         let soft = match mask {
-            Some(g) => format!(" /SMask << /Type /Mask /S /Luminosity /G {g} 0 R >>"),
+            Some((g, read)) => format!(" /SMask << /Type /Mask /S /{read} /G {g} 0 R >>"),
             None => String::new(),
         };
         let mode = match blend {
@@ -1004,8 +973,23 @@ impl Page {
 
     /// Draw a live node inside the current transform.
     fn draw_node(&mut self, id: NodeId) -> Result<(), PdfError> {
+        self.draw_node_held(id, None)
+    }
+
+    /// Draw a layer, and — when `hold` is the layer under it drawn as a
+    /// group of its own — only where that layer is: a soft mask read by
+    /// its alpha, which is the engine's hold (`Cover`). The mask is set in
+    /// the space the two layers share, before this one's own placement;
+    /// the layer goes down as one isolated group under it, so a fill and
+    /// a stroke over it are held once.
+    fn draw_node_held(&mut self, id: NodeId, hold: Option<usize>) -> Result<(), PdfError> {
         let node = self.doc.node(id)?.clone();
         self.content.push_str("q\n");
+        if let Some(g) = hold {
+            if let Some(gs) = self.gstate_masked(1.0, 1.0, BlendMode::Normal, Some((g, "Alpha"))) {
+                let _ = writeln!(self.content, "/{gs} gs");
+            }
+        }
         let t = node.transform;
         if t != Transform::default() {
             let _ = writeln!(
@@ -1043,6 +1027,7 @@ impl Page {
             _ => composite,
         };
         let isolate = node.mask.is_some()
+            || hold.is_some()
             || (many && (node.opacity < 1.0 || node.blend != BlendMode::Normal));
         let outer = isolate.then(|| std::mem::take(&mut self.content));
         // Inside the group, what it draws goes down plainly and the blend
@@ -1107,12 +1092,8 @@ impl Page {
                 // The group's own fade and blend, if it has either, are
                 // the transparency group it is drawn into: nothing to set
                 // here, just the children in order.
-                for &child in &self.doc.children_of(id)?.to_vec() {
-                    let c = self.doc.node(child)?;
-                    if c.visible && c.opacity > 0.0 {
-                        self.draw_node(child)?;
-                    }
-                }
+                let kids = self.doc.children_of(id)?.to_vec();
+                self.draw_siblings(&kids)?;
             }
             // A block to leave rather than a function to return from:
             // every way out has to reach the `Q` below, which closes the
@@ -1132,12 +1113,7 @@ impl Page {
                     Vec::new()
                 };
                 if !stand_ins.is_empty() {
-                    for part in stand_ins {
-                        let c = self.doc.node(part)?;
-                        if c.visible && c.opacity > 0.0 {
-                            self.draw_node(part)?;
-                        }
-                    }
+                    self.draw_siblings(&stand_ins)?;
                     break 'copy;
                 }
                 // The original's own placement is undone first: a copy
@@ -1184,12 +1160,8 @@ impl Page {
                     let _ = writeln!(self.content, "{rect}f");
                 }
                 let _ = writeln!(self.content, "{rect}W n");
-                for &child in &self.doc.children_of(id)?.to_vec() {
-                    let c = self.doc.node(child)?;
-                    if c.visible && c.opacity > 0.0 {
-                        self.draw_node(child)?;
-                    }
-                }
+                let kids = self.doc.children_of(id)?.to_vec();
+                self.draw_siblings(&kids)?;
             }
             NodeKind::Vector {
                 shape,
@@ -1394,6 +1366,7 @@ impl Page {
                 None => None,
             };
             let alpha = if composite { node.opacity } else { 1.0 };
+            let mask = mask.map(|g| (g, "Luminosity"));
             if let Some(gs) = self.gstate_masked(alpha, alpha, node.blend, mask) {
                 let _ = writeln!(self.content, "/{gs} gs");
             }
@@ -1401,6 +1374,78 @@ impl Page {
         }
         self.content.push_str("Q\n");
         Ok(())
+    }
+
+    /// Layers side by side, bottom first, each held to the one under it
+    /// that it is held to: a run's first layer is drawn as it is, and each
+    /// held above it only where that one is (`draw_node_held`). A layer
+    /// held to one that draws nothing — hidden, or faded to nothing —
+    /// draws nothing, as on the page.
+    fn draw_siblings(&mut self, kids: &[NodeId]) -> Result<(), PdfError> {
+        let mut base: Option<NodeId> = None;
+        let mut held_to: Option<usize> = None;
+        for (k, &c) in kids.iter().enumerate() {
+            let node = self.doc.node(c)?.clone();
+            let held = k > 0 && node.clipped;
+            if !held {
+                base = Some(c);
+                held_to = None;
+            }
+            if !node.visible || node.opacity <= 0.0 {
+                continue;
+            }
+            if !held {
+                self.draw_node(c)?;
+                continue;
+            }
+            let Some(under) = base else { continue };
+            let u = self.doc.node(under)?;
+            if !u.visible || u.opacity <= 0.0 {
+                continue;
+            }
+            let g = match held_to {
+                Some(g) => g,
+                None => {
+                    let g = self.as_group(under)?;
+                    held_to = Some(g);
+                    g
+                }
+            };
+            self.draw_node_held(c, Some(g))?;
+        }
+        Ok(())
+    }
+
+    /// A layer drawn into a transparency group of its own, not placed on
+    /// the page: what a layer held to it is held by.
+    fn as_group(&mut self, id: NodeId) -> Result<usize, PdfError> {
+        let outer = std::mem::take(&mut self.content);
+        let drawn = self.draw_node(id);
+        let inner = std::mem::replace(&mut self.content, outer);
+        drawn?;
+        let obj = self.push(&[]);
+        self.forms.push((obj, inner, false));
+        Ok(obj)
+    }
+
+    /// Whether a run of layers side by side can all be drawn live, holds
+    /// and all: every one that shows is live, none works on what is under
+    /// it, and none held to another wears a mask of its own — the hold
+    /// and its own mask would want the one soft mask a state has.
+    fn siblings_live(&self, kids: &[NodeId]) -> Result<bool, PdfError> {
+        for (k, &c) in kids.iter().enumerate() {
+            let n = self.doc.node(c)?;
+            if !n.visible || n.opacity <= 0.0 {
+                continue;
+            }
+            if works_on_what_is_under(&self.doc, c) || !self.is_live(c)? {
+                return Ok(false);
+            }
+            if k > 0 && n.clipped && n.mask.is_some() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// A layer's mask as a soft mask: a luminosity group drawing what the
@@ -4333,6 +4378,131 @@ mod tests {
             .chain((8..32).map(|y| (12, y)))
             .collect();
         for (x, y) in points {
+            let (o, g) = (ours[y * 64 + x], theirs[0][y * 64 + x]);
+            assert!(
+                (o - g).abs() < 0.03,
+                "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"
+            );
+        }
+    }
+
+    /// A layer held to the one under it goes live, held by a soft mask
+    /// read off the alpha of that layer drawn again as a group: exactly
+    /// the engine's hold, so what is held shows as much as the layer under
+    /// it does — faded, masked, a group — and a fill and a stroke over it
+    /// are held once. A run of held layers went into every PDF as one
+    /// picture.
+    #[test]
+    fn a_held_layer_goes_live_under_the_alpha_of_the_one_under_it() {
+        let mut doc = Document::new(64, 40, chitrakar_color::ColorMode::Rgb);
+        let mut oval = shape(
+            "oval",
+            VectorShape::Ellipse { rx: 16.0, ry: 12.0 },
+            Some(RED),
+        );
+        oval.opacity = 0.6;
+        oval.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 20.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(4.0, 0.0),
+            },
+            invert: false,
+            feather: 2.0,
+        });
+        add(&mut doc, oval, [8.0, 6.0]);
+        let mut band = shape(
+            "band",
+            VectorShape::Rect {
+                width: 30.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut band.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 4.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        band.clipped = true;
+        add(&mut doc, band, [6.0, 13.0]);
+        let mut word =
+            chitrakar_doc::Node::text("word", chitrakar_doc::TextSpec::new("Ab", 14.0, BLUE));
+        word.clipped = true;
+        add(&mut doc, word, [14.0, 2.0]);
+        // A faded group, and a square held to it.
+        let pair = add(&mut doc, chitrakar_doc::Node::group("pair"), [42.0, 6.0]);
+        for (i, y) in [0.0f32, 12.0].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: pair,
+                index: i,
+                node: Box::new(shape(
+                    "square",
+                    VectorShape::Rect {
+                        width: 16.0,
+                        height: 14.0,
+                        radius: 0.0,
+                    },
+                    Some(RED),
+                )),
+            })
+            .unwrap();
+            let id = doc.children_of(pair).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, y),
+            })
+            .unwrap();
+        }
+        doc.apply(Command::SetOpacity {
+            id: pair,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let mut over = shape(
+            "over",
+            VectorShape::Rect {
+                width: 12.0,
+                height: 30.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        over.clipped = true;
+        add(&mut doc, over, [46.0, 2.0]);
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert!(
+            !content.contains("/Im"),
+            "nothing went as pixels: {content}"
+        );
+        assert!(String::from_utf8_lossy(&pdf).contains("/S /Alpha"));
+        assert!(
+            pdfish_text(&pdf).contains("Tj"),
+            "the held word is still type"
+        );
+
+        let ours = engine_alpha(&doc);
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        // Across the band and the oval, through the stroke over the fill
+        // and the mask's feather; and across the group and what it holds.
+        for (x, y) in (2..62).map(|x| (x, 18)).chain((2..62).map(|x| (x, 26))) {
             let (o, g) = (ours[y * 64 + x], theirs[0][y * 64 + x]);
             assert!(
                 (o - g).abs() < 0.03,
