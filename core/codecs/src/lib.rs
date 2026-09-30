@@ -59,6 +59,7 @@ impl SourceImage {
 /// engine holds exactly one internal encoding.
 pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+    let is_png = reader.format() == Some(ImageFormat::Png);
     let mut decoder = reader.into_decoder()?;
     let icc = image::ImageDecoder::icc_profile(&mut decoder)
         .ok()
@@ -69,11 +70,40 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     if let Some(icc) = icc {
         // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
         chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
+    } else if let Some(space) = is_png.then(|| png_chromaticities(bytes)).flatten() {
+        // A PNG can name its colour space without a profile, by its
+        // primaries and gamma. That is how a ProPhoto picture written by
+        // a chunk-only encoder says what it is, and read as sRGB it
+        // shows muted and dark.
+        chitrakar_color::cms::normalize_rgba8_from_chromaticities(&space, &mut rgba8);
     }
     Ok(SourceImage {
         width,
         height,
         rgba8,
+    })
+}
+
+/// The colour space a PNG names through cHRM and gAMA, when it names one
+/// that way: both chunks present, no profile, and no sRGB chunk (which
+/// overrides the pair and says there is nothing to convert).
+fn png_chromaticities(bytes: &[u8]) -> Option<chitrakar_color::cms::Chromaticities> {
+    let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .ok()?;
+    let info = reader.info();
+    if info.srgb.is_some() || info.icc_profile.is_some() {
+        return None;
+    }
+    let chrm = info.chromaticities()?;
+    let gamma = info.gamma()?;
+    let xy = |c: (png::ScaledFloat, png::ScaledFloat)| (c.0.into_value(), c.1.into_value());
+    Some(chitrakar_color::cms::Chromaticities {
+        white: xy(chrm.white),
+        red: xy(chrm.red),
+        green: xy(chrm.green),
+        blue: xy(chrm.blue),
+        gamma: gamma.into_value(),
     })
 }
 
@@ -186,6 +216,82 @@ mod tests {
             );
         }
         assert_eq!(tagged.rgba8[3], 255, "alpha preserved");
+    }
+
+    /// A PNG written without a profile, tagged by its chunks alone.
+    fn png_by_chunks(pixels: &[u8], space: Option<(f32, [(f32, f32); 4])>, srgb: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, pixels.len() as u32 / 4, 1);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        if let Some((gamma, [w, r, g, b])) = space {
+            enc.set_source_gamma(png::ScaledFloat::new(gamma));
+            enc.set_source_chromaticities(png::SourceChromaticities::new(w, r, g, b));
+        }
+        if srgb {
+            enc.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+        }
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(pixels).unwrap();
+        drop(w);
+        out
+    }
+
+    const PRO_PHOTO_CHUNKS: (f32, [(f32, f32); 4]) = (
+        1.0 / 1.8,
+        [
+            (0.3457, 0.3585),
+            (0.7347, 0.2653),
+            (0.1596, 0.8404),
+            (0.0366, 0.0001),
+        ],
+    );
+    const SRGB_CHUNKS: (f32, [(f32, f32); 4]) = (
+        0.45455,
+        [(0.3127, 0.329), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06)],
+    );
+
+    /// A ProPhoto PNG that says so through cHRM and gAMA rather than a
+    /// profile arrives as the colour it names. (200,100,50) in ProPhoto
+    /// is (255,80,47) in sRGB, which is what littlecms makes of it
+    /// through every ProPhoto profile in circulation; read as sRGB
+    /// instead, the same picture is muted and dark, and that is how
+    /// it used to arrive.
+    #[test]
+    fn png_colour_chunks_are_honored_on_import() {
+        let pixels = vec![200u8, 100, 50, 255, 128, 128, 128, 255];
+        let decoded = decode(&png_by_chunks(&pixels, Some(PRO_PHOTO_CHUNKS), false)).unwrap();
+        let want = [255i32, 80, 47, 255, 146, 146, 146, 255];
+        for (i, (got, want)) in decoded.rgba8.iter().zip(want).enumerate() {
+            assert!(
+                (*got as i32 - want).abs() <= 1,
+                "channel {i}: want {want}, got {got} (whole run {:?})",
+                decoded.rgba8
+            );
+        }
+    }
+
+    /// Chunks that say sRGB are not a conversion, and an sRGB chunk
+    /// overrides whatever cHRM and gAMA sit beside it: neither moves
+    /// a pixel. Nor does a PNG with no colour chunks at all.
+    #[test]
+    fn png_chunks_that_say_srgb_leave_pixels_alone() {
+        let pixels = vec![200u8, 100, 50, 255, 3, 2, 1, 255];
+        for (name, bytes) in [
+            ("sRGB chunk alone", png_by_chunks(&pixels, None, true)),
+            (
+                "sRGB chunk over ProPhoto chunks",
+                png_by_chunks(&pixels, Some(PRO_PHOTO_CHUNKS), true),
+            ),
+            (
+                "chunks that say sRGB",
+                png_by_chunks(&pixels, Some(SRGB_CHUNKS), false),
+            ),
+            ("no chunks", png_by_chunks(&pixels, None, false)),
+        ] {
+            let decoded = decode(&bytes).unwrap();
+            assert_eq!(decoded.rgba8, pixels, "{name}");
+        }
     }
 
     #[test]

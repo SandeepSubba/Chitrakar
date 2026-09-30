@@ -14,6 +14,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The PNG colour chunks `image` does not pass on (cHRM, gAMA, sRGB): a
+# picture tagged without a profile is read for the space it names.
+png = "0.18"
 # Container format. Default features pull native compression stacks that
 # don't build on wasm32; deflate alone is pure Rust.
 zip = { version = "2", default-features = false, features = ["deflate"] }

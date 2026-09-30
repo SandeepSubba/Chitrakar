@@ -48,7 +48,14 @@ profile ⇒ naive conversion, never a crash), and the CMS sits behind our own
 - `chitrakar_color::cms`: import normalization (`normalize_rgba8_to_srgb`)
   and `CmykCms` (parsed press profile with a cached CMYK→sRGB f32 transform).
 - Import honors embedded ICC profiles: PNG/JPEG pixels tagged with an RGB
-  profile are converted to sRGB once at the decode edge.
+  profile are converted to sRGB once at the decode edge. A PNG with no
+  profile but cHRM and gAMA chunks is converted from the space those
+  name (`normalize_rgba8_from_chromaticities`), unless they say sRGB or
+  an sRGB chunk overrides them. ProPhoto RGB was the case that found
+  this: through seven real profiles (Kodak-style v2 curves, ISO
+  parametric v4, colord's, the LUT-based ISO 22028-2 one) moxcms agrees
+  with littlecms to a level, but a ProPhoto PNG tagged by chunks alone
+  arrived unconverted and showed muted and dark.
 - CMYK documents can carry a press profile (stored as `profiles/cmyk.icc`
   in `.chitra`); authored CMYK ink values render through it, falling back
   to the naive device formula without one. The UI loads a profile via the

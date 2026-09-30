@@ -559,7 +559,13 @@ without reading anything else.*
   left, docks it again), and the layer panel is as wide as its edge is
   dragged to be. Both are remembered between visits, so a workspace
   arranged once stays arranged.
-  Color: embedded ICC honored on import, CMYK documents with press profiles,
+  Color: embedded ICC honored on import — and, in a PNG that carries no
+  profile, the cHRM and gAMA chunks it names its space by, so a
+  ProPhoto picture tagged that way comes in as the colour it names
+  rather than muted and dark, read as sRGB (ProPhoto through every
+  profile in circulation was checked against littlecms and agrees to
+  a level; the chunks were the one way in that was not converted) —
+  CMYK documents with press profiles,
   soft proofing + gamut warning, and the screen's own profile — everything
   shown is taken from sRGB to that display's numbers, so a wide-gamut
   monitor draws the picture as it is rather than as far out as its own

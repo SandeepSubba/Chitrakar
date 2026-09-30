@@ -10,7 +10,10 @@
 //!   preview formula whenever a profile is set.
 
 use crate::{srgb_to_linear, LinearRgba};
-use moxcms::{ColorProfile, DataColorSpace, Layout, TransformF32Executor, TransformOptions};
+use moxcms::{
+    curve_from_gamma, Chromaticity, ColorPrimaries, ColorProfile, DataColorSpace, Layout,
+    TransformF32Executor, TransformOptions, XyY,
+};
 use std::sync::Arc;
 
 /// Convert RGBA8 pixels tagged with an embedded ICC profile into sRGB, in
@@ -20,6 +23,133 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
     let Ok(profile) = ColorProfile::new_from_slice(icc) else {
         return false;
     };
+    normalize_rgba8_from_profile(&profile, pixels)
+}
+
+/// A colour space named by its primaries and a plain gamma rather than by
+/// a profile: what a PNG says in its cHRM and gAMA chunks when it carries
+/// no iCCP. Chromaticities are CIE xy; `gamma` is the encoding's exponent
+/// as the file states it (a gAMA of 1/1.8 arrives as `1.0 / 1.8`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chromaticities {
+    pub white: (f32, f32),
+    pub red: (f32, f32),
+    pub green: (f32, f32),
+    pub blue: (f32, f32),
+    pub gamma: f32,
+}
+
+impl Chromaticities {
+    /// Whether these say sRGB, near enough that converting would only
+    /// move pixels by the difference between a pure 2.2 gamma and sRGB's
+    /// own curve — a change to a file that was never asking for one.
+    /// The tolerances are a few units in the last place of what the
+    /// chunks can store: xy comes in hundred-thousandths and gamma in
+    /// hundred-thousandths too, and writers round differently.
+    pub fn is_srgb(&self) -> bool {
+        const SRGB: [(f32, f32); 4] = [(0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06)];
+        let near =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.001 && (a.1 - b.1).abs() < 0.001;
+        near(self.white, SRGB[0])
+            && near(self.red, SRGB[1])
+            && near(self.green, SRGB[2])
+            && near(self.blue, SRGB[3])
+            && (self.gamma - 1.0 / 2.2).abs() < 0.001
+    }
+
+    /// The matrix/TRC profile these describe. `None` when the numbers
+    /// cannot make one: a gamma that is not positive, or primaries that
+    /// do not span a gamut (three points on a line) and so have no
+    /// matrix to XYZ.
+    fn profile(&self) -> Option<ColorProfile> {
+        if !self.gamma.is_finite() || self.gamma <= 0.0 {
+            return None;
+        }
+        let finite = |c: (f32, f32)| c.0.is_finite() && c.1.is_finite() && c.1 > 0.0;
+        if !(finite(self.white) && finite(self.red) && finite(self.green) && finite(self.blue)) {
+            return None;
+        }
+        // Three primaries on a line enclose nothing; the matrix that
+        // would take them to XYZ has no inverse, and what comes back
+        // from asking for one anyway is a number rather than an error.
+        let (r, g, b) = (self.red, self.green, self.blue);
+        let twice_area = (r.0 - b.0) * (g.1 - b.1) - (g.0 - b.0) * (r.1 - b.1);
+        if twice_area.abs() < 1e-4 {
+            return None;
+        }
+        let white = XyY {
+            x: f64::from(self.white.0),
+            y: f64::from(self.white.1),
+            yb: 1.0,
+        };
+        let primaries = ColorPrimaries {
+            red: Chromaticity {
+                x: self.red.0,
+                y: self.red.1,
+            },
+            green: Chromaticity {
+                x: self.green.0,
+                y: self.green.1,
+            },
+            blue: Chromaticity {
+                x: self.blue.0,
+                y: self.blue.1,
+            },
+        };
+        // Start from the built-in sRGB profile for its header — an RGB
+        // display profile with an XYZ connection space — and replace
+        // everything that made it sRGB. Setting the colorimetry adapts
+        // the primaries to the D50 connection space and drops the CICP
+        // tag, which matters: with it left in, the engine would read
+        // sRGB's transfer curve off it and ignore the gamma.
+        let mut profile = ColorProfile::new_srgb();
+        profile.description = None;
+        profile.copyright = None;
+        profile.update_rgb_colorimetry(white, primaries);
+        profile.media_white_point = Some(white.to_xyzd());
+        // A matrix profile's three colorants add up to its white, whose
+        // Y is one by definition: anything else is a matrix that came out
+        // of a degenerate inverse rather than a colour space.
+        let colorants = [
+            profile.red_colorant,
+            profile.green_colorant,
+            profile.blue_colorant,
+        ];
+        let white_y: f64 = colorants.iter().map(|c| c.y).sum();
+        let sane = colorants
+            .iter()
+            .all(|c| c.x.is_finite() && c.y.is_finite() && c.z.is_finite())
+            && (white_y - 1.0).abs() < 0.01;
+        if !sane {
+            return None;
+        }
+        let curve = curve_from_gamma(1.0 / self.gamma);
+        profile.red_trc = Some(curve.clone());
+        profile.green_trc = Some(curve.clone());
+        profile.blue_trc = Some(curve);
+        Some(profile)
+    }
+}
+
+/// Convert RGBA8 pixels whose colour space is given as primaries and a
+/// gamma into sRGB, in place. Returns false (pixels untouched) when the
+/// numbers already say sRGB or cannot describe a colour space at all.
+///
+/// This is the same conversion an embedded profile gets, built from the
+/// chunks a PNG writer puts down when it tags a picture without one: a
+/// ProPhoto PNG saying so through cHRM and gAMA used to arrive as its
+/// raw numbers and show muted and dark, every colour read as sRGB.
+pub fn normalize_rgba8_from_chromaticities(space: &Chromaticities, pixels: &mut [u8]) -> bool {
+    if space.is_srgb() {
+        return false;
+    }
+    let Some(profile) = space.profile() else {
+        return false;
+    };
+    normalize_rgba8_from_profile(&profile, pixels)
+}
+
+fn normalize_rgba8_from_profile(profile: &ColorProfile, pixels: &mut [u8]) -> bool {
     if profile.color_space != DataColorSpace::Rgb {
         return false;
     }
@@ -323,6 +453,135 @@ mod tests {
         for ch in &grey[0..3] {
             assert!((*ch as i32 - 128).abs() <= 2, "grey shifted: {grey:?}");
         }
+    }
+
+    /// ProPhoto RGB (200,100,50) is (255,80,47) in sRGB — the number
+    /// littlecms gives for it through seven ProPhoto profiles from the
+    /// wild (Kodak-style v2 curves, ISO parametric v4, colord's, the
+    /// LUT-based ISO 22028-2 one), and what the two primary matrices
+    /// give by hand. ProPhoto's primaries are so far outside sRGB's
+    /// that the red clips and the green and blue drop by more than
+    /// half; mid grey rises from 128 to 146 because its gamma is 1.8
+    /// against sRGB's roughly 2.2. Shown untouched, the same picture
+    /// is muted and dark: that is what an ignored profile looks like.
+    const PRO_PHOTO: Chromaticities = Chromaticities {
+        white: (0.3457, 0.3585),
+        red: (0.7347, 0.2653),
+        green: (0.1596, 0.8404),
+        blue: (0.0366, 0.0001),
+        gamma: 1.0 / 1.8,
+    };
+    const PRO_PHOTO_PIXELS: [u8; 12] = [200, 100, 50, 255, 128, 128, 128, 255, 30, 30, 30, 255];
+    const PRO_PHOTO_IN_SRGB: [u8; 12] = [255, 80, 47, 255, 146, 146, 146, 255, 40, 40, 40, 255];
+
+    fn assert_pro_photo_converted(px: &[u8]) {
+        for (i, (got, want)) in px.iter().zip(PRO_PHOTO_IN_SRGB).enumerate() {
+            assert!(
+                (*got as i32 - want as i32).abs() <= 1,
+                "channel {i}: want {want}, got {got} (whole run {px:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn pro_photo_pixels_normalize_into_srgb_through_a_profile() {
+        let icc = ColorProfile::new_pro_photo_rgb().encode().unwrap();
+        let mut px = PRO_PHOTO_PIXELS.to_vec();
+        assert!(normalize_rgba8_to_srgb(&icc, &mut px));
+        assert_pro_photo_converted(&px);
+    }
+
+    #[test]
+    fn pro_photo_pixels_normalize_into_srgb_through_their_chromaticities() {
+        let mut px = PRO_PHOTO_PIXELS.to_vec();
+        assert!(normalize_rgba8_from_chromaticities(&PRO_PHOTO, &mut px));
+        assert_pro_photo_converted(&px);
+    }
+
+    /// Chunks that say sRGB — as libpng writes beside every sRGB
+    /// picture — are not a conversion, and a pure 2.2 gamma stood in
+    /// for sRGB's curve would move the shadows of a file that asked
+    /// for nothing.
+    #[test]
+    fn chromaticities_that_say_srgb_leave_pixels_alone() {
+        let srgb = Chromaticities {
+            white: (0.3127, 0.329),
+            red: (0.64, 0.33),
+            green: (0.3, 0.6),
+            blue: (0.15, 0.06),
+            gamma: 0.45455,
+        };
+        assert!(srgb.is_srgb());
+        let mut px = vec![200u8, 100, 50, 255, 3, 2, 1, 255];
+        assert!(!normalize_rgba8_from_chromaticities(&srgb, &mut px));
+        assert_eq!(px, [200, 100, 50, 255, 3, 2, 1, 255]);
+        assert!(!PRO_PHOTO.is_srgb());
+    }
+
+    /// A space named by its chunks lands where a profile saying the same
+    /// thing lands it. Display P3's primaries with a plain 2.2 gamma,
+    /// built both ways — the white is D65 here, so this is also the
+    /// adaptation to the profile connection space agreeing with itself.
+    /// (Against the real P3 profile the blue would sit eight levels
+    /// off, which is what its sRGB-shaped curve costs against a pure
+    /// gamma in the shadows: the chunks say a gamma, so a gamma is what
+    /// they get.)
+    #[test]
+    fn chromaticities_agree_with_the_profile_they_describe() {
+        let p3 = Chromaticities {
+            white: (0.3127, 0.329),
+            red: (0.68, 0.32),
+            green: (0.265, 0.69),
+            blue: (0.15, 0.06),
+            gamma: 1.0 / 2.2,
+        };
+        let mut by_chunks = vec![200u8, 100, 50, 255, 20, 10, 5, 255];
+        assert!(normalize_rgba8_from_chromaticities(&p3, &mut by_chunks));
+
+        let mut profile = ColorProfile::new_display_p3();
+        profile.cicp = None;
+        let curve = curve_from_gamma(2.2);
+        profile.red_trc = Some(curve.clone());
+        profile.green_trc = Some(curve.clone());
+        profile.blue_trc = Some(curve);
+        let mut by_profile = vec![200u8, 100, 50, 255, 20, 10, 5, 255];
+        assert!(normalize_rgba8_to_srgb(
+            &profile.encode().unwrap(),
+            &mut by_profile
+        ));
+        for c in 0..8 {
+            assert!(
+                (by_chunks[c] as i32 - by_profile[c] as i32).abs() <= 1,
+                "{by_chunks:?} vs {by_profile:?}"
+            );
+        }
+        // And it did convert: P3's red is further out than sRGB's.
+        assert!(by_chunks[0] > 205, "{by_chunks:?}");
+    }
+
+    /// Numbers that describe no colour space are refused rather than
+    /// turned into a transform full of NaNs.
+    #[test]
+    fn degenerate_chromaticities_are_refused() {
+        let mut px = vec![200u8, 100, 50, 255];
+        let flat = Chromaticities {
+            red: (0.5, 0.5),
+            green: (0.5, 0.5),
+            blue: (0.5, 0.5),
+            ..PRO_PHOTO
+        };
+        assert!(!normalize_rgba8_from_chromaticities(&flat, &mut px));
+        let no_gamma = Chromaticities {
+            gamma: 0.0,
+            ..PRO_PHOTO
+        };
+        assert!(!normalize_rgba8_from_chromaticities(&no_gamma, &mut px));
+        let nan = Chromaticities {
+            white: (f32::NAN, 0.3),
+            ..PRO_PHOTO
+        };
+        assert!(!normalize_rgba8_from_chromaticities(&nan, &mut px));
+        assert_eq!(px, [200, 100, 50, 255]);
     }
 
     #[test]
