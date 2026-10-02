@@ -205,6 +205,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         pages: Vec::new(),
         xobjects: Vec::new(),
         forms: Vec::new(),
+        plain: None,
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -266,6 +267,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         pages: Vec::new(),
         xobjects: Vec::new(),
         forms: Vec::new(),
+        plain: None,
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -332,6 +334,10 @@ struct Page {
     /// stream shares are known.
     /// A soft mask's group is the third: grey, read for its luminosity.
     forms: Vec<(usize, String, bool)>,
+    /// A layer being drawn as what a hold reads (`as_group`): its alpha as
+    /// the engine takes it, before its own effects, which go down beside
+    /// it on the page but are no part of what holds.
+    plain: Option<NodeId>,
     gstates: Vec<(String, usize)>,
     content: String,
     /// (profile stream, colour space array) object numbers, in ink.
@@ -469,10 +475,18 @@ impl Page {
     /// opacity, and every visible child live in turn), a placed image.
     fn is_live(&self, id: NodeId) -> Result<bool, PdfError> {
         let node = self.doc.node(id)?;
-        // A mask is a soft mask on a transparency group (`soft_mask`); an
-        // effect has no live form here.
-        if !node.effects.is_empty() {
-            return Ok(false);
+        // A mask is a soft mask on a transparency group (`soft_mask`).
+        // Effects go as a picture beside the layer, which stays live
+        // (`effect_image`) — so long as each side's effects are one
+        // picture the page would make the same: with a blend, two effects
+        // on one side meet the page each in turn and would blend with each
+        // other as one picture.
+        if node.blend != BlendMode::Normal {
+            for over in [false, true] {
+                if node.effects.iter().filter(|e| e.over() == over).count() > 1 {
+                    return Ok(false);
+                }
+            }
         }
         // A layer held to the one below it is drawn under a soft mask of
         // that one (`draw_siblings`); whether a run can be is asked of the
@@ -984,6 +998,9 @@ impl Page {
     /// a stroke over it are held once.
     fn draw_node_held(&mut self, id: NodeId, hold: Option<usize>) -> Result<(), PdfError> {
         let node = self.doc.node(id)?.clone();
+        // Effects the engine draws under the layer go down first, as a
+        // picture — PDF has no blur — and the layer stays live over them.
+        self.effect_image(id, false, node.blend)?;
         self.content.push_str("q\n");
         if let Some(g) = hold {
             if let Some(gs) = self.gstate_masked(1.0, 1.0, BlendMode::Normal, Some((g, "Alpha"))) {
@@ -1392,6 +1409,37 @@ impl Page {
             let _ = writeln!(self.content, "/{name} Do");
         }
         self.content.push_str("Q\n");
+        // And the ones it draws over the layer, an inner shadow's shading.
+        self.effect_image(id, true, node.blend)?;
+        Ok(())
+    }
+
+    /// A layer's effects that go under it (or over it) as a picture in the
+    /// space the layer sits in, laid down with the layer's blend as the
+    /// engine lays each effect down (`effect_pixels`). As fine as the
+    /// other pictures drawn for print.
+    fn effect_image(&mut self, id: NodeId, over: bool, blend: BlendMode) -> Result<(), PdfError> {
+        if self.plain == Some(id) {
+            return Ok(());
+        }
+        let scale = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0).round();
+        let Some(px) = chitrakar_render::effect_pixels(&self.doc, id, over, scale)? else {
+            return Ok(());
+        };
+        let name = self.image(px.width, px.height, &px.rgba8)?;
+        self.content.push_str("q\n");
+        if let Some(gs) = self.gstate(1.0, 1.0, blend) {
+            let _ = writeln!(self.content, "/{gs} gs");
+        }
+        let (w, h) = (px.width as f32 / scale, px.height as f32 / scale);
+        let _ = writeln!(
+            self.content,
+            "{} 0 0 {} {} {} cm\n/{name} Do\nQ",
+            num(w),
+            num(-h),
+            num(px.origin[0]),
+            num(px.origin[1] + h)
+        );
         Ok(())
     }
 
@@ -1439,7 +1487,9 @@ impl Page {
     /// the page: what a layer held to it is held by.
     fn as_group(&mut self, id: NodeId) -> Result<usize, PdfError> {
         let outer = std::mem::take(&mut self.content);
+        let was = self.plain.replace(id);
         let drawn = self.draw_node(id);
+        self.plain = was;
         let inner = std::mem::replace(&mut self.content, outer);
         drawn?;
         let obj = self.push(&[]);
@@ -1451,10 +1501,17 @@ impl Page {
     /// and all: every one that shows is live, and none works on what is
     /// under it.
     fn siblings_live(&self, kids: &[NodeId]) -> Result<bool, PdfError> {
-        for &c in kids {
+        for (k, &c) in kids.iter().enumerate() {
             let n = self.doc.node(c)?;
             if !n.visible || n.opacity <= 0.0 {
                 continue;
+            }
+            // A hold cuts what is held before its effects are grown, from
+            // the cut silhouette, which a picture of them drawn beside the
+            // layer is not. (What a layer is held *by* is its alpha before
+            // its own effects, which `as_group` draws.)
+            if k > 0 && n.clipped && !n.effects.is_empty() {
+                return Ok(false);
             }
             if works_on_what_is_under(&self.doc, c) || !self.is_live(c)? {
                 return Ok(false);
@@ -4029,6 +4086,47 @@ mod tests {
         Some(out)
     }
 
+    /// The colours ghostscript draws a document's PDF in, a pixel to a
+    /// pixel of the page. `None` without ghostscript.
+    fn ghostscript_rgba(doc: &Document) -> Option<Vec<[u8; 4]>> {
+        std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let dir = std::env::temp_dir().join(format!("chitrakar-pdf-rgba-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (src, png) = (dir.join("p.pdf"), dir.join("p.png"));
+        std::fs::write(&src, export_pdf_document(doc).unwrap()).unwrap();
+        let ok = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=png16m",
+                "-r72",
+            ])
+            .args([
+                "-dGraphicsAlphaBits=4",
+                "-dTextAlphaBits=4",
+                "-dDOINTERPOLATE",
+            ])
+            .arg(format!("-sOutputFile={}", png.display()))
+            .arg(&src)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ghostscript accepted the file");
+        let img = crate::decode(&std::fs::read(&png).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(
+            img.rgba8
+                .chunks(4)
+                .map(|p| [p[0], p[1], p[2], p[3]])
+                .collect(),
+        )
+    }
+
     /// What the engine covers, rendered at the four times the exporter
     /// renders the pictures it places for print, and brought down to the
     /// page by averaging. At that resolution a frame's edge is rounded to
@@ -4590,6 +4688,190 @@ mod tests {
             assert!(
                 (o - g).abs() < 0.03,
                 "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"
+            );
+        }
+    }
+
+    /// A layer wearing effects stays live, the effects beside it as a
+    /// picture — PDF has no blur — laid down where the engine lays them:
+    /// a shadow under the layer, an inner shadow over it, each with the
+    /// layer's blend. Text with a shadow is still text. Such a layer went
+    /// as a picture of the whole of itself.
+    #[test]
+    fn a_layer_with_effects_stays_live_beside_a_picture_of_them() {
+        let mut doc = Document::new(64, 40, chitrakar_color::ColorMode::Rgb);
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            dx: 2.0,
+            dy: 3.0,
+            blur: 2.0,
+            color: RED,
+            opacity: 0.8,
+        };
+        let mut word =
+            chitrakar_doc::Node::text("word", chitrakar_doc::TextSpec::new("Ab", 16.0, BLUE));
+        word.effects = vec![shadow];
+        let word = add(&mut doc, word, [4.0, 2.0]);
+        let mut tile = shape(
+            "tile",
+            VectorShape::Rect {
+                width: 20.0,
+                height: 16.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        tile.blend = BlendMode::Multiply;
+        tile.effects = vec![chitrakar_doc::Effect::InnerShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 2.0,
+            color: RED,
+            opacity: 0.9,
+        }];
+        add(&mut doc, tile, [38.0, 4.0]);
+        add(
+            &mut doc,
+            chitrakar_doc::Node::instance("again", word),
+            [4.0, 22.0],
+        );
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let drawn = pdfish_text(&pdf);
+        assert_eq!(
+            drawn.matches("Tj").count(),
+            4,
+            "both words are type: {drawn}"
+        );
+        // Three pictures — the shadow, the inner shadow, the copy's shadow
+        // — and nothing else.
+        assert_eq!(content_of(&pdf).matches("/Im").count(), 3);
+
+        // What the effects add, read against what the same page adds
+        // without them: ghostscript sets type a fifth lighter at a stem's
+        // edge than the page does whatever is around it, which is the
+        // reader's antialiasing and not this.
+        let mut bare = doc.clone();
+        for (id, _) in doc.nodes() {
+            bare.apply(Command::SetEffects {
+                id: *id,
+                effects: Vec::new(),
+            })
+            .unwrap();
+        }
+        let Some(theirs) = ghostscript_alpha(&[doc.clone(), bare.clone()]) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let (ours, plain) = (engine_alpha(&doc), engine_alpha(&bare));
+        let mut worst = (0.0f32, 0, 0);
+        for y in 0..40 {
+            for x in 0..64 {
+                let i = y * 64 + x;
+                let d = ((ours[i] - plain[i]) - (theirs[0][i] - theirs[1][i])).abs();
+                if d > worst.0 {
+                    worst = (d, x, y);
+                }
+            }
+        }
+        // A tenth: where a shadow shows through a letter's antialiased
+        // edge, it shows as much as the edge lets it, and ghostscript's
+        // edge is a fifth lighter. A shadow missing or misplaced is most of
+        // a pixel.
+        assert!(
+            worst.0 < 0.1,
+            "what the effects add parts the page and ghostscript by {:.3} at ({}, {})",
+            worst.0,
+            worst.1,
+            worst.2
+        );
+        // An inner shadow covers nothing the tile did not, so coverage
+        // cannot see it: its colour can. Inside the tile's top-left corner
+        // it darkens the tile, on the page and in the file alike, and in
+        // the tile's middle it does not. By how much is not asked: the
+        // page mixes a partly covering shade in linear light and a reader
+        // in the encoding it shows (PLAN §0), which here is twice the
+        // darkening — the same shade, mixed two ways.
+        let (Some(with), Some(without)) = (ghostscript_rgba(&doc), ghostscript_rgba(&bare)) else {
+            return;
+        };
+        let (page, page_bare) = (
+            chitrakar_render::render(&doc).unwrap(),
+            chitrakar_render::render(&bare).unwrap(),
+        );
+        let lum = |p: [u8; 4]| p[0] as f32 + p[1] as f32 + p[2] as f32;
+        for (x, y, shaded) in [(39usize, 5usize, true), (48, 13, false)] {
+            let i = y * 64 + x;
+            let ours = lum(page.get(x as u32, y as u32).to_srgb8())
+                - lum(page_bare.get(x as u32, y as u32).to_srgb8());
+            let theirs = lum(with[i]) - lum(without[i]);
+            if shaded {
+                assert!(
+                    ours < -30.0 && theirs < -30.0,
+                    "({x}, {y}): the inner shadow darkens the page by {ours} and the file by {theirs}"
+                );
+            } else {
+                assert!(
+                    ours.abs() < 3.0 && theirs.abs() < 3.0,
+                    "({x}, {y}): {ours} {theirs}"
+                );
+            }
+        }
+    }
+
+    /// What a layer is held by is the layer under it as it is drawn, but
+    /// not its shadow: the engine reads that layer's alpha before its
+    /// effects (`Cover`). Its shadow still goes down on the page; a layer
+    /// held to it does not show over the shadow.
+    #[test]
+    fn a_hold_reads_the_layer_under_it_without_its_shadow() {
+        let mut doc = Document::new(48, 32, chitrakar_color::ColorMode::Rgb);
+        let mut base = shape(
+            "base",
+            VectorShape::Rect {
+                width: 16.0,
+                height: 12.0,
+                radius: 0.0,
+            },
+            Some(RED),
+        );
+        base.effects = vec![chitrakar_doc::Effect::DropShadow {
+            dx: 10.0,
+            dy: 8.0,
+            blur: 1.0,
+            color: RED,
+            opacity: 1.0,
+        }];
+        add(&mut doc, base, [4.0, 4.0]);
+        let mut wide = shape(
+            "wide",
+            VectorShape::Rect {
+                width: 44.0,
+                height: 28.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        wide.clipped = true;
+        add(&mut doc, wide, [2.0, 2.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        assert!(
+            String::from_utf8_lossy(&pdf).contains("/S /Alpha"),
+            "held live"
+        );
+        let Some(theirs) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let page = chitrakar_render::render(&doc).unwrap();
+        // Inside the base, what is held shows: blue. In the shadow, past
+        // the base, only the shadow does: red.
+        for (x, y) in [(10usize, 9usize), (27, 21)] {
+            let ours = page.get(x as u32, y as u32).to_srgb8();
+            let file = theirs[y * 48 + x];
+            assert_eq!(
+                ours[2] > ours[0],
+                file[2] > file[0],
+                "({x}, {y}): the page is {ours:?} and the file {file:?}"
             );
         }
     }

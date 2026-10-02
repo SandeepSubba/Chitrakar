@@ -7725,6 +7725,86 @@ pub fn clone_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>,
     }))
 }
 
+/// A layer's effects on their own, for an exporter that draws the layer
+/// itself live and has no form for a blur: the effects that go under the
+/// layer (`over` false) or over it (`over` true), drawn from its
+/// silhouette as the page draws them, onto nothing, with no blend — the
+/// exporter lays the picture down with the layer's blend, which is what
+/// the page does with each effect (`draw_effect`). In the space the layer
+/// sits in, at `scale` pixels a unit, `origin` in units; drawn as though
+/// that space were the page, so a copy, whose original sits elsewhere,
+/// is drawn where the copy is. Nothing when there are no such effects.
+pub fn effect_pixels(
+    doc: &Document,
+    id: NodeId,
+    over: bool,
+    scale: f32,
+) -> Result<Option<PaintedPixels>, DocError> {
+    let node = doc.node(id)?;
+    let effects: Vec<&Effect> = node.effects.iter().filter(|e| e.over() == over).collect();
+    if effects.is_empty() {
+        return Ok(None);
+    }
+    let scale = scale.max(1e-3);
+    // The layer's box grown by its effects' reach, in the space it sits in.
+    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+        return Ok(None);
+    };
+    let (x0, y0) = (x0.floor(), y0.floor());
+    let (w, h) = (
+        ((x1.ceil() - x0) * scale).ceil().max(1.0) as u32,
+        ((y1.ceil() - y0) * scale).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    let parent = Transform {
+        a: scale,
+        d: scale,
+        e: -x0 * scale,
+        f: -y0 * scale,
+        ..Default::default()
+    };
+    let whole = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    // The silhouette: the layer as `draw_layer` draws it onto a surface of
+    // its own before any effect is grown from it.
+    let mut layer = Surface::new(w, h);
+    render_child(doc, id, &mut layer, whole, parent, BlendMode::Normal, false)?;
+    let mut out = Surface::new(w, h);
+    for effect in effects {
+        draw_effect(
+            &mut out,
+            &layer,
+            (0, 0),
+            doc,
+            effect,
+            parent,
+            whole,
+            whole,
+            BlendMode::Normal,
+            node.opacity,
+        );
+    }
+    if out.pixels.iter().all(|p| p.a <= 0.0) {
+        return Ok(None);
+    }
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for px in &out.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
 /// A paint layer rendered on its own at one pixel per document unit,
 /// for an exporter whose format has no brush in it and has to hand the
 /// layer over as an image. `None` when the layer has no paint on it.

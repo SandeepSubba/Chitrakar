@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~559),
+- **Verify before committing:** `cargo test --workspace` (~561),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4608,6 +4608,32 @@ without reading anything else.*
      (`a_held_layer_with_a_mask_of_its_own_goes_live`; un-nested, the own
      mask replaces the hold and the layer shows past the edge it is held
      to, 0.70 where the page has nothing).
+     **And a layer wearing effects.** A shadow, an outline or an inner
+     shadow sent the whole layer into the PDF as a picture, so text with a
+     shadow was not text. PDF has no blur, so the effects stay a picture —
+     but only the effects: the engine draws them beside the layer, the
+     ones that go under it before it and an inner shadow after it, each
+     with the layer's blend (`draw_layer`), and it now hands an exporter
+     exactly that picture (`effect_pixels`, drawn from the same
+     silhouette, in the space the layer sits in so that a copy's land
+     where the copy is). The layer goes live between them
+     (`effect_image`;
+     `a_layer_with_effects_stays_live_beside_a_picture_of_them`). Read
+     against ghostscript for what the effects *add* — the same page
+     without them is the baseline, since ghostscript sets a letter's edge
+     a fifth lighter whatever is behind it — and, for the inner shadow,
+     which covers nothing the layer did not, by colour: it darkens the
+     tile's corner in both and its middle in neither. How much it darkens
+     differs twofold, which is the linear-light mixing above and not
+     placement. Two exclusions: with a blend, more than one effect on a
+     side goes as pixels, since as one picture they would blend with each
+     other; and a held layer with effects, since the engine grows those
+     from the silhouette already cut. What a layer is held *by* is drawn
+     without its own effects (`plain`), the engine's `Cover` being the
+     layer's alpha before them — written first as a refusal, which no
+     test noticed taken out, and then as the fix with a test that does
+     (`a_hold_reads_the_layer_under_it_without_its_shadow`: without it a
+     held layer shows over the shadow).
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
