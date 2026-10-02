@@ -1278,9 +1278,10 @@ fn effects_within(doc: &Document, id: NodeId, space: Transform, depth: usize) ->
 /// first, and it lifts from that.
 ///
 /// What is under it is the page below it for a clone at the top of the
-/// page. Inside a group it is the group's own surface — a group holding a
-/// clone is always isolated (`reads_backdrop`), so what its clone lifts is
-/// the group's earlier children and nothing outside it. That is drawn
+/// page, and for one in an upright frame, which is drawn in place. Inside
+/// a group it is the group's own surface — a group holding a clone is
+/// always isolated (`reads_backdrop`), so what its clone lifts is the
+/// group's earlier children and nothing outside it. That is drawn
 /// aside as the document with the group's ancestors made plain (no fade,
 /// blend, mask, effect or hold), everything off the path down to the
 /// group hidden, and the group's own layers from the clone on hidden too.
@@ -1315,6 +1316,20 @@ fn clone_alone(
         };
         at = up;
     }
+    // An upright frame is drawn where it stands rather than on a surface
+    // of its own (`frame_in_place`), so a clone in one lifts the page
+    // under the frame — beyond its box as well, where a stroke reaches
+    // out of it — and so on up through frames inside frames, as far as
+    // the first layer that does isolate what it holds. Taken as isolated
+    // here, a clone in a frame lifted the frame's ground where the page
+    // showed the page, and every picture of it said so: its thumbnail,
+    // and what an SVG or PDF lays for it.
+    let mut seen_through = Vec::with_capacity(path.len());
+    let mut through = true;
+    for &a in &path {
+        through = through && frame_in_place(doc, a, ancestor_space(doc, a))?;
+        seen_through.push(through);
+    }
     let mut below = doc.clone();
     let hide = |d: &mut Document, id: NodeId| {
         d.apply(chitrakar_doc::Command::SetVisible { id, visible: false })
@@ -1345,7 +1360,7 @@ fn clone_alone(
         // paints a ground behind it, which is the frame's and not the
         // group's: drawn aside without one. The group's own ground, where
         // it is a frame itself, is under the clone and stays.
-        if a != group {
+        if a != group && !seen_through[i] {
             if let NodeKind::Artboard {
                 width,
                 height,
@@ -1365,7 +1380,15 @@ fn clone_alone(
             }
         }
         let over = *path.get(i + 1).unwrap_or(&root);
-        for sibling in doc.children_of(over)?.to_vec() {
+        let siblings = doc.children_of(over)?.to_vec();
+        // Seen through, only what is drawn after it goes; otherwise all
+        // but the way down.
+        let from = if seen_through[i] {
+            siblings.iter().position(|k| *k == a).map_or(0, |p| p + 1)
+        } else {
+            0
+        };
+        for &sibling in &siblings[from..] {
             if sibling != a {
                 hide(&mut below, sibling)?;
             }
@@ -19822,6 +19845,78 @@ mod tests {
         );
         let off = page.get(25, 22);
         assert!(off.a < 1e-4, "and nowhere else ({off:?})");
+    }
+
+    /// A clone in a frame is pictured lifting what the page shows it
+    /// lifting.
+    ///
+    /// An upright frame is drawn in place, so a clone inside it lifts the
+    /// page under the frame — here red, from beyond the frame's box. Drawn
+    /// aside, for its thumbnail and for what an SVG or PDF lays for it,
+    /// the frame was taken to be isolated like a group, and the clone
+    /// lifted the frame's white ground: an exported page had a white
+    /// patch where the page had red.
+    #[test]
+    fn a_clone_in_a_frame_is_pictured_lifting_what_the_page_lifts() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("source", 10.0, 30.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::artboard("frame", 20.0, 30.0, Some(WHITE))),
+        })
+        .unwrap();
+        let frame = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: frame,
+            transform: Transform::translation(20.0, 0.0),
+        })
+        .unwrap();
+        let mut clone = Node::clone_layer("lift");
+        if let NodeKind::Clone { strokes } = &mut clone.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[5.0, 10.0], [10.0, 10.0]],
+                radii: vec![3.0],
+                color: RED,
+                softness: 0.0,
+                erase: false,
+                source: [-20.0, 0.0],
+                heal: false,
+                clip: None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: Box::new(clone),
+        })
+        .unwrap();
+        let clone = doc.children_of(frame).unwrap()[0];
+        let page = render(&doc).unwrap();
+        let on = page.get(27, 10);
+        assert!(
+            on.r > 0.9 && on.g < 0.1,
+            "on the page the clone lifts red from beyond the frame ({on:?})"
+        );
+        let laid = clone_pixels(&doc, clone).unwrap().unwrap();
+        // The picture's corner, in the frame's space, and where (27, 10)
+        // falls in it.
+        let (x, y) = (
+            (7.0 - laid.origin[0]) as u32,
+            (10.0 - laid.origin[1]) as u32,
+        );
+        let k = ((y * laid.width + x) * 4) as usize;
+        let px = &laid.rgba8[k..k + 4];
+        assert!(
+            px[0] > 230 && px[1] < 25 && px[3] == 255,
+            "and its picture lifts the same red, not the frame's ground ({px:?})"
+        );
     }
 
     /// What is held to a copy of an adjustment shows whole, as over the

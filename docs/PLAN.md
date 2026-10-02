@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~567),
+- **Verify before committing:** `cargo test --workspace` (~571),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4691,6 +4691,34 @@ without reading anything else.*
      (`a_tapered_stroke_goes_live_as_the_outline_it_covers`). The PDF
      tests' stand-in for "needs pixels" is a soft brush dab now, the
      last ordinary thing a PDF cannot say.
+     **And colour, where coverage cannot see.** Every audit so far
+     asked only *where* a reader paints, because where two readers mix
+     translucent paint they mix in different light and colour would be
+     noise. So the pages are made opaque first
+     (`chitrakar_doc::fixture::opaque_page`: every colour at full alpha,
+     every layer plain, brushes hard, what only changes what is under it
+     hidden), and then the colour of every pixel the engine paints flat
+     and opaque has to be what the reader paints, within twenty levels
+     (`a_reader_colours_an_opaque_page_as_the_engine_does`, 800 pages in
+     resvg; `ghostscript_colours_an_opaque_page_as_the_engine_does`, 300
+     in ghostscript). Two things it found, both in what a file holds
+     rather than how a reader takes it. **A clone in a frame was pictured
+     lifting the frame's ground**: an upright frame is drawn in place, so
+     its clone lifts the page under it — beyond its box too — but
+     `clone_alone`, which draws the clone aside for its thumbnail and for
+     what SVG and PDF lay for it, took every frame to be isolated like a
+     group, and the exported page had a grey patch where the page had
+     purple (`a_clone_in_a_frame_is_pictured_lifting_what_the_page_lifts`).
+     And **every picture in a PDF was dark along its edges**: a PDF image
+     keeps its alpha apart as a soft mask, a reader that smooths a
+     picture as it scales it smooths the two apart, and the colour under
+     the transparent pixels was black — a layer whose edge fell half a
+     pixel in was a quarter darker along it. The painted colour is
+     carried eight pixels out into what is not painted now (`bleed`),
+     one ring at a time, which costs the edge rather than the page. What
+     the two still allow is two pixels a page: a picture of a few pixels
+     at a fractional place, which each reader resamples its own way, and
+     a mark thinner than a pixel, which ghostscript paints whole.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

@@ -376,6 +376,86 @@ fn works_on_what_is_under(doc: &Document, id: NodeId) -> bool {
         || chitrakar_render::copies_a_clone(doc, id)
 }
 
+/// How many pixels out from what is painted an image's colour is carried
+/// into what is not (`bleed`): further than any reader's filter reaches
+/// over a picture oversampled four times for print.
+const BLEED: usize = 8;
+
+/// An image's pixels with the colour of what is painted carried out into
+/// the pixels that are not, or `None` when every pixel is painted.
+///
+/// A PDF image keeps its colour and its alpha apart — the alpha is a soft
+/// mask, another image — and a reader that smooths a picture as it
+/// scales it smooths the two apart, without weighing one by the other.
+/// So the colour a fully transparent pixel happens to hold is mixed into
+/// its painted neighbours': written as black, as straight pixels with no
+/// alpha are, every edge of every picture came out dark. A layer laid at
+/// a fractional place, its edge half a page pixel in, was a quarter
+/// darker along it in ghostscript, where the engine's page had the
+/// layer's own colour — found by comparing colour on pages nobody wrote
+/// with nothing translucent on them. Carried out from the edge, the
+/// colour under the transparent pixels is the colour beside them, and
+/// mixing it in changes nothing.
+///
+/// Out from what is painted one ring at a time, each pixel taking the
+/// average of its painted neighbours, which costs what the edge is long
+/// rather than what the page is large.
+fn bleed(width: usize, height: usize, rgba8: &[u8]) -> Option<Vec<u8>> {
+    let n = width * height;
+    if rgba8.len() < n * 4 || rgba8.chunks(4).all(|p| p[3] == 255) {
+        return None;
+    }
+    let mut out = rgba8.to_vec();
+    let mut done: Vec<bool> = rgba8.chunks(4).map(|p| p[3] > 0).collect();
+    let around = |i: usize| {
+        let (x, y) = ((i % width) as isize, (i / width) as isize);
+        (-1isize..=1)
+            .flat_map(move |dy| (-1isize..=1).map(move |dx| (x + dx, y + dy)))
+            .filter(move |&(nx, ny)| {
+                (nx, ny) != (x, y)
+                    && nx >= 0
+                    && ny >= 0
+                    && (nx as usize) < width
+                    && (ny as usize) < height
+            })
+            .map(move |(nx, ny)| ny as usize * width + nx as usize)
+    };
+    let mut ring: Vec<usize> = (0..n)
+        .filter(|&i| !done[i] && around(i).any(|k| done[k]))
+        .collect();
+    for _ in 0..BLEED {
+        if ring.is_empty() {
+            break;
+        }
+        let colours: Vec<[u8; 3]> = ring
+            .iter()
+            .map(|&i| {
+                let (mut sum, mut count) = ([0u32; 3], 0u32);
+                for k in around(i).filter(|&k| done[k]) {
+                    for c in 0..3 {
+                        sum[c] += out[k * 4 + c] as u32;
+                    }
+                    count += 1;
+                }
+                sum.map(|v| ((v + count / 2) / count.max(1)) as u8)
+            })
+            .collect();
+        for (&i, c) in ring.iter().zip(&colours) {
+            out[i * 4..i * 4 + 3].copy_from_slice(c);
+            done[i] = true;
+        }
+        let mut next: Vec<usize> = ring
+            .iter()
+            .flat_map(|&i| around(i))
+            .filter(|&k| !done[k])
+            .collect();
+        next.sort_unstable();
+        next.dedup();
+        ring = next;
+    }
+    Some(out)
+}
+
 fn stream_object(dict_head: &str, data: &[u8]) -> Vec<u8> {
     let mut body = format!("{dict_head} /Length {} >>\nstream\n", data.len()).into_bytes();
     body.extend_from_slice(data);
@@ -672,6 +752,8 @@ impl Page {
     /// resource name the content stream draws it by.
     fn image(&mut self, width: u32, height: u32, rgba8: &[u8]) -> Result<String, PdfError> {
         let n = (width * height) as usize;
+        let bled = bleed(width as usize, height as usize, rgba8);
+        let rgba8 = bled.as_deref().unwrap_or(rgba8);
         let (samples, space) = match &self.separate {
             Some(sep) => {
                 let srgb: Vec<f32> = rgba8
@@ -5355,5 +5437,81 @@ mod tests {
             from = end;
         }
         out
+    }
+
+    /// What ghostscript colours a page is what the engine colours it,
+    /// on pages with nothing translucent on them (`opaque_page`), where a
+    /// colour that differs is something drawn wrong rather than mixed in
+    /// another light.
+    ///
+    /// It found the pictures a PDF holds dark along every edge: an
+    /// image's colour and its soft mask are smoothed apart, and the
+    /// transparent pixels' colour was black (`bleed`). Two pixels a page
+    /// are allowed for marks thinner than a pixel, which ghostscript
+    /// paints every pixel of and the engine covers in part.
+    #[test]
+    fn ghostscript_colours_an_opaque_page_as_the_engine_does() {
+        for seed in 0..300u64 {
+            let doc = chitrakar_doc::fixture::opaque_page(seed);
+            let Some(theirs) = ghostscript_rgba(&doc) else {
+                return;
+            };
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
+            let px = |x: i32, y: i32| ours.get(x as u32, y as u32).to_srgb8();
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    // Opaque, and flat round about: an edge is the
+                    // coverage audit's to judge.
+                    let flat = c[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let n = px(x + i, y + j);
+                                (0..4).all(|k| n[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    // Ghostscript draws on white, opaque everywhere.
+                    let t = theirs[(y * w + x) as usize];
+                    if (0..3).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, t));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 2,
+                "page {seed}: {} flat pixels ghostscript colours otherwise, the first at \
+                 ({}, {}) — the engine {:?}, ghostscript {:?}",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
+    }
+
+    /// What is not painted in a picture takes the colour beside it, and
+    /// what is painted keeps its own.
+    #[test]
+    fn a_pictures_colour_is_carried_past_its_edge() {
+        // A 4×1 strip: red, half-covered blue, then two transparent.
+        let px = [255, 0, 0, 255, 0, 0, 255, 128, 0, 0, 0, 0, 0, 0, 0, 0];
+        let out = bleed(4, 1, &px).unwrap();
+        assert_eq!(&out[..8], &px[..8], "painted pixels are left alone");
+        assert_eq!(
+            &out[8..12],
+            &[0, 0, 255, 0],
+            "the next takes the blue beside it"
+        );
+        assert_eq!(&out[12..], &[0, 0, 255, 0], "and the one after, from that");
+        assert!(
+            bleed(1, 1, &[1, 2, 3, 255]).is_none(),
+            "nothing to do when all is painted"
+        );
     }
 }

@@ -2801,6 +2801,75 @@ fn shape_node(name: &str, shape: VectorShape, fill: AuthoredColor) -> Box<Node> 
     Box::new(node)
 }
 
+/// A page nobody wrote with nothing translucent left on it: every
+/// colour at full alpha, every layer plain — no fade, blend, effect or
+/// mask — brushes hard-edged, text upright and unbolded, and what only
+/// changes what is under it (an adjustment, a filter) or is set inside a
+/// closed shape hidden.
+///
+/// Where two readers mix translucent paint they mix it in different
+/// light, and a comparison of colour finds that and nothing else. On
+/// these pages a colour that differs is a layer drawn in the wrong
+/// place, in the wrong order or out of the wrong paint.
+pub fn opaque_page(seed: u64) -> Document {
+    let mut doc = page(seed);
+    let page = doc.clone();
+    fn solid(c: &mut AuthoredColor) {
+        match c {
+            AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => *a = 1.0,
+            AuthoredColor::Named { means, .. } => solid(means),
+        }
+    }
+    for (id, n) in page.nodes() {
+        let id = *id;
+        let hide = matches!(n.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+            || matches!(&n.kind, NodeKind::Text(t) if matches!(
+                t.along,
+                Some(VectorShape::Ellipse { .. })
+                    | Some(VectorShape::Rect { .. })
+                    | Some(VectorShape::Path { closed: true, .. })
+            ));
+        if hide {
+            doc.apply(Command::SetVisible { id, visible: false })
+                .unwrap();
+            continue;
+        }
+        let mut m = n.clone();
+        m.each_color_mut(&mut solid);
+        if let NodeKind::Paint { strokes } | NodeKind::Clone { strokes } = &mut m.kind {
+            for s in strokes {
+                s.softness = 0.0;
+            }
+        }
+        if let NodeKind::Text(t) = &mut m.kind {
+            t.italic = false;
+            t.bold = false;
+            for r in &mut t.runs {
+                r.italic = None;
+                r.bold = None;
+            }
+        }
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(m.kind),
+        })
+        .unwrap();
+        doc.apply(Command::SetOpacity { id, opacity: 1.0 }).unwrap();
+        doc.apply(Command::SetBlendMode {
+            id,
+            blend: BlendMode::Normal,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id,
+            effects: Vec::new(),
+        })
+        .unwrap();
+        doc.apply(Command::SetMask { id, mask: None }).unwrap();
+    }
+    doc
+}
+
 /// One instance of every command, against the nodes of a [`Fixture`].
 /// Each of them changes something: a command that changed nothing would
 /// prove nothing about itself.

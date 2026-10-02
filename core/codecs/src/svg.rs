@@ -4199,4 +4199,62 @@ mod tests {
             "resvg and the page part by {worst:.3} at ({x}, {y})"
         );
     }
+
+    /// What a reader colours a page is what the engine colours it, once
+    /// what is translucent is taken out of the question: where two
+    /// readers mix translucent paint over each other they mix in
+    /// different light, and a coverage audit is all that can be asked of
+    /// that. With every layer opaque, plain and unblended, a colour that
+    /// differs where the engine's picture is flat is a layer drawn in the
+    /// wrong place, in the wrong order or out of the wrong paint.
+    ///
+    /// It found a clone in a frame: the frame is drawn in place, so its
+    /// clone lifts the page under it, and the picture the SVG lays for
+    /// the clone lifted the frame's own ground, in a different colour
+    /// altogether. Two pixels a page are allowed for a picture of a few
+    /// pixels at a fractional place, which each reader resamples its own
+    /// way.
+    #[test]
+    fn a_reader_colours_an_opaque_page_as_the_engine_does() {
+        for seed in 0..800u64 {
+            let doc = chitrakar_doc::fixture::opaque_page(seed);
+            let theirs = resvg_pixels(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
+            let px = |x: i32, y: i32| ours.get(x as u32, y as u32).to_srgb8();
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    // Opaque, and flat round about: an edge is the
+                    // coverage audit's to judge.
+                    let flat = c[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let n = px(x + i, y + j);
+                                (0..4).all(|k| n[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    let k = ((y * w + x) * 4) as usize;
+                    let t = [theirs[k], theirs[k + 1], theirs[k + 2], theirs[k + 3]];
+                    if (0..4).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, t));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 2,
+                "page {seed}: {} flat pixels a reader colours otherwise, the first at \
+                 ({}, {}) — the engine {:?}, the reader {:?}",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
+    }
 }
