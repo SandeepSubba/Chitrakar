@@ -1367,6 +1367,25 @@ impl Page {
             };
             let alpha = if composite { node.opacity } else { 1.0 };
             let mask = mask.map(|g| (g, "Luminosity"));
+            // Held and masked both, the layer wants two soft masks and a
+            // state has one. So its own mask goes on a group of its own,
+            // and that group is what the hold — already set, in the space
+            // the two layers share — and the fade and blend come down on:
+            // the layer masked first and then held, as the engine cuts it.
+            let (name, mask) = match (hold, mask) {
+                (Some(_), Some(own)) => {
+                    let gs = self
+                        .gstate_masked(1.0, 1.0, BlendMode::Normal, Some(own))
+                        .expect("a soft mask is a state");
+                    let obj = self.push(&[]);
+                    let outer = format!("Fm{}", self.forms.len());
+                    self.xobjects.push((outer.clone(), obj));
+                    self.forms
+                        .push((obj, format!("/{gs} gs\n/{name} Do\n"), false));
+                    (outer, None)
+                }
+                (_, mask) => (name, mask),
+            };
             if let Some(gs) = self.gstate_masked(alpha, alpha, node.blend, mask) {
                 let _ = writeln!(self.content, "/{gs} gs");
             }
@@ -1429,19 +1448,15 @@ impl Page {
     }
 
     /// Whether a run of layers side by side can all be drawn live, holds
-    /// and all: every one that shows is live, none works on what is under
-    /// it, and none held to another wears a mask of its own — the hold
-    /// and its own mask would want the one soft mask a state has.
+    /// and all: every one that shows is live, and none works on what is
+    /// under it.
     fn siblings_live(&self, kids: &[NodeId]) -> Result<bool, PdfError> {
-        for (k, &c) in kids.iter().enumerate() {
+        for &c in kids {
             let n = self.doc.node(c)?;
             if !n.visible || n.opacity <= 0.0 {
                 continue;
             }
             if works_on_what_is_under(&self.doc, c) || !self.is_live(c)? {
-                return Ok(false);
-            }
-            if k > 0 && n.clipped && n.mask.is_some() {
                 return Ok(false);
             }
         }
@@ -4504,6 +4519,74 @@ mod tests {
         // and the mask's feather; and across the group and what it holds.
         for (x, y) in (2..62).map(|x| (x, 18)).chain((2..62).map(|x| (x, 26))) {
             let (o, g) = (ours[y * 64 + x], theirs[0][y * 64 + x]);
+            assert!(
+                (o - g).abs() < 0.03,
+                "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"
+            );
+        }
+    }
+
+    /// A held layer wearing a mask of its own goes live too: its mask on a
+    /// group of its own, and the hold on the group around that — two soft
+    /// masks, which one graphics state cannot carry, nested so that the
+    /// layer is masked and then held, as the engine cuts it. It went as
+    /// pixels.
+    #[test]
+    fn a_held_layer_with_a_mask_of_its_own_goes_live() {
+        let mut doc = Document::new(48, 32, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut doc,
+            shape(
+                "disc",
+                VectorShape::Ellipse { rx: 14.0, ry: 12.0 },
+                Some(RED),
+            ),
+            [6.0, 4.0],
+        );
+        let mut bar = shape(
+            "bar",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 12.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        bar.clipped = true;
+        bar.opacity = 0.7;
+        bar.blend = BlendMode::Multiply;
+        // Down its right half, feathered.
+        bar.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 30.0,
+                    height: 32.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(18.0, 0.0),
+            },
+            invert: false,
+            feather: 2.0,
+        });
+        add(&mut doc, bar, [2.0, 10.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert!(
+            !content.contains("/Im"),
+            "nothing went as pixels: {content}"
+        );
+        let file = String::from_utf8_lossy(&pdf);
+        assert!(file.contains("/S /Alpha") && file.contains("/S /Luminosity"));
+
+        let ours = engine_alpha(&doc);
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        // Along the bar, across the disc's edge it is held by and the feather
+        // of its own mask; and down through it, inside the disc.
+        for (x, y) in (2..46).map(|x| (x, 15)).chain((8..26).map(|y| (22, y))) {
+            let (o, g) = (ours[y * 48 + x], theirs[0][y * 48 + x]);
             assert!(
                 (o - g).abs() < 0.03,
                 "({x}, {y}): ghostscript covers {g:.3} where the page covers {o:.3}"

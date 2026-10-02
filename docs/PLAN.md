@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~558),
+- **Verify before committing:** `cargo test --workspace` (~559),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4598,11 +4598,16 @@ without reading anything else.*
      is (faded, masked, a group) is what holds (`draw_siblings`,
      `a_held_layer_goes_live_under_the_alpha_of_the_one_under_it`, read
      against ghostscript to three hundredths). A layer held to one that
-     draws nothing draws nothing, as on the page; a held layer that also
-     wears a mask of its own still goes as pixels, the two wanting the
-     one soft mask a state has. Taken out one at a time, the hold, the
-     space it is set in, the isolation and the hidden base each fail a
-     test.
+     draws nothing draws nothing, as on the page. Taken out one at a
+     time, the hold, the space it is set in, the isolation and the
+     hidden base each fail a test. A held layer wearing a mask of its own
+     wants two soft masks, which one graphics state cannot carry; they
+     are nested — its own mask on a group of its own, the hold, fade and
+     blend on the group around that — so it is masked and then held, as
+     the engine cuts it, and stays live too
+     (`a_held_layer_with_a_mask_of_its_own_goes_live`; un-nested, the own
+     mask replaces the hold and the layer shows past the edge it is held
+     to, 0.70 where the page has nothing).
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
