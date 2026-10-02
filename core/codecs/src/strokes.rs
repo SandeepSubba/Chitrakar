@@ -124,6 +124,104 @@ fn disc(c: [f32; 2], r: f32) -> Outline {
     }
 }
 
+/// The region a shape's stroke covers, as outlines — for a stroke whose
+/// width varies along it, which neither SVG nor PDF has a stroke for.
+/// The engine states that region as convex pieces whose union it is
+/// (`stroke_pieces`): a band between two points whose sides run straight
+/// from one half-width to the other — exactly the quadrilateral through
+/// its four rim points — a disc at a round end or join, and a polygon at
+/// a square end or a carried corner. Each is one outline here, all wound
+/// the way a disc is, so that filled together under the nonzero rule they
+/// are that union and nothing else.
+pub(crate) fn piece_outlines(pieces: &[chitrakar_render::StrokePiece]) -> Vec<Outline> {
+    use chitrakar_render::StrokePiece;
+    let mut out = Vec::new();
+    // Polygons are wound to agree with the discs: a disc's sign, read once.
+    let sign = signed_area(&disc([0.0, 0.0], 1.0)).signum();
+    let polygon = |mut pts: Vec<[f32; 2]>| -> Option<Outline> {
+        let area: f32 = (0..pts.len())
+            .map(|i| {
+                let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+                p[0] * q[1] - p[1] * q[0]
+            })
+            .sum();
+        if area.abs() < 1e-9 {
+            return None;
+        }
+        if area.signum() != sign {
+            pts.reverse();
+        }
+        Some(Outline {
+            start: pts[0],
+            pieces: pts[1..].iter().map(|p| Piece::Line(*p)).collect(),
+        })
+    };
+    for piece in pieces {
+        match *piece {
+            StrokePiece::Band { a, b, ha, hb } => {
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len <= 1e-6 || (ha <= 0.0 && hb <= 0.0) {
+                    continue;
+                }
+                let n = [-dy / len, dx / len];
+                let (ha, hb) = (ha.max(0.0), hb.max(0.0));
+                out.extend(polygon(vec![
+                    [a[0] + n[0] * ha, a[1] + n[1] * ha],
+                    [b[0] + n[0] * hb, b[1] + n[1] * hb],
+                    [b[0] - n[0] * hb, b[1] - n[1] * hb],
+                    [a[0] - n[0] * ha, a[1] - n[1] * ha],
+                ]));
+            }
+            StrokePiece::Disc { at, r } => {
+                if r > 0.0 {
+                    out.push(disc(at, r));
+                }
+            }
+            StrokePiece::Corner(pts, n) => out.extend(polygon(pts[..n].to_vec())),
+        }
+    }
+    out
+}
+
+/// What a path's stroke covers when its width varies along it, which is
+/// the one stroke an SVG or PDF stroke cannot say: `None` for any other.
+/// A rect's or an ellipse's stroke takes no widths (the engine has no
+/// anchors on them to vary at), and a path's is stroked down its middle,
+/// so a varying one is exactly its pieces.
+pub(crate) fn tapered_outlines(
+    shape: &chitrakar_doc::VectorShape,
+    stroke: &chitrakar_doc::Stroke,
+) -> Option<Vec<Outline>> {
+    if !matches!(shape, chitrakar_doc::VectorShape::Path { .. })
+        || stroke.widths.is_empty()
+        || stroke.width <= 0.0
+    {
+        return None;
+    }
+    Some(piece_outlines(&chitrakar_render::stroke_pieces(
+        shape, stroke,
+    )))
+}
+
+/// An outline's signed area, its curves taken by their control polygon —
+/// enough to tell which way it winds.
+fn signed_area(o: &Outline) -> f32 {
+    let mut pts = vec![o.start];
+    for p in &o.pieces {
+        match *p {
+            Piece::Line(e) => pts.push(e),
+            Piece::Cubic(c1, c2, e) => pts.extend([c1, c2, e]),
+        }
+    }
+    (0..pts.len())
+        .map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+            p[0] * q[1] - p[1] * q[0]
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +334,57 @@ mod tests {
             assert!(!sayable(&[plain.clone(), other]));
         }
         assert!(!sayable(&[]));
+    }
+
+    /// A tapered path's square ends and carried corners are polygons the
+    /// engine winds either way; as outlines they wind the way the bands
+    /// and discs do, or nonzero would cut them out where they overlap.
+    #[test]
+    fn every_piece_of_a_tapered_stroke_winds_alike() {
+        for (cap, join) in [
+            (
+                chitrakar_doc::StrokeCap::Square,
+                chitrakar_doc::StrokeJoin::Miter,
+            ),
+            (
+                chitrakar_doc::StrokeCap::Butt,
+                chitrakar_doc::StrokeJoin::Bevel,
+            ),
+            (
+                chitrakar_doc::StrokeCap::Round,
+                chitrakar_doc::StrokeJoin::Round,
+            ),
+        ] {
+            let shape = chitrakar_doc::VectorShape::Path {
+                points: vec![[0.0, 0.0], [20.0, 2.0], [8.0, 14.0], [26.0, 20.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            };
+            let stroke = chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: vec![1.0, 0.5, 0.9, 0.3],
+                dash: Vec::new(),
+                cap,
+                join,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            };
+            let all = tapered_outlines(&shape, &stroke).unwrap();
+            assert!(all.len() > 3, "{cap:?} {join:?}");
+            let signs: Vec<bool> = all.iter().map(|o| area(o) > 0.0).collect();
+            assert!(
+                signs.iter().all(|s| *s == signs[0]),
+                "{cap:?} {join:?}: {signs:?}"
+            );
+        }
     }
 }

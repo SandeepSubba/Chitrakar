@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~564),
+- **Verify before committing:** `cargo test --workspace` (~567),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4662,6 +4662,35 @@ without reading anything else.*
      profile like every other colour and the shading is four inks in the
      profile's space (`a_gradient_in_ink_is_a_shading_in_the_press_profile`,
      which self-skips without `CHITRAKAR_TEST_CMYK_ICC`).
+     **And strokes, as the engine draws them.** A stroke whose width
+     varies along it — a pressure stroke, a taper — went into the PDF as
+     pixels and into the SVG *as wide as its nominal width all the way
+     along*: the SVG writer never read `widths`. Both now write the region
+     it covers, filled. The engine already states that region as convex
+     pieces whose union it is (`stroke_pieces`: a band between two points
+     whose sides run straight from one half-width to the other, a disc at
+     a round end or join, a polygon at a square end or a carried corner),
+     and each is one outline, all wound alike (`piece_outlines`,
+     `tapered_outlines`) — a mitred corner wound the other way would have
+     been cut out of the stroke where it overlaps, which only a test with
+     square ends and mitred corners sees
+     (`every_piece_of_a_tapered_stroke_winds_alike`). Only a path tapers: a
+     rect's and an ellipse's stroke take no widths. Two more SVG defects
+     came with it, both colour rather than coverage and so invisible to the
+     half-pixel audit: **a translucent stroke went into every SVG solid**
+     (its alpha was dropped from its colour, like a fill's, and written
+     nowhere else — there was no `stroke-opacity` in the writer at all),
+     and **a faded shape was faded once**, `opacity` over fill and stroke
+     together, where the engine fades each paint, so where the stroke lay
+     over the fill the SVG was lighter. The fade goes on each paint now
+     (`fill-opacity`, `stroke-opacity`); mask and blend stay on the layer.
+     Resvg drawn four times larger and the engine agree to five
+     thousandths on a faded, translucent, tapered stroke over its fill
+     (`a_tapered_translucent_stroke_leaves_as_the_engine_draws_it`), and
+     ghostscript to three hundredths
+     (`a_tapered_stroke_goes_live_as_the_outline_it_covers`). The PDF
+     tests' stand-in for "needs pixels" is a soft brush dab now, the
+     last ordinary thing a PDF cannot say.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

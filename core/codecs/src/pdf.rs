@@ -17,13 +17,13 @@
 //! graphics states, text as text — each face embedded once as a CID font
 //! addressed by glyph id, every glyph placed where the shaper put it (so
 //! kerning and ligatures survive) with a ToUnicode map so the words can
-//! be found and copied. Gradients are shadings of the engine's own ramp;
+//! be found and copied. Gradients are shadings of the engine's own ramp,
+//! and a stroke whose width varies is the outline of what it covers;
 //! a fade, a blend or a mask on a whole layer is a transparency group and
 //! a soft mask; a layer held to the one under it is held by that layer's
 //! alpha; effects are a picture beside a layer that stays live. What PDF
-//! cannot say — a stroke whose width varies, a soft brush or an eraser,
-//! a clone — is rendered by the engine alone on the page and placed as an
-//! image, trimmed to its ink;
+//! cannot say — a soft brush or an eraser, a clone — is rendered by the
+//! engine alone on the page and placed as an image, trimmed to its ink;
 //! an adjustment or filter layer, which changes everything under it,
 //! flattens everything under it into one. [`export_pdf`] is the whole
 //! composite as one image, which is what the vector writer falls back to.
@@ -508,14 +508,9 @@ impl Page {
             NodeKind::Group | NodeKind::Artboard { .. } => {
                 self.siblings_live(self.doc.children_of(id)?)?
             }
-            NodeKind::Vector {
-                gradient, stroke, ..
-            } => {
-                // A gradient is a shading (`gradient_fill`), so only a
-                // stroke whose width varies along it still needs pixels.
-                let _ = gradient;
-                stroke.as_ref().is_none_or(|s| s.widths.is_empty())
-            }
+            // A gradient is a shading (`gradient_fill`) and a stroke whose
+            // width varies is the outline it covers (`strokes`).
+            NodeKind::Vector { .. } => true,
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
             // A copy is drawn by drawing the original again, so it is as
             // live as the original is — or, where it stands in for some
@@ -1095,28 +1090,7 @@ impl Page {
                     if let Some(gs) = self.gstate(opacity * stroke.color.alpha(), 1.0, blend) {
                         let _ = writeln!(self.content, "/{gs} gs");
                     }
-                    let mut path = String::new();
-                    for o in outlines {
-                        let _ = writeln!(path, "{} {} m", num(o.start[0]), num(o.start[1]));
-                        for p in &o.pieces {
-                            let _ = match p {
-                                crate::strokes::Piece::Line(e) => {
-                                    writeln!(path, "{} {} l", num(e[0]), num(e[1]))
-                                }
-                                crate::strokes::Piece::Cubic(c1, c2, e) => writeln!(
-                                    path,
-                                    "{} {} {} {} {} {} c",
-                                    num(c1[0]),
-                                    num(c1[1]),
-                                    num(c2[0]),
-                                    num(c2[1]),
-                                    num(e[0]),
-                                    num(e[1])
-                                ),
-                            };
-                        }
-                        path.push_str("h\n");
-                    }
+                    let path = outline_ops(&outlines);
                     // Nonzero: the outlines of one stroke overlap where its
                     // segments meet, and a stroke lays its paint once.
                     let _ = write!(
@@ -1234,6 +1208,28 @@ impl Page {
                     };
                     let _ = writeln!(self.content, "{path}{rule}");
                 }
+                // A stroke whose width varies along it is the region it
+                // covers, filled in its colour under a state of its own —
+                // its alpha is the stroke's, where the state above holds
+                // the fill's — and with whatever it carries at its ends,
+                // which are among its pieces.
+                let tapered = stroke
+                    .as_ref()
+                    .and_then(|s| crate::strokes::tapered_outlines(shape, s));
+                if let (Some(outlines), Some(s)) = (&tapered, stroke) {
+                    self.content.push_str("q\n");
+                    let a = opacity * s.color.alpha();
+                    if let Some(gs) = self.gstate(a, a, blend) {
+                        let _ = writeln!(self.content, "/{gs} gs");
+                    }
+                    let _ = write!(
+                        self.content,
+                        "{}\n{}f\nQ\n",
+                        self.color_op(&s.color, false)?,
+                        outline_ops(outlines)
+                    );
+                }
+                let stroke = if tapered.is_some() { &None } else { stroke };
                 if let Some(stroke) = stroke {
                     if stroke.width > 0.0 {
                         let _ = writeln!(self.content, "{}", self.color_op(&stroke.color, true)?);
@@ -2128,6 +2124,32 @@ fn num(v: f32) -> String {
 
 /// The path-construction operators for a shape, ending in a newline, in
 /// the shape's own coordinates.
+/// Outlines as path operators, each closed: filled under the nonzero
+/// rule, they are the region they were made to cover (`strokes`).
+fn outline_ops(outlines: &[crate::strokes::Outline]) -> String {
+    let mut path = String::new();
+    for o in outlines {
+        let _ = writeln!(path, "{} {} m", num(o.start[0]), num(o.start[1]));
+        for p in &o.pieces {
+            let _ = match p {
+                crate::strokes::Piece::Line(e) => writeln!(path, "{} {} l", num(e[0]), num(e[1])),
+                crate::strokes::Piece::Cubic(c1, c2, e) => writeln!(
+                    path,
+                    "{} {} {} {} {} {} c",
+                    num(c1[0]),
+                    num(c1[1]),
+                    num(c2[0]),
+                    num(c2[1]),
+                    num(e[0]),
+                    num(e[1])
+                ),
+            };
+        }
+        path.push_str("h\n");
+    }
+    path
+}
+
 fn path_ops(shape: &VectorShape) -> String {
     let mut d = String::new();
     let p = |d: &mut String, op: &str, pts: &[[f32; 2]]| {
@@ -2464,37 +2486,26 @@ mod tests {
         node
     }
 
-    /// A 10px rect with a tapered stroke: a layer PDF has to take as pixels.
+    /// A soft dab inking a 10px box: a layer PDF has to take as pixels,
+    /// since a stroke that fades over its radius has no form there — what
+    /// still does, now gradients and tapered strokes go live. Radius 4.5,
+    /// so that its edge, which reaches half a device pixel past it, stays
+    /// inside the box.
     fn shaded(name: &str) -> chitrakar_doc::Node {
-        let mut node = shape(
-            name,
-            VectorShape::Rect {
-                width: 10.0,
-                height: 10.0,
-                radius: 0.0,
-            },
-            Some(RED),
-        );
-        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
-            *stroke = Some(tapered());
-        }
+        let mut node = chitrakar_doc::Node::paint(name);
+        node.kind = NodeKind::Paint {
+            strokes: vec![chitrakar_doc::PaintStroke {
+                points: vec![[5.0, 5.0]],
+                radii: vec![4.5],
+                color: RED,
+                softness: 0.5,
+                erase: false,
+                source: [0.0, 0.0],
+                heal: false,
+                clip: None,
+            }],
+        };
         node
-    }
-
-    /// A stroke whose width varies along it, which PDF has no stroke for:
-    /// what still sends a shape to pixels, now a gradient does not.
-    fn tapered() -> chitrakar_doc::Stroke {
-        chitrakar_doc::Stroke {
-            color: BLUE,
-            width: 3.0,
-            widths: vec![1.0, 0.3, 1.0, 0.3],
-            dash: Vec::new(),
-            cap: Default::default(),
-            join: Default::default(),
-            start_marker: Default::default(),
-            end_marker: Default::default(),
-            align: None,
-        }
     }
 
     fn add(doc: &mut Document, node: chitrakar_doc::Node, at: [f32; 2]) -> NodeId {
@@ -2940,26 +2951,10 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&export_pdf_document(&doc).unwrap())
             .contains("/ca 0.5 /CA 0.5 /BM /Normal"));
-        // A stroke whose width varies: pixels.
-        let mut shaded = shape(
-            "shaded",
-            VectorShape::Rect {
-                width: 10.0,
-                height: 10.0,
-                radius: 0.0,
-            },
-            Some(RED),
-        );
-        if let NodeKind::Vector { stroke, .. } = &mut shaded.kind {
-            *stroke = Some(tapered());
-        }
-        add(&mut doc, shaded, [100.0, 0.0]);
+        // A soft brush stroke: pixels.
+        add(&mut doc, shaded("shaded"), [100.0, 0.0]);
         let content = content_of(&export_pdf_document(&doc).unwrap());
-        assert!(
-            !content.contains("0 0 10 10 re"),
-            "the tapered rect is not drawn as a path"
-        );
-        // At 72 dpi it is rendered four times over for print: a 10px rect
+        // At 72 dpi it is rendered four times over for print: a 10px box
         // is a 40-sample image placed 10 wide.
         let pdf_text = String::from_utf8_lossy(&export_pdf_document(&doc).unwrap()).to_string();
         assert!(
@@ -2973,14 +2968,14 @@ mod tests {
         assert_eq!(
             content.matches(" Do").count(),
             2,
-            "the image, then the gradient rect as a picture: {content}"
+            "the image, then the soft dab as a picture: {content}"
         );
     }
 
     #[test]
     fn pixels_keep_their_blend_and_a_run_of_them_is_one_picture() {
         let mut doc = everything();
-        // Three tapered rects in a row: one picture rather than three
+        // Three soft dabs in a row: one picture rather than three
         // renders of the page.
         for (i, at) in [[100.0, 0.0], [100.0, 20.0], [100.0, 40.0]]
             .iter()
@@ -2993,9 +2988,9 @@ mod tests {
         assert_eq!(
             content.matches(" Do").count(),
             2,
-            "the placed image, then one picture of three rects: {content}"
+            "the placed image, then one picture of three dabs: {content}"
         );
-        // A multiplied tapered rect reads what is under it, so it is its own
+        // A multiplied soft dab reads what is under it, so it is its own
         // picture and lands with the blend.
         let root = doc.root();
         let last = *doc.children_of(root).unwrap().last().unwrap();
@@ -5260,6 +5255,71 @@ mod tests {
         assert!(
             ours[0] > 100 && (ours[0] as i32 - theirs[0] as i32).abs() <= 4,
             "the page is {ours:?} and the file {theirs:?}"
+        );
+    }
+
+    /// A stroke whose width varies along it goes live as the region it
+    /// covers, filled in its colour under its own alpha — PDF has no such
+    /// stroke, and it went as pixels — over its fill, on a faded layer,
+    /// each paint faded as the engine fades it. Ghostscript covers what
+    /// the page covers.
+    #[test]
+    fn a_tapered_stroke_goes_live_as_the_outline_it_covers() {
+        let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
+        let mut leaf = shape(
+            "leaf",
+            VectorShape::Path {
+                points: vec![[4.0, 18.0], [20.0, 4.0], [42.0, 14.0], [30.0, 32.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            Some(BLUE),
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut leaf.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.2,
+                    b: 0.1,
+                    a: 0.7,
+                },
+                width: 6.0,
+                widths: vec![1.0, 0.2, 0.8, 0.4],
+                dash: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Round,
+                join: chitrakar_doc::StrokeJoin::Round,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        leaf.opacity = 0.6;
+        add(&mut doc, leaf, [0.0, 0.0]);
+        let content = content_of(&export_pdf_document(&doc).unwrap());
+        assert!(
+            !content.contains("/Im") && !content.contains(" S\n"),
+            "{content}"
+        );
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let ours = engine_alpha(&doc);
+        let mut worst = (0.0f32, 0, 0);
+        for (i, (o, g)) in ours.iter().zip(&theirs[0]).enumerate() {
+            let d = (o - g).abs();
+            if d > worst.0 {
+                worst = (d, i % 48, i / 48);
+            }
+        }
+        assert!(
+            worst.0 < 0.03,
+            "ghostscript and the page part by {:.3} at ({}, {})",
+            worst.0,
+            worst.1,
+            worst.2
         );
     }
 

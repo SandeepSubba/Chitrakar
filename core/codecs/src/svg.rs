@@ -389,7 +389,7 @@ fn write_node(
                 );
                 let _ = writeln!(out, r#"{pad}<g{common} clip-path="url(#{name})">"#);
                 if let Some(color) = background {
-                    let ground = paint_attrs(doc, Some(color), None, None, child, defs, false);
+                    let ground = paint_attrs(doc, Some(color), None, None, child, defs, false, 1.0);
                     // Over the box the frame is cut to, which is what the
                     // engine fills: the ground's own box, where that was
                     // rounded outward, left a half-covered row at the edge.
@@ -414,6 +414,22 @@ fn write_node(
                 stroke,
                 gradient,
             } => {
+                // The fade goes on each paint (`paint_attrs`), not on the
+                // element or its group.
+                let common = {
+                    let mut plain = node.clone();
+                    plain.opacity = 1.0;
+                    if effects.is_some() {
+                        plain.blend = BlendMode::Normal;
+                    }
+                    common_attrs(&plain)
+                };
+                let fade = node.opacity;
+                // A stroke whose width varies along it has no SVG stroke:
+                // it goes as the region it covers, filled (`strokes`).
+                let tapered = stroke
+                    .as_ref()
+                    .and_then(|s| crate::strokes::tapered_outlines(shape, s));
                 // A rect's or an ellipse's stroke is a band lying inside
                 // its edge, where SVG's own stroke straddles it — an
                 // eight-wide border would come out four in and four out,
@@ -440,7 +456,7 @@ fn write_node(
                 let paint = paint_attrs(
                     doc,
                     fill.as_ref(),
-                    if inner.is_some() {
+                    if inner.is_some() || tapered.is_some() {
                         None
                     } else {
                         stroke.as_ref()
@@ -449,6 +465,7 @@ fn write_node(
                     child,
                     defs,
                     inner.is_none(),
+                    fade,
                 );
                 match shape {
                     VectorShape::Rect {
@@ -479,8 +496,16 @@ fn write_node(
                             }
                             Some(band) => {
                                 let (iw, ih) = (width - offset * 2.0, height - offset * 2.0);
-                                let line =
-                                    paint_attrs(doc, None, Some(band), None, child, defs, false);
+                                let line = paint_attrs(
+                                    doc,
+                                    None,
+                                    Some(band),
+                                    None,
+                                    child,
+                                    defs,
+                                    false,
+                                    fade,
+                                );
                                 let _ = writeln!(out, "{pad}<g{common}>");
                                 let _ = writeln!(
                                     out,
@@ -507,7 +532,8 @@ fn write_node(
                         }
                         Some(band) => {
                             let (ix, iy) = (rx - offset, ry - offset);
-                            let line = paint_attrs(doc, None, Some(band), None, child, defs, false);
+                            let line =
+                                paint_attrs(doc, None, Some(band), None, child, defs, false, fade);
                             let _ = writeln!(out, "{pad}<g{common}>");
                             let _ = writeln!(
                                 out,
@@ -610,10 +636,32 @@ fn write_node(
                         } else {
                             ""
                         };
-                        let _ = writeln!(
-                            out,
-                            r#"{pad}<path d="{d}"{common}{paint}{rule}{smooth_note}/>"#
-                        );
+                        match (&tapered, stroke) {
+                            (Some(outlines), Some(s)) => {
+                                let _ = writeln!(out, "{pad}<g{common}>");
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <path d="{d}"{paint}{rule}{smooth_note}/>"#
+                                );
+                                let mut fill = format!(r#" fill="{}""#, color_hex(doc, &s.color));
+                                let a = fade * s.color.alpha();
+                                if a < 1.0 {
+                                    let _ = write!(fill, r#" fill-opacity="{a}""#);
+                                }
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <path d="{}"{fill}/>"#,
+                                    outlines_d(outlines)
+                                );
+                                let _ = writeln!(out, "{pad}</g>");
+                            }
+                            _ => {
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}<path d="{d}"{common}{paint}{rule}{smooth_note}/>"#
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -642,23 +690,7 @@ fn write_node(
             NodeKind::Paint { strokes } if crate::strokes::sayable(strokes) => {
                 let _ = writeln!(out, "{pad}<g{common}>");
                 for stroke in strokes {
-                    let mut d = String::new();
-                    for o in crate::strokes::outlines(stroke) {
-                        let _ = write!(d, "M{:.3},{:.3}", o.start[0], o.start[1]);
-                        for p in &o.pieces {
-                            let _ = match p {
-                                crate::strokes::Piece::Line(e) => {
-                                    write!(d, " L{:.3},{:.3}", e[0], e[1])
-                                }
-                                crate::strokes::Piece::Cubic(c1, c2, e) => write!(
-                                    d,
-                                    " C{:.3},{:.3} {:.3},{:.3} {:.3},{:.3}",
-                                    c1[0], c1[1], c2[0], c2[1], e[0], e[1]
-                                ),
-                            };
-                        }
-                        d.push_str(" Z ");
-                    }
+                    let d = outlines_d(&crate::strokes::outlines(stroke));
                     if d.is_empty() {
                         continue;
                     }
@@ -1145,6 +1177,27 @@ fn css_blend(mode: BlendMode) -> &'static str {
     }
 }
 
+/// Outlines as one path's data, each closed: filled under the nonzero
+/// rule, they are the region they were made to cover (`strokes`).
+fn outlines_d(outlines: &[crate::strokes::Outline]) -> String {
+    let mut d = String::new();
+    for o in outlines {
+        let _ = write!(d, "M{:.3},{:.3}", o.start[0], o.start[1]);
+        for p in &o.pieces {
+            let _ = match p {
+                crate::strokes::Piece::Line(e) => write!(d, " L{:.3},{:.3}", e[0], e[1]),
+                crate::strokes::Piece::Cubic(c1, c2, e) => write!(
+                    d,
+                    " C{:.3},{:.3} {:.3},{:.3} {:.3},{:.3}",
+                    c1[0], c1[1], c2[0], c2[1], e[0], e[1]
+                ),
+            };
+        }
+        d.push_str(" Z ");
+    }
+    d.trim_end().to_string()
+}
+
 fn common_attrs(node: &chitrakar_doc::Node) -> String {
     let mut s = String::new();
     let t = node.transform;
@@ -1181,8 +1234,18 @@ fn paint_attrs(
     // something about: true for a path's line, false for the band lying
     // inside a rect's or an ellipse's closed outline.
     ends: bool,
+    // The layer's own opacity, taken by each paint as it goes down — the
+    // engine fades a shape's fill and its stroke each as it paints, so
+    // where the stroke lies over the fill the fade is taken twice. SVG's
+    // `opacity` on the element took it once over the two together.
+    fade: f32,
 ) -> String {
     let mut s = String::new();
+    let alpha = |s: &mut String, which: &str, a: f32| {
+        if a < 1.0 {
+            let _ = write!(s, r#" {which}-opacity="{a}""#);
+        }
+    };
     // A gradient paints in place of the flat fill, and exports live: our
     // stops are already in objectBoundingBox units, which is SVG's default.
     if let Some(g) = gradient {
@@ -1190,6 +1253,7 @@ fn paint_attrs(
             let name = format!("chitrakar-grad-{}", id.0);
             write_gradient_def(doc, g, &name, defs);
             let _ = write!(s, r##" fill="url(#{name})""##);
+            alpha(&mut s, "fill", fade);
             if let Some(stroke) = stroke {
                 let _ = write!(
                     s,
@@ -1198,6 +1262,7 @@ fn paint_attrs(
                     stroke.width,
                     stroke_attrs(doc, stroke, ends, id, defs)
                 );
+                alpha(&mut s, "stroke", fade * stroke.color.alpha());
             }
             return s;
         }
@@ -1205,10 +1270,7 @@ fn paint_attrs(
     match fill {
         Some(c) => {
             let _ = write!(s, r#" fill="{}""#, color_hex(doc, c));
-            let a = c.alpha();
-            if a < 1.0 {
-                let _ = write!(s, r#" fill-opacity="{a}""#);
-            }
+            alpha(&mut s, "fill", fade * c.alpha());
         }
         None => s.push_str(r#" fill="none""#),
     }
@@ -1220,6 +1282,10 @@ fn paint_attrs(
             stroke.width,
             stroke_attrs(doc, stroke, ends, id, defs)
         );
+        // A stroke's own alpha: dropped from its colour like a fill's and
+        // never written anywhere else, so a translucent stroke went into
+        // every SVG solid.
+        alpha(&mut s, "stroke", fade * stroke.color.alpha());
     }
     s
 }
@@ -4009,6 +4075,128 @@ mod tests {
             "and on the ink: {:.1} against {:.1}",
             ink.0,
             ink.1
+        );
+    }
+
+    /// A path stroked with a width that varies along it, translucent, over
+    /// its fill, on a layer faded to six tenths: what a reader draws of it.
+    fn tapered_page() -> Document {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "leaf",
+            VectorShape::Path {
+                points: vec![[4.0, 18.0], [20.0, 4.0], [42.0, 14.0], [30.0, 32.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.3,
+                b: 0.9,
+                a: 1.0,
+            });
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.2,
+                    b: 0.1,
+                    a: 0.7,
+                },
+                width: 6.0,
+                widths: vec![1.0, 0.2, 0.8, 0.4],
+                dash: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Round,
+                join: chitrakar_doc::StrokeJoin::Round,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        node.opacity = 0.6;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        doc
+    }
+
+    /// The largest difference, pixel by pixel, between what resvg and the
+    /// engine cover, each drawn four times larger and averaged back down.
+    fn worst_cover_at_four(doc: &Document) -> (f32, usize, usize) {
+        let (w, h, k) = (doc.meta.width, doc.meta.height, 4u32);
+        let svg = export_svg(doc).unwrap();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(w * k, h * k).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::from_scale(k as f32, k as f32),
+            &mut drawn.as_mut(),
+        );
+        let mut ours = chitrakar_render::Surface::new(w * k, h * k);
+        let clip = ours.full_clip();
+        chitrakar_render::render_region_at(
+            doc,
+            &mut ours,
+            clip,
+            chitrakar_doc::Transform {
+                a: k as f32,
+                d: k as f32,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut worst = (0.0f32, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                let (mut a, mut b) = (0.0f32, 0.0f32);
+                for j in 0..k {
+                    for i in 0..k {
+                        let (px, py) = (x * k + i, y * k + j);
+                        a += ours.get(px, py).a;
+                        b += drawn.data()[((py * w * k + px) * 4 + 3) as usize] as f32 / 255.0;
+                    }
+                }
+                let d = ((a - b) / (k * k) as f32).abs();
+                if d > worst.0 {
+                    worst = (d, x as usize, y as usize);
+                }
+            }
+        }
+        worst
+    }
+
+    /// A stroke whose width varies along it leaves as the region it
+    /// covers, filled — SVG has no such stroke, and the one written was
+    /// as wide as its widest point all the way along. A translucent stroke
+    /// keeps its alpha (dropped from its colour like a fill's and written
+    /// nowhere, it went into every SVG solid), and the layer's fade is
+    /// taken by each paint as the engine takes it, rather than once over
+    /// fill and stroke together by `opacity`. Drawn four times larger,
+    /// resvg covers what the engine covers to two hundredths.
+    #[test]
+    fn a_tapered_translucent_stroke_leaves_as_the_engine_draws_it() {
+        let doc = tapered_page();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            !svg.contains("<image") && !svg.contains(" opacity="),
+            "{svg}"
+        );
+        // The stroke's own alpha times the layer's fade, on the outline.
+        assert!(
+            svg.contains(r##"fill="#e6331a" fill-opacity="0.4"##),
+            "{svg}"
+        );
+        let (worst, x, y) = worst_cover_at_four(&doc);
+        assert!(
+            worst < 0.02,
+            "resvg and the page part by {worst:.3} at ({x}, {y})"
         );
     }
 }
