@@ -17,9 +17,13 @@
 //! graphics states, text as text — each face embedded once as a CID font
 //! addressed by glyph id, every glyph placed where the shaper put it (so
 //! kerning and ligatures survive) with a ToUnicode map so the words can
-//! be found and copied. What PDF cannot say — gradients, effects, masks,
-//! varying strokes, a group that needs isolating — is rendered by the
-//! engine alone on the page and placed as an image, trimmed to its ink;
+//! be found and copied. Gradients are shadings of the engine's own ramp;
+//! a fade, a blend or a mask on a whole layer is a transparency group and
+//! a soft mask; a layer held to the one under it is held by that layer's
+//! alpha; effects are a picture beside a layer that stays live. What PDF
+//! cannot say — a stroke whose width varies, a soft brush or an eraser,
+//! a clone — is rendered by the engine alone on the page and placed as an
+//! image, trimmed to its ink;
 //! an adjustment or filter layer, which changes everything under it,
 //! flattens everything under it into one. [`export_pdf`] is the whole
 //! composite as one image, which is what the vector writer falls back to.
@@ -206,6 +210,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         xobjects: Vec::new(),
         forms: Vec::new(),
         plain: None,
+        shadings: Vec::new(),
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -268,6 +273,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         xobjects: Vec::new(),
         forms: Vec::new(),
         plain: None,
+        shadings: Vec::new(),
         gstates: Vec::new(),
         content: String::new(),
         icc_objects: None,
@@ -338,6 +344,8 @@ struct Page {
     /// the engine takes it, before its own effects, which go down beside
     /// it on the page but are no part of what holds.
     plain: Option<NodeId>,
+    /// Gradients, as shadings the content paints with `sh`.
+    shadings: Vec<(String, usize)>,
     gstates: Vec<(String, usize)>,
     content: String,
     /// (profile stream, colour space array) object numbers, in ink.
@@ -502,7 +510,12 @@ impl Page {
             }
             NodeKind::Vector {
                 gradient, stroke, ..
-            } => gradient.is_none() && stroke.as_ref().is_none_or(|s| s.widths.is_empty()),
+            } => {
+                // A gradient is a shading (`gradient_fill`), so only a
+                // stroke whose width varies along it still needs pixels.
+                let _ = gradient;
+                stroke.as_ref().is_none_or(|s| s.widths.is_empty())
+            }
             NodeKind::Raster(_) | NodeKind::Text(_) => true,
             // A copy is drawn by drawing the original again, so it is as
             // live as the original is — or, where it stands in for some
@@ -1043,8 +1056,18 @@ impl Page {
             NodeKind::Paint { strokes } => strokes.len() > 1,
             _ => composite,
         };
+        // And a shape that paints twice — a fill and a stroke over it —
+        // with a blend, which the engine takes once over the two
+        // (`a_shapes_mask_and_blend_are_taken_once`). Each paint blended
+        // here was the stroke blended with the fill where they overlap.
+        let paints_twice = matches!(
+            &node.kind,
+            NodeKind::Vector { fill, gradient, stroke: Some(_), .. }
+                if fill.is_some() || gradient.is_some()
+        );
         let isolate = node.mask.is_some()
             || hold.is_some()
+            || (paints_twice && node.blend != BlendMode::Normal)
             || (many && (node.opacity < 1.0 || node.blend != BlendMode::Normal));
         let outer = isolate.then(|| std::mem::take(&mut self.content));
         // Inside the group, what it draws goes down plainly and the blend
@@ -1184,8 +1207,14 @@ impl Page {
                 shape,
                 fill,
                 stroke,
-                ..
+                gradient,
             } => {
+                // A gradient paints in place of the flat fill, as on the
+                // page: a shading, clipped to the shape.
+                if let Some(g) = gradient {
+                    self.gradient_fill(g, shape, opacity, blend)?;
+                }
+                let fill = if gradient.is_some() { &None } else { fill };
                 let alpha = |c: Option<&AuthoredColor>| c.map_or(1.0, |c| c.alpha());
                 let gs = self.gstate(
                     opacity * alpha(fill.as_ref()),
@@ -1411,6 +1440,150 @@ impl Page {
         self.content.push_str("Q\n");
         // And the ones it draws over the layer, an inner shadow's shading.
         self.effect_image(id, true, node.blend)?;
+        Ok(())
+    }
+
+    /// A shape filled with a gradient: a shading, in the unit box the
+    /// gradient's geometry is written against, mapped onto the shape's box
+    /// and clipped to the shape. Its colours are the engine's own ramp
+    /// read off at 256 points (`ramp_color`, which the GPU backend bakes
+    /// the same way), so the way the engine mixes between two stops is
+    /// what the file mixes, not an approximation of it; where the ramp's
+    /// alpha varies, that goes as a soft mask of the same ramp's alpha.
+    fn gradient_fill(
+        &mut self,
+        g: &chitrakar_doc::Gradient,
+        shape: &VectorShape,
+        opacity: f32,
+        blend: BlendMode,
+    ) -> Result<(), PdfError> {
+        const SAMPLES: usize = 256;
+        let mut stops: Vec<(f32, chitrakar_color::LinearRgba)> = g
+            .stops()
+            .iter()
+            .map(|s| {
+                (
+                    s.offset,
+                    chitrakar_render::resolve_color(&self.doc, &s.color),
+                )
+            })
+            .collect();
+        if stops.is_empty() {
+            return Ok(());
+        }
+        stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let (x0, y0, x1, y1) = chitrakar_render::gradient_box(shape);
+        let ramp: Vec<[u8; 4]> = (0..SAMPLES)
+            .map(|i| {
+                chitrakar_render::ramp_color(&stops, i as f32 / (SAMPLES - 1) as f32).to_srgb8()
+            })
+            .collect();
+        // Where the gradient's own geometry says it, in the unit box; the
+        // engine's reading of a line or a ring of no size is the colour at
+        // one end, everywhere, which a shading of one colour says.
+        let (kind, coords, flat) = match g {
+            chitrakar_doc::Gradient::Linear { from, to, .. } => {
+                let degenerate = (to[0] - from[0]).hypot(to[1] - from[1]) < 1e-6;
+                (
+                    2,
+                    format!(
+                        "{} {} {} {}",
+                        num(from[0]),
+                        num(from[1]),
+                        num(to[0]),
+                        num(to[1])
+                    ),
+                    degenerate.then_some(0),
+                )
+            }
+            chitrakar_doc::Gradient::Radial { center, radius, .. } => (
+                3,
+                format!(
+                    "{c0} {c1} 0 {c0} {c1} {}",
+                    num(radius.max(1e-6)),
+                    c0 = num(center[0]),
+                    c1 = num(center[1])
+                ),
+                (*radius < 1e-6).then_some(SAMPLES - 1),
+            ),
+        };
+        let ramp: Vec<[u8; 4]> = match flat {
+            Some(i) => vec![ramp[i]; SAMPLES],
+            None => ramp,
+        };
+        let sampled =
+            |this: &mut Self, channels: usize, data: Vec<u8>| -> Result<usize, PdfError> {
+                let range = vec!["0 1"; channels].join(" ");
+                Ok(this.push(&stream_object(
+                    &format!(
+                        "<< /FunctionType 0 /Domain [0 1] /Range [{range}] /Size [{SAMPLES}] \
+                     /BitsPerSample 8 /Filter /FlateDecode"
+                    ),
+                    &deflate(&data)?,
+                )))
+            };
+        let (space, channels, colours) = match &self.separate {
+            Some(sep) => {
+                let srgb: Vec<f32> = ramp
+                    .iter()
+                    .flat_map(|p| [p[0], p[1], p[2]].map(|v| v as f32 / 255.0))
+                    .collect();
+                let ink = sep.separate(&srgb).map_err(PdfError::Color)?;
+                let space = self.icc_objects.expect("profile objects").1;
+                (format!("{space} 0 R"), 4, ink)
+            }
+            None => (
+                "/DeviceRGB".to_string(),
+                3,
+                ramp.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
+            ),
+        };
+        let function = sampled(self, channels, colours)?;
+        let shading = self.push(
+            format!(
+                "<< /ShadingType {kind} /ColorSpace {space} /Coords [{coords}] \
+                 /Function {function} 0 R /Extend [true true] >>"
+            )
+            .as_bytes(),
+        );
+        let name = format!("Sh{}", self.shadings.len() + 1);
+        self.shadings.push((name.clone(), shading));
+        let into_box = format!(
+            "{} 0 0 {} {} {} cm",
+            num(x1 - x0),
+            num(y1 - y0),
+            num(x0),
+            num(y0)
+        );
+        // The ramp's alpha, when it is not one throughout.
+        let mask = if ramp.iter().any(|p| p[3] < 255) {
+            let alphas = sampled(self, 1, ramp.iter().map(|p| p[3]).collect())?;
+            let grey = self.push(
+                format!(
+                    "<< /ShadingType {kind} /ColorSpace /DeviceGray /Coords [{coords}] \
+                     /Function {alphas} 0 R /Extend [true true] >>"
+                )
+                .as_bytes(),
+            );
+            let grey_name = format!("Sh{}", self.shadings.len() + 1);
+            self.shadings.push((grey_name.clone(), grey));
+            let form = self.push(&[]);
+            self.forms
+                .push((form, format!("{into_box}\n/{grey_name} sh\n"), true));
+            Some((form, "Luminosity"))
+        } else {
+            None
+        };
+        let rule = if matches!(shape, VectorShape::Path { .. }) {
+            "W*"
+        } else {
+            "W"
+        };
+        let _ = writeln!(self.content, "q\n{}{rule} n", path_ops(shape));
+        if let Some(gs) = self.gstate_masked(opacity, opacity, blend, mask) {
+            let _ = writeln!(self.content, "/{gs} gs");
+        }
+        let _ = writeln!(self.content, "{into_box}\n/{name} sh\nQ");
         Ok(())
     }
 
@@ -1706,6 +1879,13 @@ impl Page {
         if !self.xobjects.is_empty() {
             resources.push_str(" /XObject <<");
             for (name, obj) in &self.xobjects {
+                let _ = write!(resources, " /{name} {obj} 0 R");
+            }
+            resources.push_str(" >>");
+        }
+        if !self.shadings.is_empty() {
+            resources.push_str(" /Shading <<");
+            for (name, obj) in &self.shadings {
                 let _ = write!(resources, " /{name} {obj} 0 R");
             }
             resources.push_str(" >>");
@@ -2284,7 +2464,7 @@ mod tests {
         node
     }
 
-    /// A 10px rect with a gradient fill: a layer PDF has to take as pixels.
+    /// A 10px rect with a tapered stroke: a layer PDF has to take as pixels.
     fn shaded(name: &str) -> chitrakar_doc::Node {
         let mut node = shape(
             name,
@@ -2295,23 +2475,26 @@ mod tests {
             },
             Some(RED),
         );
-        if let NodeKind::Vector { gradient, .. } = &mut node.kind {
-            *gradient = Some(chitrakar_doc::Gradient::Linear {
-                from: [0.0, 0.0],
-                to: [1.0, 0.0],
-                stops: vec![
-                    chitrakar_doc::GradientStop {
-                        offset: 0.0,
-                        color: RED,
-                    },
-                    chitrakar_doc::GradientStop {
-                        offset: 1.0,
-                        color: BLUE,
-                    },
-                ],
-            });
+        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+            *stroke = Some(tapered());
         }
         node
+    }
+
+    /// A stroke whose width varies along it, which PDF has no stroke for:
+    /// what still sends a shape to pixels, now a gradient does not.
+    fn tapered() -> chitrakar_doc::Stroke {
+        chitrakar_doc::Stroke {
+            color: BLUE,
+            width: 3.0,
+            widths: vec![1.0, 0.3, 1.0, 0.3],
+            dash: Vec::new(),
+            cap: Default::default(),
+            join: Default::default(),
+            start_marker: Default::default(),
+            end_marker: Default::default(),
+            align: None,
+        }
     }
 
     fn add(doc: &mut Document, node: chitrakar_doc::Node, at: [f32; 2]) -> NodeId {
@@ -2757,7 +2940,7 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&export_pdf_document(&doc).unwrap())
             .contains("/ca 0.5 /CA 0.5 /BM /Normal"));
-        // A gradient, a mask, an effect, a varying stroke: pixels.
+        // A stroke whose width varies: pixels.
         let mut shaded = shape(
             "shaded",
             VectorShape::Rect {
@@ -2767,27 +2950,14 @@ mod tests {
             },
             Some(RED),
         );
-        if let NodeKind::Vector { gradient, .. } = &mut shaded.kind {
-            *gradient = Some(chitrakar_doc::Gradient::Linear {
-                from: [0.0, 0.0],
-                to: [1.0, 0.0],
-                stops: vec![
-                    chitrakar_doc::GradientStop {
-                        offset: 0.0,
-                        color: RED,
-                    },
-                    chitrakar_doc::GradientStop {
-                        offset: 1.0,
-                        color: BLUE,
-                    },
-                ],
-            });
+        if let NodeKind::Vector { stroke, .. } = &mut shaded.kind {
+            *stroke = Some(tapered());
         }
         add(&mut doc, shaded, [100.0, 0.0]);
         let content = content_of(&export_pdf_document(&doc).unwrap());
         assert!(
             !content.contains("0 0 10 10 re"),
-            "the gradient rect is not drawn as a path"
+            "the tapered rect is not drawn as a path"
         );
         // At 72 dpi it is rendered four times over for print: a 10px rect
         // is a 40-sample image placed 10 wide.
@@ -2810,7 +2980,7 @@ mod tests {
     #[test]
     fn pixels_keep_their_blend_and_a_run_of_them_is_one_picture() {
         let mut doc = everything();
-        // Three gradient rects in a row: one picture rather than three
+        // Three tapered rects in a row: one picture rather than three
         // renders of the page.
         for (i, at) in [[100.0, 0.0], [100.0, 20.0], [100.0, 40.0]]
             .iter()
@@ -2823,9 +2993,9 @@ mod tests {
         assert_eq!(
             content.matches(" Do").count(),
             2,
-            "the placed image, then one picture of three gradients: {content}"
+            "the placed image, then one picture of three rects: {content}"
         );
-        // A multiplied gradient reads what is under it, so it is its own
+        // A multiplied tapered rect reads what is under it, so it is its own
         // picture and lands with the blend.
         let root = doc.root();
         let last = *doc.children_of(root).unwrap().last().unwrap();
@@ -4093,7 +4263,12 @@ mod tests {
             .arg("--version")
             .output()
             .ok()?;
-        let dir = std::env::temp_dir().join(format!("chitrakar-pdf-rgba-{}", std::process::id()));
+        // One directory a call: tests run side by side, and two sharing
+        // one read each other's pictures.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("chitrakar-pdf-rgba-{}-{call}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (src, png) = (dir.join("p.pdf"), dir.join("p.png"));
         std::fs::write(&src, export_pdf_document(doc).unwrap()).unwrap();
@@ -4874,6 +5049,218 @@ mod tests {
                 "({x}, {y}): the page is {ours:?} and the file {file:?}"
             );
         }
+    }
+
+    /// A gradient goes live, as a shading of the engine's own ramp: the
+    /// colours ghostscript draws inside a linear gradient are the page's,
+    /// and a radial one whose stop is translucent covers what the page
+    /// covers, its alpha a soft mask of the same ramp. Both went as
+    /// pictures.
+    #[test]
+    fn a_gradient_goes_live_as_a_shading_of_the_engines_ramp() {
+        let stop = |offset: f32, r: f32, g: f32, b: f32, a: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a },
+        };
+        let mut doc = Document::new(64, 40, chitrakar_color::ColorMode::Rgb);
+        let mut band = shape(
+            "band",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 16.0,
+                radius: 0.0,
+            },
+            Some(RED),
+        );
+        if let NodeKind::Vector { gradient, .. } = &mut band.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.9, 0.7],
+                stops: vec![
+                    stop(0.0, 1.0, 0.1, 0.1, 1.0),
+                    stop(0.5, 0.1, 0.8, 0.2, 1.0),
+                    stop(1.0, 0.1, 0.2, 1.0, 1.0),
+                ],
+            });
+        }
+        add(&mut doc, band, [2.0, 2.0]);
+        let mut glow = shape("glow", VectorShape::Ellipse { rx: 10.0, ry: 8.0 }, None);
+        if let NodeKind::Vector { gradient, .. } = &mut glow.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Radial {
+                center: [0.4, 0.45],
+                radius: 0.6,
+                stops: vec![stop(0.0, 0.1, 0.2, 1.0, 1.0), stop(1.0, 1.0, 0.9, 0.1, 0.2)],
+            });
+        }
+        add(&mut doc, glow, [42.0, 20.0]);
+
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = content_of(&pdf);
+        assert!(
+            content.matches(" sh").count() == 2 && !content.contains("/Im"),
+            "{content}"
+        );
+        let Some(colours) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let page = chitrakar_render::render(&doc).unwrap();
+        for y in (5..16).step_by(2) {
+            for x in (5..40).step_by(3) {
+                let ours = page.get(x, y).to_srgb8();
+                let file = colours[(y * 64 + x) as usize];
+                let off = (0..3)
+                    .map(|c| (ours[c] as i32 - file[c] as i32).abs())
+                    .max()
+                    .unwrap();
+                assert!(
+                    off <= 4,
+                    "({x}, {y}): the page is {ours:?} and the file {file:?}"
+                );
+            }
+        }
+        let (ours, theirs) = (
+            engine_alpha(&doc),
+            ghostscript_alpha(std::slice::from_ref(&doc)).unwrap(),
+        );
+        // Inside the ellipse, where the ramp's alpha is all there is to the
+        // coverage; its edge is the shape's antialiasing, not the ramp's.
+        for y in 20..37usize {
+            for x in 42..63usize {
+                let (dx, dy) = (
+                    (x as f32 + 0.5 - 52.0) / 10.0,
+                    (y as f32 + 0.5 - 28.0) / 8.0,
+                );
+                if dx * dx + dy * dy > 0.7 {
+                    continue;
+                }
+                let i = y * 64 + x;
+                assert!(
+                    (ours[i] - theirs[0][i]).abs() < 0.03,
+                    "({x}, {y}): ghostscript covers {:.3} where the page covers {:.3}",
+                    theirs[0][i],
+                    ours[i]
+                );
+            }
+        }
+    }
+
+    /// In ink, a gradient is a shading in the press profile's own space:
+    /// its ramp separated stop by stop as every other colour in the file
+    /// is, and drawn where the page draws it. Self-skips without a CMYK
+    /// profile or ghostscript.
+    #[test]
+    fn a_gradient_in_ink_is_a_shading_in_the_press_profile() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        let mut doc = Document::new(48, 24, chitrakar_color::ColorMode::Rgb);
+        doc.set_cmyk_profile(std::fs::read(path).unwrap()).unwrap();
+        let mut band = shape(
+            "band",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 16.0,
+                radius: 0.0,
+            },
+            Some(RED),
+        );
+        if let NodeKind::Vector { gradient, .. } = &mut band.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: RED,
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: BLUE,
+                    },
+                ],
+            });
+        }
+        add(&mut doc, band, [4.0, 4.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let file = String::from_utf8_lossy(&pdf);
+        assert!(
+            file.contains("/ShadingType 2 /ColorSpace 4 0 R")
+                && file.contains("/Range [0 1 0 1 0 1 0 1]"),
+            "a four-ink shading in the profile's space"
+        );
+        let Some(theirs) = ghostscript_alpha(std::slice::from_ref(&doc)) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let ours = engine_alpha(&doc);
+        for (x, y) in [(6usize, 12usize), (24, 12), (42, 12), (24, 2), (24, 22)] {
+            let i = y * 48 + x;
+            assert!((ours[i] - theirs[0][i]).abs() < 0.03, "({x}, {y})");
+        }
+    }
+
+    /// A shape with a blend meets the page once, fill and stroke together,
+    /// as the engine takes it: a multiplied red stroke over a blue fill on
+    /// grey is red times grey where it lies over the fill, not red times
+    /// what the blue had already made of the grey — which is nothing.
+    #[test]
+    fn a_blended_shape_meets_the_page_once_in_a_pdf() {
+        let mut doc = Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut doc,
+            shape(
+                "grey",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                Some(AuthoredColor::Srgb {
+                    r: 0.5,
+                    g: 0.5,
+                    b: 0.5,
+                    a: 1.0,
+                }),
+            ),
+            [0.0, 0.0],
+        );
+        let mut tile = shape(
+            "tile",
+            VectorShape::Rect {
+                width: 24.0,
+                height: 16.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        tile.blend = BlendMode::Multiply;
+        if let NodeKind::Vector { stroke, .. } = &mut tile.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            });
+        }
+        add(&mut doc, tile, [8.0, 7.0]);
+        let Some(file) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let page = chitrakar_render::render(&doc).unwrap();
+        // On the stroke, inside the tile's edge, where it lies over the fill.
+        let (ours, theirs) = (page.get(9, 15).to_srgb8(), file[15 * 40 + 9]);
+        assert!(
+            ours[0] > 100 && (ours[0] as i32 - theirs[0] as i32).abs() <= 4,
+            "the page is {ours:?} and the file {theirs:?}"
+        );
     }
 
     /// Every content stream in a PDF, inflated and joined: a form's

@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~561),
+- **Verify before committing:** `cargo test --workspace` (~564),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4634,6 +4634,34 @@ without reading anything else.*
      test noticed taken out, and then as the fix with a test that does
      (`a_hold_reads_the_layer_under_it_without_its_shadow`: without it a
      held layer shows over the shadow).
+     **And gradients.** Every shape with a gradient went into the PDF as
+     pixels. It is a shading now (`gradient_fill`): the gradient's
+     geometry is written against the shape's unit box, which a `cm`
+     carries onto the box (`gradient_box`), clipped to the shape; its
+     colours are the engine's own ramp read off at 256 points into a
+     sampled function (`ramp_color`, which the GPU backend bakes the same
+     way), so the file mixes between stops exactly as the page does rather
+     than by PDF's own interpolation; where the ramp's alpha varies, a
+     soft mask of the same ramp's alpha. Read against ghostscript by
+     colour inside a three-stop linear gradient (to four levels) and by
+     coverage inside a radial one with a translucent stop
+     (`a_gradient_goes_live_as_a_shading_of_the_engines_ramp`; a two-stop
+     interpolation, the alpha mask, the box's mapping each fail it taken
+     out). The tests that had used a gradient as their example of what
+     needs pixels use a tapered stroke now.
+     And one thing the last entries left behind: the engine had begun
+     blending a stroked shape once over its fill and stroke together, but
+     the PDF still blended each paint, so where the stroke lay over the
+     fill it was blended with the fill too — a multiplied red stroke over
+     a blue fill on grey came out black there instead of red times grey.
+     Such a shape is a transparency group with its blend on the group now
+     (`a_blended_shape_meets_the_page_once_in_a_pdf`). Coverage could not
+     see it; colour does. And `ghostscript_rgba` takes a directory of its
+     own a call: two tests running side by side had read each other's
+     pictures. In ink, a gradient's ramp is separated through the press
+     profile like every other colour and the shading is four inks in the
+     profile's space (`a_gradient_in_ink_is_a_shading_in_the_press_profile`,
+     which self-skips without `CHITRAKAR_TEST_CMYK_ICC`).
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

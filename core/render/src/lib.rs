@@ -268,6 +268,13 @@ fn shape_size(shape: &VectorShape) -> (f32, f32) {
 /// Local bounding box (min x, min y, max x, max y). Unlike [`shape_size`]
 /// this keeps a negative min — a smooth path's spline can overshoot the
 /// anchors, including past the origin.
+/// The box a shape's gradient is laid in — its own local bounds, the
+/// unit box a gradient's geometry is written against — for an exporter
+/// that draws the gradient itself.
+pub fn gradient_box(shape: &VectorShape) -> (f32, f32, f32, f32) {
+    local_bounds(flatten_shape(shape).as_ref())
+}
+
 fn local_bounds(shape: &VectorShape) -> (f32, f32, f32, f32) {
     match shape {
         VectorShape::Path {
