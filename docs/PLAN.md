@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~578),
+- **Verify before committing:** `cargo test --workspace` (~579),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4751,6 +4751,21 @@ without reading anything else.*
      them, rather than as `ClipPath::clip_path` and `Mask::mask` — and
      are now, in the referring group's space as resvg applies them
      (`a_clip_on_a_clip_path_narrows_it_as_a_reader_does`).
+     **And a PDF of the frames, page by page.** Each frame's page held
+     to what exporting that frame as a picture gives
+     (`artboard_pixels`), in colour, on the opaque pages
+     (`each_frames_page_is_the_frame_as_its_own_picture`): fourteen of
+     seventy-six frames came out wrong, every one mostly white. A frame
+     *held* to the layer under it was put on its page with every other
+     layer hidden, that one included, so it showed nothing; it is let go
+     of for its own page now, as the picture export already did. And
+     what goes as pixels was rendered over the document's own rectangle,
+     through the page's edge, so a frame reaching past the document's
+     edge was cut off there on its own page — while its live vectors
+     carried on past it. `place_rendered` renders over the area the page
+     shows (`Page::area`: the document, or the frame's box) with
+     `render_past_the_page_at`, the document drawn without its edge;
+     for a whole-document page the two are the same rectangle.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

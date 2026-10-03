@@ -215,6 +215,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         content: String::new(),
         icc_objects: None,
         fonts: Vec::new(),
+        area: [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
     };
     // 1 catalog and 2 pages: reserved, written last, once every page
     // they list has a number. The pages themselves are pushed at the
@@ -278,6 +279,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         content: String::new(),
         icc_objects: None,
         fonts: Vec::new(),
+        area: [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
     };
     for _ in 0..2 {
         page.objects.push(Vec::new());
@@ -308,7 +310,16 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
             continue;
         };
         let box_ = [x0, y0, x1, y1];
+        // The frame's page is the frame's contents, as exporting the
+        // frame as a picture gives them (`artboard_pixels`): a frame held
+        // to the layer under it, alone with that layer hidden, showed
+        // nothing at all, and its page was blank.
+        alone.apply(Command::SetClipped {
+            id: frame,
+            clipped: false,
+        })?;
         page.doc = alone;
+        page.area = box_;
         page.content.clear();
         page.draw_page()?;
         let body = std::mem::take(&mut page.content);
@@ -322,6 +333,13 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
 /// content itself, in document pixels — the page's own transform maps
 /// those to points and turns y downwards.
 struct Page {
+    /// The part of the document the page being drawn shows, in document
+    /// pixels: the whole of it, or one frame's box. What goes as pixels
+    /// is rendered over this, since it is what the page shows — rendered
+    /// over the document's own rectangle instead, a frame reaching past
+    /// the document's edge lost everything past it that was not a live
+    /// vector, and its page was white there.
+    area: [f32; 4],
     /// The document this page draws. Owned, because exporting the
     /// frames as pages draws a differently-hidden copy of it per page
     /// while keeping one pool of objects for the file.
@@ -672,13 +690,19 @@ impl Page {
         // screen-resolution text on the page, so the render is oversampled
         // towards 300 dpi (up to four times).
         let over = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0);
-        let meta = &self.doc.meta;
+        // Over what the page shows, from its corner: the samples line up
+        // with the page's own pixels, which for a frame start where the
+        // frame does.
+        let [ax, ay, bx, by] = self.area;
         let (w, h) = (
-            (meta.width as f32 * over).ceil().max(1.0) as usize,
-            (meta.height as f32 * over).ceil().max(1.0) as usize,
+            ((bx - ax) * over).ceil().max(1.0) as usize,
+            ((by - ay) * over).ceil().max(1.0) as usize,
         );
         let mut surface = chitrakar_render::Surface::new(w as u32, h as u32);
-        chitrakar_render::render_region_at(
+        // Past the page's edge, since the surface is already what the page
+        // shows: for the whole document that is the document, and for a
+        // frame it is the frame, wherever it stands.
+        chitrakar_render::render_past_the_page_at(
             &alone,
             &mut surface,
             chitrakar_render::ClipRect {
@@ -690,6 +714,8 @@ impl Page {
             Transform {
                 a: over,
                 d: over,
+                e: -ax * over,
+                f: -ay * over,
                 ..Default::default()
             },
         )?;
@@ -741,8 +767,8 @@ impl Page {
             "q\n{gs}{} 0 0 {} {} {} cm\n/{name} Do\nQ",
             num(cw as f32 / over),
             num(-(ch as f32) / over),
-            num(x0 as f32 / over),
-            num(y1 as f32 / over)
+            num(ax + x0 as f32 / over),
+            num(ay + y1 as f32 / over)
         );
         Ok(())
     }
@@ -5513,5 +5539,126 @@ mod tests {
             bleed(1, 1, &[1, 2, 3, 255]).is_none(),
             "nothing to do when all is painted"
         );
+    }
+
+    /// Every frame's page in a PDF of the frames shows what exporting the
+    /// frame as a picture shows (`artboard_pixels`), in colour, on pages
+    /// with nothing translucent on them.
+    ///
+    /// Fourteen of seventy-six frames came out wrong, every one of them
+    /// mostly white. A frame held to the layer under it was put on its
+    /// page with every other layer hidden, that one included, and showed
+    /// nothing; and what went as pixels was rendered over the document's
+    /// own rectangle rather than the frame's, so a frame reaching past the
+    /// document's edge was cut off there on its own page.
+    #[test]
+    fn each_frames_page_is_the_frame_as_its_own_picture() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let mut frames = 0;
+        for seed in 0..300u64 {
+            let doc = chitrakar_doc::fixture::opaque_page(seed);
+            let root = doc.root();
+            let boards: Vec<NodeId> = doc
+                .children_of(root)
+                .unwrap()
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let n = doc.node(*id).unwrap();
+                    n.visible && matches!(n.kind, NodeKind::Artboard { .. })
+                })
+                .collect();
+            if boards.is_empty() {
+                continue;
+            }
+            let dir = std::env::temp_dir()
+                .join(format!("chitrakar-frames-{}-{seed}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("f.pdf"), export_pdf_frames(&doc).unwrap()).unwrap();
+            let ok = std::process::Command::new("gs")
+                .args([
+                    "-q",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dSAFER",
+                    "-sDEVICE=png16m",
+                    "-r72",
+                ])
+                .args([
+                    "-dGraphicsAlphaBits=4",
+                    "-dTextAlphaBits=4",
+                    "-dDOINTERPOLATE",
+                ])
+                .arg(format!("-sOutputFile={}", dir.join("p%d.png").display()))
+                .arg(dir.join("f.pdf"))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "ghostscript accepted the file");
+            for (k, &id) in boards.iter().enumerate() {
+                // Upright and at its own size, where the page and the
+                // picture are the same grid.
+                let n = doc.node(id).unwrap();
+                let t = chitrakar_render::ancestor_space(&doc, id).compose(n.transform);
+                if t.b.abs() > 1e-6
+                    || t.c.abs() > 1e-6
+                    || (t.a - 1.0).abs() > 1e-6
+                    || (t.d - 1.0).abs() > 1e-6
+                {
+                    continue;
+                }
+                frames += 1;
+                let ours = chitrakar_render::artboard_pixels(&doc, id, 1.0)
+                    .unwrap()
+                    .unwrap();
+                let theirs =
+                    crate::decode(&std::fs::read(dir.join(format!("p{}.png", k + 1))).unwrap())
+                        .unwrap();
+                let (w, h) = (
+                    ours.width.min(theirs.width) as i32,
+                    ours.height.min(theirs.height) as i32,
+                );
+                let px = |x: i32, y: i32| ours.get(x as u32, y as u32).to_srgb8();
+                let mut off = Vec::new();
+                for y in 1..h - 1 {
+                    for x in 1..w - 1 {
+                        let c = px(x, y);
+                        let flat = c[3] == 255
+                            && (-1..=1).all(|j| {
+                                (-1..=1).all(|i| {
+                                    let q = px(x + i, y + j);
+                                    (0..4).all(|k| q[k].abs_diff(c[k]) <= 3)
+                                })
+                            });
+                        if !flat {
+                            continue;
+                        }
+                        let o = ((y as u32 * theirs.width + x as u32) * 4) as usize;
+                        let t = &theirs.rgba8[o..o + 3];
+                        if (0..3).any(|q| c[q].abs_diff(t[q]) > 20) {
+                            off.push((x, y, c, [t[0], t[1], t[2]]));
+                        }
+                    }
+                }
+                assert!(
+                    off.len() <= 2,
+                    "page {seed}, frame {id:?}: {} flat pixels its page colours otherwise, \
+                     the first at ({}, {}) — the picture {:?}, the page {:?}",
+                    off.len(),
+                    off[0].0,
+                    off[0].1,
+                    off[0].2,
+                    off[0].3
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        assert!(frames > 50, "enough frames were asked about ({frames})");
     }
 }

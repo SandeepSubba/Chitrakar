@@ -811,6 +811,32 @@ pub fn render_region_at(
     region_at(doc, surface, clip, view, Showing::Everything)
 }
 
+/// The same, without the page's edge: the document drawn wherever the
+/// surface looks, on the page or past it.
+///
+/// A frame is its own page wherever it stands. Exported as a picture
+/// (`artboard_pixels`) it shows the whole of its box, and a PDF page of
+/// one has to show the same — drawn through the page's edge, a frame
+/// reaching past the document's edge came out cut off there, white
+/// beyond it on its own page. Only what is asked for is cleared and
+/// drawn, as with the others.
+pub fn render_past_the_page_at(
+    doc: &Document,
+    surface: &mut Surface,
+    clip: ClipRect,
+    view: Transform,
+) -> Result<(), DocError> {
+    if clip.is_empty() {
+        return Ok(());
+    }
+    for y in clip.y0..clip.y1 {
+        let row = (y * surface.width) as usize;
+        surface.pixels[row + clip.x0 as usize..row + clip.x1 as usize]
+            .fill(LinearRgba::TRANSPARENT);
+    }
+    drawn(doc, surface, clip, view, Showing::Everything)
+}
+
 /// The same, of something less than the whole page.
 ///
 /// The page is still the page — the same edge, the same framing — with
