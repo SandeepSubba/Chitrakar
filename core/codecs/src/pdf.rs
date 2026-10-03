@@ -2080,6 +2080,15 @@ impl Page {
         // showing the whole document sits at the document's origin; one
         // showing a frame is the same content seen through the frame's
         // view, so the frame stands upright with its corner at the page's.
+        // In ink, the page itself blends in ink: what a transparency group
+        // brings down meets the page in the press profile, as it does in
+        // the engine's proof. Left to the reader, ghostscript blended in
+        // its screen's RGB, taking the ink there by a route of its own.
+        let blends = match (&self.separate, self.icc_objects) {
+            (Some(_), Some((_, icc))) => format!(" /Group << /S /Transparency /CS {icc} 0 R >>"),
+            (Some(_), None) => " /Group << /S /Transparency /CS /DeviceCMYK >>".to_string(),
+            (None, _) => String::new(),
+        };
         let mut kids = String::new();
         let pages = std::mem::take(&mut self.pages);
         for (body, view, size) in &pages {
@@ -2109,7 +2118,7 @@ impl Page {
             let page = self.push(
                 format!(
                     "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
-                     /Resources <<{resources} >> /Contents {stream} 0 R >>"
+                     /Resources <<{resources} >>{blends} /Contents {stream} 0 R >>"
                 )
                 .as_bytes(),
             );
@@ -5699,5 +5708,109 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
         assert!(frames > 100, "enough frames were asked about ({frames})");
+    }
+
+    /// A press PDF read back is what the engine's soft proof shows, on
+    /// pages with nothing translucent on them: ghostscript's reading of
+    /// the ink, against the engine's page carried to the press and back
+    /// through the same profile. Ghostscript is asked not to compensate
+    /// for black, which the proof does not do either — with it, every
+    /// shadow on every page reads deeper, the press's black taken as the
+    /// screen's.
+    ///
+    /// It found the page blending in the reader's own space: with no
+    /// transparency group of its own, a page in ink had what a group
+    /// brought down — a held layer, a faded group, a blended shape —
+    /// mixed in ghostscript's RGB, the ink taken there by a route of the
+    /// reader's choosing, and those layers came out deeper in their
+    /// shadows than the rest of the same page. Five pixels a page are
+    /// allowed for a hairline of a self-crossing path, which ghostscript
+    /// paints heavier than the engine. Self-skips without a CMYK profile
+    /// (`CHITRAKAR_TEST_CMYK_ICC`) or without `gs`.
+    #[test]
+    fn ghostscript_reads_ink_as_the_proof_shows_it() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_CMYK_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_CMYK_ICC to run");
+            return;
+        };
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let icc = std::fs::read(path).unwrap();
+        let proof = chitrakar_color::cms::ProofCms::new(&icc).unwrap();
+        for seed in 0..120u64 {
+            let mut doc = chitrakar_doc::fixture::opaque_page(seed);
+            doc.set_cmyk_profile(icc.clone()).unwrap();
+            let dir =
+                std::env::temp_dir().join(format!("chitrakar-ink-{}-{seed}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("p.pdf"), export_pdf_document(&doc).unwrap()).unwrap();
+            let ok = std::process::Command::new("gs")
+                .args([
+                    "-q",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dSAFER",
+                    "-sDEVICE=png16m",
+                    "-r72",
+                ])
+                .args([
+                    "-dGraphicsAlphaBits=4",
+                    "-dTextAlphaBits=4",
+                    "-dDOINTERPOLATE",
+                    "-dBlackPtComp=0",
+                ])
+                .arg(format!("-sOutputFile={}", dir.join("p.png").display()))
+                .arg(dir.join("p.pdf"))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "ghostscript accepted the file");
+            let theirs = crate::decode(&std::fs::read(dir.join("p.png")).unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            let page = chitrakar_render::render(&doc).unwrap();
+            let mut ours: Vec<u8> = page.pixels.iter().flat_map(|p| p.to_srgb8()).collect();
+            proof.proof_rgba8(&mut ours, false);
+            let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
+            let px = |x: i32, y: i32| {
+                let k = ((y * w + x) * 4) as usize;
+                [ours[k], ours[k + 1], ours[k + 2], ours[k + 3]]
+            };
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    let flat = c[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let q = px(x + i, y + j);
+                                (0..4).all(|k| q[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    let k = ((y * w + x) * 4) as usize;
+                    let t = &theirs.rgba8[k..k + 3];
+                    if (0..3).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, [t[0], t[1], t[2]]));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 5,
+                "page {seed}: {} flat pixels ghostscript reads otherwise, the first at \
+                 ({}, {}) — the proof {:?}, ghostscript {:?}",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
     }
 }

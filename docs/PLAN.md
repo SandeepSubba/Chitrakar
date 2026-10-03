@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~579),
+- **Verify before committing:** `cargo test --workspace` (~580),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4775,6 +4775,21 @@ without reading anything else.*
      folded into the page's one transform to points, and what goes as
      pixels is rendered through it. The audit takes turned and scaled
      frames too: 110 frames, where the upright ones were 76.
+     **And ink.** A press PDF read back by ghostscript, against the
+     engine's page soft-proofed through the same profile, on the opaque
+     pages (`ghostscript_reads_ink_as_the_proof_shows_it`, which needs
+     `CHITRAKAR_TEST_CMYK_ICC`). At first a third of the pages disagreed,
+     every shadow deeper — ghostscript compensates for black by default
+     and the proof does not; asked not to (`-dBlackPtComp=0`) the median
+     difference is nought. What was left was real: **a page in ink had
+     no transparency group of its own**, so ghostscript blended whatever
+     a group brought down — a held layer, a faded group, a blended shape
+     — in its screen's RGB, taking the ink there by its own route, and
+     those layers came out deeper than the rest of the same page. Each
+     page in ink is a transparency group in the press profile now
+     (`/Group << /S /Transparency /CS … >>`), which is what a press file
+     should say anyway. Five pixels a page are allowed, for hairlines of
+     self-crossing paths that ghostscript paints heavier.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so
