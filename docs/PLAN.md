@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~571),
+- **Verify before committing:** `cargo test --workspace` (~578),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4719,6 +4719,38 @@ without reading anything else.*
      the two still allow is two pixels a page: a picture of a few pixels
      at a fractional place, which each reader resamples its own way, and
      a mark thinner than a pixel, which ghostscript paints whole.
+     **And the round trip, in colour.** The same question asked of an
+     SVG exported and brought back in, where both sides are the engine's
+     and so every flat pixel is held to its colour, translucent ones too
+     (`a_page_exported_and_brought_back_is_the_colour_it_was`, 400
+     pages). One page in four hundred was wrong, and what it found ran
+     well past the importer: **`combine` says `None` for an answer with
+     nothing in it as well as for one it cannot trace**, and every caller
+     read the second. In the importer, a clip inside a clip it does not
+     meet kept the inner one — a frame standing wholly outside the frame
+     it sits in came back whole, over its neighbour. In the editor,
+     keeping the overlap of two boxes that do not meet, or taking away a
+     box that covers all that is picked, was refused with an alert about
+     edges that overlap exactly; and a box *snapped* to the selection's
+     edge and covering it, taken away, left a selection one
+     five-hundredth of a pixel thick — the nudge's own sliver — that no
+     one could see and every brush was confined to. A box dragged from
+     its middle with alt held lands touching the first as often as not,
+     which is the case the arithmetic finds degenerate; the browser
+     suite found that one where the engine's own test, two boxes apart,
+     had passed. `combine_or_nudge` now answers `Some` of no rings for
+     nothing (`leaves_nothing`, the same pieces `combine` keeps, asked
+     whether there are any) and drops rings thinner than two nudges, so
+     each caller gets nothing as nothing: the selection is let go of, one
+     step and undoable (9bz in the browser suite); a shape boolean says
+     "nothing would be left"; the importer leaves out what shows nowhere
+     — which is also an empty clip path, and a mask drawn outside its
+     own rectangle, both of which had let everything through. Found on
+     the way: **a clip on a clip path and a mask on a mask were never
+     applied** — looked for on their contents, where usvg never puts
+     them, rather than as `ClipPath::clip_path` and `Mask::mask` — and
+     are now, in the referring group's space as resvg applies them
+     (`a_clip_on_a_clip_path_narrows_it_as_a_reader_does`).
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

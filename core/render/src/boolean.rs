@@ -165,7 +165,11 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
 }
 
 /// Combine two sets of rings, asking again with the second nudged where
-/// the first answer is that they cannot be.
+/// the first answer is that they cannot be. `Some` of no rings is an
+/// answer with nothing in it — two that do not meet, or only touch,
+/// intersected; all of the first taken away — and `None` is only an
+/// answer that cannot be traced. Both used to be `None`, and every
+/// caller read it as the second.
 ///
 /// [`combine`] declines outlines whose edges overlap exactly rather than
 /// guessing what was meant, which is the honest answer to an ambiguous
@@ -181,6 +185,14 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
 /// distance between samples: it can move one sample in sixteen, on the
 /// pixels an edge actually crosses. What it cannot do is turn a union
 /// into an error message.
+///
+/// The nudge leaves a mark of its own where the answer runs along the
+/// edge the two shared: a ring a five-hundredth of a pixel thick, which
+/// is the nudge and not the shapes. Those are dropped, and an answer that
+/// was nothing *but* them is nothing — `Some` of no rings. A box snapped
+/// to a selection's edge and covering the whole of it, taken away, used
+/// to leave a selection of one such sliver: invisible, and every brush
+/// confined to it painted nowhere.
 pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
     if let Some(rings) = combine(a, b, op) {
         return Some(rings);
@@ -190,7 +202,24 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
         .iter()
         .map(|ring| ring.iter().map(|p| [p[0] + NUDGE, p[1] + NUDGE]).collect())
         .collect();
-    combine(a, &moved, op)
+    let Some(rings) = combine(a, &moved, op) else {
+        // Two that only touched, moved apart: an intersection of nothing,
+        // or all of the first taken away. Said as what it is.
+        return leaves_nothing(a, &moved, op).then(Vec::new);
+    };
+    // Thinner on average than two nudges: area against perimeter is half
+    // the thickness of a long thin ring.
+    let thick = |ring: &Ring| {
+        let n = ring.len();
+        let (mut twice, mut around) = (0.0f32, 0.0f32);
+        for i in 0..n {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            twice += p[0] * q[1] - q[0] * p[1];
+            around += ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+        }
+        twice.abs() / 2.0 >= NUDGE * around
+    };
+    Some(rings.into_iter().filter(thick).collect())
 }
 
 /// Combine two sets of rings. Returns the result as rings, or `None` when
@@ -209,6 +238,16 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         rings.extend(b.iter().cloned());
         return Some(rings);
     }
+    let fragments = fragments(a, b, op);
+    if fragments.is_empty() {
+        return None;
+    }
+    chain(fragments)
+}
+
+/// The pieces of both outlines that bound what `op` answers, before they
+/// are chained into rings.
+fn fragments(a: &[Ring], b: &[Ring], op: BoolOp) -> Vec<(Point, Point)> {
     // Which side of the other shape each operand contributes, and whether
     // that contribution runs backwards. Reversing is what turns the inside
     // of the subtracted shape into the wall of the hole it leaves.
@@ -216,7 +255,9 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         BoolOp::Union => (false, false, false),
         BoolOp::Intersect => (true, true, false),
         BoolOp::Subtract => (false, true, true),
-        // Handled above; the arm is here so the match stays total.
+        // Never asked: `combine` answers it without pieces. Taken as a
+        // union here, which has the same pieces and is empty only when
+        // both are.
         BoolOp::Exclude => (false, false, false),
     };
     let mut fragments = Vec::new();
@@ -231,10 +272,23 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
             fragments.push(if flip_b { (f.1, f.0) } else { f });
         }
     }
-    if fragments.is_empty() {
-        return None;
+    fragments
+}
+
+/// Whether `op` on these outlines comes to nothing at all: an
+/// intersection of two that do not meet, a subtraction of something
+/// that covers the whole of the first.
+///
+/// [`combine`] gives `None` for an empty answer as well as for one it
+/// cannot trace, and the two mean opposite things — nothing is there, or
+/// what is there is not known — which [`combine_or_nudge`] tells apart by
+/// asking this.
+fn leaves_nothing(a: &[Ring], b: &[Ring], op: BoolOp) -> bool {
+    match op {
+        BoolOp::Union | BoolOp::Exclude => a.is_empty() && b.is_empty(),
+        BoolOp::Intersect => a.is_empty() || b.is_empty() || fragments(a, b, op).is_empty(),
+        BoolOp::Subtract => a.is_empty() || (!b.is_empty() && fragments(a, b, op).is_empty()),
     }
-    chain(fragments)
 }
 
 fn split_ring_all(rings: &[Ring], other: &[Ring]) -> Vec<(Point, Point)> {
@@ -268,6 +322,80 @@ mod tests {
             y += STEP;
         }
         n as f32 * STEP * STEP
+    }
+
+    /// Taking away a box that shares an edge with a shape and covers all
+    /// of it leaves nothing, not the sliver the nudge left along the
+    /// shared edge; and a box sharing an edge that covers only part of it
+    /// still leaves the rest.
+    #[test]
+    fn a_nudge_leaves_no_sliver_of_its_own() {
+        let a = vec![square(10.0, 10.0, 20.0)];
+        let over = vec![square(5.0, 10.0, 40.0)];
+        assert!(
+            combine(&a, &over, BoolOp::Subtract).is_none(),
+            "shared edge"
+        );
+        let left = combine_or_nudge(&a, &over, BoolOp::Subtract).expect("an answer");
+        assert!(left.is_empty(), "and it is nothing: {left:?}");
+        // Touching along an edge, or apart, they have nothing in common.
+        for b in [
+            square(30.0, 10.0, 20.0),
+            square(-10.0, 10.0, 20.0),
+            square(50.0, 50.0, 5.0),
+        ] {
+            let both = combine_or_nudge(&a, std::slice::from_ref(&b), BoolOp::Intersect);
+            assert_eq!(both, Some(Vec::new()), "nothing in common with {b:?}");
+        }
+        let half = vec![vec![[10.0, 10.0], [20.0, 10.0], [20.0, 30.0], [10.0, 30.0]]];
+        let rest = combine_or_nudge(&a, &half, BoolOp::Subtract).expect("an answer");
+        assert!(
+            (covered_area(&rest) - 200.0).abs() < 5.0,
+            "the other half: {}",
+            covered_area(&rest)
+        );
+    }
+
+    /// An operation that comes to nothing says so, and one that comes to
+    /// something does not.
+    #[test]
+    fn leaves_nothing_says_when_an_operation_comes_to_nothing() {
+        use BoolOp::*;
+        let a = vec![square(0.0, 0.0, 10.0)];
+        let apart = vec![square(12.0, 0.0, 5.0)];
+        let inside = vec![square(2.0, 2.0, 3.0)];
+        let over = vec![square(-1.0, -1.0, 12.0)];
+        assert!(
+            leaves_nothing(&a, &apart, Intersect),
+            "apart, nothing in common"
+        );
+        assert!(
+            !leaves_nothing(&a, &inside, Intersect),
+            "one inside the other"
+        );
+        assert!(!leaves_nothing(&inside, &a, Intersect), "either way round");
+        assert!(
+            !leaves_nothing(&a, &[square(5.0, 5.0, 10.0)], Intersect),
+            "overlapping"
+        );
+        // A plus: neither has a corner inside the other, and they cross.
+        let tall = vec![vec![[4.0, -2.0], [6.0, -2.0], [6.0, 12.0], [4.0, 12.0]]];
+        let wide = vec![vec![[-2.0, 4.0], [12.0, 4.0], [12.0, 6.0], [-2.0, 6.0]]];
+        assert!(!leaves_nothing(&tall, &wide, Intersect), "crossing");
+        assert!(
+            leaves_nothing(&a, &over, Subtract),
+            "taken away by what covers it"
+        );
+        assert!(
+            !leaves_nothing(&a, &inside, Subtract),
+            "a hole is something left"
+        );
+        assert!(!leaves_nothing(&a, &apart, Subtract), "nothing taken");
+        assert!(!leaves_nothing(&a, &apart, Union), "a union of something");
+        assert!(
+            combine(&a, &apart, Intersect).is_none() && combine(&a, &over, Subtract).is_none(),
+            "and each is the None this tells apart from one that cannot be traced"
+        );
     }
 
     #[test]

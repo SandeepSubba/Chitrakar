@@ -81,14 +81,24 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
 /// it — each of those is grey somewhere, and a region would be wrong
 /// about it in the direction of showing too much.
 fn mask_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
-    let m = group.mask()?;
+    mask_region(group.mask()?, group.abs_transform())
+}
+
+/// One mask's region placed by `at`, the referring group's placement, and
+/// narrowed by the mask on it, if that is a region too.
+///
+/// The mask on a mask is usvg's `Mask::mask`, which a reader applies in
+/// the same space as the first. It used to be looked for on the mask's
+/// *contents* instead, where usvg never puts it, so it was never applied.
+fn mask_region(m: &usvg::Mask, at: usvg::Transform) -> Option<Vec<Vec<[f32; 2]>>> {
     if !region_only(m.root(), m.kind()) {
         return None;
     }
     let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
     collect_clip(m.root(), &mut rings);
+    // Nothing drawn in it lets nothing through.
     if rings.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
     let mut acc = vec![rings.remove(0)];
     for next in rings {
@@ -110,24 +120,12 @@ fn mask_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
         [r.right(), r.bottom()],
         [r.left(), r.bottom()],
     ]];
-    if let Some(cut) = chitrakar_render::boolean::combine_or_nudge(
-        &acc,
-        &bounds,
-        chitrakar_render::boolean::BoolOp::Intersect,
-    ) {
-        acc = cut;
-    }
+    acc = placed(narrowed(acc, bounds)?, at);
     // And a mask on the mask narrows it again.
-    if let Some(inner) = mask_rings(m.root()) {
-        if let Some(both) = chitrakar_render::boolean::combine_or_nudge(
-            &acc,
-            &inner,
-            chitrakar_render::boolean::BoolOp::Intersect,
-        ) {
-            acc = both;
-        }
+    if let Some(inner) = m.mask().and_then(|inner| mask_region(inner, at)) {
+        acc = narrowed(acc, inner)?;
     }
-    Some(placed(acc, group.abs_transform()))
+    Some(acc)
 }
 
 /// A clip's or a mask's region carried from the space of the group that
@@ -185,7 +183,24 @@ fn region_only(group: &usvg::Group, kind: usvg::MaskType) -> bool {
     })
 }
 
-/// The region a group is seen through, in document space, or nothing.
+/// A region narrowed to where another one also is: no rings where the
+/// two do not meet — what shows through both is nothing — and left as it
+/// was where the meeting cannot be traced, which is the one case it is
+/// not known. Always `Some`; an `Option` so a caller can pass it on.
+///
+/// Two regions that do not meet used to leave the region as it was, so a
+/// mask drawn wholly outside its own rectangle — or a clip path cut by a
+/// clip it does not meet — let everything through where it lets nothing.
+fn narrowed(region: Vec<Vec<[f32; 2]>>, by: Vec<Vec<[f32; 2]>>) -> Option<Vec<Vec<[f32; 2]>>> {
+    use chitrakar_render::boolean::{combine_or_nudge, BoolOp};
+    if region.is_empty() || by.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(combine_or_nudge(&region, &by, BoolOp::Intersect).unwrap_or(region))
+}
+
+/// The region a group is seen through, in document space, or `None` for
+/// a group with no clip; an empty region shows nothing.
 ///
 /// A clip path is a set of outlines and the content shows where they
 /// cover — usvg has already resolved which outlines and put the whole
@@ -195,11 +210,23 @@ fn region_only(group: &usvg::Group, kind: usvg::MaskType) -> bool {
 /// all resolved by then as well; a clip *on* the clip path narrows it,
 /// which is an intersection like any other.
 fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
-    let cp = group.clip_path()?;
+    clip_region(group.clip_path()?, group.abs_transform())
+}
+
+/// One clip path's region placed by `at`, the referring group's
+/// placement, and narrowed by the clip path on it.
+///
+/// The clip on a clip path is usvg's `ClipPath::clip_path`, applied by a
+/// reader in the referring group's space — without the first clip path's
+/// own `transform`. It used to be looked for on the clip path's
+/// *contents*, where usvg never puts it, so a clip path cut by another
+/// let through everything the first one did.
+fn clip_region(cp: &usvg::ClipPath, at: usvg::Transform) -> Option<Vec<Vec<[f32; 2]>>> {
     let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
     collect_clip(cp.root(), &mut rings);
+    // A clip path with no outlines in it shows nothing.
     if rings.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
     // The outlines of a clip path show where *any* of them covers, which
     // is their union — not the even-odd of one compound shape.
@@ -214,21 +241,13 @@ fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
             None => acc.push(next),
         }
     }
-    // And a clip on the clip path narrows what it lets through.
-    if let Some(inner) = clip_rings(cp.root()) {
-        if let Some(both) = chitrakar_render::boolean::combine_or_nudge(
-            &acc,
-            &inner,
-            chitrakar_render::boolean::BoolOp::Intersect,
-        ) {
-            acc = both;
-        }
-    }
     // The clip path's own `transform` goes inside the group's placement.
-    Some(placed(
-        acc,
-        group.abs_transform().pre_concat(cp.transform()),
-    ))
+    acc = placed(acc, at.pre_concat(cp.transform()));
+    // And a clip on the clip path narrows what it lets through.
+    if let Some(inner) = cp.clip_path().and_then(|inner| clip_region(inner, at)) {
+        acc = narrowed(acc, inner)?;
+    }
+    Some(acc)
 }
 
 fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<[f32; 2]>>) {
@@ -290,28 +309,28 @@ fn walk(
     // A clip path and a mask are both "show only here", so they meet as
     // one region — and a mask only joins in when it *is* a region. See
     // `mask_rings`.
+    //
+    //
+    // Two regions that do not meet show nothing, and what is under them
+    // stays out (`narrowed`). The inner region used to be kept instead, so
+    // a frame standing wholly outside the frame it sits in — hidden on the
+    // page — came back whole. Only what cannot be traced keeps the inner
+    // region, as before.
     let here = match (clip_rings(group), mask_rings(group)) {
         (None, None) => None,
         (Some(only), None) | (None, Some(only)) => Some(only),
-        (Some(a), Some(b)) => chitrakar_render::boolean::combine_or_nudge(
-            &a,
-            &b,
-            chitrakar_render::boolean::BoolOp::Intersect,
-        )
-        .or(Some(b)),
+        (Some(a), Some(b)) => narrowed(b, a),
     };
-    let clip = match (clip, here.as_ref()) {
+    let clip = match (clip, here) {
         (None, None) => None,
         (Some(outer), None) => Some(outer.clone()),
-        (None, Some(inner)) => Some(inner.clone()),
+        (None, Some(inner)) => Some(inner),
         // A clip inside a clip shows only what both show.
-        (Some(outer), Some(inner)) => chitrakar_render::boolean::combine_or_nudge(
-            outer,
-            inner,
-            chitrakar_render::boolean::BoolOp::Intersect,
-        )
-        .or_else(|| Some(inner.clone())),
+        (Some(outer), Some(inner)) => narrowed(inner, outer.clone()),
     };
+    if clip.as_ref().is_some_and(|c| c.is_empty()) {
+        return;
+    }
     let clip = clip.as_ref();
     for child in group.children() {
         match child {
@@ -1853,5 +1872,174 @@ mod tests {
             place(br#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40"><g transform="translate(20 10)"><text font-family="DejaVu Sans" font-size="10" transform="translate(5 0)" x="0" y="10">Hi</text></g></svg>"#),
             (25.0, 10.0)
         );
+    }
+
+    /// A page exported and brought back in is the colour it was.
+    ///
+    /// Both sides are drawn by the engine, so unlike a reader's picture
+    /// nothing here is mixed in another light, and every flat pixel is
+    /// held to its colour — translucent ones too. Coverage alone could
+    /// not see a layer come back over another opaque one, and that is
+    /// what it found: a frame standing wholly outside the frame it sits
+    /// in, hidden on the page, came back whole on top of its neighbour,
+    /// because two clips that do not meet were read as two clips that
+    /// could not be combined (`walk`, `boolean::combine_or_nudge`).
+    #[test]
+    fn a_page_exported_and_brought_back_is_the_colour_it_was() {
+        for seed in 0..400u64 {
+            let page = portable(seed);
+            let before = chitrakar_render::render(&page).unwrap();
+            let after = chitrakar_render::render(&round_trip(&page)).unwrap();
+            let (w, h) = (page.meta.width as i32, page.meta.height as i32);
+            let px = |x: i32, y: i32| before.get(x as u32, y as u32).to_srgb8();
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    // Painted, and flat round about: an edge is the
+                    // coverage test's to judge.
+                    let flat = c[3] > 0
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let n = px(x + i, y + j);
+                                (0..4).all(|k| n[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    let t = after.get(x as u32, y as u32).to_srgb8();
+                    if (0..4).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, t));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 2,
+                "seed {seed}: {} flat pixels came back another colour, the first at \
+                 ({}, {}) — {:?} before, {:?} after",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
+    }
+
+    /// What is clipped by two regions that do not meet shows nothing, and
+    /// does not come in.
+    #[test]
+    fn what_two_clips_that_do_not_meet_hide_stays_hidden() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><clipPath id="a"><rect width="10" height="10"/></clipPath><clipPath id="b"><rect x="20" width="10" height="10"/></clipPath></defs><g clip-path="url(#a)"><g clip-path="url(#b)"><rect width="40" height="40" fill="red"/></g></g><rect x="30" y="30" width="5" height="5" fill="blue"/></svg>"#;
+        let imported = import_svg(svg).unwrap();
+        assert_eq!(imported.shapes.len(), 1, "only the blue square comes in");
+        // Every other way a region comes out empty, each held to what a
+        // reader draws as well: a red square that shows nowhere.
+        for (svg, what) in [
+            (
+                r#"<defs><clipPath id="c"/></defs><g clip-path="url(#c)"><rect width="40" height="40" fill="red"/></g>"#,
+                "a clip path with nothing in it",
+            ),
+            (
+                r#"<defs><clipPath id="i"><rect x="30" width="5" height="5"/></clipPath><clipPath id="c" clip-path="url(#i)"><rect width="10" height="10"/></clipPath></defs><g clip-path="url(#c)"><rect width="40" height="40" fill="red"/></g>"#,
+                "a clip path cut by a clip it does not meet",
+            ),
+            (
+                r#"<defs><mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="10" height="10"><rect x="20" width="10" height="10" fill="white"/></mask></defs><g mask="url(#m)"><rect width="40" height="40" fill="red"/></g>"#,
+                "a mask drawn outside its own rectangle",
+            ),
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">{svg}</svg>"#
+            );
+            let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+            let mut pix = resvg::tiny_skia::Pixmap::new(40, 40).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pix.as_mut(),
+            );
+            assert!(
+                pix.data().chunks(4).all(|p| p[3] == 0),
+                "{what}: a reader shows nothing"
+            );
+            assert!(
+                import_svg(svg.as_bytes()).unwrap().shapes.is_empty(),
+                "{what}: and nothing comes in"
+            );
+        }
+        // And clips that do meet still show where they meet.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><clipPath id="a"><rect width="10" height="10"/></clipPath><clipPath id="b"><rect x="5" width="10" height="10"/></clipPath></defs><g clip-path="url(#a)"><g clip-path="url(#b)"><rect width="40" height="40" fill="red"/></g></g></svg>"#;
+        let imported = import_svg(svg).unwrap();
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, n) in imported.shapes.into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(n),
+            })
+            .unwrap();
+        }
+        let ours = chitrakar_render::render(&doc).unwrap();
+        assert!(ours.get(7, 5).a > 0.99, "where both show");
+        assert!(
+            ours.get(2, 5).a < 0.01 && ours.get(12, 5).a < 0.01,
+            "and nowhere else"
+        );
+    }
+
+    /// A clip on a clip path, and a mask on a mask, narrow it where a
+    /// reader narrows it — in the referring group's space, without the
+    /// first one's own transform.
+    #[test]
+    fn a_clip_on_a_clip_path_narrows_it_as_a_reader_does() {
+        for (body, what) in [
+            (
+                r#"<defs><clipPath id="i"><rect x="12" y="0" width="20" height="40"/></clipPath><clipPath id="c" clip-path="url(#i)" transform="translate(4 0)"><rect width="16" height="30"/></clipPath></defs><g transform="translate(2 3)" clip-path="url(#c)"><rect width="40" height="40" fill="red"/></g>"#,
+                "a clip on a moved clip path",
+            ),
+            (
+                r#"<defs><mask id="i" maskUnits="userSpaceOnUse" x="0" y="10" width="40" height="40"><rect width="40" height="40" fill="white"/></mask><mask id="m" mask="url(#i)" maskUnits="userSpaceOnUse" x="0" y="0" width="40" height="40"><rect width="20" height="30" fill="white"/></mask></defs><g transform="translate(3 2)" mask="url(#m)"><rect width="40" height="40" fill="red"/></g>"#,
+                "a mask on a mask",
+            ),
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">{body}</svg>"#
+            );
+            let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+            let mut pix = resvg::tiny_skia::Pixmap::new(40, 40).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pix.as_mut(),
+            );
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            let mut doc = Document::new(40, 40, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, n) in imported.shapes.into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(n),
+                })
+                .unwrap();
+            }
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let theirs = pix.data();
+            let shown = theirs.chunks(4).filter(|p| p[3] > 127).count();
+            assert!(shown > 50, "{what}: a reader shows some of it ({shown})");
+            for y in 0..40u32 {
+                for x in 0..40u32 {
+                    let t = theirs[((y * 40 + x) * 4 + 3) as usize] as f32 / 255.0;
+                    let o = ours.get(x, y).a;
+                    assert!(
+                        (t - o).abs() < 0.5,
+                        "{what}: at ({x}, {y}) a reader covers {t:.2} and the import {o:.2}"
+                    );
+                }
+            }
+        }
     }
 }

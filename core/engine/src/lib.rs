@@ -1139,6 +1139,20 @@ impl Session {
                     )
                 })?;
         }
+        // Nothing in common, or all of it taken away, is an answer with
+        // nothing in it — and was reported as outlines whose edges
+        // overlap exactly, which they did not.
+        if acc.is_empty() {
+            return Err(EngineError::BadCommand(
+                match op {
+                    chitrakar_render::boolean::BoolOp::Intersect => {
+                        "nothing would be left — these shapes do not overlap"
+                    }
+                    _ => "nothing would be left — what is taken away covers it all",
+                }
+                .into(),
+            ));
+        }
         // Anchors are stored relative to the node's own origin, like every
         // other path, so the transform carries the position.
         let (mut x0, mut y0) = (f32::MAX, f32::MAX);
@@ -3195,7 +3209,11 @@ impl Session {
                 )
             })?;
         // The softness of what was already picked carries through: the
-        // second box says where, not how sharply.
+        // second box says where, not how sharply. Keeping the overlap of
+        // two that do not meet, or taking away a box that covers all of
+        // it, comes to no rings, and picks nothing — as it does when
+        // nothing was picked to begin with. It used to be refused as
+        // edges that overlap exactly, which they did not.
         let selection = Self::region_of(combined, current.feather).map(Box::new);
         self.apply_labeled(
             Command::SetSelection { selection },
@@ -12542,6 +12560,68 @@ mod tests {
             at[0].abs() < 1e-3,
             "one thing aligns to the page's own left edge: {at:?}"
         );
+    }
+
+    /// Keeping the overlap of two regions that do not meet picks nothing,
+    /// and so does taking away a box that covers all that was picked —
+    /// one step each, undone like any other. Both were refused as edges
+    /// that overlap exactly, which they did not.
+    #[test]
+    fn keeping_an_overlap_that_is_not_there_picks_nothing() {
+        let mut session = Session::new(100, 60, ColorMode::Rgb);
+        let square = |s: f32| VectorShape::Rect {
+            width: s,
+            height: s,
+            radius: 0.0,
+        };
+        let pick = |session: &mut Session, x: f32, s: f32, how: &str| {
+            session.pick_region(square(s), Transform::translation(x, 10.0), how)
+        };
+        pick(&mut session, 10.0, 20.0, "replace").unwrap();
+        pick(&mut session, 60.0, 20.0, "intersect").unwrap();
+        assert!(session.doc.selection().is_none(), "nothing in common");
+        session.undo().unwrap();
+        assert!(
+            session.doc.selection().is_some(),
+            "and undone, the first again"
+        );
+        // Touching along an edge is nothing in common too — which is what
+        // a box dragged from its middle with alt held lands on, as often
+        // as not, and the case that is degenerate to the arithmetic.
+        pick(&mut session, 30.0, 20.0, "intersect").unwrap();
+        assert!(
+            session.doc.selection().is_none(),
+            "touching, nothing in common"
+        );
+        session.undo().unwrap();
+        pick(&mut session, 5.0, 40.0, "subtract").unwrap();
+        assert!(session.doc.selection().is_none(), "all of it taken away");
+        // What is something still comes to something.
+        session.undo().unwrap();
+        pick(&mut session, 20.0, 20.0, "intersect").unwrap();
+        assert!(
+            session.doc.selection().is_some(),
+            "an overlap that is there"
+        );
+    }
+
+    /// Shapes with nothing in common say so when asked for it.
+    #[test]
+    fn shapes_with_nothing_in_common_say_so() {
+        let mut session = Session::new(120, 60, ColorMode::Rgb);
+        let left = add_rect(&mut session, "left", 20.0, 20.0);
+        let right = add_rect(&mut session, "right", 20.0, 20.0);
+        session
+            .apply(Command::SetTransform {
+                id: right,
+                transform: Transform::translation(60.0, 0.0),
+            })
+            .unwrap();
+        let err = session
+            .boolean_nodes(&[left, right], "intersect")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("do not overlap"), "{err}");
     }
 
     /// Two shapes snapped edge to edge, united.

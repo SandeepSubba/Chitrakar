@@ -12603,6 +12603,44 @@ assert(
   await pickTool("Move");
 }
 
+// 9bz. Keeping the overlap with a box that does not meet what is picked
+// picks nothing, and taking away a box that covers all of it does too —
+// each one step, undone like any other. Both were refused with an alert
+// about edges that overlap exactly, which they did not.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const drag = async (x0, y0, x1, y1, keys = []) => {
+    for (const k of keys) await page.keyboard.down(k);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    for (const k of keys) await page.keyboard.up(k);
+    await page.waitForTimeout(300);
+  };
+  const ants = () => page.locator(".ants").count();
+  await pickTool("Select");
+  await drag(40, 40, 140, 140);
+  assert((await ants()) === 1, "a box is picked out");
+  lastDialog = "";
+  await drag(240, 160, 340, 260, ["Shift", "Alt"]);
+  assert(lastDialog === "", `keeping an overlap that is not there says nothing (${lastDialog})`);
+  assert((await ants()) === 0, "and picks nothing");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await ants()) === 1, "undone, the box is picked again");
+  await drag(20, 20, 200, 200, ["Alt"]);
+  assert(lastDialog === "", `taking all of it away says nothing (${lastDialog})`);
+  assert((await ants()) === 0, "and leaves nothing picked");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await ants()) === 1, "and undone, it is back");
+  await page.keyboard.press("Escape");
+  await pickTool("Move");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 
