@@ -1,0 +1,19 @@
+[package]
+name = "chitrakar-render"
+description = "Render graph: CPU reference renderer now, wgpu/vello backends next"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+ab_glyph = "0.2"
+rustybuzz = "0.20"
+
+# The shared fixture is a test dependency here for the same reason it is
+# one for the GPU backend: a claim about the renderer is worth most when
+# it is asked of a document with one of everything in it.
+[dev-dependencies]
+chitrakar-doc = { workspace = true, features = ["fixture"] }
