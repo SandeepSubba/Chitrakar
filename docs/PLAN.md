@@ -4765,7 +4765,16 @@ without reading anything else.*
      carried on past it. `place_rendered` renders over the area the page
      shows (`Page::area`: the document, or the frame's box) with
      `render_past_the_page_at`, the document drawn without its edge;
-     for a whole-document page the two are the same rectangle.
+     for a whole-document page the two are the same rectangle. And a
+     *turned* frame's page was the upright box around it — the frame at
+     its angle in the middle, corners of nothing round it — where the
+     picture export stands it upright, "since what is wanted is its
+     contents, not its angle". A page carries a view now (`Page::view`,
+     `size`: the identity and the document for a page of the whole; for
+     a frame, its placement undone and its size on the page put back),
+     folded into the page's one transform to points, and what goes as
+     pixels is rendered through it. The audit takes turned and scaled
+     frames too: 110 frames, where the upright ones were 76.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

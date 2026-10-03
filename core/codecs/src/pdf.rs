@@ -215,7 +215,8 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         content: String::new(),
         icc_objects: None,
         fonts: Vec::new(),
-        area: [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
+        view: Transform::default(),
+        size: [doc.meta.width as f32, doc.meta.height as f32],
     };
     // 1 catalog and 2 pages: reserved, written last, once every page
     // they list has a number. The pages themselves are pushed at the
@@ -232,10 +233,8 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         page.icc_objects = Some((profile, space));
     }
     page.draw_page()?;
-    let meta = &page.doc.meta;
-    let whole = [0.0, 0.0, meta.width as f32, meta.height as f32];
     let body = std::mem::take(&mut page.content);
-    page.pages.push((body, whole));
+    page.pages.push((body, page.view, page.size));
     page.finish()
 }
 
@@ -279,7 +278,8 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         content: String::new(),
         icc_objects: None,
         fonts: Vec::new(),
-        area: [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
+        view: Transform::default(),
+        size: [doc.meta.width as f32, doc.meta.height as f32],
     };
     for _ in 0..2 {
         page.objects.push(Vec::new());
@@ -303,13 +303,33 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
             }
         }
         // The frame's own box, not what it can touch: a frame cuts what
-        // goes into it to its box, so that box is the page.
-        let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) =
-            chitrakar_render::node_visual_bounds(doc, frame)?
-        else {
+        // goes into it to its box, so that box is the page — upright, at
+        // the size it shows on the page, as exporting the frame as a
+        // picture gives it (`artboard_pixels`). A turned frame's page was
+        // the upright box *around* it, the frame standing at its angle in
+        // the middle of it with corners of nothing round it.
+        let node = doc.node(frame)?;
+        let NodeKind::Artboard { width, height, .. } = node.kind else {
             continue;
         };
-        let box_ = [x0, y0, x1, y1];
+        let world = chitrakar_render::ancestor_space(doc, frame).compose(node.transform);
+        let (sx, sy) = (
+            (world.a * world.a + world.b * world.b).sqrt(),
+            (world.c * world.c + world.d * world.d).sqrt(),
+        );
+        let Some(back) = chitrakar_render::invert(world) else {
+            continue;
+        };
+        let view = Transform {
+            a: sx,
+            d: sy,
+            ..Default::default()
+        }
+        .compose(back);
+        let size = [width * sx, height * sy];
+        if !(size[0] > 0.0 && size[1] > 0.0 && size[0].is_finite() && size[1].is_finite()) {
+            continue;
+        }
         // The frame's page is the frame's contents, as exporting the
         // frame as a picture gives them (`artboard_pixels`): a frame held
         // to the layer under it, alone with that layer hidden, showed
@@ -319,11 +339,12 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
             clipped: false,
         })?;
         page.doc = alone;
-        page.area = box_;
+        page.view = view;
+        page.size = size;
         page.content.clear();
         page.draw_page()?;
         let body = std::mem::take(&mut page.content);
-        page.pages.push((body, box_));
+        page.pages.push((body, view, size));
     }
     page.finish()
 }
@@ -333,13 +354,18 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
 /// content itself, in document pixels — the page's own transform maps
 /// those to points and turns y downwards.
 struct Page {
-    /// The part of the document the page being drawn shows, in document
-    /// pixels: the whole of it, or one frame's box. What goes as pixels
-    /// is rendered over this, since it is what the page shows — rendered
-    /// over the document's own rectangle instead, a frame reaching past
-    /// the document's edge lost everything past it that was not a live
-    /// vector, and its page was white there.
-    area: [f32; 4],
+    /// Where the page being drawn looks: document pixels carried into the
+    /// page's own, whose corner is the page's corner. The identity for a
+    /// page of the whole document; for a frame's page, the frame's own
+    /// placement undone and its size on the page put back, so the frame
+    /// stands upright at its corner.
+    view: Transform,
+    /// That page's size, in its own pixels. What goes as pixels is
+    /// rendered over it through `view`, since it is what the page shows —
+    /// rendered over the document's own rectangle instead, a frame
+    /// reaching past the document's edge lost everything past it that was
+    /// not a live vector, and its page was white there.
+    size: [f32; 2],
     /// The document this page draws. Owned, because exporting the
     /// frames as pages draws a differently-hidden copy of it per page
     /// while keeping one pool of objects for the file.
@@ -348,10 +374,10 @@ struct Page {
     /// is then written in ink.
     separate: Option<chitrakar_color::cms::RgbToCmyk>,
     objects: Vec<Vec<u8>>,
-    /// The pages written so far: each a finished content stream and the
-    /// document-space box it shows. One page for the whole document,
-    /// or one per frame.
-    pages: Vec<(String, [f32; 4])>,
+    /// The pages written so far: each a finished content stream, the view
+    /// it was drawn through and its size (`view`, `size`). One page for
+    /// the whole document, or one per frame.
+    pages: Vec<(String, Transform, [f32; 2])>,
     xobjects: Vec<(String, usize)>,
     /// Transparency groups: the object number reserved for each and what
     /// it draws. Written at the end, once the resources every content
@@ -693,10 +719,10 @@ impl Page {
         // Over what the page shows, from its corner: the samples line up
         // with the page's own pixels, which for a frame start where the
         // frame does.
-        let [ax, ay, bx, by] = self.area;
+        let [pw, ph] = self.size;
         let (w, h) = (
-            ((bx - ax) * over).ceil().max(1.0) as usize,
-            ((by - ay) * over).ceil().max(1.0) as usize,
+            (pw * over).ceil().max(1.0) as usize,
+            (ph * over).ceil().max(1.0) as usize,
         );
         let mut surface = chitrakar_render::Surface::new(w as u32, h as u32);
         // Past the page's edge, since the surface is already what the page
@@ -714,10 +740,9 @@ impl Page {
             Transform {
                 a: over,
                 d: over,
-                e: -ax * over,
-                f: -ay * over,
                 ..Default::default()
-            },
+            }
+            .compose(self.view),
         )?;
         // The ink's bounding box; nothing to place when there is none.
         let inked = |x: usize, y: usize| surface.pixels[y * w + x].a > 0.0;
@@ -761,14 +786,28 @@ impl Page {
             .gstate(1.0, 1.0, blend)
             .map(|gs| format!("/{gs} gs\n"))
             .unwrap_or_default();
-        // Placed in document pixels, however many samples it holds.
+        // Placed in the page's own pixels, however many samples it
+        // holds — which, the content being written in the document's, is
+        // through the page's view undone.
+        let back = match chitrakar_render::invert(self.view) {
+            Some(b) if b != Transform::default() => format!(
+                "{} {} {} {} {} {} cm\n",
+                num(b.a),
+                num(b.b),
+                num(b.c),
+                num(b.d),
+                num(b.e),
+                num(b.f)
+            ),
+            _ => String::new(),
+        };
         let _ = writeln!(
             self.content,
-            "q\n{gs}{} 0 0 {} {} {} cm\n/{name} Do\nQ",
+            "q\n{back}{gs}{} 0 0 {} {} {} cm\n/{name} Do\nQ",
             num(cw as f32 / over),
             num(-(ch as f32) / over),
-            num(ax + x0 as f32 / over),
-            num(ay + y1 as f32 / over)
+            num(x0 as f32 / over),
+            num(y1 as f32 / over)
         );
         Ok(())
     }
@@ -2039,18 +2078,27 @@ impl Page {
         // Each page: its content in points with y downwards from its own
         // top-left corner, and a box the size of what it shows. A page
         // showing the whole document sits at the document's origin; one
-        // showing a frame is the same content moved so that frame's own
-        // corner is the corner of the page.
+        // showing a frame is the same content seen through the frame's
+        // view, so the frame stands upright with its corner at the page's.
         let mut kids = String::new();
         let pages = std::mem::take(&mut self.pages);
-        for (body, box_) in &pages {
-            let (page_w, page_h) = ((box_[2] - box_[0]) * pt, (box_[3] - box_[1]) * pt);
+        for (body, view, size) in &pages {
+            let (page_w, page_h) = (size[0] * pt, size[1] * pt);
+            let to_points = Transform {
+                a: pt,
+                d: -pt,
+                f: page_h,
+                ..Default::default()
+            }
+            .compose(*view);
             let content = format!(
-                "q\n{} 0 0 {} {} {} cm\n{body}Q\n",
-                num(pt),
-                num(-pt),
-                num(-box_[0] * pt),
-                num(box_[3] * pt)
+                "q\n{} {} {} {} {} {} cm\n{body}Q\n",
+                num(to_points.a),
+                num(to_points.b),
+                num(to_points.c),
+                num(to_points.d),
+                num(to_points.e),
+                num(to_points.f)
             );
             // Compressed: the content is text, and a bold no face supplies
             // is drawn as its outlines, which fill a page's worth of it.
@@ -5602,17 +5650,8 @@ mod tests {
                 .success();
             assert!(ok, "ghostscript accepted the file");
             for (k, &id) in boards.iter().enumerate() {
-                // Upright and at its own size, where the page and the
-                // picture are the same grid.
-                let n = doc.node(id).unwrap();
-                let t = chitrakar_render::ancestor_space(&doc, id).compose(n.transform);
-                if t.b.abs() > 1e-6
-                    || t.c.abs() > 1e-6
-                    || (t.a - 1.0).abs() > 1e-6
-                    || (t.d - 1.0).abs() > 1e-6
-                {
-                    continue;
-                }
+                // Turned or scaled as well: the page is the frame upright
+                // at its size on the page, which is the picture's grid.
                 frames += 1;
                 let ours = chitrakar_render::artboard_pixels(&doc, id, 1.0)
                     .unwrap()
@@ -5659,6 +5698,6 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
-        assert!(frames > 50, "enough frames were asked about ({frames})");
+        assert!(frames > 100, "enough frames were asked about ({frames})");
     }
 }
