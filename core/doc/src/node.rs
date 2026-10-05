@@ -137,13 +137,31 @@ pub enum Gradient {
         to: [f32; 2],
         stops: Vec<GradientStop>,
     },
-    /// Ramp outward from `center` to `radius` (in units of the box's
-    /// half-diagonal), clamped past the edge.
+    /// Ramp outward from `center` to `radius`, clamped past the edge —
+    /// in the box's own units, 0..1 each way, so on a box that is not
+    /// square the rings are ellipses that follow it.
     Radial {
         center: [f32; 2],
         radius: f32,
         stops: Vec<GradientStop>,
+        /// A 2×2 matrix, `[a, b, c, d]` by rows, that the offset from
+        /// the centre goes through before its length is taken: the ramp
+        /// is at `|A·(q − center)| / radius`. What lets the rings be
+        /// circles on the page whatever the box, or ellipses at an angle
+        /// — a file's radial gradient in its own units, or turned by a
+        /// transform of its own. `None`, every older file, is the
+        /// identity: rings in the box's units, as above.
+        #[serde(default)]
+        axes: Option<[f32; 4]>,
     },
+}
+
+/// The inverse of a radial gradient's axes (`Gradient::Radial::axes`),
+/// by rows like them, or `None` when they flatten everything to a line.
+pub fn invert_axes(a: [f32; 4]) -> Option<[f32; 4]> {
+    let det = a[0] * a[3] - a[1] * a[2];
+    (det.abs() > 1e-12 && det.is_finite())
+        .then(|| [a[3] / det, -a[1] / det, -a[2] / det, a[0] / det])
 }
 
 impl Gradient {

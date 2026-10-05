@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~585),
+- **Verify before committing:** `cargo test --workspace` (~588),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4828,9 +4828,31 @@ without reading anything else.*
      cell's edge did not meet** in `chain`, so a crossing worked out from
      each of its two edges could leave an outline unclosable; ends meet
      within a weld by distance now, through the cells round them.
-     Left out of the test, and said so there: gradients, whose spread
-     (reflect, repeat) and focal point the engine has no field for —
-     the next thing to add — and strokes under a skew or an uneven
+     **Then gradients.** Colour compared only where a picture is flat
+     had let every gradient through — a gradient is nowhere flat — so
+     they are held everywhere the shape is solid, one shape a file
+     (`a_gradient_written_elsewhere_comes_in_painting_what_a_reader_paints`).
+     **Every radial gradient came in wrong**: as a circle in the box's own
+     units with the file's radius over the box's half-diagonal — half as
+     wide again on a square, an ellipse on anything else. The engine's
+     radial takes axes of its own now (`Gradient::Radial::axes`, a 2×2
+     matrix the offset from the centre goes through; `None`, every older
+     file, the identity), the file's rings come in through them exactly
+     (`M⁻¹ B / r`), SVG writes them as a gradient transform and PDF as one
+     more `cm` before the shading, and the GPU hands such a page back to
+     the CPU until it is taught the matrix. A **linear** one in user
+     space over a box that is not square came in with its bands turned —
+     its ends taken into the box straight across, where the engine lays
+     bands square to the line in the box; the ramp itself is carried
+     over now (`t = (q − q1)·B a`). And a curve bulging past its anchors
+     had its gradient laid over the anchors' box rather than the curve's
+     (`gradient_box`). Found on the way, and not ours: ghostscript draws
+     a radial shading up to a device pixel further out than its rings,
+     with axes or without, so the PDF witness compares where along the
+     ramp a pixel is, drawn large.
+     Left out of the tests, and said so there: a focal point off the
+     centre and a spread other than pad, which the engine has no field
+     for — the next thing to add — and strokes under a skew or an uneven
      scale, since a path comes in in page space with its pen, where a
      reader turns the pen with the path; keeping each path in its own
      space with the transform on the layer is the fix for that. Long

@@ -4170,6 +4170,11 @@ fn vector(
         // No stops is nothing to paint, as it is on the CPU — and the
         // flat fill stays covered up.
         Some(g) if g.stops().is_empty() => None,
+        // A radial whose rings go through axes of their own — a file's
+        // radial gradient as it came in — is a matrix more than the four
+        // numbers a gradient carries here, and is the CPU's until it is
+        // taught it.
+        Some(chitrakar_doc::Gradient::Radial { axes: Some(_), .. }) => return None,
         Some(g) => {
             let (ramp, geom, radial) = bake(doc, g);
             let at = out.textures.len();
@@ -7256,6 +7261,7 @@ mod tests {
                     center: [0.4, 0.45],
                     radius: 0.8,
                     stops: ramp(&[(0.0, WHITE), (1.0, BLUE)]),
+                    axes: None,
                 },
             ),
             Transform {

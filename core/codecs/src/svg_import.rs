@@ -618,20 +618,74 @@ fn gradient_of(
         [(p.x - bbox[0]) / bw, (p.y - bbox[1]) / bh]
     };
     match paint {
-        usvg::Paint::LinearGradient(g) => Some(Gradient::Linear {
-            from: norm(g.transform(), g.x1(), g.y1()),
-            to: norm(g.transform(), g.x2(), g.y2()),
-            stops: stops_of(g.stops(), alpha),
-        }),
+        // The engine's line runs across the shape's box, its bands square
+        // to it *in the box* — 0..1 each way, however long each way is.
+        // A file's bands are square to the line in the gradient's own
+        // space, whatever that is mapped to the page by. Both ends taken
+        // into the box straight across, a gradient in user space over a
+        // box that is not square came in with every band turned, and one
+        // under a skew or in box units likewise. So the ramp is carried
+        // over rather than the ends: it is `t = (p − p1)·a` on the page,
+        // `a = M⁻ᵀ d / |d|²` for the gradient's vector `d` and the matrix
+        // `M` taking its space to the page; in the box, `q` with
+        // `p = B q + b0`, it is `(q − q1)·B a`; and the line whose ramp
+        // that is runs from `q1` along `B a / |B a|²`.
+        usvg::Paint::LinearGradient(g) => {
+            let from = norm(g.transform(), g.x1(), g.y1());
+            let m = abs.pre_concat(g.transform());
+            let det = m.sx * m.sy - m.kx * m.ky;
+            let d = [g.x2() - g.x1(), g.y2() - g.y1()];
+            let dd = d[0] * d[0] + d[1] * d[1];
+            let to = if det.abs() > 1e-12 && dd > 1e-12 {
+                // M⁻ᵀ d, then over |d|².
+                let a = [
+                    (m.sy * d[0] - m.ky * d[1]) / det / dd,
+                    (-m.kx * d[0] + m.sx * d[1]) / det / dd,
+                ];
+                let ba = [bw * a[0], bh * a[1]];
+                let n = ba[0] * ba[0] + ba[1] * ba[1];
+                if n > 1e-20 {
+                    [from[0] + ba[0] / n, from[1] + ba[1] / n]
+                } else {
+                    norm(g.transform(), g.x2(), g.y2())
+                }
+            } else {
+                norm(g.transform(), g.x2(), g.y2())
+            };
+            Some(Gradient::Linear {
+                from,
+                to,
+                stops: stops_of(g.stops(), alpha),
+            })
+        }
+        // A file's rings are circles in the gradient's own space, which
+        // reaches the page through the matrix `M`: the ramp is
+        // `|M⁻¹ (p − pc)| / r`. In the shape's box `p − pc = B (q − qc)`,
+        // so the rings there are `|M⁻¹ B (q − qc)| / r` — exactly the
+        // engine's radial with those axes and a radius of one. They used
+        // to come in as a circle in the box's own units with the file's
+        // radius over the box's half-diagonal: half as wide again as the
+        // file's on a square, and an ellipse on anything else.
         usvg::Paint::RadialGradient(g) => {
             let center = norm(g.transform(), g.cx(), g.cy());
-            let (sx, sy) = g.transform().get_scale();
-            let (ax, ay) = abs.get_scale();
-            let r = g.r().get() * ((sx * ax + sy * ay) / 2.0).abs();
+            let m = abs.pre_concat(g.transform());
+            let det = m.sx * m.sy - m.kx * m.ky;
+            let r = g.r().get();
+            if det.abs() < 1e-12 || r <= 0.0 {
+                return None;
+            }
+            // M⁻¹ = [sy −kx; −ky sx] / det, then on the right by B, over r.
+            let axes = [
+                m.sy / det * bw / r,
+                -m.kx / det * bh / r,
+                -m.ky / det * bw / r,
+                m.sx / det * bh / r,
+            ];
             Some(Gradient::Radial {
                 center,
-                radius: r / (0.5 * (bw * bw + bh * bh).sqrt()),
+                radius: 1.0,
                 stops: stops_of(g.stops(), alpha),
+                axes: Some(axes),
             })
         }
         _ => None,
@@ -795,30 +849,26 @@ fn shape_of(path: &usvg::Path, mut rings: Vec<Ring>, opacity: f32) -> Option<Nod
     // is how outlines are usually drawn.
     let main = rings.remove(0);
     let subpaths: Vec<Vec<[f32; 2]>> = rings.iter().map(Ring::flattened).collect();
-    let mut bbox = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for p in main.points.iter().chain(subpaths.iter().flatten()) {
-        bbox = [
-            bbox[0].min(p[0]),
-            bbox[1].min(p[1]),
-            bbox[2].max(p[0]),
-            bbox[3].max(p[1]),
-        ];
-    }
     let name = if path.id().is_empty() {
         "Path"
     } else {
         path.id()
     };
-    let mut node = Node::vector(
-        name,
-        VectorShape::Path {
-            points: main.points,
-            closed: main.closed,
-            smooth: false,
-            handles: main.handles,
-            subpaths,
-        },
-    );
+    let shape = VectorShape::Path {
+        points: main.points,
+        closed: main.closed,
+        smooth: false,
+        handles: main.handles,
+        subpaths,
+    };
+    // The box a gradient is laid across is the one the engine will lay it
+    // across (`gradient_box`): the curve's own extent. Measured from the
+    // anchors alone, a curve bulging past them gave the gradient a
+    // smaller box here than it was painted over, and its ramp came in
+    // shifted along it.
+    let (x0, y0, x1, y1) = chitrakar_render::gradient_box(&shape);
+    let bbox = [x0, y0, x1, y1];
+    let mut node = Node::vector(name, shape);
     if let NodeKind::Vector {
         fill,
         stroke,
@@ -2129,6 +2179,11 @@ mod tests {
         wrappers: bool,
         curves: bool,
         many: bool,
+        spread: bool,
+        radial: bool,
+        grad_transform: bool,
+        bbox_units: bool,
+        focal: bool,
     }
     const ALL: Allow = Allow {
         gradients: true,
@@ -2138,6 +2193,11 @@ mod tests {
         wrappers: true,
         curves: true,
         many: true,
+        spread: true,
+        radial: true,
+        grad_transform: true,
+        bbox_units: true,
+        focal: true,
     };
 
     fn foreign_svg_with(seed: u64, opaque: bool, allow: Allow) -> String {
@@ -2197,13 +2257,14 @@ mod tests {
                 k => {
                     *ids += 1;
                     let id = format!("g{ids}");
-                    let units = if d.one_in(2) {
+                    let units = if d.one_in(2) || !allow.bbox_units {
                         "userSpaceOnUse"
                     } else {
                         "objectBoundingBox"
                     };
                     let spread = *d.pick(&["pad", "reflect", "repeat"]);
-                    let gt = if d.one_in(3) {
+                    let spread = if allow.spread { spread } else { "pad" };
+                    let gt = if d.one_in(3) && allow.grad_transform {
                         format!(" gradientTransform=\"rotate({:.1})\"", d.f(-45.0, 45.0))
                     } else {
                         String::new()
@@ -2222,14 +2283,22 @@ mod tests {
                             )
                         })
                         .collect();
-                    if k == 3 {
+                    if k == 3 || !allow.radial {
                         let _ = std::fmt::Write::write_fmt(defs, format_args!(
                             "<linearGradient id=\"{id}\" gradientUnits=\"{units}\" spreadMethod=\"{spread}\"{gt} x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\">{stops}</linearGradient>",
                             d.f(0.0, a * 0.5), d.f(0.0, b * 0.5), d.f(a * 0.3, a * 0.8), d.f(b * 0.3, b * 0.8)));
                     } else {
+                        // The focus inside the circle: outside it the
+                        // gradient is a cone readers do not agree on.
+                        let (cx, cy, r) = (
+                            d.f(0.3 * a, 0.7 * a),
+                            d.f(0.3 * b, 0.7 * b),
+                            d.f(0.15 * a, 0.4 * a),
+                        );
+                        let k = if allow.focal { 1.0 } else { 0.0 };
+                        let (fx, fy) = (cx + d.f(-0.5, 0.5) * r * k, cy + d.f(-0.5, 0.5) * r * k);
                         let _ = std::fmt::Write::write_fmt(defs, format_args!(
-                            "<radialGradient id=\"{id}\" gradientUnits=\"{units}\" spreadMethod=\"{spread}\"{gt} cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fx=\"{:.2}\" fy=\"{:.2}\">{stops}</radialGradient>",
-                            d.f(0.3 * a, 0.7 * a), d.f(0.3 * b, 0.7 * b), d.f(0.15 * a, 0.4 * a), d.f(0.35 * a, 0.65 * a), d.f(0.35 * b, 0.65 * b)));
+                            "<radialGradient id=\"{id}\" gradientUnits=\"{units}\" spreadMethod=\"{spread}\"{gt} cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{r:.2}\" fx=\"{fx:.2}\" fy=\"{fy:.2}\">{stops}</radialGradient>"));
                     }
                     format!("url(#{id})")
                 }
@@ -2519,6 +2588,77 @@ mod tests {
                  {} pixels (file {})",
                 worst.0,
                 worst.1
+            );
+        }
+    }
+
+    fn grad_bad(svg: &str) -> (usize, Option<Mismatch>) {
+        let doc = brought_in(svg, 64, 48);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let theirs = reader_draws(svg, 64, 48);
+        let (mut n, mut first) = (0, None);
+        for y in 1..47i32 {
+            for x in 1..63i32 {
+                let solid = (-1..=1).all(|j| {
+                    (-1..=1).all(|i| {
+                        ours.get((x + i) as u32, (y + j) as u32).a > 0.999
+                            && theirs[((y + j) * 64 + x + i) as usize][3] == 255
+                    })
+                });
+                if !solid {
+                    continue;
+                }
+                let o = ours.get(x as u32, y as u32).to_srgb8();
+                let t = theirs[(y * 64 + x) as usize];
+                if (0..3).any(|k| o[k].abs_diff(t[k]) > 20) {
+                    n += 1;
+                    first.get_or_insert((x, y, o, t));
+                }
+            }
+        }
+        (n, first)
+    }
+
+    /// A file's gradient comes in painting what a reader paints.
+    ///
+    /// Colour is compared everywhere the shape is solid rather than only
+    /// where the picture is flat — a gradient is nowhere flat, and it was
+    /// by being flat-only that every gradient got past the audit above.
+    /// One shape a file, so every pixel compared has the gradient under
+    /// it; under every transform and wrapper, in both unit systems and
+    /// with a gradient transform of its own.
+    ///
+    /// Asked, every radial gradient was wrong: it came in as a circle in
+    /// the box's own units with the file's radius over the box's
+    /// half-diagonal, half as wide again as the file's on a square and an
+    /// ellipse on anything else — the engine's radial takes axes of its
+    /// own now (`Gradient::Radial::axes`) and the file's rings are carried
+    /// through them exactly. A linear one in user space over a box that is
+    /// not square came in with its bands turned, its ends taken into the
+    /// box straight across; its ramp is carried over instead. And a curve
+    /// bulging past its anchors had its gradient laid over the anchors'
+    /// box rather than the curve's.
+    ///
+    /// Not yet: a focus off the centre and a spread other than pad, which
+    /// the engine has no field for.
+    #[test]
+    fn a_gradient_written_elsewhere_comes_in_painting_what_a_reader_paints() {
+        let one = Allow {
+            strokes: false,
+            dashes: false,
+            spread: false,
+            focal: false,
+            many: false,
+            ..ALL
+        };
+        for seed in 0..400u64 {
+            let svg = foreign_svg_with(seed, true, one);
+            let (shaded, first) = grad_bad(&svg);
+            let (cover, colour, _) = foreign_bad(&svg, true);
+            assert!(
+                shaded + cover + colour <= 10,
+                "file {seed}: {shaded} pixels shaded otherwise, {cover} covered otherwise, \
+                 the first {first:?}\n{svg}"
             );
         }
     }

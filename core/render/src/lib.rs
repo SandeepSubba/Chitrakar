@@ -5022,8 +5022,15 @@ enum Paint {
 }
 
 enum GradientGeom {
-    Linear { from: [f32; 2], to: [f32; 2] },
-    Radial { center: [f32; 2], radius: f32 },
+    Linear {
+        from: [f32; 2],
+        to: [f32; 2],
+    },
+    Radial {
+        center: [f32; 2],
+        radius: f32,
+        axes: [f32; 4],
+    },
 }
 
 impl Paint {
@@ -5049,9 +5056,15 @@ impl Paint {
                 from: *from,
                 to: *to,
             },
-            Gradient::Radial { center, radius, .. } => GradientGeom::Radial {
+            Gradient::Radial {
+                center,
+                radius,
+                axes,
+                ..
+            } => GradientGeom::Radial {
                 center: *center,
                 radius: *radius,
+                axes: axes.unwrap_or([1.0, 0.0, 0.0, 1.0]),
             },
         };
         Some(Paint::Gradient {
@@ -5088,11 +5101,19 @@ impl Paint {
                     ((u - from[0]) * dx + (v - from[1]) * dy) / len2
                 }
             }
-            GradientGeom::Radial { center, radius } => {
+            GradientGeom::Radial {
+                center,
+                radius,
+                axes,
+            } => {
                 if *radius < 1e-6 {
                     1.0
                 } else {
-                    ((u - center[0]).powi(2) + (v - center[1]).powi(2)).sqrt() / radius
+                    // The offset through the gradient's own axes first,
+                    // which is the identity unless it says otherwise.
+                    let (du, dv) = (u - center[0], v - center[1]);
+                    let (a, b) = (axes[0] * du + axes[1] * dv, axes[2] * du + axes[3] * dv);
+                    (a * a + b * b).sqrt() / radius
                 }
             }
         }
@@ -15003,6 +15024,7 @@ mod tests {
                 center: [0.5, 0.5],
                 radius: 0.5,
                 stops: vec![stop(0.0, 1.0, 1.0, 1.0), stop(1.0, 0.0, 0.0, 0.0)],
+                axes: None,
             },
         );
 

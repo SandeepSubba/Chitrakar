@@ -1432,6 +1432,24 @@ fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut Strin
             ),
             "    </linearGradient>",
         ),
+        // Rings through axes of their own are circles about the origin
+        // of a space the gradient's transform carries into the box:
+        // `q = center + A⁻¹ g`.
+        Gradient::Radial {
+            center,
+            radius,
+            axes: Some(axes),
+            ..
+        } if chitrakar_doc::invert_axes(*axes).is_some() => {
+            let inv = chitrakar_doc::invert_axes(*axes).unwrap_or([1.0, 0.0, 0.0, 1.0]);
+            (
+                format!(
+                    r#"    <radialGradient id="{name}" cx="0" cy="0" r="{radius}" gradientTransform="matrix({} {} {} {} {} {})">"#,
+                    inv[0], inv[2], inv[1], inv[3], center[0], center[1]
+                ),
+                "    </radialGradient>",
+            )
+        }
         Gradient::Radial { center, radius, .. } => (
             format!(
                 r#"    <radialGradient id="{name}" cx="{}" cy="{}" r="{radius}">"#,
@@ -4282,6 +4300,64 @@ mod tests {
                 off[0].2,
                 off[0].3
             );
+        }
+    }
+
+    /// A radial gradient whose rings go through axes of their own leaves
+    /// as a gradient transform, and a reader draws the same rings.
+    #[test]
+    fn a_radial_with_axes_of_its_own_keeps_its_rings_in_svg() {
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        let mut doc = Document::new(64, 40, ColorMode::Rgb);
+        let id = filled(&mut doc, "slab", 50.0, 30.0);
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 50.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                fill: None,
+                stroke: None,
+                gradient: Some(chitrakar_doc::Gradient::Radial {
+                    center: [0.45, 0.55],
+                    radius: 0.5,
+                    stops: vec![
+                        stop(0.0, 0.1, 0.2, 1.0),
+                        stop(0.6, 1.0, 0.3, 0.1),
+                        stop(1.0, 0.2, 0.9, 0.3),
+                    ],
+                    axes: Some([1.3, 0.6, -0.5, 1.1]),
+                }),
+            }),
+        })
+        .unwrap();
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(7.0, 5.0),
+        })
+        .unwrap();
+        assert!(export_svg(&doc).unwrap().contains("gradientTransform"));
+        let theirs = resvg_pixels(&doc);
+        let page = chitrakar_render::render(&doc).unwrap();
+        for y in (8..33).step_by(3) {
+            for x in (10..55).step_by(3) {
+                let ours = page.get(x, y).to_srgb8();
+                let k = ((y * 64 + x) * 4) as usize;
+                let off = (0..3)
+                    .map(|c| ours[c].abs_diff(theirs[k + c]))
+                    .max()
+                    .unwrap();
+                assert!(
+                    off <= 6,
+                    "({x}, {y}): the page is {ours:?} and the reader {:?}",
+                    &theirs[k..k + 4]
+                );
+            }
         }
     }
 }

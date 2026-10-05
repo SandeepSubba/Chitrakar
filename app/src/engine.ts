@@ -306,7 +306,17 @@ export type Gradient =
         stops: GradientStop[];
       };
     }
-  | { Radial: { center: [number, number]; radius: number; stops: GradientStop[] } };
+  | {
+      Radial: {
+        center: [number, number];
+        radius: number;
+        stops: GradientStop[];
+        /** A 2×2 matrix by rows the offset from the centre goes through
+         * before its length is taken — a file's radial as it came in.
+         * Left out, the identity. */
+        axes?: [number, number, number, number] | null;
+      };
+    };
 
 /** What a layer does when the frame around it is given a new size. */
 export type Pin = "Start" | "End" | "Middle" | "Stretch";

@@ -263,6 +263,7 @@ pub fn everything() -> Fixture {
                         },
                     },
                 ],
+                axes: None,
             });
         }
         doc.apply(Command::SetKind {
@@ -2086,6 +2087,7 @@ impl Rng {
                                     color: self.color(1.0),
                                 },
                             ],
+                            axes: None,
                         });
                     } else if self.chance(4) {
                         *gradient = Some(Gradient::Linear {

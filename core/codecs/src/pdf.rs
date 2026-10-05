@@ -1646,6 +1646,19 @@ impl Page {
                     degenerate.then_some(0),
                 )
             }
+            // Rings through axes of their own are circles about the origin
+            // of a space carried into the box by `q = center + A⁻¹ g`
+            // (`frame`, below), so the shading is drawn about the origin.
+            chitrakar_doc::Gradient::Radial {
+                center,
+                radius,
+                axes: Some(axes),
+                ..
+            } if chitrakar_doc::invert_axes(*axes).is_some() => (
+                3,
+                format!("0 0 0 0 0 {}", num(radius.max(1e-6))),
+                (*radius < 1e-6).then_some(SAMPLES - 1),
+            ),
             chitrakar_doc::Gradient::Radial { center, radius, .. } => (
                 3,
                 format!(
@@ -1657,6 +1670,25 @@ impl Page {
                 (*radius < 1e-6).then_some(SAMPLES - 1),
             ),
         };
+        let frame = match g {
+            chitrakar_doc::Gradient::Radial {
+                center,
+                axes: Some(axes),
+                ..
+            } => chitrakar_doc::invert_axes(*axes).map(|inv| {
+                format!(
+                    "\n{} {} {} {} {} {} cm",
+                    num(inv[0]),
+                    num(inv[2]),
+                    num(inv[1]),
+                    num(inv[3]),
+                    num(center[0]),
+                    num(center[1])
+                )
+            }),
+            _ => None,
+        }
+        .unwrap_or_default();
         let ramp: Vec<[u8; 4]> = match flat {
             Some(i) => vec![ramp[i]; SAMPLES],
             None => ramp,
@@ -1699,7 +1731,7 @@ impl Page {
         let name = format!("Sh{}", self.shadings.len() + 1);
         self.shadings.push((name.clone(), shading));
         let into_box = format!(
-            "{} 0 0 {} {} {} cm",
+            "{} 0 0 {} {} {} cm{frame}",
             num(x1 - x0),
             num(y1 - y0),
             num(x0),
@@ -5227,6 +5259,89 @@ mod tests {
     /// and a radial one whose stop is translucent covers what the page
     /// covers, its alpha a soft mask of the same ramp. Both went as
     /// pictures.
+    /// A radial gradient whose rings go through axes of their own — an
+    /// ellipse at an angle, as a file's radial comes in — is a shading of
+    /// the same rings, set in the space the axes undo.
+    ///
+    /// Held by where along the ramp each pixel is rather than by its
+    /// colour: ghostscript draws a radial shading as rings within a
+    /// smoothness of its own, up to a device pixel further out than the
+    /// rings themselves — with axes or without, this exporter's or any —
+    /// which on a steep ramp is a dozen levels of colour and no error of
+    /// the file's.
+    #[test]
+    fn a_radial_with_axes_of_its_own_keeps_its_rings_in_a_pdf() {
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        let stops = vec![
+            stop(0.0, 0.1, 0.2, 1.0),
+            stop(0.6, 1.0, 0.3, 0.1),
+            stop(1.0, 0.2, 0.9, 0.3),
+        ];
+        for axes in [
+            None,
+            Some([1.0, 0.0, 0.0, 1.0]),
+            Some([2.0, 0.0, 0.0, 2.0]),
+            Some([0.8, 0.6, -0.6, 0.8]),
+            Some([1.3, 0.6, -0.5, 1.1]),
+        ] {
+            let mut doc = Document::new(256, 160, chitrakar_color::ColorMode::Rgb);
+            let mut slab = shape(
+                "slab",
+                VectorShape::Rect {
+                    width: 200.0,
+                    height: 120.0,
+                    radius: 0.0,
+                },
+                None,
+            );
+            if let NodeKind::Vector { gradient, .. } = &mut slab.kind {
+                *gradient = Some(chitrakar_doc::Gradient::Radial {
+                    center: [0.45, 0.55],
+                    radius: 0.5,
+                    stops: stops.clone(),
+                    axes,
+                });
+            }
+            add(&mut doc, slab, [28.0, 20.0]);
+            assert!(
+                content_of(&export_pdf_document(&doc).unwrap()).contains(" sh"),
+                "drawn live, as a shading"
+            );
+            let Some(colours) = ghostscript_rgba(&doc) else {
+                eprintln!("skipped: no ghostscript");
+                return;
+            };
+            let ramp: Vec<(f32, chitrakar_color::LinearRgba)> = stops
+                .iter()
+                .map(|s| (s.offset, chitrakar_render::resolve_color(&doc, &s.color)))
+                .collect();
+            // Where along the ramp a colour is: the nearest of a thousand.
+            let along = |c: &[u8]| {
+                (0..=1000)
+                    .map(|i| i as f32 / 1000.0)
+                    .min_by_key(|t| {
+                        let r = chitrakar_render::ramp_color(&ramp, *t).to_srgb8();
+                        (0..3).map(|k| r[k].abs_diff(c[k]) as u32).sum::<u32>()
+                    })
+                    .unwrap()
+            };
+            let page = chitrakar_render::render(&doc).unwrap();
+            for y in (32..132).step_by(9) {
+                for x in (40..220).step_by(9) {
+                    let ours = along(&page.get(x, y).to_srgb8());
+                    let file = along(&colours[(y * 256 + x) as usize]);
+                    assert!(
+                        (ours - file).abs() <= 0.05,
+                        "{axes:?} ({x}, {y}): the page is {ours:.3} along the ramp and the file {file:.3}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_gradient_goes_live_as_a_shading_of_the_engines_ramp() {
         let stop = |offset: f32, r: f32, g: f32, b: f32, a: f32| chitrakar_doc::GradientStop {
@@ -5261,6 +5376,7 @@ mod tests {
                 center: [0.4, 0.45],
                 radius: 0.6,
                 stops: vec![stop(0.0, 0.1, 0.2, 1.0, 1.0), stop(1.0, 1.0, 0.9, 0.1, 0.2)],
+                axes: None,
             });
         }
         add(&mut doc, glow, [42.0, 20.0]);
