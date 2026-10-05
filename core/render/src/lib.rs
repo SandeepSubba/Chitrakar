@@ -5032,6 +5032,9 @@ enum GradientGeom {
         center: [f32; 2],
         radius: f32,
         axes: [f32; 4],
+        /// The focus from the centre through the axes, in radii
+        /// (`chitrakar_doc::focal_offset`).
+        focal: [f32; 2],
     },
 }
 
@@ -5062,11 +5065,13 @@ impl Paint {
                 center,
                 radius,
                 axes,
+                focus,
                 ..
             } => GradientGeom::Radial {
                 center: *center,
                 radius: *radius,
                 axes: axes.unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                focal: chitrakar_doc::focal_offset(*center, *radius, *axes, *focus),
             },
         };
         Some(Paint::Gradient {
@@ -5115,16 +5120,25 @@ impl Paint {
                 center,
                 radius,
                 axes,
+                focal,
             } => {
                 if *radius < 1e-6 {
                     // And a ring of no size the last.
                     return ramp(stops, 1.0);
                 } else {
                     // The offset through the gradient's own axes first,
-                    // which is the identity unless it says otherwise.
+                    // which is the identity unless it says otherwise,
+                    // then which ring out from the focus it is on. Rings
+                    // about their centre keep the arithmetic they always
+                    // had, to the last bit: a page that has no focus
+                    // draws exactly what it drew before there was one.
                     let (du, dv) = (u - center[0], v - center[1]);
                     let (a, b) = (axes[0] * du + axes[1] * dv, axes[2] * du + axes[3] * dv);
-                    (a * a + b * b).sqrt() / radius
+                    if *focal == [0.0, 0.0] {
+                        (a * a + b * b).sqrt() / radius
+                    } else {
+                        chitrakar_doc::focal_ramp([a / radius, b / radius], *focal)
+                    }
                 }
             }
         };
@@ -15046,6 +15060,7 @@ mod tests {
         gradient_rect(
             &mut doc,
             Gradient::Radial {
+                focus: None,
                 center: [0.5, 0.5],
                 radius: 0.125,
                 stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
@@ -15098,6 +15113,7 @@ mod tests {
         gradient_rect(
             &mut doc,
             Gradient::Radial {
+                focus: None,
                 center: [0.5, 0.5],
                 radius: 0.5,
                 stops: vec![stop(0.0, 1.0, 1.0, 1.0), stop(1.0, 0.0, 0.0, 0.0)],

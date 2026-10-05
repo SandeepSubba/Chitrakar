@@ -5225,7 +5225,7 @@ export function App() {
    * Coordinates are the gradient's own — the shape's box, normalized — so
    * dragging maps the cursor back through the layer and its box. */
   const gradDragRef = useRef<{
-    part: "from" | "to" | "centre" | "radius" | number;
+    part: "from" | "to" | "centre" | "focus" | "radius" | number;
     vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
   } | null>(null);
 
@@ -5246,13 +5246,20 @@ export function App() {
 
   const onGradHandleDown = (
     e: React.PointerEvent,
-    part: "from" | "to" | "centre" | "radius" | number,
+    part: "from" | "to" | "centre" | "focus" | "radius" | number,
   ) => {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
+    // Nor is it the start of a text selection: Shift held down on a knob
+    // would otherwise stretch the page's selection to it, and the next
+    // drag would pick that up and carry it off — a native drag, which
+    // cancels the pointer after its first move.
+    e.preventDefault();
     gradDragRef.current = {
-      part,
+      // Shift on the centre pulls the focus out of it, which sits under
+      // the centre until it has been moved somewhere of its own.
+      part: part === "centre" && e.shiftKey ? "focus" : part,
       vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
     };
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -5286,8 +5293,18 @@ export function App() {
       }
     } else {
       const rad = g.Radial;
-      if (drag.part === "centre") next = { Radial: { ...rad, center: [u, v] } };
-      else if (drag.part === "radius") {
+      if (drag.part === "centre") {
+        // The focus goes with the centre, keeping where it is from it.
+        const f = rad.focus;
+        const focus: [number, number] | null = f
+          ? [f[0] + u - rad.center[0], f[1] + v - rad.center[1]]
+          : null;
+        next = { Radial: { ...rad, center: [u, v], focus } };
+      } else if (drag.part === "focus") {
+        // Brought back onto the centre, there is no focus of its own.
+        const home = Math.hypot(u - rad.center[0], v - rad.center[1]) < 0.02;
+        next = { Radial: { ...rad, focus: home ? null : [u, v] } };
+      } else if (drag.part === "radius") {
         const r = Math.hypot(u - rad.center[0], v - rad.center[1]);
         next = { Radial: { ...rad, radius: Math.max(0.02, r) } };
       }
@@ -8835,7 +8852,7 @@ export function App() {
                 const knob = (
                   key: string,
                   p: [number, number],
-                  part: "from" | "to" | "centre" | "radius" | number,
+                  part: "from" | "to" | "centre" | "focus" | "radius" | number,
                   cls: string,
                 ) => (
                   <div
@@ -8880,9 +8897,17 @@ export function App() {
                     </>
                   );
                 }
-                const { center, radius } = g.Radial;
+                const { center, radius, focus } = g.Radial;
                 const c = at(center[0], center[1]);
                 const rim = at(center[0] + radius, center[1]);
+                // A focus being dragged keeps its knob even while it sits
+                // on the centre: taken away under the pointer, it would take
+                // the drag's capture with it and the gesture would never end.
+                const f = focus
+                  ? at(focus[0], focus[1])
+                  : gradDragRef.current?.part === "focus"
+                    ? c
+                    : null;
                 return (
                   <>
                     <svg className="sel-outline" aria-hidden="true">
@@ -8894,6 +8919,7 @@ export function App() {
                         y2={rim[1]}
                       />
                     </svg>
+                    {f && knob("focus", f, "focus", "grad-handle grad-focus")}
                     {knob("centre", c, "centre", "grad-handle")}
                     {knob("radius", rim, "radius", "grad-handle")}
                   </>

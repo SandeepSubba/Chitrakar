@@ -1194,6 +1194,13 @@ body {
   border-width: 1.5px;
 }
 
+/* A radial's focus: where its rings start, told from its centre by being
+   filled with the accent rather than white. */
+.grad-focus {
+  background: var(--accent);
+  border-color: #fff;
+}
+
 .curve-handle {
   position: absolute;
   width: 8px;
@@ -1556,10 +1563,21 @@ body {
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */
   touch-action: none;
+  /* Nor is a drag here the page's text being picked: Shift held down on a
+     handle would stretch the selection to it, and the next drag would
+     carry that off as a native drag, cancelling the pointer after one
+     move. Text typed onto the canvas is still text. */
+  user-select: none;
+  -webkit-user-select: none;
   flex: 1;
   position: relative;
   overflow: hidden;
   background: var(--canvas);
+}
+
+.canvas-host textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 #engine-canvas {

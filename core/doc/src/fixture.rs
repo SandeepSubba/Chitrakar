@@ -234,6 +234,7 @@ pub fn everything() -> Fixture {
             *gradient = Some(Gradient::Radial {
                 center: [0.35, 0.4],
                 radius: 0.7,
+                focus: None,
                 stops: vec![
                     GradientStop {
                         offset: 0.0,
@@ -2076,9 +2077,15 @@ impl Rng {
                         }
                     }
                     if self.chance(4) && self.chance(2) {
+                        let center = [self.between(0.2, 0.8), self.between(0.2, 0.8)];
+                        let radius = self.between(0.4, 1.2);
                         *gradient = Some(Gradient::Radial {
-                            center: [self.between(0.2, 0.8), self.between(0.2, 0.8)],
-                            radius: self.between(0.4, 1.2),
+                            center,
+                            radius,
+                            // A highlight off to one side, from the ring
+                            // itself rather than another draw, so every
+                            // page after this one is the page it was.
+                            focus: Some([center[0] + radius * 0.35, center[1] - radius * 0.25]),
                             stops: vec![
                                 GradientStop {
                                     offset: 0.0,
@@ -2885,6 +2892,84 @@ pub fn opaque_page(seed: u64) -> Document {
         })
         .unwrap();
         doc.apply(Command::SetMask { id, mask: None }).unwrap();
+    }
+    doc
+}
+
+/// A page of radial gradients whose rings start off their centre, drawn
+/// large enough that a reader's rounding is small beside a ring: a focus
+/// to one side of plain rings repeated, one inside rings with axes of
+/// their own and reflected, and one set past the outer ring — which every
+/// renderer holds just inside it, so padded: repeated, the rings would
+/// crowd without end on the far side of a focus so near the ring. All
+/// three ramp the same stops.
+pub fn focal_page() -> Document {
+    use crate::Spread::*;
+    let stop = |offset: f32, r: f32, g: f32, b: f32| GradientStop {
+        offset,
+        color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+    };
+    let stops = vec![
+        stop(0.0, 0.95, 0.95, 0.9),
+        stop(0.5, 1.0, 0.3, 0.1),
+        stop(1.0, 0.1, 0.2, 1.0),
+    ];
+    let mut doc = Document::new(300, 120, ColorMode::Rgb);
+    for (i, g) in [
+        Gradient::Radial {
+            center: [0.5, 0.5],
+            radius: 0.3,
+            stops: stops.clone(),
+            axes: None,
+            spread: Repeat,
+            focus: Some([0.4, 0.38]),
+        },
+        Gradient::Radial {
+            center: [0.5, 0.5],
+            radius: 0.45,
+            stops: stops.clone(),
+            axes: Some([1.2, 0.3, -0.2, 0.9]),
+            spread: Reflect,
+            focus: Some([0.62, 0.4]),
+        },
+        Gradient::Radial {
+            center: [0.5, 0.5],
+            radius: 0.3,
+            stops,
+            axes: None,
+            spread: Pad,
+            focus: Some([0.95, 0.5]),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let root = doc.root();
+        let mut node = Node::vector(
+            "rings",
+            VectorShape::Rect {
+                width: 84.0,
+                height: 96.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, gradient, .. } = &mut node.kind {
+            *fill = None;
+            *gradient = Some(g);
+        }
+        let at = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: at,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[at];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(8.0 + 100.0 * i as f32, 12.0),
+        })
+        .unwrap();
     }
     doc
 }

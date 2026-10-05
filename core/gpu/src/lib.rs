@@ -4182,7 +4182,19 @@ fn vector(
                 chitrakar_doc::Spread::Reflect => 1.0,
                 chitrakar_doc::Spread::Repeat => 2.0,
             };
-            Some(([kind, spread, 0.0, alpha], geom, Some(at)))
+            // And a radial's focus, from its centre in radii, half on the
+            // geometry's spare slot (`bake`) and half here.
+            let focal_y = match g {
+                chitrakar_doc::Gradient::Radial {
+                    center,
+                    radius,
+                    axes,
+                    focus,
+                    ..
+                } => chitrakar_doc::focal_offset(*center, *radius, *axes, *focus)[1],
+                _ => 0.0,
+            };
+            Some(([kind, spread, focal_y, alpha], geom, Some(at)))
         }
         None => fill.map(|c| (premultiplied_color(doc, &c, alpha), [0.0; 4], None)),
     };
@@ -4541,8 +4553,10 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
             center,
             radius,
             axes,
+            focus,
             ..
         } => {
+            let f = chitrakar_doc::focal_offset(*center, *radius, *axes, *focus);
             let c = match axes {
                 Some(a) => [
                     a[0] * center[0] + a[1] * center[1],
@@ -4550,7 +4564,7 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
                 ],
                 None => *center,
             };
-            ([c[0], c[1], *radius, 0.0], true)
+            ([c[0], c[1], *radius, f[0]], true)
         }
     };
     (
@@ -7300,6 +7314,7 @@ mod tests {
                 "ellipse",
                 VectorShape::Ellipse { rx: 20.0, ry: 14.0 },
                 chitrakar_doc::Gradient::Radial {
+                    focus: None,
                     center: [0.4, 0.45],
                     radius: 0.8,
                     stops: ramp(&[(0.0, WHITE), (1.0, BLUE)]),
@@ -7389,6 +7404,7 @@ mod tests {
         };
         let mut doc = Document::new(140, 90, ColorMode::Rgb);
         let rings = |axes: [f32; 4]| chitrakar_doc::Gradient::Radial {
+            focus: None,
             center: [0.45, 0.55],
             radius: 0.5,
             stops: ramp(&[(0.0, BLUE), (0.6, RED), (1.0, WHITE)]),
@@ -7497,6 +7513,7 @@ mod tests {
             ),
             (
                 chitrakar_doc::Gradient::Radial {
+                    focus: None,
                     center: [0.5, 0.5],
                     radius: 0.2,
                     stops: stops(),
@@ -7527,6 +7544,25 @@ mod tests {
                 ),
             );
         }
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.008,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+    }
+
+    /// Rings that start off their centre are drawn from the same focus
+    /// here as there — plain and repeated, through axes of their own and
+    /// reflected, and from a focus past the outer ring held inside it.
+    #[test]
+    fn a_radials_focus_is_the_cpus() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let doc = chitrakar_doc::fixture::focal_page();
         assert!(GpuRenderer::can_render(&doc));
         let drawn = gpu.render(&doc).unwrap();
         let reference = chitrakar_render::render(&doc).unwrap();

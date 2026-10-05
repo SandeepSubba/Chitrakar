@@ -322,6 +322,9 @@ export type Gradient =
         axes?: [number, number, number, number] | null;
         /** Past the ends of the ramp. Left out, `Pad`. */
         spread?: GradientSpread;
+        /** Where the rings start from, in the same units as `center` —
+         * a highlight off to one side. Left out or null, the centre. */
+        focus?: [number, number] | null;
       };
     };
 

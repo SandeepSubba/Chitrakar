@@ -399,13 +399,18 @@ fn fs_text(in: CoverOut) -> @location(0) vec4f {
 // the projection onto the line from `from` to `to`, or the distance from
 // the centre in units of the radius, clamped past either end — the same
 // arithmetic the CPU renderer does per pixel.
-fn ramp_at(uv: vec2f, geom: vec4f, radial: bool, spread: f32) -> f32 {
+fn ramp_at(uv: vec2f, geom: vec4f, radial: bool, spread: f32, focal_y: f32) -> f32 {
     if radial {
         // A ring of no size is the last colour throughout.
         if geom.z < 1e-6 {
             return 1.0;
         }
-        return spread_at(length(uv - geom.xy) / geom.z, spread);
+        // Rings about their centre measured as they always were.
+        let f = vec2f(geom.w, focal_y);
+        if all(f == vec2f(0.0)) {
+            return spread_at(length(uv - geom.xy) / geom.z, spread);
+        }
+        return spread_at(focal_ramp((uv - geom.xy) / geom.z, f), spread);
     }
     let d = geom.zw - geom.xy;
     let len2 = dot(d, d);
@@ -414,6 +419,24 @@ fn ramp_at(uv: vec2f, geom: vec4f, radial: bool, spread: f32) -> f32 {
         return 0.0;
     }
     return spread_at(dot(uv - geom.xy, d) / len2, spread);
+}
+
+// Which ring out from a radial's focus a point is on, both measured from
+// the centre in radii — `chitrakar_doc::focal_ramp`, said the same way:
+// the root of `k t² − 2 (w·f) t − |w|² = 0` that is not negative.
+fn focal_ramp(p: vec2f, f: vec2f) -> f32 {
+    let w = p - f;
+    let ww = dot(w, w);
+    let wf = dot(w, f);
+    let k = 1.0 - dot(f, f);
+    let root = sqrt(max(wf * wf + k * ww, 0.0));
+    if wf >= 0.0 {
+        return (wf + root) / k;
+    }
+    if root - wf > 1e-30 {
+        return ww / (root - wf);
+    }
+    return 0.0;
 }
 
 // What a gradient does past the ends of its ramp — `Spread::place`:
@@ -446,7 +469,7 @@ fn ramp_color(t: f32) -> vec4f {
 fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
     let cov = coverage(in);
     let uv = in.local / max(in.params.xy, vec2f(1e-6, 1e-6));
-    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5, in.color.g))
+    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5, in.color.g, in.color.b))
         * in.color.a
         * cov
         * mask_cover(in.page, in.mask);
@@ -458,7 +481,7 @@ fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
 // across the quad however the layer is transformed.
 @fragment
 fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
-    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5, in.color.g))
+    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5, in.color.g, in.color.b))
         * in.color.a
         * mask_cover(in.page, in.mask);
 }

@@ -1644,15 +1644,18 @@ impl Page {
                 center,
                 radius,
                 axes,
+                focus,
                 ..
             } => {
                 let a = axes.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                let r = radius.max(1e-6);
+                let f = chitrakar_doc::focal_offset(*center, r, *axes, *focus);
                 corners
                     .iter()
                     .map(|q| {
                         let (du, dv) = (q[0] - center[0], q[1] - center[1]);
                         let (x, y) = (a[0] * du + a[1] * dv, a[2] * du + a[3] * dv);
-                        (x * x + y * y).sqrt() / radius.max(1e-6)
+                        chitrakar_doc::focal_ramp([x / r, y / r], f)
                     })
                     .collect()
             }
@@ -1707,29 +1710,42 @@ impl Page {
                     degenerate.then_some(0),
                 )
             }
-            // Rings through axes of their own are circles about the origin
-            // of a space carried into the box by `q = center + A⁻¹ g`
-            // (`frame`, below), so the shading is drawn about the origin.
+            // A ring starts as a point at the focus and its middle moves
+            // toward the centre as it grows, reaching it at the outer
+            // ring: so the shading's first circle is the focus, of no
+            // size, and its last is `t1` rings out, its middle as far
+            // past the centre as that carries it. Rings through axes of
+            // their own are circles about the origin of a space carried
+            // into the box by `q = center + A⁻¹ g` (`frame`, below), so
+            // there the shading is drawn about the origin.
             chitrakar_doc::Gradient::Radial {
                 center,
                 radius,
-                axes: Some(axes),
+                axes,
+                focus,
                 ..
-            } if chitrakar_doc::invert_axes(*axes).is_some() => (
-                3,
-                format!("0 0 0 0 0 {}", num(radius.max(1e-6) * t1)),
-                (*radius < 1e-6).then_some(usize::MAX),
-            ),
-            chitrakar_doc::Gradient::Radial { center, radius, .. } => (
-                3,
-                format!(
-                    "{c0} {c1} 0 {c0} {c1} {}",
-                    num(radius.max(1e-6) * t1),
-                    c0 = num(center[0]),
-                    c1 = num(center[1])
-                ),
-                (*radius < 1e-6).then_some(usize::MAX),
-            ),
+            } => {
+                let r = radius.max(1e-6);
+                let f = chitrakar_doc::focal_offset(*center, r, *axes, *focus);
+                let at = match axes {
+                    Some(a) if chitrakar_doc::invert_axes(*a).is_some() => [0.0, 0.0],
+                    _ => *center,
+                };
+                let start = [at[0] + f[0] * r, at[1] + f[1] * r];
+                let end = [at[0] + f[0] * r * (1.0 - t1), at[1] + f[1] * r * (1.0 - t1)];
+                (
+                    3,
+                    format!(
+                        "{} {} 0 {} {} {}",
+                        num(start[0]),
+                        num(start[1]),
+                        num(end[0]),
+                        num(end[1]),
+                        num(r * t1)
+                    ),
+                    (*radius < 1e-6).then_some(usize::MAX),
+                )
+            }
         };
         let frame = match g {
             chitrakar_doc::Gradient::Radial {
@@ -5363,6 +5379,7 @@ mod tests {
             );
             if let NodeKind::Vector { gradient, .. } = &mut slab.kind {
                 *gradient = Some(chitrakar_doc::Gradient::Radial {
+                    focus: None,
                     center: [0.45, 0.55],
                     radius: 0.5,
                     stops: stops.clone(),
@@ -5439,6 +5456,7 @@ mod tests {
         let mut glow = shape("glow", VectorShape::Ellipse { rx: 10.0, ry: 8.0 }, None);
         if let NodeKind::Vector { gradient, .. } = &mut glow.kind {
             *gradient = Some(chitrakar_doc::Gradient::Radial {
+                focus: None,
                 center: [0.4, 0.45],
                 radius: 0.6,
                 stops: vec![stop(0.0, 0.1, 0.2, 1.0, 1.0), stop(1.0, 1.0, 0.9, 0.1, 0.2)],
@@ -6078,6 +6096,7 @@ mod tests {
                 spread: Repeat,
             },
             chitrakar_doc::Gradient::Radial {
+                focus: None,
                 center: [0.5, 0.5],
                 radius: 0.2,
                 stops: stops.clone(),
@@ -6163,5 +6182,62 @@ mod tests {
             }
         }
         assert!(asked > 300, "asked of enough of it ({asked})");
+    }
+
+    /// Rings that start off their centre are shadings whose first circle
+    /// is the focus, of no size — with axes of their own, reflected, and
+    /// from a focus set past the outer ring and held inside it — and
+    /// ghostscript draws each ring where the engine does.
+    #[test]
+    fn a_radials_focus_is_where_its_shading_starts() {
+        let doc = chitrakar_doc::fixture::focal_page();
+        let first = doc.children_of(doc.root()).unwrap()[0];
+        let Ok(NodeKind::Vector {
+            gradient: Some(g), ..
+        }) = doc.node(first).map(|n| &n.kind)
+        else {
+            panic!("a gradient first");
+        };
+        let ramp: Vec<_> = g
+            .stops()
+            .iter()
+            .map(|s| (s.offset, chitrakar_render::resolve_color(&doc, &s.color)))
+            .collect();
+        let Some(colours) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let page = chitrakar_render::render(&doc).unwrap();
+        let mut asked = 0;
+        for y in (14..106).step_by(3) {
+            for x in (10..290).step_by(3) {
+                if page.get(x, y).a < 0.999 {
+                    continue;
+                }
+                let ours = along_ramp(&ramp, &page.get(x, y).to_srgb8());
+                if !(0.06..=0.94).contains(&ours) {
+                    continue;
+                }
+                // Nor where the ramp runs most of its length in a pixel —
+                // beside a focus held at the ring's edge — since there a
+                // reader's rounding of where a pixel is decides it.
+                let steep =
+                    [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                        .iter()
+                        .any(|&(a, b)| {
+                            (along_ramp(&ramp, &page.get(a, b).to_srgb8()) - ours).abs() > 0.15
+                        });
+                if steep {
+                    continue;
+                }
+                let file = along_ramp(&ramp, &colours[(y * 300 + x) as usize]);
+                assert!(
+                    (ours - file).abs() <= 0.05,
+                    "({x}, {y}): the page is {ours:.3} along the ramp and the file {file:.3}"
+                );
+                asked += 1;
+            }
+        }
+        assert!(asked > 1000, "asked of enough of it ({asked})");
     }
 }

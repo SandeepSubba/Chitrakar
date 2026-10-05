@@ -682,7 +682,13 @@ fn gradient_of(
                 -m.ky / det * bw / r,
                 m.sx / det * bh / r,
             ];
+            // The focus is a point in the gradient's space like the
+            // centre, so it comes into the box the way the centre does,
+            // and the axes measure from either alike.
+            let focus =
+                (g.fx() != g.cx() || g.fy() != g.cy()).then(|| norm(g.transform(), g.fx(), g.fy()));
             Some(Gradient::Radial {
+                focus,
                 center,
                 radius: 1.0,
                 stops: stops_of(g.stops(), alpha),
@@ -2557,8 +2563,8 @@ mod tests {
     /// each of its two edges, rounded to two different cells could not
     /// be closed (`chain`).
     ///
-    /// Left out, and said so: gradients, whose spread — reflect, repeat —
-    /// and focal point the engine has no field for yet; and strokes
+    /// Left out, and said so: gradients, which have a test of their own
+    /// below; and strokes
     /// under a transform that skews or scales unevenly, since a path
     /// comes in in the page's own space and its pen with it, where a
     /// reader turns the pen with the path. Fills are taken under every
@@ -2655,13 +2661,16 @@ mod tests {
     ///
     /// And past its ends, what its `spreadMethod` says — reflect, repeat —
     /// which had no field to land in and came in padded
-    /// (`Gradient::spread`). Not yet: a focus off the centre.
+    /// (`Gradient::spread`). And rings that start from a focus off the
+    /// centre, which came in starting from the centre
+    /// (`Gradient::Radial::focus`) — a focus inside the outer ring; past
+    /// it SVG 2 draws a cone that readers do not agree on, and the
+    /// engine holds the focus inside the ring as SVG 1.1 did.
     #[test]
     fn a_gradient_written_elsewhere_comes_in_painting_what_a_reader_paints() {
         let one = Allow {
             strokes: false,
             dashes: false,
-            focal: false,
             many: false,
             ..ALL
         };

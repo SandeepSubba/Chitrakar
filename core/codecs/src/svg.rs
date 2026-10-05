@@ -1458,6 +1458,32 @@ fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut Strin
             "    </radialGradient>",
         ),
     };
+    // Where the rings start from, when not the centre: in the gradient's
+    // own units, which with axes of its own are about the origin and
+    // otherwise about the centre — and held inside the outer ring as the
+    // renderer holds it, which a reader drawing SVG 2's cone past the
+    // ring would otherwise not.
+    let open = match g {
+        Gradient::Radial {
+            center,
+            radius,
+            axes,
+            focus: focus @ Some(_),
+            ..
+        } => {
+            let f = chitrakar_doc::focal_offset(*center, *radius, *axes, *focus);
+            let at = match axes {
+                Some(a) if chitrakar_doc::invert_axes(*a).is_some() => [0.0, 0.0],
+                _ => *center,
+            };
+            let (fx, fy) = (at[0] + f[0] * radius, at[1] + f[1] * radius);
+            match open.strip_suffix('>') {
+                Some(head) => format!(r#"{head} fx="{fx}" fy="{fy}">"#),
+                None => open,
+            }
+        }
+        _ => open,
+    };
     // What it does past its ends, when that is not to carry the end
     // colour on, which is SVG's default as it is ours.
     let open = match g.spread() {
@@ -4342,6 +4368,7 @@ mod tests {
                 fill: None,
                 stroke: None,
                 gradient: Some(chitrakar_doc::Gradient::Radial {
+                    focus: None,
                     center: [0.45, 0.55],
                     radius: 0.5,
                     stops: vec![
@@ -4409,6 +4436,7 @@ mod tests {
                 spread: Repeat,
             },
             chitrakar_doc::Gradient::Radial {
+                focus: None,
                 center: [0.5, 0.5],
                 radius: 0.2,
                 stops: stops.clone(),
@@ -4497,5 +4525,56 @@ mod tests {
             }
         }
         assert!(asked > 300, "asked of enough of it ({asked})");
+    }
+
+    /// The ramp a page of one set of stops is drawn in: its first layer's.
+    fn ramp_of(doc: &Document) -> Vec<(f32, chitrakar_color::LinearRgba)> {
+        let first = doc.children_of(doc.root()).unwrap()[0];
+        let Ok(NodeKind::Vector {
+            gradient: Some(g), ..
+        }) = doc.node(first).map(|n| &n.kind)
+        else {
+            panic!("a gradient first");
+        };
+        g.stops()
+            .iter()
+            .map(|s| (s.offset, chitrakar_render::resolve_color(doc, &s.color)))
+            .collect()
+    }
+
+    /// Rings that start off their centre leave with their focus, and a
+    /// reader draws each ring where the engine does — with axes of their
+    /// own, reflected, and from a focus set past the outer ring, which
+    /// both hold inside it.
+    #[test]
+    fn a_radials_focus_leaves_as_fx_and_fy() {
+        let doc = chitrakar_doc::fixture::focal_page();
+        let ramp = ramp_of(&doc);
+        let svg = export_svg(&doc).unwrap();
+        assert_eq!(svg.matches(" fx=").count(), 3, "{svg}");
+        let theirs = resvg_pixels(&doc);
+        let page = chitrakar_render::render(&doc).unwrap();
+        let mut asked = 0;
+        for y in (14..106).step_by(3) {
+            for x in (10..290).step_by(3) {
+                if page.get(x, y).a < 0.999 {
+                    continue;
+                }
+                let ours = along_ramp(&ramp, &page.get(x, y).to_srgb8());
+                // Away from where a repeat starts again, a seam the two
+                // can put a pixel apart.
+                if !(0.06..=0.94).contains(&ours) {
+                    continue;
+                }
+                let k = ((y * 300 + x) * 4) as usize;
+                let reader = along_ramp(&ramp, &theirs[k..k + 3]);
+                assert!(
+                    (ours - reader).abs() <= 0.04,
+                    "({x}, {y}): the page is {ours:.3} along the ramp and the reader {reader:.3}"
+                );
+                asked += 1;
+            }
+        }
+        assert!(asked > 1000, "asked of enough of it ({asked})");
     }
 }

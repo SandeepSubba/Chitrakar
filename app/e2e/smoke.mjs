@@ -560,6 +560,58 @@ assert(
   "and carrying the end colour on puts it back",
 );
 
+// A focus off the centre: shift-dragging the centre knob pulls the point
+// the rings start from out of it, leaving the centre and the rim where
+// they were — so the first colour is now where the focus was put, and
+// the centre is part way out along the ramp. Dragged back onto the
+// centre, the focus is gone again.
+const startColour = await canvasPixel(250, 200);
+const leftOfCentre = await canvasPixel(190, 200);
+assert(
+  (await page.locator(".grad-focus").count()) === 0,
+  "a radial starts with its focus at its centre, and no knob of its own",
+);
+const centreKnob = page.locator('[data-grad="centre"]');
+const ck = await centreKnob.boundingBox();
+await page.mouse.move(ck.x + ck.width / 2, ck.y + ck.height / 2);
+await page.keyboard.down("Shift");
+await page.mouse.down();
+await page.mouse.move(box.x + 190 * sx, box.y + 200 * sy, { steps: 6 });
+await page.mouse.up();
+await page.keyboard.up("Shift");
+await page.waitForTimeout(250);
+assert(
+  (await page.locator(".grad-focus").count()) === 1,
+  "shift-dragging the centre pulls out a focus knob",
+);
+const atFocus = await canvasPixel(190, 200);
+const closeTo = (a, b, d) => Math.max(...[0, 1, 2].map((k) => Math.abs(a[k] - b[k]))) <= d;
+assert(
+  closeTo(atFocus, startColour, 12) && !closeTo(leftOfCentre, startColour, 12),
+  `the first colour moved out to the focus (${leftOfCentre} -> ${atFocus}, the start ${startColour})`,
+);
+assert(
+  !closeTo(await canvasPixel(250, 200), startColour, 12),
+  "and the centre is part way along the ramp now",
+);
+const ck2 = await centreKnob.boundingBox();
+assert(
+  Math.abs(ck2.x - ck.x) < 1 && Math.abs(ck2.y - ck.y) < 1,
+  "while the centre itself stayed put",
+);
+const focusKnob = page.locator('[data-grad="focus"]');
+await focusKnob.hover();
+await page.mouse.down();
+await page.mouse.move(ck.x + ck.width / 2 + 1, ck.y + ck.height / 2, { steps: 6 });
+await page.mouse.up();
+await page.waitForTimeout(250);
+const knobsLeft = await page.locator(".grad-focus").count();
+const backAgain = await canvasPixel(190, 200);
+assert(
+  knobsLeft === 0 && JSON.stringify(backAgain) === JSON.stringify(leftOfCentre),
+  `dragged back onto the centre, the focus is the centre again (${knobsLeft} focus knobs, ${backAgain} where it was ${leftOfCentre})`,
+);
+
 // Back to a flat fill: the shape is uniform again and later steps see the
 // same rect they always did.
 await page.selectOption('[aria-label="Fill type"]', "solid");

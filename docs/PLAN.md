@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~593),
+- **Verify before committing:** `cargo test --workspace` (~597),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4876,9 +4876,43 @@ without reading anything else.*
      angle slider keeps it rather than rebuilding the gradient bare.
      Held against the CPU on the GPU, against resvg in SVG and against
      ghostscript in PDF, each failing when its own layer is undone.
-     Left out of the tests, and said so there: a focal point off the
-     centre, which the engine has no field for — the next thing to add —
-     and strokes under a skew or an uneven
+     **And from a focus.** A radial's `fx`/`fy` — rings starting from a
+     point off the centre, a highlight to one side — came in starting
+     from the centre: `Gradient::Radial::focus` now (additive, in the
+     centre's units, so the importer carries it in the way it carries
+     the centre). `focal_offset` measures it from the centre through the
+     axes in radii, holding a focus at or past the outer ring just inside
+     it (`FOCUS_REACH`, SVG 1.1's rule: SVG 2 draws a cone there that
+     readers disagree on), and `focal_ramp` is the one statement of which
+     ring a point is on — the root of `k t² − 2(w·f)t − |w|² = 0`, said
+     so the small answers behind the focus keep their digits; the CPU,
+     the shader (the focus rides in the radial's spare geometry slot and
+     a colour slot) and PDF's reach all use it. Rings with no focus keep
+     the arithmetic they always had, to the bit: the same distance
+     divided in another order moved a group's drop shadow by 3e-4 in the
+     wrap-a-layer-in-a-group test, past its 1e-4 — a last-bit change
+     amplified somewhere on the way through the shadow, not chased. SVG writes the held
+     focus as `fx`/`fy`; PDF's shading starts as a circle of no size at
+     the focus and ends `t1` rings out, its middle carried past the
+     centre as far as that takes it. `fixture::focal_page` — a focus
+     beside plain rings repeated, one inside turned axes reflected, one
+     set past the ring — is the page resvg, ghostscript (away from the
+     pixel beside a focus held at the ring, where the ramp runs its
+     length in a pixel) and the GPU are each held to, each failing when
+     its layer is undone; the random pages give every radial a focus
+     too, and the importer's gradient test now draws one in every file.
+     On the canvas, shift-dragging a radial's centre knob pulls a focus
+     out of it (an accent-filled knob); the centre carries the focus with
+     it, and a focus dragged back onto the centre is none. Writing that
+     step found a real bug: Shift held down on a knob stretched the
+     page's text selection to it, and the next drag picked the
+     selection up as a native drag — `pointercancel` after one move, the
+     knob stuck and the gesture never committed. The gradient knobs'
+     pointerdown now prevents the default, and the canvas host is
+     `user-select: none` (its in-place text box excepted) so the other
+     handles that read Shift cannot start one either.
+     Left out of the tests, and said so there: strokes under a skew or
+     an uneven
      scale, since a path comes in in page space with its pen, where a
      reader turns the pen with the path; keeping each path in its own
      space with the transform on the layer is the fix for that. Long

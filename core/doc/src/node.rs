@@ -158,7 +158,75 @@ pub enum Gradient {
         axes: Option<[f32; 4]>,
         #[serde(default)]
         spread: Spread,
+        /// Where the rings start from, in the same units as `center`:
+        /// the ramp's first colour is a point here rather than at the
+        /// centre, and each ring between is a circle (through the axes)
+        /// whose middle has moved along from it toward the centre —
+        /// SVG's `fx`/`fy`, a highlight off to one side. A focus at or
+        /// past the outer ring is held just inside it (`focal_offset`),
+        /// as SVG 1.1 says, so every ring still goes all the way round.
+        /// `None`, every older file, is the centre itself.
+        #[serde(default)]
+        focus: Option<[f32; 2]>,
     },
+}
+
+/// How far in from the outer ring a focus is held, as a share of it: on
+/// the ring itself, half the plane would have no ring through it.
+pub const FOCUS_REACH: f32 = 0.998;
+
+/// A radial gradient's focus as the renderers measure it: the offset
+/// from the centre through the axes, in units of the radius, held inside
+/// the outer ring (`FOCUS_REACH`). Zero when there is no focus.
+pub fn focal_offset(
+    center: [f32; 2],
+    radius: f32,
+    axes: Option<[f32; 4]>,
+    focus: Option<[f32; 2]>,
+) -> [f32; 2] {
+    let Some(f) = focus else {
+        return [0.0, 0.0];
+    };
+    if radius.abs() < 1e-12 || !radius.is_finite() {
+        return [0.0, 0.0];
+    }
+    let (du, dv) = (f[0] - center[0], f[1] - center[1]);
+    let a = axes.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+    let (x, y) = (
+        (a[0] * du + a[1] * dv) / radius,
+        (a[2] * du + a[3] * dv) / radius,
+    );
+    let len = x.hypot(y);
+    if !len.is_finite() {
+        return [0.0, 0.0];
+    }
+    if len > FOCUS_REACH {
+        [x / len * FOCUS_REACH, y / len * FOCUS_REACH]
+    } else {
+        [x, y]
+    }
+}
+
+/// Where along a radial ramp a point lies, `p` and the focus `f` both
+/// measured from the centre through the axes in units of the radius
+/// (`focal_offset`): the `t` whose ring — a circle of radius `t` about
+/// `f + t·(0 − f)` — passes through `p`. With the focus at the centre it
+/// is `|p|`, the plain radial.
+pub fn focal_ramp(p: [f32; 2], f: [f32; 2]) -> f32 {
+    let w = [p[0] - f[0], p[1] - f[1]];
+    let ww = w[0] * w[0] + w[1] * w[1];
+    let wf = w[0] * f[0] + w[1] * f[1];
+    let k = 1.0 - (f[0] * f[0] + f[1] * f[1]);
+    // `k t² − 2 (w·f) t − |w|² = 0`, its root that is not negative; said
+    // the way that does not lose the small answers behind the focus.
+    let root = (wf * wf + k * ww).max(0.0).sqrt();
+    if wf >= 0.0 {
+        (wf + root) / k
+    } else if root - wf > 1e-30 {
+        ww / (root - wf)
+    } else {
+        0.0
+    }
 }
 
 /// What a gradient does past the end of its ramp — SVG's `spreadMethod`.
@@ -1624,6 +1692,48 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// Rings out from a focus start at it and end on the outer ring all
+    /// the way round, whichever side of the focus; with the focus at the
+    /// centre they are the plain distance out; and a focus past the ring
+    /// is held just inside it.
+    #[test]
+    fn rings_from_a_focus_start_there_and_end_on_the_outer_ring() {
+        use super::{focal_offset, focal_ramp, FOCUS_REACH};
+        for f in [[0.0, 0.0], [0.4, -0.3], [-0.9, 0.1], [0.0, 0.99]] {
+            assert!(focal_ramp(f, f).abs() < 1e-6, "nothing at the focus {f:?}");
+            for k in 0..32 {
+                let a = k as f32 / 32.0 * std::f32::consts::TAU;
+                let rim = [a.cos(), a.sin()];
+                let t = focal_ramp(rim, f);
+                assert!((t - 1.0).abs() < 2e-3, "{f:?} at {a}: {t}");
+                // Twice as far out from the focus along the same line is
+                // past the ring, and half way is inside it.
+                let twice = [2.0 * rim[0] - f[0], 2.0 * rim[1] - f[1]];
+                let half = [(rim[0] + f[0]) / 2.0, (rim[1] + f[1]) / 2.0];
+                assert!(focal_ramp(twice, f) > 1.0 && focal_ramp(half, f) < 1.0);
+            }
+        }
+        let plain = focal_ramp([0.3, 0.4], [0.0, 0.0]);
+        assert!((plain - 0.5).abs() < 1e-6, "{plain}");
+        // Measured through the axes and in radii; and past the ring, held.
+        let f = focal_offset(
+            [0.5, 0.5],
+            0.25,
+            Some([2.0, 0.0, 0.0, 1.0]),
+            Some([0.55, 0.6]),
+        );
+        assert!(
+            (f[0] - 0.4).abs() < 1e-6 && (f[1] - 0.4).abs() < 1e-6,
+            "{f:?}"
+        );
+        let held = focal_offset([0.5, 0.5], 0.25, None, Some([1.5, 0.5]));
+        assert!(
+            (held[0] - FOCUS_REACH).abs() < 1e-6 && held[1] == 0.0,
+            "{held:?}"
+        );
+        assert_eq!(focal_offset([0.5, 0.5], 0.25, None, None), [0.0, 0.0]);
+    }
 
     /// A stroke written before there was a choice says nothing about how
     /// it ends or turns, and has to come back the way it was drawn then:
