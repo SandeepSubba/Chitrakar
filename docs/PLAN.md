@@ -436,10 +436,11 @@ without reading anything else.*
   one layer", a filter layer here reaching everything below it and a
   clip to the shape cutting the very spread that makes it a blur; a mask
   with real grey in it, which wants a raster mask and the pixels pooled
-  for it; a pattern fill, which wants a tile rasterized; and
-  `stroke-dashoffset`, which has no field to land in, so a broken line
-  starts its pattern at the beginning. Every one of those is a layer
-  that arrives plainer than the file, never one that arrives missing.
+  for it. Every one of those is a layer that arrives plainer than the
+  file, never one that arrives missing. (Two more were on this list: a
+  pattern fill, which comes in now as a picture of its tile repeated
+  and seen through the shape's outline, and `stroke-dashoffset`, which
+  has a field now — see the later entries.)
   Documents carry a resolution (presets and the New dialog set it, with
   the page's size on paper shown), and View › Pixels/Millimetres/Inches
   reads the rulers, the geometry fields and the status line in that
@@ -4922,7 +4923,30 @@ without reading anything else.*
      its dashes and its gradient are the file's as written; everything
      else still comes in in page space as it did. Strokes are taken
      under every transform in the import test now, inside its old
-     bounds (the worst file 20 pixels). Long dashed curves drift a pixel or so against resvg; finer flattening
+     bounds (the worst file 20 pixels).
+     **And a pattern, painted.** A shape filled with a `<pattern>` came
+     in with no fill at all — `Paint::Pattern` had no answer — so a
+     hatched or textured shape arrived as an empty outline. The engine
+     has no pattern fill (a tile repeated under a transform of its own),
+     and adding one is a new paint everywhere; so the importer does what
+     a reader does — draws the tile once at the scale it is seen at,
+     here with the engine's own renderer, its contents brought in by
+     `walk` like any of the file's — and lays it across the shape's box
+     at a document pixel a pixel (sampled through the pattern's
+     transform, wrapped, bilinear), as a picture whose mask is the
+     shape's outline (`pattern_picture`); a stroke over it still comes
+     in as the vector it is. Above sixteen megapixels the picture is
+     drawn coarser rather than refused. Writing it found usvg's own
+     TODO: a pattern in the box's units has its contents wrapped in a
+     group whose transform the paths under it are never told about, so
+     every one stood where it would with none; `walk` takes the truth
+     of where a group stands now, and puts each layer under it right by
+     the difference. Four files — stripes in user space, a checker
+     turned by `patternTransform`, dots in box units through a viewBox
+     under a stroke, and a skewed ellipse in a scaled group — are held
+     to resvg pixel by pixel (`a_pattern_fill_comes_in_painted`), and
+     each fails with the group fix or the outline mask taken out. Long
+     dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,
@@ -6626,9 +6650,9 @@ without reading anything else.*
      a filter layer here applies to everything below it, and clipping it
      to the shape would cut exactly the spread that makes it a blur, so
      there is no way to say "blur this one layer" yet. And a pattern fill
-     comes in unpainted, since `Paint::Pattern` has no answer here; the
-     honest fix is to rasterize a tile, which is worth less than it costs
-     for the files people bring to a photo editor.
+     came in unpainted, since `Paint::Pattern` had no answer here; it
+     comes in now as a picture of the tile (see "And a pattern, painted." in
+     §0's import notes).
      Then whatever the next user of the editor misses first — a brush
      that paints pixels rather than laying down live strokes. This line
      used to ask for text shaping worth the name as well, and that has

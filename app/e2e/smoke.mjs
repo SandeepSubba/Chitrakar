@@ -4323,6 +4323,31 @@ assert(
     (await names()).join() === beforeSvg.join() && (await canvasPixel(30, 25))[3] === 0,
     "one undo takes the whole drawing back",
   );
+  // A pattern fill is painted rather than dropped: the tile repeated
+  // across the shape, seen only through its outline, as one picture
+  // layer named after the shape.
+  const stripes = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <pattern id="p" width="12" height="12" patternUnits="userSpaceOnUse">
+      <rect width="6" height="12" fill="#cc2020"/><rect x="6" width="6" height="12" fill="#2040cc"/>
+    </pattern>
+    <rect id="striped" x="12" y="12" width="60" height="40" fill="url(#p)"/></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "stripes.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(stripes),
+  });
+  await page.waitForTimeout(400);
+  assert((await names()).includes("striped"), `the patterned shape is a layer (${await names()})`);
+  const redStripe = await canvasPixel(14, 30);
+  const blueStripe = await canvasPixel(20, 30);
+  assert(
+    redStripe[0] > 150 && redStripe[2] < 80 && blueStripe[2] > 150 && blueStripe[0] < 80,
+    `the stripes are where the file put them (${redStripe} and ${blueStripe})`,
+  );
+  assert((await canvasPixel(8, 30))[3] === 0, "and nothing outside the shape");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "one undo takes it back");
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

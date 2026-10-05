@@ -50,7 +50,7 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let mut shapes = Vec::new();
     let mut images = Vec::new();
-    walk(tree.root(), 1.0, None, &mut shapes, &mut images);
+    walk(tree.root(), 1.0, None, None, &mut shapes, &mut images);
     Ok(ImportedSvg {
         width: tree.size().width(),
         height: tree.size().height(),
@@ -291,13 +291,38 @@ fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
     }
 }
 
+/// A transform the way the document says one.
+fn as_doc(t: usvg::Transform) -> chitrakar_doc::Transform {
+    chitrakar_doc::Transform {
+        a: t.sx,
+        b: t.ky,
+        c: t.kx,
+        d: t.sy,
+        e: t.tx,
+        f: t.ty,
+    }
+}
+
+/// `truth` is where `group` really stands when usvg's own word for it
+/// cannot be taken: inside a pattern whose units it has resolved, it
+/// wraps the contents in a group of its own and leaves everything under
+/// that group placed as if it were not there (a TODO in usvg's
+/// `push_pattern_transform`). Each layer under it is put right by the
+/// difference between where it stands and where usvg says it does.
 fn walk(
     group: &usvg::Group,
     opacity: f32,
     clip: Option<&Vec<Vec<[f32; 2]>>>,
+    truth: Option<usvg::Transform>,
     out: &mut Vec<Node>,
     pics: &mut Vec<ImportedImage>,
 ) {
+    // What a layer standing at `said` is out by: the truth over what usvg
+    // said, which a path and a text both take from the group they are in.
+    let fix = |said: usvg::Transform| {
+        let truth = truth?;
+        Some(as_doc(truth.pre_concat(said.invert()?)))
+    };
     let opacity = opacity * group.opacity().get();
     // What this group is seen through, and everything under it with it. A
     // clip is the one thing about a group that survives the group being
@@ -334,11 +359,38 @@ fn walk(
     let clip = clip.as_ref();
     for child in group.children() {
         match child {
-            usvg::Node::Group(g) => walk(g, opacity, clip, out, pics),
+            usvg::Node::Group(g) => walk(
+                g,
+                opacity,
+                clip,
+                truth.map(|t| t.pre_concat(g.transform())),
+                out,
+                pics,
+            ),
             usvg::Node::Path(p) => {
                 if p.is_visible() {
+                    // A pattern fill comes in as a picture under the rest
+                    // of the path (`pattern_picture`); a path with nothing
+                    // else to it is that picture alone.
+                    let patterned = match p.fill().map(|f| (f, f.paint())) {
+                        Some((f, usvg::Paint::Pattern(pattern))) => {
+                            let alpha = f.opacity().get() * opacity;
+                            if let Some(pic) = pattern_picture(p, pattern, alpha, clip, out.len()) {
+                                pics.push(pic);
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if patterned && p.stroke().is_none() {
+                        continue;
+                    }
+                    let fixed = fix(p.abs_transform());
                     for mut node in shapes_of(p, opacity) {
                         node.mask = clip.map(|c| mask_of(c));
+                        if let Some(f) = fixed {
+                            node.transform = f.compose(node.transform);
+                        }
                         out.push(node);
                     }
                 }
@@ -354,15 +406,11 @@ fn walk(
             // stays where it is.
             usvg::Node::Text(t) => {
                 let before = out.len();
-                walk(t.flattened(), opacity, clip, out, pics);
+                walk(t.flattened(), opacity, clip, None, out, pics);
                 let a = t.abs_transform();
-                let placed = chitrakar_doc::Transform {
-                    a: a.sx,
-                    b: a.ky,
-                    c: a.kx,
-                    d: a.sy,
-                    e: a.tx,
-                    f: a.ty,
+                let placed = match fix(a) {
+                    Some(f) => f.compose(as_doc(a)),
+                    None => as_doc(a),
                 };
                 for node in &mut out[before..] {
                     node.transform = placed.compose(node.transform);
@@ -378,7 +426,7 @@ fn walk(
                 match img.kind() {
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
-                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, clip, out, pics),
+                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, clip, None, out, pics),
                     kind => {
                         if let Some(mut pic) = picture_of(img, kind, opacity, out.len()) {
                             pic.clip = clip.map(|c| mask_of(c));
@@ -389,6 +437,221 @@ fn walk(
             }
         }
     }
+}
+
+/// The most pixels a pattern's picture is drawn with before it is drawn
+/// coarser instead: a pattern behind a whole poster is still one layer.
+const PATTERN_MOST: f32 = 16_000_000.0;
+
+/// A path filled with a pattern, as a picture of the pattern laid across
+/// the path's box and seen only through its outline.
+///
+/// The engine has no pattern fill — a tile repeated under a transform of
+/// its own — so a hatched or textured shape used to come in with no fill
+/// at all, silently. What a reader does is draw the tile once at the
+/// scale it will be seen at and repeat it across the page through the
+/// pattern's transform; this does the same with the engine's own
+/// renderer for the tile (whose contents are more of the same file, and
+/// come in through `walk` like any other), and lays the result across the
+/// box at a pixel a document unit. The outline goes on as the picture's
+/// mask, so it is still the shape it was: a layer can be moved, and its
+/// mask edited, where a fill would have been lost.
+fn pattern_picture(
+    path: &usvg::Path,
+    pattern: &usvg::Pattern,
+    opacity: f32,
+    clip: Option<&Vec<Vec<[f32; 2]>>>,
+    below: usize,
+) -> Option<ImportedImage> {
+    let abs = path.abs_transform();
+    let rings = as_even_odd(path, rings_of(path));
+    let mut outline: Vec<Vec<[f32; 2]>> = rings
+        .iter()
+        .map(Ring::flattened)
+        .filter(|r| r.len() >= 3)
+        .collect();
+    if outline.is_empty() {
+        return None;
+    }
+    if let Some(c) = clip {
+        outline = narrowed(outline, c.clone())?;
+        if outline.is_empty() {
+            return None;
+        }
+    }
+    // The tile, drawn at the scale it is seen at, as a reader draws it.
+    let seen = abs.pre_concat(pattern.transform());
+    let (sx, sy) = seen.get_scale();
+    let rect = pattern.rect();
+    let (tw, th) = (
+        (rect.width() * sx).round().max(1.0) as u32,
+        (rect.height() * sy).round().max(1.0) as u32,
+    );
+    if (tw as f32) * (th as f32) > PATTERN_MOST {
+        return None;
+    }
+    let tile = draw_tile(pattern.root(), tw, th, sx, sy)?;
+    // Page → tile pixels: the inverse of where the tile's pixels land.
+    let place = seen
+        .pre_translate(rect.x(), rect.y())
+        .pre_scale(1.0 / sx, 1.0 / sy);
+    let back = place.invert()?;
+    // The box the outline covers, in document units, whole pixels out.
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in outline.iter().flatten() {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let (x0, y0) = (x0.floor(), y0.floor());
+    let (x1, y1) = (x1.ceil(), y1.ceil());
+    let (bw, bh) = (x1 - x0, y1 - y0);
+    if !(bw >= 1.0 && bh >= 1.0) {
+        return None;
+    }
+    let k = (PATTERN_MOST / (bw * bh)).sqrt().min(1.0);
+    let (w, h) = (
+        (bw * k).ceil().max(1.0) as u32,
+        (bh * k).ceil().max(1.0) as u32,
+    );
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for j in 0..h {
+        for i in 0..w {
+            let mut q = usvg::tiny_skia_path::Point::from_xy(
+                x0 + (i as f32 + 0.5) / k,
+                y0 + (j as f32 + 0.5) / k,
+            );
+            back.map_point(&mut q);
+            rgba.extend_from_slice(&sample_wrapped(&tile, q.x - 0.5, q.y - 0.5).to_srgb8());
+        }
+    }
+    let name = if path.id().is_empty() {
+        "Pattern".to_string()
+    } else {
+        path.id().to_string()
+    };
+    Some(ImportedImage {
+        name,
+        rgba,
+        width: w,
+        height: h,
+        transform: chitrakar_doc::Transform {
+            a: 1.0 / k,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0 / k,
+            e: x0,
+            f: y0,
+        },
+        opacity,
+        below,
+        clip: Some(mask_of(&outline)),
+    })
+}
+
+/// A pattern's tile as the engine draws it: what it holds, brought in as
+/// any file's contents are, on a page the tile's size in device pixels.
+fn draw_tile(
+    root: &usvg::Group,
+    w: u32,
+    h: u32,
+    sx: f32,
+    sy: f32,
+) -> Option<chitrakar_render::Surface> {
+    let mut shapes = Vec::new();
+    let mut pics = Vec::new();
+    // The tile's own space is where the pattern's contents stand.
+    walk(
+        root,
+        1.0,
+        None,
+        Some(usvg::Transform::default()),
+        &mut shapes,
+        &mut pics,
+    );
+    let mut doc = chitrakar_doc::Document::new(w, h, chitrakar_color::ColorMode::Rgb);
+    let root_id = doc.root();
+    let group = doc.peek_next_id();
+    let mut cmds = vec![chitrakar_doc::Command::AddNode {
+        parent: root_id,
+        index: 0,
+        node: Box::new({
+            let mut g = Node::group("tile");
+            g.transform = chitrakar_doc::Transform {
+                a: sx,
+                b: 0.0,
+                c: 0.0,
+                d: sy,
+                e: 0.0,
+                f: 0.0,
+            };
+            g
+        }),
+    }];
+    let mut pictures: Vec<(usize, Node)> = pics
+        .into_iter()
+        .map(|pic| {
+            let resource_id = doc.add_resource(pic.width, pic.height, pic.rgba);
+            let mut node = Node::raster(
+                &pic.name,
+                chitrakar_doc::RasterRef {
+                    resource_id,
+                    width: pic.width,
+                    height: pic.height,
+                },
+            );
+            node.transform = pic.transform;
+            node.opacity = pic.opacity;
+            node.mask = pic.clip;
+            (pic.below, node)
+        })
+        .collect();
+    pictures.reverse();
+    let mut at = 0usize;
+    let mut push = |cmds: &mut Vec<chitrakar_doc::Command>, node: Node| {
+        cmds.push(chitrakar_doc::Command::AddNode {
+            parent: group,
+            index: at,
+            node: Box::new(node),
+        });
+        at += 1;
+    };
+    for (i, shape) in shapes.into_iter().enumerate() {
+        while pictures.last().is_some_and(|(below, _)| *below <= i) {
+            let (_, pic) = pictures.pop()?;
+            push(&mut cmds, pic);
+        }
+        push(&mut cmds, shape);
+    }
+    while let Some((_, pic)) = pictures.pop() {
+        push(&mut cmds, pic);
+    }
+    doc.apply(chitrakar_doc::Command::Batch(cmds)).ok()?;
+    chitrakar_render::render(&doc).ok()
+}
+
+/// A tile's colour at a point in its pixels, the tile repeating every way
+/// and its neighbours mixed in by how near they are.
+fn sample_wrapped(tile: &chitrakar_render::Surface, x: f32, y: f32) -> chitrakar_color::LinearRgba {
+    let (w, h) = (tile.width as i64, tile.height as i64);
+    let (fx, fy) = (x.floor(), y.floor());
+    let (tx, ty) = (x - fx, y - fy);
+    let at = |i: i64, j: i64| tile.pixels[(j.rem_euclid(h) * w + i.rem_euclid(w)) as usize];
+    let (i, j) = (fx as i64, fy as i64);
+    let mix = |a: chitrakar_color::LinearRgba, b: chitrakar_color::LinearRgba, t: f32| {
+        chitrakar_color::LinearRgba {
+            r: a.r + (b.r - a.r) * t,
+            g: a.g + (b.g - a.g) * t,
+            b: a.b + (b.b - a.b) * t,
+            a: a.a + (b.a - a.a) * t,
+        }
+    };
+    mix(
+        mix(at(i, j), at(i + 1, j), tx),
+        mix(at(i, j + 1), at(i + 1, j + 1), tx),
+        ty,
+    )
 }
 
 /// One embedded picture, decoded and placed.
@@ -2779,5 +3042,57 @@ mod tests {
         let imported = import_svg(even.as_bytes()).unwrap();
         let line = &imported.shapes[0];
         assert_eq!(line.transform, chitrakar_doc::Transform::default());
+    }
+
+    /// A shape filled with a pattern comes in painted as a reader paints
+    /// it — the tile repeated through the pattern's own transform, in
+    /// either unit system, through a viewBox, under the shape's transform
+    /// and a group's — as a picture seen through the shape's outline.
+    /// It used to come in with no fill at all.
+    #[test]
+    fn a_pattern_fill_comes_in_painted() {
+        let head = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">"##;
+        let files = [
+            // Stripes in user space.
+            r##"<pattern id="p" width="12" height="12" patternUnits="userSpaceOnUse">
+  <rect width="6" height="12" fill="#c03020"/><rect x="6" width="6" height="12" fill="#2050d0"/>
+</pattern>
+<rect x="4" y="4" width="50" height="36" fill="url(#p)"/>"##,
+            // A checker turned and scaled by the pattern's own transform.
+            r##"<pattern id="p" width="16" height="16" patternUnits="userSpaceOnUse" patternTransform="rotate(30) scale(1.2)">
+  <rect width="8" height="8" fill="#20a040"/><rect x="8" y="8" width="8" height="8" fill="#20a040"/>
+  <rect x="8" width="8" height="8" fill="#f0e0c0"/><rect y="8" width="8" height="8" fill="#f0e0c0"/>
+</pattern>
+<circle cx="32" cy="24" r="20" fill="url(#p)"/>"##,
+            // In the box's units, through a viewBox, with a stroke over it.
+            r##"<pattern id="p" width="0.25" height="0.25" viewBox="0 0 10 10">
+  <rect width="10" height="10" fill="#ffffff"/><circle cx="5" cy="5" r="3" fill="#303080"/>
+</pattern>
+<path d="M6 6 L58 10 L50 42 L10 38 Z" fill="url(#p)" stroke="#000000" stroke-width="2"/>"##,
+            // Under a group that moves and scales it, and a skew of its own.
+            r##"<pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse">
+  <rect width="10" height="10" fill="#f0c020"/><rect width="5" height="5" fill="#402010"/>
+</pattern>
+<g transform="translate(6 2) scale(0.9)"><ellipse cx="30" cy="26" rx="26" ry="18" fill="url(#p)" transform="skewX(10)"/></g>"##,
+        ];
+        for (n, body) in files.iter().enumerate() {
+            let svg = format!("{head}\n{body}\n</svg>");
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            assert_eq!(
+                imported.images.len(),
+                1,
+                "file {n}: the pattern as a picture"
+            );
+            assert!(
+                imported.images[0].clip.is_some(),
+                "file {n}: seen through its outline"
+            );
+            let (cover, colour, first) = foreign_bad(&svg, true);
+            assert!(
+                cover + colour <= 8,
+                "file {n}: {cover} pixels covered and {colour} coloured otherwise, the first \
+                 {first:?}\n{svg}"
+            );
+        }
     }
 }
