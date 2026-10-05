@@ -4021,7 +4021,12 @@ pub fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
 /// Empty when there is nothing to break up — no pattern, or a pattern
 /// with nothing on in it, which would leave no stroke at all and so is
 /// read as a solid one.
-pub fn dashed_rings(shape: &VectorShape, dash: &[f32], inward: f32) -> Vec<Vec<[f32; 2]>> {
+pub fn dashed_rings(
+    shape: &VectorShape,
+    dash: &[f32],
+    offset: f32,
+    inward: f32,
+) -> Vec<Vec<[f32; 2]>> {
     let pattern: Vec<f32> = dash.iter().map(|d| d.max(0.0)).collect();
     if pattern.is_empty() || pattern.iter().all(|d| *d <= 0.0) {
         return Vec::new();
@@ -4063,14 +4068,33 @@ pub fn dashed_rings(shape: &VectorShape, dash: &[f32], inward: f32) -> Vec<Vec<[
             None => return Vec::new(),
         },
     };
+    // Where each line starts in the pattern: `offset` along it, taken
+    // round the pattern's length — which, for an odd number of lengths,
+    // is twice their sum, since the runs have to come round to *on*
+    // again to repeat. Negative goes back round the other way.
+    let period: f32 = pattern.iter().sum::<f32>() * if pattern.len() % 2 == 1 { 2.0 } else { 1.0 };
+    let (first_step, first_left, first_on) = {
+        let mut into = if period > 0.0 && offset.is_finite() {
+            offset.rem_euclid(period)
+        } else {
+            0.0
+        };
+        let (mut step, mut on) = (0usize, true);
+        while into >= pattern[step].max(1e-4) {
+            into -= pattern[step].max(1e-4);
+            step = (step + 1) % pattern.len();
+            on = !on;
+        }
+        (step, pattern[step].max(1e-4) - into, on)
+    };
     let mut out = Vec::new();
     for (points, closed) in rings {
         if points.len() < 2 {
             continue;
         }
-        let mut step = 0usize;
-        let mut left = pattern[0];
-        let mut on = true;
+        let mut step = first_step;
+        let mut left = first_left;
+        let mut on = first_on;
         let mut run: Vec<[f32; 2]> = vec![points[0]];
         let segments = if closed {
             points.len()
@@ -4567,7 +4591,7 @@ pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec
         StrokeAlign::Centre => 0.0,
         StrokeAlign::Outside => -stroke.width / 2.0,
     };
-    let runs = dashed_rings(shape, &stroke.dash, inward);
+    let runs = dashed_rings(shape, &stroke.dash, stroke.dash_offset, inward);
     if !runs.is_empty() {
         let half = stroke.width / 2.0;
         for run in runs {
@@ -4714,6 +4738,10 @@ fn direction(a: [f32; 2], b: [f32; 2]) -> Option<[f32; 2]> {
     (len > 1e-9).then(|| [dx / len, dy / len])
 }
 
+/// How little a line has to bend at a point, as the cosine of the turn,
+/// for a round join there to be filled as a miter: fifteen degrees.
+const SLIGHT_TURN: f32 = 0.965_925_8;
+
 /// What fills the outside of the corner at point `i`.
 ///
 /// Only the outside: on the inside of a turn the two bands already
@@ -4729,16 +4757,27 @@ fn join_piece(
     if h <= 0.0 {
         return;
     }
-    if join == chitrakar_doc::StrokeJoin::Round {
-        out.push(StrokePiece::Disc { at: v, r: h });
-        return;
-    }
     let (Some(d1), Some(d2)) = (
         direction(ring.points[(i + n - 1) % n], v),
         direction(v, ring.points[(i + 1) % n]),
     ) else {
+        if join == chitrakar_doc::StrokeJoin::Round {
+            out.push(StrokePiece::Disc { at: v, r: h });
+        }
         return;
     };
+    // A round join is a disc at a real corner. Where the line only bends
+    // a little — which is every point a curve is flattened into — the
+    // corner a disc fills and the one a miter fills differ by less than
+    // a three-hundredth of the half-width, but the disc reaches out
+    // along the line as well, past the flat end of a dash that stops just
+    // beyond the point. Every dash along a curve came out with rounded,
+    // swollen ends: in a file a reader drew them flat, since a curve has
+    // no corners for a join to be made at.
+    if join == chitrakar_doc::StrokeJoin::Round && d1[0] * d2[0] + d1[1] * d2[1] < SLIGHT_TURN {
+        out.push(StrokePiece::Disc { at: v, r: h });
+        return;
+    }
     let cross = d1[0] * d2[1] - d1[1] * d2[0];
     // Straight on has no corner to fill, and a line doubling back on
     // itself has no outside to fill it on.
@@ -8757,6 +8796,7 @@ fn hit_child(
                         // it: clicking a gap should still catch the line.
                         let solid = chitrakar_doc::Stroke {
                             dash: Vec::new(),
+                            dash_offset: 0.0,
                             ..s.clone()
                         };
                         stroke_covers(
@@ -9453,6 +9493,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash,
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 align: None,
@@ -9524,6 +9565,7 @@ mod tests {
                 width: 8.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: StrokeCap::Round,
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -9600,6 +9642,7 @@ mod tests {
                 width: 8.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -9681,6 +9724,7 @@ mod tests {
                         // at either end of each dash, which reach half a
                         // width along the line.
                         dash: vec![10.0, 20.0],
+                        dash_offset: 0.0,
                         ..s
                     });
                 }
@@ -9737,6 +9781,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: StrokeCap::Butt,
                 join: Default::default(),
                 start_marker: Marker::None,
@@ -9854,6 +9899,7 @@ mod tests {
                 width: 24.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: StrokeCap::Butt,
                 join: StrokeJoin::Round,
                 start_marker: Default::default(),
@@ -9942,6 +9988,7 @@ mod tests {
                 width: half * 2.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: StrokeCap::Butt,
                 join: StrokeJoin::Miter,
                 start_marker: Default::default(),
@@ -10058,6 +10105,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -10095,6 +10143,7 @@ mod tests {
                         width: 4.0,
                         widths: Vec::new(),
                         dash,
+                        dash_offset: 0.0,
                         cap: Default::default(),
                         join: Default::default(),
                         start_marker: Default::default(),
@@ -10126,6 +10175,84 @@ mod tests {
         assert!(along(&doc).iter().all(|on| *on), "and solid again");
     }
 
+    /// A dash pattern starts as far into itself as the stroke's offset
+    /// says: a whole "on" in begins in the gap, a period further round is
+    /// the same again, a negative one goes back round the other way —
+    /// and a pattern of an odd number of lengths repeats only after twice
+    /// their sum, so an offset of one sum starts it on its *off* turn.
+    #[test]
+    fn a_dash_pattern_starts_as_far_in_as_its_offset() {
+        let along = |dash: Vec<f32>, offset: f32| {
+            let mut doc = Document::new(80, 20, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "line",
+                VectorShape::Path {
+                    points: vec![[0.0, 10.0], [80.0, 10.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = None;
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 4.0,
+                    widths: Vec::new(),
+                    dash,
+                    dash_offset: offset,
+                    // Flat, so a dash is its own length and no more.
+                    cap: chitrakar_doc::StrokeCap::Butt,
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: None,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let s = render(&doc).unwrap();
+            (0..80).map(|x| s.get(x, 10).a > 0.5).collect::<Vec<_>>()
+        };
+        let plain = along(vec![8.0, 8.0], 0.0);
+        let shifted = along(vec![8.0, 8.0], 8.0);
+        assert!(
+            plain[2] && !shifted[2],
+            "eight in, the line starts in the gap"
+        );
+        assert!(!plain[12] && shifted[12], "and is on where it was off");
+        assert_eq!(
+            along(vec![8.0, 8.0], 24.0),
+            shifted,
+            "a period further round is the same"
+        );
+        assert_eq!(
+            along(vec![8.0, 8.0], -8.0),
+            shifted,
+            "and so is the other way round"
+        );
+        let back = along(vec![8.0, 8.0], -4.0);
+        assert!(
+            !back[2] && back[6],
+            "four back is twelve in: the last four of the gap, then a dash"
+        );
+        // Four on, two off, six on — then four *off*, the runs having to
+        // alternate: its period is twice its sum.
+        let odd = along(vec![4.0, 2.0, 6.0], 12.0);
+        assert!(!odd[2], "a sum in, an odd pattern starts off");
+        assert_eq!(
+            along(vec![4.0, 2.0, 6.0], 24.0),
+            along(vec![4.0, 2.0, 6.0], 0.0),
+            "and twice its sum in is where it began"
+        );
+    }
+
     /// A dashed outline is still picked along the whole of it: clicking
     /// where a gap happens to be should catch the line, not fall through.
     #[test]
@@ -10149,6 +10276,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: vec![8.0, 8.0],
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -16439,6 +16567,7 @@ mod tests {
                 width: 3.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -17210,6 +17339,7 @@ mod tests {
                 width: 12.0,
                 widths: vec![1.0, 0.15],
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -17280,6 +17410,7 @@ mod tests {
                     width: 10.0,
                     widths,
                     dash: Vec::new(),
+                    dash_offset: 0.0,
                     cap: Default::default(),
                     join: Default::default(),
                     start_marker: Default::default(),
@@ -18428,6 +18559,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -18512,6 +18644,7 @@ mod tests {
                     width,
                     widths: Vec::new(),
                     dash: Vec::new(),
+                    dash_offset: 0.0,
                     cap: Default::default(),
                     join: Default::default(),
                     start_marker: Default::default(),
@@ -18605,6 +18738,7 @@ mod tests {
                 width: 2.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -19342,6 +19476,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 align: None,
@@ -21487,6 +21622,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: StrokeJoin::Round,
                 align: None,
@@ -22208,6 +22344,7 @@ mod tests {
                         width: 6.0,
                         widths: Vec::new(),
                         dash: Vec::new(),
+                        dash_offset: 0.0,
                         cap: Default::default(),
                         join: Default::default(),
                         start_marker: Default::default(),

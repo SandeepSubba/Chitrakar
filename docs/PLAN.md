@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~580),
+- **Verify before committing:** `cargo test --workspace` (~585),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4790,6 +4790,53 @@ without reading anything else.*
      (`/Group << /S /Transparency /CS … >>`), which is what a press file
      should say anyway. Five pixels a page are allowed, for hairlines of
      self-crossing paths that ghostscript paints heavier.
+     **And files written elsewhere, coming in.** The round trip only ever
+     handed the importer what this exporter writes. A generator of SVG
+     files nobody here wrote (`foreign_svg_with`: every basic shape, paths
+     with relative commands, quadratics and arcs, every kind of
+     transform, dashes, caps and joins, clip paths in both unit systems,
+     `use`, nested viewports) holds the engine's picture of what came in
+     to resvg's picture of the file
+     (`a_file_written_elsewhere_comes_in_as_a_reader_draws_it`). Asked by
+     feature, one at a time, a third of files with single plain shapes
+     were wrong, and so on up. **An outline crossing itself** — a star, a
+     looping polyline — came in with a hole wherever it wound round
+     twice, since SVG fills by winding, the engine even-odd, and the
+     importer converted only rings that overlapped each other. It is cut
+     where it crosses itself now and kept where it is the edge of what
+     winding fills (`boolean::nonzero_as_even_odd`), and left with its
+     curves when the two rules agree; where outlines only touch — a
+     tapered stroke's bands and the discs that cap them, which our own
+     exporter writes — that cannot be traced, and the old union of
+     rings wound alike, which nudges touching edges apart, answers
+     instead (the round trip caught that one); where such a path is stroked too it
+     comes in as its fill and then its stroke along the file's own line
+     (`shapes_of`), since a stroke laid round the converted edge closed
+     open paths and turned crossings into corners. **`stroke-dashoffset`
+     had nowhere to land**: `Stroke::dash_offset` now (additive, nought
+     for every older file), walked into the pattern by `dashed_rings`
+     with SVG's rule — round the pattern's period, which is twice its sum
+     for an odd number of lengths — written as `stroke-dashoffset` and as
+     a PDF dash's phase, read on import, set in the fixture from the
+     pattern it already drew so no page moved, and offered beside the
+     line pattern in the panel (8k1). **Dashes along a curve had round,
+     swollen ends**: a round join was a disc at every point a curve is
+     flattened into, reaching past a dash's flat end; a join that only
+     bends a little (`SLIGHT_TURN`, fifteen degrees) is filled as a
+     miter, which differs from the disc by a three-hundredth of the
+     half-width. And **two ends a hair apart either side of a grid
+     cell's edge did not meet** in `chain`, so a crossing worked out from
+     each of its two edges could leave an outline unclosable; ends meet
+     within a weld by distance now, through the cells round them.
+     Left out of the test, and said so there: gradients, whose spread
+     (reflect, repeat) and focal point the engine has no field for —
+     the next thing to add — and strokes under a skew or an uneven
+     scale, since a path comes in in page space with its pen, where a
+     reader turns the pen with the path; keeping each path in its own
+     space with the transform on the layer is the fix for that. Long
+     dashed curves drift a pixel or so against resvg; finer flattening
+     made it worse, so the difference is the reader's arc length as much
+     as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,
      standing turned** (`again`), which is two things this document had
      never held. Every resource in it was referred to exactly *once*, so

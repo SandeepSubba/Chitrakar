@@ -206,6 +206,14 @@ const DASHES: [string, number[]][] = [
   ["Dash-dot", [16, 6, 2, 6]],
 ];
 
+/** How far along a dash pattern repeats: its lengths summed, or twice
+ * that for an odd number of them, whose runs have to come round to "on"
+ * again. */
+const dashPeriod = (dash: number[]): number => {
+  const sum = dash.reduce((a, b) => a + Math.max(0, b), 0);
+  return dash.length % 2 === 1 ? sum * 2 : sum;
+};
+
 /** A glyph per layer kind, so the stack is scannable without reading the
  * type label at the end of every row. */
 /** The layer kinds that hold other layers — what a row can be dropped
@@ -12338,6 +12346,20 @@ function KindProps({
             </select>
           </label>
         )}
+        {/* Where along its pattern a dashed line starts — what a file
+            calls `stroke-dashoffset`, and what lines dashes up with a
+            corner. One period round is where it began, so that is as
+            far as the slider goes. */}
+        {v.stroke &&
+          (v.stroke.dash ?? []).length > 0 &&
+          slider(
+            "Dash offset",
+            v.stroke.dash_offset ?? 0,
+            0,
+            dashPeriod(v.stroke.dash),
+            0.5,
+            (o) => patch({ stroke: { ...v.stroke!, dash_offset: o } }),
+          )}
         {/* Which side of the edge the border lies on. A rect's and an
             ellipse's outline has a distance of its own, so a band to
             either side of it is exact; a path is stroked down the middle

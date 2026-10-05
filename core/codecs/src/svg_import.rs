@@ -337,7 +337,7 @@ fn walk(
             usvg::Node::Group(g) => walk(g, opacity, clip, out, pics),
             usvg::Node::Path(p) => {
                 if p.is_visible() {
-                    if let Some(mut node) = shape_of(p, opacity) {
+                    for mut node in shapes_of(p, opacity) {
                         node.mask = clip.map(|c| mask_of(c));
                         out.push(node);
                     }
@@ -448,6 +448,7 @@ fn picture_of(
 }
 
 /// One subpath as anchors with bezier handles, and whether it closes.
+#[derive(Clone)]
 struct Ring {
     points: Vec<[f32; 2]>,
     handles: Vec<[f32; 4]>,
@@ -658,27 +659,49 @@ fn solid_of(paint: &usvg::Paint, alpha: f32) -> Option<AuthoredColor> {
 /// the file draws solid and this drew a hole, which is a shape coming in
 /// wrong rather than a shade being off.
 ///
-/// Where every ring is wound the same way, nonzero is *exactly* the
-/// union of them: a point inside `k` of them has winding `±k`, which is
-/// non-zero for every `k ≥ 1`, and that is what a union covers. So that
-/// case is converted rather than approximated, through the same shape
-/// booleans a selection is built with.
-///
-/// Rings wound both ways are left alone. They are the ordinary
-/// outline-with-holes, where the two rules already agree, and the cases
-/// where they do not — a hole inside two overlapping outlines still
-/// being filled — cannot be said as a union and are not worth guessing
-/// at. Nothing is done unless two same-wound rings actually overlap,
-/// since the union flattens curves and a path that needs no correction
-/// should not pay for one.
+/// It used to convert only one case — rings all wound the same way,
+/// overlapping, as their union — and leave the rest alone. Asked of
+/// files nobody wrote, the commonest case it left was the simplest: one
+/// outline crossing itself, a star or a looping polyline, which came in
+/// with a hole wherever it wound round twice. Now the outline is cut
+/// where it crosses itself and kept where it is the edge of what the
+/// nonzero rule fills (`boolean::nonzero_as_even_odd`), which is every
+/// case; a path whose rules already agree is left with its curves.
 fn as_even_odd(path: &usvg::Path, rings: Vec<Ring>) -> Vec<Ring> {
     let nonzero = path
         .fill()
         .is_some_and(|f| f.rule() == usvg::FillRule::NonZero);
-    if !nonzero || rings.len() < 2 {
+    if !nonzero {
         return rings;
     }
     let flat: Vec<Vec<[f32; 2]>> = rings.iter().map(Ring::flattened).collect();
+    let edge = chitrakar_render::boolean::nonzero_as_even_odd(&flat)
+        // Where that could not be traced — outlines that only touch, as a
+        // tapered stroke's bands and discs do — rings all wound one way
+        // are still exactly their union, which the shape booleans can say
+        // by nudging what only touches apart.
+        .or_else(|| union_if_wound_alike(&flat));
+    match edge {
+        Some(edge) => edge
+            .into_iter()
+            .map(|points| Ring {
+                handles: vec![[0.0; 4]; points.len()],
+                points,
+                closed: true,
+            })
+            .collect(),
+        // The rules agree — or the edge could not be traced, where the
+        // shape as it stands is the honest answer rather than a guess.
+        None => rings,
+    }
+}
+
+/// Rings all wound the same way, overlapping, as their union — which is
+/// what the nonzero rule fills for them. `None` for anything else.
+fn union_if_wound_alike(flat: &[Vec<[f32; 2]>]) -> Option<Vec<Vec<[f32; 2]>>> {
+    if flat.len() < 2 {
+        return None;
+    }
     let area = |r: &[[f32; 2]]| -> f32 {
         let mut a = 0.0;
         for i in 0..r.len() {
@@ -689,8 +712,10 @@ fn as_even_odd(path: &usvg::Path, rings: Vec<Ring>) -> Vec<Ring> {
     };
     let signs: Vec<f32> = flat.iter().map(|r| area(r).signum()).collect();
     if signs.windows(2).any(|w| w[0] != w[1]) {
-        return rings;
+        return None;
     }
+    // Rings that do not reach each other already mean the same under
+    // either rule, and a union would only flatten their curves.
     let box_of = |r: &[[f32; 2]]| {
         r.iter()
             .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
@@ -710,37 +735,61 @@ fn as_even_odd(path: &usvg::Path, rings: Vec<Ring>) -> Vec<Ring> {
         })
     });
     if !touching {
-        return rings;
+        return None;
     }
     let mut acc: Vec<Vec<[f32; 2]>> = vec![flat[0].clone()];
     for next in &flat[1..] {
-        match chitrakar_render::boolean::combine_or_nudge(
+        acc = chitrakar_render::boolean::combine_or_nudge(
             &acc,
             std::slice::from_ref(next),
             chitrakar_render::boolean::BoolOp::Union,
-        ) {
-            Some(joined) => acc = joined,
-            // Outlines that only touch, or share an edge exactly, are
-            // what `combine` declines. The shape as it stands is the
-            // honest answer there rather than a guess.
-            None => return rings,
-        }
+        )?;
     }
-    acc.into_iter()
-        .map(|points| Ring {
-            handles: vec![[0.0; 4]; points.len()],
-            points,
-            closed: true,
-        })
-        .collect()
+    Some(acc)
 }
 
-fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
-    let mut rings = rings_of(path);
+/// A path's layers: one, or two where its fill and its stroke need
+/// different outlines.
+///
+/// They do when the fill had to be said for the even-odd rule
+/// (`as_even_odd`): the fill's outline is then the edge of the region the
+/// file fills, and a stroke laid along *that* goes round the region's
+/// edge rather than along the line the file drew — an open path closed
+/// up, a crossing turned into a corner. So the fill goes on the region,
+/// and the stroke on the file's own path above it, which is the order SVG
+/// paints the two in.
+fn shapes_of(path: &usvg::Path, opacity: f32) -> Vec<Node> {
+    let rings = rings_of(path);
+    if rings.is_empty() {
+        return Vec::new();
+    }
+    let edge = as_even_odd(path, rings.clone());
+    let corrected =
+        edge.len() != rings.len() || edge.iter().zip(&rings).any(|(a, b)| a.points != b.points);
+    if !corrected || path.stroke().is_none() || path.fill().is_none() {
+        return shape_of(path, edge, opacity).into_iter().collect();
+    }
+    let mut out = Vec::new();
+    if let Some(mut fill) = shape_of(path, edge, opacity) {
+        if let NodeKind::Vector { stroke, .. } = &mut fill.kind {
+            *stroke = None;
+        }
+        out.push(fill);
+    }
+    if let Some(mut line) = shape_of(path, rings, opacity) {
+        if let NodeKind::Vector { fill, gradient, .. } = &mut line.kind {
+            *fill = None;
+            *gradient = None;
+        }
+        out.push(line);
+    }
+    out
+}
+
+fn shape_of(path: &usvg::Path, mut rings: Vec<Ring>, opacity: f32) -> Option<Node> {
     if rings.is_empty() {
         return None;
     }
-    rings = as_even_odd(path, rings);
     // The main ring keeps its curves; the rest, straight-sided, cut holes
     // or add islands. The first subpath is taken as the main one, which
     // is how outlines are usually drawn.
@@ -799,17 +848,16 @@ fn shape_of(path: &usvg::Path, opacity: f32) -> Option<Node> {
                 //
                 // An odd-length pattern needs no special handling: SVG
                 // repeats it to make the runs alternate, and a pattern
-                // walked round and round does that by itself. What is
-                // *not* carried is `stroke-dashoffset`, which shifts
-                // where the pattern starts along the line and has no
-                // field here to land in. A line whose dashes begin a
-                // little further along is much nearer the file than a
-                // line with no dashes at all, so it comes in unshifted
-                // rather than being refused.
+                // walked round and round does that by itself.
                 dash: s
                     .dasharray()
                     .map(|d| d.iter().map(|v| v * scale).collect())
                     .unwrap_or_default(),
+                // Where the pattern starts along the line, in the same
+                // units. It used to have no field to land in and came in
+                // as nought, so every dashed line whose file shifted its
+                // pattern came in with its dashes where the gaps were.
+                dash_offset: s.dashoffset() * scale,
                 // What the file says, not what this engine happens to
                 // default to: SVG's own default is a flat end and a
                 // mitred corner, and a line imported round when it was
@@ -1724,12 +1772,14 @@ mod tests {
     /// back among the shapes where each one was.
     fn round_trip(doc: &Document) -> Document {
         let svg = crate::export_svg(doc).unwrap();
+        brought_in(&svg, doc.meta.width, doc.meta.height)
+    }
+
+    /// An SVG file brought in the way `Session::place_svg` brings one in,
+    /// onto a page of the given size.
+    fn brought_in(svg: &str, width: u32, height: u32) -> Document {
         let imported = import_svg(svg.as_bytes()).unwrap();
-        let mut out = Document::new(
-            doc.meta.width,
-            doc.meta.height,
-            chitrakar_color::ColorMode::Rgb,
-        );
+        let mut out = Document::new(width, height, chitrakar_color::ColorMode::Rgb);
         let root = out.root();
         let mut pictures: Vec<(usize, Node)> = imported
             .images
@@ -2040,6 +2090,436 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A random number source for the files below, fixed by its seed.
+    struct Dice(u64);
+    impl Dice {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn f(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (self.next() % 10_000) as f32 / 10_000.0 * (hi - lo)
+        }
+        fn pick<'a, T>(&mut self, of: &'a [T]) -> &'a T {
+            &of[(self.next() % of.len() as u64) as usize]
+        }
+        fn one_in(&mut self, n: u64) -> bool {
+            self.next().is_multiple_of(n)
+        }
+    }
+
+    /// An SVG file nobody wrote, using what files written elsewhere use
+    /// and this exporter never writes: every basic shape, paths with
+    /// relative commands, quadratics and arcs, transforms of every kind,
+    /// gradients in both unit systems with every spread and a transform
+    /// of their own, dashes, joins and caps, clip paths, `use`, and a
+    /// nested `svg` with a viewBox. `opaque` keeps every paint and every
+    /// layer at full strength, so colour can be compared as well.
+    #[derive(Clone, Copy)]
+    struct Allow {
+        gradients: bool,
+        strokes: bool,
+        dashes: bool,
+        transforms: bool,
+        wrappers: bool,
+        curves: bool,
+        many: bool,
+    }
+    const ALL: Allow = Allow {
+        gradients: true,
+        strokes: true,
+        dashes: true,
+        transforms: true,
+        wrappers: true,
+        curves: true,
+        many: true,
+    };
+
+    fn foreign_svg_with(seed: u64, opaque: bool, allow: Allow) -> String {
+        let mut d = Dice(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let (w, h) = (64.0f32, 48.0f32);
+        let colour = |d: &mut Dice| {
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                d.next() % 256,
+                d.next() % 256,
+                d.next() % 256
+            )
+        };
+        let mut defs = String::new();
+        let mut body = String::new();
+        let mut ids = 0usize;
+        let transform = |d: &mut Dice| -> String {
+            if !allow.transforms {
+                return String::new();
+            }
+            match d.next() % 7 {
+                0 => format!(
+                    " transform=\"translate({:.2} {:.2})\"",
+                    d.f(-10.0, 10.0),
+                    d.f(-10.0, 10.0)
+                ),
+                1 => format!(
+                    " transform=\"rotate({:.1} {:.1} {:.1})\"",
+                    d.f(-90.0, 90.0),
+                    d.f(0.0, 64.0),
+                    d.f(0.0, 48.0)
+                ),
+                2 => format!(
+                    " transform=\"scale({:.2} {:.2})\"",
+                    d.f(0.6, 1.4),
+                    d.f(0.6, 1.4)
+                ),
+                3 => format!(" transform=\"skewX({:.1})\"", d.f(-25.0, 25.0)),
+                4 => format!(
+                    " transform=\"matrix({:.2} {:.2} {:.2} {:.2} {:.1} {:.1})\"",
+                    d.f(0.7, 1.2),
+                    d.f(-0.3, 0.3),
+                    d.f(-0.3, 0.3),
+                    d.f(0.7, 1.2),
+                    d.f(-8.0, 8.0),
+                    d.f(-8.0, 8.0)
+                ),
+                _ => String::new(),
+            }
+        };
+        let paint = |d: &mut Dice, defs: &mut String, ids: &mut usize| -> String {
+            if !allow.gradients {
+                return colour(d);
+            }
+            match d.next() % 5 {
+                0..=2 => colour(d),
+                k => {
+                    *ids += 1;
+                    let id = format!("g{ids}");
+                    let units = if d.one_in(2) {
+                        "userSpaceOnUse"
+                    } else {
+                        "objectBoundingBox"
+                    };
+                    let spread = *d.pick(&["pad", "reflect", "repeat"]);
+                    let gt = if d.one_in(3) {
+                        format!(" gradientTransform=\"rotate({:.1})\"", d.f(-45.0, 45.0))
+                    } else {
+                        String::new()
+                    };
+                    let (a, b) = if units == "userSpaceOnUse" {
+                        (64.0, 48.0)
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let stops: String = (0..2 + d.next() % 2)
+                        .map(|n| {
+                            format!(
+                                "<stop offset=\"{:.2}\" stop-color=\"{}\"/>",
+                                n as f32 / 2.0 + d.f(0.0, 0.2),
+                                colour(d)
+                            )
+                        })
+                        .collect();
+                    if k == 3 {
+                        let _ = std::fmt::Write::write_fmt(defs, format_args!(
+                            "<linearGradient id=\"{id}\" gradientUnits=\"{units}\" spreadMethod=\"{spread}\"{gt} x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\">{stops}</linearGradient>",
+                            d.f(0.0, a * 0.5), d.f(0.0, b * 0.5), d.f(a * 0.3, a * 0.8), d.f(b * 0.3, b * 0.8)));
+                    } else {
+                        let _ = std::fmt::Write::write_fmt(defs, format_args!(
+                            "<radialGradient id=\"{id}\" gradientUnits=\"{units}\" spreadMethod=\"{spread}\"{gt} cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fx=\"{:.2}\" fy=\"{:.2}\">{stops}</radialGradient>",
+                            d.f(0.3 * a, 0.7 * a), d.f(0.3 * b, 0.7 * b), d.f(0.15 * a, 0.4 * a), d.f(0.35 * a, 0.65 * a), d.f(0.35 * b, 0.65 * b)));
+                    }
+                    format!("url(#{id})")
+                }
+            }
+        };
+        let shape = |d: &mut Dice| -> String {
+            match d.next() % if allow.curves { 8 } else { 5 } {
+                0 => format!(
+                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" rx=\"{:.2}\"",
+                    d.f(0.0, 40.0),
+                    d.f(0.0, 30.0),
+                    d.f(6.0, 30.0),
+                    d.f(6.0, 24.0),
+                    if d.one_in(2) { d.f(0.0, 6.0) } else { 0.0 }
+                ),
+                1 => format!(
+                    "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\"",
+                    d.f(8.0, 56.0),
+                    d.f(8.0, 40.0),
+                    d.f(3.0, 14.0)
+                ),
+                2 => format!(
+                    "<ellipse cx=\"{:.2}\" cy=\"{:.2}\" rx=\"{:.2}\" ry=\"{:.2}\"",
+                    d.f(8.0, 56.0),
+                    d.f(8.0, 40.0),
+                    d.f(3.0, 18.0),
+                    d.f(3.0, 12.0)
+                ),
+                3 => format!(
+                    "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\"",
+                    d.f(0.0, 64.0),
+                    d.f(0.0, 48.0),
+                    d.f(0.0, 64.0),
+                    d.f(0.0, 48.0)
+                ),
+                4 => {
+                    let pts: Vec<String> = (0..3 + d.next() % 4)
+                        .map(|_| format!("{:.2},{:.2}", d.f(0.0, 64.0), d.f(0.0, 48.0)))
+                        .collect();
+                    format!(
+                        "<{} points=\"{}\"",
+                        if d.one_in(2) { "polygon" } else { "polyline" },
+                        pts.join(" ")
+                    )
+                }
+                _ => {
+                    let mut p = format!("M{:.2} {:.2}", d.f(5.0, 59.0), d.f(5.0, 43.0));
+                    for _ in 0..2 + d.next() % 4 {
+                        p += &match d.next() % 6 {
+                            0 => format!(" l{:.2} {:.2}", d.f(-15.0, 15.0), d.f(-15.0, 15.0)),
+                            1 => format!(
+                                " C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
+                                d.f(0.0, 64.0),
+                                d.f(0.0, 48.0),
+                                d.f(0.0, 64.0),
+                                d.f(0.0, 48.0),
+                                d.f(0.0, 64.0),
+                                d.f(0.0, 48.0)
+                            ),
+                            2 => format!(
+                                " q{:.2} {:.2} {:.2} {:.2}",
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0)
+                            ),
+                            3 => format!(
+                                " A{:.2} {:.2} {:.1} {} {} {:.2} {:.2}",
+                                d.f(4.0, 20.0),
+                                d.f(4.0, 20.0),
+                                d.f(0.0, 90.0),
+                                d.next() % 2,
+                                d.next() % 2,
+                                d.f(0.0, 64.0),
+                                d.f(0.0, 48.0)
+                            ),
+                            4 => format!(" h{:.2} v{:.2}", d.f(-15.0, 15.0), d.f(-15.0, 15.0)),
+                            _ => format!(
+                                " s{:.2} {:.2} {:.2} {:.2}",
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0),
+                                d.f(-15.0, 15.0)
+                            ),
+                        };
+                    }
+                    if d.one_in(2) {
+                        p += " Z";
+                    }
+                    format!("<path d=\"{p}\"")
+                }
+            }
+        };
+        for _ in 0..if allow.many { 3 + d.next() % 5 } else { 1 } {
+            let mut el = shape(&mut d);
+            let f = paint(&mut d, &mut defs, &mut ids);
+            let fill = if allow.strokes && d.one_in(5) {
+                "none".to_string()
+            } else {
+                f
+            };
+            el += &format!(" fill=\"{fill}\"");
+            if d.one_in(3) {
+                el += " fill-rule=\"evenodd\"";
+            }
+            if allow.strokes && (fill == "none" || d.one_in(2)) {
+                let st = paint(&mut d, &mut defs, &mut ids);
+                el += &format!(" stroke=\"{st}\" stroke-width=\"{:.2}\"", d.f(0.8, 5.0));
+                el += &format!(
+                    " stroke-linecap=\"{}\" stroke-linejoin=\"{}\"",
+                    d.pick(&["butt", "round", "square"]),
+                    d.pick(&["miter", "round", "bevel"])
+                );
+                if allow.dashes && d.one_in(4) {
+                    el += &format!(
+                        " stroke-dasharray=\"{:.1} {:.1}\" stroke-dashoffset=\"{:.1}\"",
+                        d.f(1.0, 6.0),
+                        d.f(1.0, 6.0),
+                        d.f(0.0, 4.0)
+                    );
+                }
+                if !opaque && d.one_in(3) {
+                    el += &format!(" stroke-opacity=\"{:.2}\"", d.f(0.3, 0.9));
+                }
+            }
+            if !opaque && d.one_in(3) {
+                el += &format!(" fill-opacity=\"{:.2}\"", d.f(0.3, 0.9));
+            }
+            if !opaque && d.one_in(4) {
+                el += &format!(" opacity=\"{:.2}\"", d.f(0.3, 0.9));
+            }
+            el += &transform(&mut d);
+            el += "/>";
+            // Some go inside a clip, a group, a use or a nested viewport.
+            el = match if allow.wrappers { d.next() % 9 } else { 8 } {
+                0 => {
+                    ids += 1;
+                    let units = if d.one_in(2) { "userSpaceOnUse" } else { "objectBoundingBox" };
+                    let clip = if units == "userSpaceOnUse" {
+                        format!("<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\"/>", d.f(10.0, 54.0), d.f(10.0, 38.0), d.f(6.0, 20.0))
+                    } else {
+                        format!("<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\"/>", d.f(0.0, 0.4), d.f(0.0, 0.4), d.f(0.4, 0.8), d.f(0.4, 0.8))
+                    };
+                    defs += &format!("<clipPath id=\"c{ids}\" clipPathUnits=\"{units}\">{clip}</clipPath>");
+                    format!("<g clip-path=\"url(#c{ids})\">{el}</g>")
+                }
+                1 => format!("<g{}>{el}</g>", transform(&mut d)),
+                2 => {
+                    ids += 1;
+                    defs += &el.replacen('<', &format!("<g id=\"u{ids}\"><"), 1);
+                    defs += "</g>";
+                    format!("<use href=\"#u{ids}\" x=\"{:.2}\" y=\"{:.2}\"/>", d.f(-8.0, 8.0), d.f(-8.0, 8.0))
+                }
+                3 => format!(
+                    "<svg x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" viewBox=\"0 0 64 48\" preserveAspectRatio=\"{}\">{el}</svg>",
+                    d.f(0.0, 16.0), d.f(0.0, 12.0), d.f(30.0, 60.0), d.f(24.0, 44.0),
+                    d.pick(&["xMidYMid meet", "xMinYMin slice", "none", "xMaxYMax meet"])
+                ),
+                _ => el,
+            };
+            body += &el;
+        }
+        format!("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\"><defs>{defs}</defs>{body}</svg>")
+    }
+
+    /// What resvg draws of a file, straight RGBA.
+    fn reader_draws(svg: &str, w: u32, h: u32) -> Vec<[u8; 4]> {
+        let mut opt = usvg::Options::default();
+        opt.fontdb_mut().load_font_data(FACE.to_vec());
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).unwrap();
+        let mut pix = resvg::tiny_skia::Pixmap::new(w, h).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pix.as_mut(),
+        );
+        pix.pixels()
+            .iter()
+            .map(|p| {
+                let c = p.demultiply();
+                [c.red(), c.green(), c.blue(), c.alpha()]
+            })
+            .collect()
+    }
+
+    /// Where a picture first parted from a reader's: the pixel, and the
+    /// two colours there.
+    type Mismatch = (i32, i32, [u8; 4], [u8; 4]);
+
+    fn foreign_bad(svg: &str, opaque: bool) -> (usize, usize, Option<Mismatch>) {
+        let doc = brought_in(svg, 64, 48);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let theirs = reader_draws(svg, 64, 48);
+        let (mut cov, mut col) = (0, 0);
+        let mut first = None;
+        for y in 1..47i32 {
+            for x in 1..63i32 {
+                let o = ours.get(x as u32, y as u32).to_srgb8();
+                let t = theirs[(y * 64 + x) as usize];
+                if (o[3] as i32 - t[3] as i32).abs() > 127 {
+                    cov += 1;
+                    first.get_or_insert((x, y, o, t));
+                }
+                if opaque {
+                    let flat = o[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let q = ours.get((x + i) as u32, (y + j) as u32).to_srgb8();
+                                (0..4).all(|k| q[k].abs_diff(o[k]) <= 3)
+                            })
+                        });
+                    if flat && (0..3).any(|k| o[k].abs_diff(t[k]) > 20) {
+                        col += 1;
+                        first.get_or_insert((x, y, o, t));
+                    }
+                }
+            }
+        }
+        (cov, col, first)
+    }
+
+    /// A file written elsewhere comes in as a reader draws it.
+    ///
+    /// The round trip only ever hands the importer what this exporter
+    /// writes. These files use what files written elsewhere use
+    /// (`foreign_svg_with`), and the engine's picture of what came in is
+    /// held to resvg's picture of the file, pixel by pixel: coverage
+    /// everywhere, and colour where the files are opaque.
+    ///
+    /// Asked first, a third of single plain shapes came back wrong. An
+    /// outline crossing itself — a star, a looping polyline — came in
+    /// with a hole wherever it wound round twice, the importer having
+    /// converted only rings that overlapped one another
+    /// (`boolean::nonzero_as_even_odd` now, for every case); and where it
+    /// was stroked as well, its stroke went round the converted edge, so
+    /// such a path comes in as its fill and then its stroke along the
+    /// file's own line (`shapes_of`). A dashed line's
+    /// `stroke-dashoffset` had nowhere to land (`Stroke::dash_offset`).
+    /// Dashes along a curve had round, swollen ends, a round join being a
+    /// disc at every point a curve is flattened into (`SLIGHT_TURN`). And
+    /// an outline crossing itself where the crossing, worked out from
+    /// each of its two edges, rounded to two different cells could not
+    /// be closed (`chain`).
+    ///
+    /// Left out, and said so: gradients, whose spread — reflect, repeat —
+    /// and focal point the engine has no field for yet; and strokes
+    /// under a transform that skews or scales unevenly, since a path
+    /// comes in in the page's own space and its pen with it, where a
+    /// reader turns the pen with the path. Fills are taken under every
+    /// transform and wrapper.
+    #[test]
+    fn a_file_written_elsewhere_comes_in_as_a_reader_draws_it() {
+        let fills = Allow {
+            gradients: false,
+            strokes: false,
+            dashes: false,
+            ..ALL
+        };
+        let lines = Allow {
+            gradients: false,
+            transforms: false,
+            ..ALL
+        };
+        for opaque in [true, false] {
+            for seed in 0..400u64 {
+                let svg = foreign_svg_with(seed, opaque, fills);
+                let (cover, colour, first) = foreign_bad(&svg, opaque);
+                assert!(
+                    cover + colour <= 2,
+                    "filled file {seed} (opaque {opaque}): {cover} pixels covered and {colour} \
+                     coloured otherwise, the first {first:?}\n{svg}"
+                );
+            }
+            let mut sizes: Vec<(usize, u64)> = (0..400u64)
+                .map(|seed| {
+                    let (cover, colour, _) =
+                        foreign_bad(&foreign_svg_with(seed, opaque, lines), opaque);
+                    (cover + colour, seed)
+                })
+                .collect();
+            sizes.sort();
+            let over = sizes.iter().filter(|s| s.0 > 10).count();
+            let worst = sizes[sizes.len() - 1];
+            assert!(
+                over <= 6 && worst.0 <= 50,
+                "stroked files (opaque {opaque}): {over} over ten pixels, the worst \
+                 {} pixels (file {})",
+                worst.0,
+                worst.1
+            );
         }
     }
 }

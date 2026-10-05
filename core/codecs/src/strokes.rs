@@ -372,6 +372,7 @@ mod tests {
                 width: 4.0,
                 widths: vec![1.0, 0.5, 0.9, 0.3],
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap,
                 join,
                 start_marker: Default::default(),

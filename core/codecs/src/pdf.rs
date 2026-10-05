@@ -1381,16 +1381,23 @@ impl Page {
                     if stroke.width > 0.0 {
                         let _ = writeln!(self.content, "{}", self.color_op(&stroke.color, true)?);
                         // PDF's own dash: the same lengths on and off,
-                        // starting at the beginning of the line.
+                        // starting as far into them as the stroke says —
+                        // which is what PDF calls the dash's phase.
                         let dash: Vec<String> = stroke.dash.iter().map(|d| num(*d)).collect();
+                        let phase = if dash.is_empty() || !stroke.dash_offset.is_finite() {
+                            0.0
+                        } else {
+                            stroke.dash_offset
+                        };
                         let _ = writeln!(
                             self.content,
-                            "[{}] 0 d",
+                            "[{}] {} d",
                             if dash.is_empty() {
                                 String::new()
                             } else {
                                 dash.join(" ")
-                            }
+                            },
+                            num(phase)
                         );
                         match shape {
                             // A band to one side of the edge is a
@@ -2869,6 +2876,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -2935,6 +2943,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
                 start_marker: chitrakar_doc::Marker::None,
@@ -4767,6 +4776,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -4877,6 +4887,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -5402,6 +5413,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -5428,6 +5440,44 @@ mod tests {
     /// stroke, and it went as pixels — over its fill, on a faded layer,
     /// each paint faded as the engine fades it. Ghostscript covers what
     /// the page covers.
+    /// Where a dash pattern starts along a line is the phase PDF gives a
+    /// dash, and nought says nothing more than PDF's own default.
+    #[test]
+    fn a_dash_offset_is_the_phase_of_a_dash() {
+        let dashed = |offset: f32| {
+            let mut doc = Document::new(60, 20, chitrakar_color::ColorMode::Rgb);
+            let mut line = shape(
+                "line",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [50.0, 0.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                None,
+            );
+            if let NodeKind::Vector { stroke, .. } = &mut line.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 3.0,
+                    widths: Vec::new(),
+                    dash: vec![6.0, 3.0],
+                    dash_offset: offset,
+                    cap: chitrakar_doc::StrokeCap::Butt,
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: None,
+                });
+            }
+            add(&mut doc, line, [5.0, 10.0]);
+            page_content(&export_pdf_document(&doc).unwrap(), 0)
+        };
+        assert!(dashed(0.0).contains("[6 3] 0 d"), "{}", dashed(0.0));
+        assert!(dashed(2.5).contains("[6 3] 2.5 d"), "{}", dashed(2.5));
+    }
+
     #[test]
     fn a_tapered_stroke_goes_live_as_the_outline_it_covers() {
         let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
@@ -5453,6 +5503,7 @@ mod tests {
                 width: 6.0,
                 widths: vec![1.0, 0.2, 0.8, 0.4],
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: chitrakar_doc::StrokeCap::Round,
                 join: chitrakar_doc::StrokeJoin::Round,
                 start_marker: Default::default(),

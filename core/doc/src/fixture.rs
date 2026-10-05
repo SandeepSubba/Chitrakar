@@ -208,6 +208,7 @@ pub fn everything() -> Fixture {
                 width: 2.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 align: Some(StrokeAlign::Outside),
@@ -875,6 +876,7 @@ pub fn everything() -> Fixture {
                 // a shape placed on a tangent, neither of which anything
                 // else here asks for.
                 dash: vec![3.0, 2.0],
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 align: None,
@@ -1296,6 +1298,7 @@ pub fn everything() -> Fixture {
                     width: 4.0,
                     widths: vec![0.25, 1.0, 0.4, 0.1],
                     dash: Vec::new(),
+                    dash_offset: 0.0,
                     cap: crate::StrokeCap::Round,
                     join: crate::StrokeJoin::Round,
                     align: None,
@@ -1538,6 +1541,7 @@ pub fn everything() -> Fixture {
                     width: 2.0,
                     widths: Vec::new(),
                     dash: Vec::new(),
+                    dash_offset: 0.0,
                     cap: Default::default(),
                     join: Default::default(),
                     align: None,
@@ -2040,6 +2044,7 @@ impl Rng {
                             } else {
                                 Vec::new()
                             },
+                            dash_offset: 0.0,
                             cap: match self.upto(3) {
                                 0 => crate::StrokeCap::Butt,
                                 1 => crate::StrokeCap::Round,
@@ -2058,6 +2063,14 @@ impl Rng {
                             start_marker: marker(self),
                             end_marker: marker(self),
                         });
+                        // Where a dashed stroke starts in its pattern, from
+                        // the pattern itself rather than another draw, so
+                        // every page after this one is the page it was.
+                        if let Some(s) = stroke.as_mut() {
+                            if let Some(first) = s.dash.first() {
+                                s.dash_offset = first * 0.6;
+                            }
+                        }
                     }
                     if self.chance(4) && self.chance(2) {
                         *gradient = Some(Gradient::Radial {

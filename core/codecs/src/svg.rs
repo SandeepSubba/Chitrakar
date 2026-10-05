@@ -1308,6 +1308,9 @@ fn stroke_attrs(
     if !stroke.dash.is_empty() && stroke.dash.iter().any(|d| *d > 0.0) {
         let lengths: Vec<String> = stroke.dash.iter().map(|d| d.to_string()).collect();
         let _ = write!(s, r#" stroke-dasharray="{}""#, lengths.join(" "));
+        if stroke.dash_offset != 0.0 && stroke.dash_offset.is_finite() {
+            let _ = write!(s, r#" stroke-dashoffset="{}""#, stroke.dash_offset);
+        }
     }
     if !ends {
         return s;
@@ -1638,6 +1641,7 @@ mod tests {
                 width: 8.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -1664,7 +1668,7 @@ mod tests {
     fn a_dashed_stroke_travels_as_its_pattern() {
         let mut doc = Document::new(80, 80, ColorMode::Rgb);
         let id = filled(&mut doc, "line", 40.0, 40.0);
-        let stroked = |dash: Vec<f32>| chitrakar_doc::NodeKind::Vector {
+        let stroked_from = |dash: Vec<f32>, dash_offset: f32| chitrakar_doc::NodeKind::Vector {
             shape: VectorShape::Rect {
                 width: 40.0,
                 height: 40.0,
@@ -1676,6 +1680,7 @@ mod tests {
                 width: 2.0,
                 widths: Vec::new(),
                 dash,
+                dash_offset,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -1684,6 +1689,7 @@ mod tests {
             }),
             gradient: None,
         };
+        let stroked = |dash: Vec<f32>| stroked_from(dash, 0.0);
         doc.apply(Command::SetKind {
             id,
             kind: Box::new(stroked(Vec::new())),
@@ -1703,6 +1709,21 @@ mod tests {
                 .unwrap()
                 .contains(r#"stroke-dasharray="6 3""#),
             "and a dashed one carries its pattern"
+        );
+        assert!(
+            !export_svg(&doc).unwrap().contains("dashoffset"),
+            "starting at its beginning, it says nothing of where"
+        );
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(stroked_from(vec![6.0, 3.0], 2.5)),
+        })
+        .unwrap();
+        assert!(
+            export_svg(&doc)
+                .unwrap()
+                .contains(r#"stroke-dashoffset="2.5""#),
+            "and where it starts in it, when that is somewhere else"
         );
     }
 
@@ -1727,6 +1748,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap,
                 join,
                 start_marker: Default::default(),
@@ -1805,6 +1827,7 @@ mod tests {
                     width: 4.0,
                     widths: Vec::new(),
                     dash: Vec::new(),
+                    dash_offset: 0.0,
                     cap: chitrakar_doc::StrokeCap::Round,
                     join: chitrakar_doc::StrokeJoin::Round,
                     start_marker: Default::default(),
@@ -2934,6 +2957,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: Default::default(),
                 join: Default::default(),
                 start_marker: Default::default(),
@@ -3062,6 +3086,7 @@ mod tests {
                 width: 6.0,
                 widths: Vec::new(),
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: chitrakar_doc::StrokeCap::Square,
                 join: chitrakar_doc::StrokeJoin::Bevel,
                 // A head at one end and nothing at the other, which is
@@ -3097,6 +3122,7 @@ mod tests {
                 width: 4.0,
                 widths: Vec::new(),
                 dash: vec![6.0, 4.0],
+                dash_offset: 0.0,
                 cap: chitrakar_doc::StrokeCap::Butt,
                 join: Default::default(),
                 start_marker: chitrakar_doc::Marker::None,
@@ -4110,6 +4136,7 @@ mod tests {
                 width: 6.0,
                 widths: vec![1.0, 0.2, 0.8, 0.4],
                 dash: Vec::new(),
+                dash_offset: 0.0,
                 cap: chitrakar_doc::StrokeCap::Round,
                 join: chitrakar_doc::StrokeJoin::Round,
                 start_marker: Default::default(),

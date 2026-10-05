@@ -127,13 +127,40 @@ fn split_ring(ring: &Ring, other: &[Ring]) -> Vec<(Point, Point)> {
 /// of continuations before closing, which means the fragment set was not a
 /// set of closed loops and no honest ring can be built from it.
 fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
+    // Ends meet when they are within a weld of each other — a distance,
+    // looked up through a grid of that size and the cells round it. Keyed
+    // by the cell alone, two ends a ten-thousandth apart either side of
+    // a cell's edge were strangers: the one crossing worked out from
+    // each of the two edges that make it landed at 0.5175 and at
+    // 0.51750004, which round to different cells, and an outline that
+    // crossed itself there could not be closed.
     let key = |p: Point| ((p[0] / WELD).round() as i64, (p[1] / WELD).round() as i64);
+    let near = |a: Point, b: Point| (a[0] - b[0]).abs() <= WELD && (a[1] - b[1]).abs() <= WELD;
     let mut starts: std::collections::HashMap<(i64, i64), Vec<usize>> =
         std::collections::HashMap::new();
     for (i, f) in fragments.iter().enumerate() {
         starts.entry(key(f.0)).or_default().push(i);
     }
     let mut used = vec![false; fragments.len()];
+    let following = |end: Point, used: &[bool]| -> Option<usize> {
+        let (kx, ky) = key(end);
+        let mut best: Option<(f32, usize)> = None;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                for &i in starts.get(&(kx + dx, ky + dy)).into_iter().flatten() {
+                    let s = fragments[i].0;
+                    if used[i] || !near(s, end) {
+                        continue;
+                    }
+                    let d = (s[0] - end[0]).powi(2) + (s[1] - end[1]).powi(2);
+                    if best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, i));
+                    }
+                }
+            }
+        }
+        best.map(|(_, i)| i)
+    };
     let mut rings = Vec::new();
     for seed in 0..fragments.len() {
         if used[seed] {
@@ -144,11 +171,11 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
         used[at] = true;
         loop {
             let end = fragments[at].1;
-            if key(end) == key(ring[0]) {
+            if near(end, ring[0]) {
                 break;
             }
             ring.push(end);
-            let next = starts.get(&key(end))?.iter().copied().find(|i| !used[*i])?;
+            let next = following(end, &used)?;
             used[next] = true;
             at = next;
             // A ring longer than the whole fragment set is a cycle that is
@@ -291,6 +318,67 @@ fn leaves_nothing(a: &[Ring], b: &[Ring], op: BoolOp) -> bool {
     }
 }
 
+/// How many times the rings wind round `p`, counted the way the nonzero
+/// rule counts: up through the point's row one way is one more, the
+/// other way one fewer.
+fn winding(rings: &[Ring], p: Point) -> i32 {
+    let mut w = 0;
+    for ring in rings {
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let side = (b[0] - a[0]) * (p[1] - a[1]) - (p[0] - a[0]) * (b[1] - a[1]);
+            if a[1] <= p[1] && b[1] > p[1] && side > 0.0 {
+                w += 1;
+            } else if b[1] <= p[1] && a[1] > p[1] && side < 0.0 {
+                w -= 1;
+            }
+        }
+    }
+    w
+}
+
+/// Rings filled by the nonzero rule, said as rings the even-odd rule
+/// fills the same — or `None` where the two rules already agree, or
+/// where the answer cannot be traced.
+///
+/// The rules part company only where the outline winds round a point
+/// twice or more: a star's middle, a loop of a path crossing itself, an
+/// outline inside another wound the same way. Nonzero fills there and
+/// even-odd leaves a hole. So the outline is cut wherever it crosses
+/// itself, and each piece asked which of its two sides is filled: a
+/// piece with the filled region on one side is part of the region's
+/// edge, kept and turned so the region is on its left; a piece with it
+/// on both is inside the region and goes. What is kept chains into the
+/// region's own edge, which says the same thing under either rule. Where
+/// no piece has the region on both sides there is nothing a hole could
+/// have appeared in, and the rings are left as they are.
+pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
+    const SIDE: f32 = 1e-3;
+    let mut keep = Vec::new();
+    let mut inside_twice = false;
+    for (a, b) in split_ring_all(rings, rings) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let normal = [-dy / len * SIDE, dx / len * SIDE];
+        let left = winding(rings, [mid[0] + normal[0], mid[1] + normal[1]]) != 0;
+        let right = winding(rings, [mid[0] - normal[0], mid[1] - normal[1]]) != 0;
+        match (left, right) {
+            (true, false) => keep.push((a, b)),
+            (false, true) => keep.push((b, a)),
+            (true, true) => inside_twice = true,
+            (false, false) => {}
+        }
+    }
+    if !inside_twice || keep.is_empty() {
+        return None;
+    }
+    chain(keep)
+}
+
 fn split_ring_all(rings: &[Ring], other: &[Ring]) -> Vec<(Point, Point)> {
     rings.iter().flat_map(|r| split_ring(r, other)).collect()
 }
@@ -322,6 +410,59 @@ mod tests {
             y += STEP;
         }
         n as f32 * STEP * STEP
+    }
+
+    /// Two ends a hair apart meet, even where they round to two cells.
+    #[test]
+    fn ends_within_a_weld_meet_across_a_cells_edge() {
+        // Half a weld up rounds one way and a hair under it the other.
+        let fragments = vec![
+            ([0.0, 0.0], [1.0, 0.0005]),
+            ([1.0, 0.000_499], [1.0, 1.0]),
+            ([1.0, 1.0], [0.0, 0.0]),
+        ];
+        let rings = chain(fragments).expect("the three close");
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 3, "{rings:?}");
+    }
+
+    /// What the nonzero rule fills, said for the even-odd rule: a star's
+    /// middle stays filled, a loop crossing itself stays solid, and an
+    /// outline whose rules already agree is left alone.
+    #[test]
+    fn a_winding_fill_is_said_as_an_even_odd_one() {
+        // A pentagram: its middle is wound round twice.
+        let star: Ring = (0..5)
+            .map(|k| {
+                let t = std::f32::consts::PI * 2.0 * (k as f32 * 2.0) / 5.0;
+                [10.0 + 8.0 * t.sin(), 10.0 - 8.0 * t.cos()]
+            })
+            .collect();
+        assert!(
+            !covers(std::slice::from_ref(&star), [10.0, 10.0]),
+            "even-odd leaves the middle out"
+        );
+        let out = nonzero_as_even_odd(std::slice::from_ref(&star)).expect("a correction");
+        assert!(covers(&out, [10.0, 10.0]), "and now it is in");
+        assert!(
+            covers(&out, [10.0, 3.5]),
+            "and a point of the star still is"
+        );
+        assert!(!covers(&out, [2.0, 18.0]), "and outside is out");
+        // A square with a hole wound the other way already agrees.
+        let ring = square(0.0, 0.0, 10.0);
+        let hole: Ring = square(3.0, 3.0, 4.0).into_iter().rev().collect();
+        assert!(
+            nonzero_as_even_odd(&[ring.clone(), hole]).is_none(),
+            "a hole is a hole"
+        );
+        // The same square inside, wound the same way, is no hole at all.
+        let out = nonzero_as_even_odd(&[ring, square(3.0, 3.0, 4.0)]).expect("a correction");
+        assert!(covers(&out, [5.0, 5.0]), "wound twice is inside");
+        assert!(
+            nonzero_as_even_odd(&[square(0.0, 0.0, 5.0)]).is_none(),
+            "nothing to do"
+        );
     }
 
     /// Taking away a box that shares an edge with a shape and covers all

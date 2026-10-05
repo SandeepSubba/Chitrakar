@@ -147,6 +147,9 @@ export interface Stroke {
   /** Lengths on and off in turn, repeating, in the shape's own units.
    * Empty is a solid line. */
   dash: number[];
+  /** How far into `dash` the line starts, in the same units — a file's
+   * `stroke-dashoffset`. Left out, it is nought. */
+  dash_offset?: number;
   /** How the line ends where it stops, and at either end of every dash.
    * Paths only: a rect's or an ellipse's stroke is a band inside a
    * closed outline, which never stops. */

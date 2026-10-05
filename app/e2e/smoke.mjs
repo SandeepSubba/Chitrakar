@@ -1373,6 +1373,28 @@ assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
     dashed.some((r) => r > 150) && dashed.some((r) => r < 80),
     `dashed, it is on in places and off in others (${dashed})`,
   );
+  // Where along the pattern it starts moves the dashes along the line:
+  // half its period, twelve on and eight off, puts dashes where gaps
+  // were, and a whole period round is where it began.
+  const offset = page.locator('input[aria-label="Dash offset"]');
+  assert((await offset.count()) === 1, "a dashed line offers where its dashes start");
+  const on = (row) => row.map((r) => r < 80);
+  await offset.fill("10");
+  await page.waitForTimeout(300);
+  const moved = await alongEdge();
+  const differ = on(moved).filter((v, i) => v !== on(dashed)[i]).length;
+  assert(
+    differ >= on(dashed).length / 3,
+    `half a period on, the dashes stand elsewhere (${differ} of ${dashed.length} changed)`,
+  );
+  await offset.fill("20");
+  await page.waitForTimeout(300);
+  assert(
+    on(await alongEdge()).join() === on(dashed).join(),
+    "and a whole period round, where they began",
+  );
+  await offset.fill("0");
+  await page.waitForTimeout(200);
   await page.selectOption('select[aria-label="Line pattern"]', {
     label: "Solid",
   });
@@ -1380,6 +1402,10 @@ assert(px[3] === 255 && px[0] < 80, `stroke band painted (got ${px})`);
   assert(
     (await alongEdge()).every((r) => r < 80),
     "and Solid puts the whole line back",
+  );
+  assert(
+    (await page.locator('input[aria-label="Dash offset"]').count()) === 0,
+    "with nothing to offset, nothing offered",
   );
 }
 

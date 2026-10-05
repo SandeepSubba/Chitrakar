@@ -922,6 +922,14 @@ pub struct Stroke {
     /// the same line, and the dashes win.
     #[serde(default)]
     pub dash: Vec<f32>,
+    /// How far into the dash pattern the line starts, in the same units:
+    /// the pattern is walked this far before the first dash is laid, so
+    /// a positive offset starts the line partway through it. Taken round
+    /// the pattern's own length, either way. Nought, the default, starts
+    /// at the beginning, which is every file written before there was a
+    /// choice; SVG calls it `stroke-dashoffset`, PDF the phase of a dash.
+    #[serde(default)]
+    pub dash_offset: f32,
     /// How the stroke ends where the line stops — including at either
     /// end of every dash. Paths only: a rect's or an ellipse's stroke is
     /// a band lying inside a closed outline, which never stops.
