@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~588),
+- **Verify before committing:** `cargo test --workspace` (~589),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4839,8 +4839,18 @@ without reading anything else.*
      matrix the offset from the centre goes through; `None`, every older
      file, the identity), the file's rings come in through them exactly
      (`M⁻¹ B / r`), SVG writes them as a gradient transform and PDF as one
-     more `cm` before the shading, and the GPU hands such a page back to
-     the CPU until it is taught the matrix. A **linear** one in user
+     more `cm` before the shading, and the GPU draws it by handing the
+     shader the box's coordinates already through the axes and the
+     centre with them — the ramp is `|A·uv − A·c| / r`, so the shader
+     measures as it always has — set at a covered path's corners, which a
+     linear map carries exactly; a rectangle or an ellipse wearing one is
+     filled the way a path is
+     (`a_radial_with_axes_of_its_own_ramps_the_way_the_cpu_ramps_it`).
+     Worth knowing: a container without a GPU adapter *skips* every GPU
+     test with one line of output, and a fresh one has none until
+     `mesa-vulkan-drivers` is installed (llvmpipe) — two commits' gates
+     ran without them before that was noticed; the crate passed when it
+     was. A **linear** one in user
      space over a box that is not square came in with its bands turned —
      its ends taken into the box straight across, where the engine lays
      bands square to the line in the box; the ramp itself is carried

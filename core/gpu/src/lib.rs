@@ -4170,11 +4170,6 @@ fn vector(
         // No stops is nothing to paint, as it is on the CPU — and the
         // flat fill stays covered up.
         Some(g) if g.stops().is_empty() => None,
-        // A radial whose rings go through axes of their own — a file's
-        // radial gradient as it came in — is a matrix more than the four
-        // numbers a gradient carries here, and is the CPU's until it is
-        // taught it.
-        Some(chitrakar_doc::Gradient::Radial { axes: Some(_), .. }) => return None,
         Some(g) => {
             let (ramp, geom, radial) = bake(doc, g);
             let at = out.textures.len();
@@ -4192,13 +4187,31 @@ fn vector(
         return Some(());
     }
 
+    // A radial whose rings go through axes of their own — a file's
+    // radial gradient as it came in. The ramp is `|A·uv − A·c| / r`, so
+    // what the shader is handed is the box's coordinates already through
+    // `A` and the centre with them (`bake`), and it measures as it always
+    // has. Only a covered path hands it coordinates the CPU can set — at
+    // the cover's corners, which a linear map carries exactly — so a
+    // rectangle or an ellipse wearing one is filled the way a path is.
+    let axes = match gradient {
+        Some(chitrakar_doc::Gradient::Radial { axes: Some(a), .. }) => Some(*a),
+        _ => None,
+    };
+    let covered = axes.is_some() && !matches!(shape, VectorShape::Path { .. });
+    if covered {
+        if let Some((color, grad, ramp)) = paint {
+            fill_path(doc, id, shape, t, color, grad, ramp, axes, out);
+        }
+    }
+
     // A path is stencilled and covered: parity gives the even-odd fill
     // the CPU draws, holes and crossings included; a stroke is the union
     // of the round-capped segments the CPU tests against, which the
     // stencil takes as geometry.
     if let VectorShape::Path { .. } = shape {
         if let Some((color, grad, ramp)) = paint {
-            fill_path(doc, id, shape, t, color, grad, ramp, out);
+            fill_path(doc, id, shape, t, color, grad, ramp, axes, out);
         }
         if let Some((color, s)) = ink {
             stroke_path(shape, t, color, s, out);
@@ -4223,7 +4236,7 @@ fn vector(
     }
     let ellipse = matches!(shape, VectorShape::Ellipse { .. });
     let kind = if ellipse { 1.0 } else { 0.0 };
-    if let Some((color, grad, ramp)) = paint {
+    if let Some((color, grad, ramp)) = paint.filter(|_| !covered) {
         let quad = out.push(quad(
             t,
             size,
@@ -4298,6 +4311,9 @@ fn fill_path(
     color: [f32; 4],
     grad: [f32; 4],
     ramp: Option<usize>,
+    // A radial's own axes, which the box's coordinates go through on the
+    // way to the shader (`vector`).
+    axes: Option<[f32; 4]>,
     out: &mut Scene,
 ) {
     let rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
@@ -4333,9 +4349,13 @@ fn fill_path(
         1.0 / device_scale(t) / (x1 - x0),
         1.0 / device_scale(t) / (y1 - y0),
     );
+    let through = |u: f32, v: f32| match axes {
+        Some(a) => [a[0] * u + a[1] * v, a[2] * u + a[3] * v],
+        None => [u, v],
+    };
     let corner = |u: f32, v: f32| Vertex {
         doc: place(t, [x0 + (x1 - x0) * u, y0 + (y1 - y0) * v]),
-        local: [u, v],
+        local: through(u, v),
         params: [0.0; 4],
         color,
         grad,
@@ -4508,8 +4528,22 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
         chitrakar_doc::Gradient::Linear { from, to, .. } => {
             ([from[0], from[1], to[0], to[1]], false)
         }
-        chitrakar_doc::Gradient::Radial { center, radius, .. } => {
-            ([center[0], center[1], *radius, 0.0], true)
+        // The centre goes through the radial's own axes with the box's
+        // coordinates (`fill_path`), so the shader measures from it there.
+        chitrakar_doc::Gradient::Radial {
+            center,
+            radius,
+            axes,
+            ..
+        } => {
+            let c = match axes {
+                Some(a) => [
+                    a[0] * center[0] + a[1] * center[1],
+                    a[2] * center[0] + a[3] * center[1],
+                ],
+                None => *center,
+            };
+            ([c[0], c[1], *radius, 0.0], true)
         }
     };
     (
@@ -7332,6 +7366,93 @@ mod tests {
             got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.03),
             "the ramp the CPU draws: {got:?} vs {want:?}"
         );
+    }
+
+    /// A radial whose rings go through axes of their own — a file's
+    /// radial as it comes in — ramps here as it does there, on a
+    /// rectangle, an ellipse and a path, turned as well. It used to hand
+    /// the whole page back.
+    #[test]
+    fn a_radial_with_axes_of_its_own_ramps_the_way_the_cpu_ramps_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(140, 90, ColorMode::Rgb);
+        let rings = |axes: [f32; 4]| chitrakar_doc::Gradient::Radial {
+            center: [0.45, 0.55],
+            radius: 0.5,
+            stops: ramp(&[(0.0, BLUE), (0.6, RED), (1.0, WHITE)]),
+            axes: Some(axes),
+        };
+        add(
+            &mut doc,
+            gradient_filled(
+                "rect",
+                VectorShape::Rect {
+                    width: 50.0,
+                    height: 30.0,
+                    radius: 4.0,
+                },
+                rings([1.3, 0.6, -0.5, 1.1]),
+            ),
+            Transform::translation(6.0, 6.0),
+        );
+        add(
+            &mut doc,
+            gradient_filled(
+                "ellipse",
+                VectorShape::Ellipse { rx: 24.0, ry: 16.0 },
+                rings([0.7, -0.3, 0.4, 1.6]),
+            ),
+            Transform {
+                a: 0.9,
+                b: 0.44,
+                c: -0.44,
+                d: 0.9,
+                e: 100.0,
+                f: 26.0,
+            },
+        );
+        add(
+            &mut doc,
+            gradient_filled(
+                "path",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [54.0, 6.0], [46.0, 34.0], [6.0, 28.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                rings([2.0, 0.0, 0.3, 1.2]),
+            ),
+            Transform::translation(14.0, 48.0),
+        );
+
+        assert!(GpuRenderer::can_render(&doc), "drawn here, not handed back");
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.006,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // Inside each, the colour is the reference's.
+        for (x, y) in [
+            (20, 16),
+            (31, 21),
+            (45, 28),
+            (98, 26),
+            (106, 32),
+            (30, 62),
+            (45, 70),
+        ] {
+            let (g, c) = (drawn.get(x, y), reference.get(x, y));
+            assert!(
+                (g.r - c.r).abs() < 0.02 && (g.g - c.g).abs() < 0.02 && (g.b - c.b).abs() < 0.02,
+                "at ({x}, {y}): {g:?} vs {c:?}"
+            );
+        }
     }
 
     /// A gradient with no stops paints nothing at all — and does not
