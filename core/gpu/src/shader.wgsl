@@ -399,19 +399,35 @@ fn fs_text(in: CoverOut) -> @location(0) vec4f {
 // the projection onto the line from `from` to `to`, or the distance from
 // the centre in units of the radius, clamped past either end — the same
 // arithmetic the CPU renderer does per pixel.
-fn ramp_at(uv: vec2f, geom: vec4f, radial: bool) -> f32 {
+fn ramp_at(uv: vec2f, geom: vec4f, radial: bool, spread: f32) -> f32 {
     if radial {
+        // A ring of no size is the last colour throughout.
         if geom.z < 1e-6 {
             return 1.0;
         }
-        return clamp(length(uv - geom.xy) / geom.z, 0.0, 1.0);
+        return spread_at(length(uv - geom.xy) / geom.z, spread);
     }
     let d = geom.zw - geom.xy;
     let len2 = dot(d, d);
+    // A line of no length, the first.
     if len2 < 1e-12 {
         return 0.0;
     }
-    return clamp(dot(uv - geom.xy, d) / len2, 0.0, 1.0);
+    return spread_at(dot(uv - geom.xy, d) / len2, spread);
+}
+
+// What a gradient does past the ends of its ramp — `Spread::place`:
+// 0 pads with the end colours, 1 reflects the ramp back and forth, 2
+// repeats it from its start.
+fn spread_at(t: f32, spread: f32) -> f32 {
+    if spread > 1.5 {
+        return t - floor(t);
+    }
+    if spread > 0.5 {
+        let u = t - 2.0 * floor(t / 2.0);
+        return select(u, 2.0 - u, u > 1.0);
+    }
+    return clamp(t, 0.0, 1.0);
 }
 
 // The ramp's colour at `t`. The row's first and last texels are the ends
@@ -430,7 +446,7 @@ fn ramp_color(t: f32) -> vec4f {
 fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
     let cov = coverage(in);
     let uv = in.local / max(in.params.xy, vec2f(1e-6, 1e-6));
-    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5))
+    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5, in.color.g))
         * in.color.a
         * cov
         * mask_cover(in.page, in.mask);
@@ -442,7 +458,7 @@ fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
 // across the quad however the layer is transformed.
 @fragment
 fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
-    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5))
+    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5, in.color.g))
         * in.color.a
         * mask_cover(in.page, in.mask);
 }

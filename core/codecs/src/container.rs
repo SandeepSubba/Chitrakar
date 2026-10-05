@@ -2091,6 +2091,7 @@ mod tests {
                         color: blue.clone(),
                     },
                 ],
+                spread: Default::default(),
             });
         }
         let shape_id = add(&mut doc, Box::new(shape));

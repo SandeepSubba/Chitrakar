@@ -263,6 +263,7 @@ pub fn everything() -> Fixture {
                         },
                     },
                 ],
+                spread: Default::default(),
                 axes: None,
             });
         }
@@ -862,6 +863,7 @@ pub fn everything() -> Fixture {
                         },
                     },
                 ],
+                spread: Default::default(),
             }),
             stroke: Some(Stroke {
                 color: chitrakar_color::AuthoredColor::Srgb {
@@ -2087,6 +2089,7 @@ impl Rng {
                                     color: self.color(1.0),
                                 },
                             ],
+                            spread: Default::default(),
                             axes: None,
                         });
                     } else if self.chance(4) {
@@ -2103,6 +2106,7 @@ impl Rng {
                                     color: self.color(1.0),
                                 },
                             ],
+                            spread: Default::default(),
                         });
                     }
                 }

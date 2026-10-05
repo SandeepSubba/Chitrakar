@@ -1458,6 +1458,22 @@ fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut Strin
             "    </radialGradient>",
         ),
     };
+    // What it does past its ends, when that is not to carry the end
+    // colour on, which is SVG's default as it is ours.
+    let open = match g.spread() {
+        chitrakar_doc::Spread::Pad => open,
+        spread => {
+            let word = if spread == chitrakar_doc::Spread::Reflect {
+                "reflect"
+            } else {
+                "repeat"
+            };
+            match open.strip_suffix('>') {
+                Some(head) => format!(r#"{head} spreadMethod="{word}">"#),
+                None => open,
+            }
+        }
+    };
     let _ = writeln!(defs, "{open}");
     let mut stops = g.stops().to_vec();
     stops.sort_by(|a, b| {
@@ -2464,6 +2480,7 @@ mod tests {
                             },
                         },
                     ],
+                    spread: Default::default(),
                 }),
             }),
         })
@@ -3053,6 +3070,7 @@ mod tests {
                         color: BLUE,
                     },
                 ],
+                spread: Default::default(),
             });
         }
         place(&mut doc, ramp, [80.0, 45.0]);
@@ -4331,6 +4349,7 @@ mod tests {
                         stop(0.6, 1.0, 0.3, 0.1),
                         stop(1.0, 0.2, 0.9, 0.3),
                     ],
+                    spread: Default::default(),
                     axes: Some([1.3, 0.6, -0.5, 1.1]),
                 }),
             }),
@@ -4359,5 +4378,124 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A page of gradients reaching past their ends — a line reflected, a
+    /// line repeated and rings with axes of their own repeated — drawn
+    /// large, and its ramp.
+    fn spread_page() -> (Document, Vec<(f32, chitrakar_color::LinearRgba)>) {
+        use chitrakar_doc::Spread::*;
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        let stops = vec![
+            stop(0.0, 0.1, 0.2, 1.0),
+            stop(0.5, 1.0, 0.3, 0.1),
+            stop(1.0, 0.95, 0.95, 0.9),
+        ];
+        let mut doc = Document::new(300, 120, chitrakar_color::ColorMode::Rgb);
+        for (i, g) in [
+            chitrakar_doc::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.35, 0.4],
+                stops: stops.clone(),
+                spread: Reflect,
+            },
+            chitrakar_doc::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.35, 0.4],
+                stops: stops.clone(),
+                spread: Repeat,
+            },
+            chitrakar_doc::Gradient::Radial {
+                center: [0.5, 0.5],
+                radius: 0.2,
+                stops: stops.clone(),
+                axes: Some([1.2, 0.3, -0.2, 0.9]),
+                spread: Repeat,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = doc.root();
+            let mut node = chitrakar_doc::Node::vector(
+                "g",
+                VectorShape::Rect {
+                    width: 84.0,
+                    height: 96.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, gradient, .. } = &mut node.kind {
+                *fill = None;
+                *gradient = Some(g);
+            }
+            let at = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[at];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(8.0 + 100.0 * i as f32, 12.0),
+            })
+            .unwrap();
+        }
+        let ramp = stops
+            .iter()
+            .map(|s| (s.offset, chitrakar_render::resolve_color(&doc, &s.color)))
+            .collect();
+        (doc, ramp)
+    }
+
+    /// Where along a ramp a colour is: the nearest of a thousand.
+    fn along_ramp(ramp: &[(f32, chitrakar_color::LinearRgba)], c: &[u8]) -> f32 {
+        (0..=1000)
+            .map(|i| i as f32 / 1000.0)
+            .min_by_key(|t| {
+                let r = chitrakar_render::ramp_color(ramp, *t).to_srgb8();
+                (0..3).map(|k| r[k].abs_diff(c[k]) as u32).sum::<u32>()
+            })
+            .unwrap()
+    }
+
+    /// Gradients reaching past their ends leave with their spread, and a
+    /// reader reflects and repeats them where the engine does.
+    #[test]
+    fn a_gradients_spread_leaves_as_its_spread_method() {
+        let (doc, ramp) = spread_page();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"spreadMethod="reflect""#) && svg.contains(r#"spreadMethod="repeat""#)
+        );
+        let theirs = resvg_pixels(&doc);
+        let page = chitrakar_render::render(&doc).unwrap();
+        let mut asked = 0;
+        for y in (16..104).step_by(5) {
+            for x in (12..290).step_by(5) {
+                if page.get(x, y).a < 0.999 {
+                    continue;
+                }
+                let ours = along_ramp(&ramp, &page.get(x, y).to_srgb8());
+                // Away from where a repeat starts again, which is a seam
+                // the two can put a pixel apart.
+                if !(0.06..=0.94).contains(&ours) {
+                    continue;
+                }
+                let k = ((y * 300 + x) * 4) as usize;
+                let reader = along_ramp(&ramp, &theirs[k..k + 3]);
+                assert!(
+                    (ours - reader).abs() <= 0.04,
+                    "({x}, {y}): the page is {ours:.3} along the ramp and the reader {reader:.3}"
+                );
+                asked += 1;
+            }
+        }
+        assert!(asked > 300, "asked of enough of it ({asked})");
     }
 }

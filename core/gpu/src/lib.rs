@@ -4175,7 +4175,14 @@ fn vector(
             let at = out.textures.len();
             out.textures.push(ramp);
             let kind = if radial { 1.0 } else { 0.0 };
-            Some(([kind, 0.0, 0.0, alpha], geom, Some(at)))
+            // What it does past its ends rides beside which kind it is
+            // (`spread_at`).
+            let spread = match g.spread() {
+                chitrakar_doc::Spread::Pad => 0.0,
+                chitrakar_doc::Spread::Reflect => 1.0,
+                chitrakar_doc::Spread::Repeat => 2.0,
+            };
+            Some(([kind, spread, 0.0, alpha], geom, Some(at)))
         }
         None => fill.map(|c| (premultiplied_color(doc, &c, alpha), [0.0; 4], None)),
     };
@@ -7280,6 +7287,7 @@ mod tests {
                     from: [0.0, 0.0],
                     to: [1.0, 1.0],
                     stops: ramp(&[(0.0, RED), (0.3, BLUE), (1.0, WHITE)]),
+                    spread: Default::default(),
                 },
             ),
             Transform::translation(8.0, 8.0),
@@ -7295,6 +7303,7 @@ mod tests {
                     center: [0.4, 0.45],
                     radius: 0.8,
                     stops: ramp(&[(0.0, WHITE), (1.0, BLUE)]),
+                    spread: Default::default(),
                     axes: None,
                 },
             ),
@@ -7324,6 +7333,7 @@ mod tests {
                     from: [0.0, 1.0],
                     to: [0.0, 0.0],
                     stops: ramp(&[(0.0, RED), (1.0, BLUE)]),
+                    spread: Default::default(),
                 },
             ),
             Transform::translation(12.0, 44.0),
@@ -7382,6 +7392,7 @@ mod tests {
             center: [0.45, 0.55],
             radius: 0.5,
             stops: ramp(&[(0.0, BLUE), (0.6, RED), (1.0, WHITE)]),
+            spread: Default::default(),
             axes: Some(axes),
         };
         add(
@@ -7455,6 +7466,77 @@ mod tests {
         }
     }
 
+    /// Past the ends of its ramp a gradient reflects or repeats here as it
+    /// does there, on a line and on rings with axes of their own.
+    #[test]
+    fn a_gradients_spread_is_the_cpus() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Spread::*;
+        let mut doc = Document::new(150, 60, ColorMode::Rgb);
+        let stops = || ramp(&[(0.0, BLUE), (0.5, RED), (1.0, WHITE)]);
+        for (i, (g, at)) in [
+            (
+                chitrakar_doc::Gradient::Linear {
+                    from: [0.1, 0.2],
+                    to: [0.35, 0.4],
+                    stops: stops(),
+                    spread: Reflect,
+                },
+                4.0,
+            ),
+            (
+                chitrakar_doc::Gradient::Linear {
+                    from: [0.1, 0.2],
+                    to: [0.35, 0.4],
+                    stops: stops(),
+                    spread: Repeat,
+                },
+                54.0,
+            ),
+            (
+                chitrakar_doc::Gradient::Radial {
+                    center: [0.5, 0.5],
+                    radius: 0.2,
+                    stops: stops(),
+                    axes: Some([1.2, 0.3, -0.2, 0.9]),
+                    spread: Reflect,
+                },
+                104.0,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shape = if i == 2 {
+                VectorShape::Ellipse { rx: 21.0, ry: 24.0 }
+            } else {
+                VectorShape::Rect {
+                    width: 42.0,
+                    height: 48.0,
+                    radius: 0.0,
+                }
+            };
+            add(
+                &mut doc,
+                gradient_filled("g", shape, g),
+                Transform::translation(
+                    at + if i == 2 { 21.0 } else { 0.0 },
+                    if i == 2 { 30.0 } else { 6.0 },
+                ),
+            );
+        }
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.008,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+    }
+
     /// A gradient with no stops paints nothing at all — and does not
     /// fall back to the flat fill underneath it, which is what the CPU
     /// does with one.
@@ -7477,6 +7559,7 @@ mod tests {
                     from: [0.0, 0.0],
                     to: [1.0, 0.0],
                     stops: Vec::new(),
+                    spread: Default::default(),
                 },
             ),
             Transform::translation(10.0, 10.0),
@@ -13395,6 +13478,7 @@ mod tests {
                     from: [0.0, 0.0],
                     to: [1.0, 0.0],
                     stops: ramp(&[(0.0, RED), (1.0, ink(0.9, 0.7, 0.0, 0.1))]),
+                    spread: Default::default(),
                 });
             }
             add(
@@ -13669,6 +13753,7 @@ mod tests {
                                 },
                             ),
                         ]),
+                        spread: Default::default(),
                     }),
                 }),
             })

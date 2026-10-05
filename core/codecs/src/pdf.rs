@@ -1623,26 +1623,87 @@ impl Page {
         }
         stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let (x0, y0, x1, y1) = chitrakar_render::gradient_box(shape);
-        let ramp: Vec<[u8; 4]> = (0..SAMPLES)
+        // How far the shading has to reach. A pad is the ramp once and
+        // PDF's own extension past its ends; a reflect or a repeat has no
+        // extension in PDF, so the shading is stretched over every whole
+        // period of the ramp the shape reaches — read at the corners of
+        // its box, where a line's position and a ring's are greatest — and
+        // what it holds is the ramp with the spread already applied.
+        let spread = g.spread();
+        let corners = [[0.0f32, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let reach: Vec<f32> = match g {
+            chitrakar_doc::Gradient::Linear { from, to, .. } => {
+                let d = [to[0] - from[0], to[1] - from[1]];
+                let dd = (d[0] * d[0] + d[1] * d[1]).max(1e-12);
+                corners
+                    .iter()
+                    .map(|q| ((q[0] - from[0]) * d[0] + (q[1] - from[1]) * d[1]) / dd)
+                    .collect()
+            }
+            chitrakar_doc::Gradient::Radial {
+                center,
+                radius,
+                axes,
+                ..
+            } => {
+                let a = axes.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+                corners
+                    .iter()
+                    .map(|q| {
+                        let (du, dv) = (q[0] - center[0], q[1] - center[1]);
+                        let (x, y) = (a[0] * du + a[1] * dv, a[2] * du + a[3] * dv);
+                        (x * x + y * y).sqrt() / radius.max(1e-6)
+                    })
+                    .collect()
+            }
+        };
+        let (t0, t1) = if spread == chitrakar_doc::Spread::Pad {
+            (0.0f32, 1.0f32)
+        } else {
+            let lo = reach
+                .iter()
+                .copied()
+                .fold(0.0f32, f32::min)
+                .floor()
+                .max(-64.0);
+            let hi = reach
+                .iter()
+                .copied()
+                .fold(1.0f32, f32::max)
+                .ceil()
+                .min(64.0);
+            // A ring is measured out from its centre, from nought.
+            let lo = if matches!(g, chitrakar_doc::Gradient::Radial { .. }) {
+                0.0
+            } else {
+                lo
+            };
+            (lo, hi)
+        };
+        let samples = SAMPLES * ((t1 - t0).round().max(1.0) as usize);
+        let ramp: Vec<[u8; 4]> = (0..samples)
             .map(|i| {
-                chitrakar_render::ramp_color(&stops, i as f32 / (SAMPLES - 1) as f32).to_srgb8()
+                let t = t0 + (t1 - t0) * i as f32 / (samples - 1) as f32;
+                chitrakar_render::ramp_color(&stops, spread.place(t)).to_srgb8()
             })
             .collect();
+        // The line's ends and the ring's reach, carried to `t0` and `t1`.
+        let along = |from: [f32; 2], to: [f32; 2], t: f32| {
+            [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ]
+        };
         // Where the gradient's own geometry says it, in the unit box; the
         // engine's reading of a line or a ring of no size is the colour at
         // one end, everywhere, which a shading of one colour says.
         let (kind, coords, flat) = match g {
             chitrakar_doc::Gradient::Linear { from, to, .. } => {
                 let degenerate = (to[0] - from[0]).hypot(to[1] - from[1]) < 1e-6;
+                let (a, b) = (along(*from, *to, t0), along(*from, *to, t1));
                 (
                     2,
-                    format!(
-                        "{} {} {} {}",
-                        num(from[0]),
-                        num(from[1]),
-                        num(to[0]),
-                        num(to[1])
-                    ),
+                    format!("{} {} {} {}", num(a[0]), num(a[1]), num(b[0]), num(b[1])),
                     degenerate.then_some(0),
                 )
             }
@@ -1656,18 +1717,18 @@ impl Page {
                 ..
             } if chitrakar_doc::invert_axes(*axes).is_some() => (
                 3,
-                format!("0 0 0 0 0 {}", num(radius.max(1e-6))),
-                (*radius < 1e-6).then_some(SAMPLES - 1),
+                format!("0 0 0 0 0 {}", num(radius.max(1e-6) * t1)),
+                (*radius < 1e-6).then_some(usize::MAX),
             ),
             chitrakar_doc::Gradient::Radial { center, radius, .. } => (
                 3,
                 format!(
                     "{c0} {c1} 0 {c0} {c1} {}",
-                    num(radius.max(1e-6)),
+                    num(radius.max(1e-6) * t1),
                     c0 = num(center[0]),
                     c1 = num(center[1])
                 ),
-                (*radius < 1e-6).then_some(SAMPLES - 1),
+                (*radius < 1e-6).then_some(usize::MAX),
             ),
         };
         let frame = match g {
@@ -1689,8 +1750,11 @@ impl Page {
             _ => None,
         }
         .unwrap_or_default();
+        // Of no size, one end throughout: the first colour for a line, the
+        // last for a ring, whatever the spread.
         let ramp: Vec<[u8; 4]> = match flat {
-            Some(i) => vec![ramp[i]; SAMPLES],
+            Some(0) => vec![chitrakar_render::ramp_color(&stops, 0.0).to_srgb8(); samples],
+            Some(_) => vec![chitrakar_render::ramp_color(&stops, 1.0).to_srgb8(); samples],
             None => ramp,
         };
         let sampled =
@@ -1698,7 +1762,7 @@ impl Page {
                 let range = vec!["0 1"; channels].join(" ");
                 Ok(this.push(&stream_object(
                     &format!(
-                        "<< /FunctionType 0 /Domain [0 1] /Range [{range}] /Size [{SAMPLES}] \
+                        "<< /FunctionType 0 /Domain [0 1] /Range [{range}] /Size [{samples}] \
                      /BitsPerSample 8 /Filter /FlateDecode"
                     ),
                     &deflate(&data)?,
@@ -5302,6 +5366,7 @@ mod tests {
                     center: [0.45, 0.55],
                     radius: 0.5,
                     stops: stops.clone(),
+                    spread: Default::default(),
                     axes,
                 });
             }
@@ -5367,6 +5432,7 @@ mod tests {
                     stop(0.5, 0.1, 0.8, 0.2, 1.0),
                     stop(1.0, 0.1, 0.2, 1.0, 1.0),
                 ],
+                spread: Default::default(),
             });
         }
         add(&mut doc, band, [2.0, 2.0]);
@@ -5376,6 +5442,7 @@ mod tests {
                 center: [0.4, 0.45],
                 radius: 0.6,
                 stops: vec![stop(0.0, 0.1, 0.2, 1.0, 1.0), stop(1.0, 1.0, 0.9, 0.1, 0.2)],
+                spread: Default::default(),
                 axes: None,
             });
         }
@@ -5467,6 +5534,7 @@ mod tests {
                         color: BLUE,
                     },
                 ],
+                spread: Default::default(),
             });
         }
         add(&mut doc, band, [4.0, 4.0]);
@@ -5979,5 +6047,121 @@ mod tests {
                 off[0].3
             );
         }
+    }
+
+    /// A page of gradients reaching past their ends — a line reflected, a
+    /// line repeated and rings with axes of their own repeated — drawn
+    /// large, and its ramp.
+    fn spread_page() -> (Document, Vec<(f32, chitrakar_color::LinearRgba)>) {
+        use chitrakar_doc::Spread::*;
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        let stops = vec![
+            stop(0.0, 0.1, 0.2, 1.0),
+            stop(0.5, 1.0, 0.3, 0.1),
+            stop(1.0, 0.95, 0.95, 0.9),
+        ];
+        let mut doc = Document::new(300, 120, chitrakar_color::ColorMode::Rgb);
+        for (i, g) in [
+            chitrakar_doc::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.35, 0.4],
+                stops: stops.clone(),
+                spread: Reflect,
+            },
+            chitrakar_doc::Gradient::Linear {
+                from: [0.1, 0.2],
+                to: [0.35, 0.4],
+                stops: stops.clone(),
+                spread: Repeat,
+            },
+            chitrakar_doc::Gradient::Radial {
+                center: [0.5, 0.5],
+                radius: 0.2,
+                stops: stops.clone(),
+                axes: Some([1.2, 0.3, -0.2, 0.9]),
+                spread: Repeat,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = doc.root();
+            let mut node = chitrakar_doc::Node::vector(
+                "g",
+                VectorShape::Rect {
+                    width: 84.0,
+                    height: 96.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, gradient, .. } = &mut node.kind {
+                *fill = None;
+                *gradient = Some(g);
+            }
+            let at = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: at,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[at];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(8.0 + 100.0 * i as f32, 12.0),
+            })
+            .unwrap();
+        }
+        let ramp = stops
+            .iter()
+            .map(|s| (s.offset, chitrakar_render::resolve_color(&doc, &s.color)))
+            .collect();
+        (doc, ramp)
+    }
+
+    /// Where along a ramp a colour is: the nearest of a thousand.
+    fn along_ramp(ramp: &[(f32, chitrakar_color::LinearRgba)], c: &[u8]) -> f32 {
+        (0..=1000)
+            .map(|i| i as f32 / 1000.0)
+            .min_by_key(|t| {
+                let r = chitrakar_render::ramp_color(ramp, *t).to_srgb8();
+                (0..3).map(|k| r[k].abs_diff(c[k]) as u32).sum::<u32>()
+            })
+            .unwrap()
+    }
+
+    /// Gradients reaching past their ends are shadings stretched over the
+    /// periods the shape reaches, holding the ramp with the spread
+    /// already in it, since PDF's own extension only pads.
+    #[test]
+    fn a_gradients_spread_is_stretched_over_its_periods_in_a_pdf() {
+        let (doc, ramp) = spread_page();
+        let Some(colours) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let page = chitrakar_render::render(&doc).unwrap();
+        let mut asked = 0;
+        for y in (16..104).step_by(5) {
+            for x in (12..290).step_by(5) {
+                if page.get(x, y).a < 0.999 {
+                    continue;
+                }
+                let ours = along_ramp(&ramp, &page.get(x, y).to_srgb8());
+                if !(0.06..=0.94).contains(&ours) {
+                    continue;
+                }
+                let file = along_ramp(&ramp, &colours[(y * 300 + x) as usize]);
+                assert!(
+                    (ours - file).abs() <= 0.05,
+                    "({x}, {y}): the page is {ours:.3} along the ramp and the file {file:.3}"
+                );
+                asked += 1;
+            }
+        }
+        assert!(asked > 300, "asked of enough of it ({asked})");
     }
 }

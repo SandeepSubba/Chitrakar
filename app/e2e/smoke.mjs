@@ -539,6 +539,26 @@ assert(
   corner[0] > middle[0] + 60,
   `radial ramps outward from the centre (${middle} -> ${corner})`,
 );
+// Past the ends: the corner is past the rim, where padding carries the
+// last colour on, a reflect runs the ramp back in and a repeat starts it
+// again — three different colours at the same pixel, and Pad the first.
+const spreadTo = async (value) => {
+  await page.selectOption('select[aria-label="Gradient spread"]', value);
+  await page.waitForTimeout(200);
+  return canvasPixel(115, 115);
+};
+const reflected = await spreadTo("Reflect");
+const repeated = await spreadTo("Repeat");
+const differs = (a, b) => Math.max(...[0, 1, 2].map((k) => Math.abs(a[k] - b[k]))) > 20;
+assert(differs(reflected, corner), `reflected, the corner is back along the ramp (${corner} -> ${reflected})`);
+assert(
+  differs(repeated, corner) && differs(repeated, reflected),
+  `repeated, it is somewhere else again (${repeated})`,
+);
+assert(
+  JSON.stringify(await spreadTo("Pad")) === JSON.stringify(corner),
+  "and carrying the end colour on puts it back",
+);
 
 // Back to a flat fill: the shape is uniform again and later steps see the
 // same rect they always did.

@@ -131,11 +131,14 @@ pub struct GradientStop {
 /// needing its own transform to be kept in step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Gradient {
-    /// Ramp along the line from `from` to `to`, clamped past either end.
+    /// Ramp along the line from `from` to `to`; past either end, what
+    /// `spread` says.
     Linear {
         from: [f32; 2],
         to: [f32; 2],
         stops: Vec<GradientStop>,
+        #[serde(default)]
+        spread: Spread,
     },
     /// Ramp outward from `center` to `radius`, clamped past the edge —
     /// in the box's own units, 0..1 each way, so on a box that is not
@@ -153,7 +156,44 @@ pub enum Gradient {
         /// identity: rings in the box's units, as above.
         #[serde(default)]
         axes: Option<[f32; 4]>,
+        #[serde(default)]
+        spread: Spread,
     },
+}
+
+/// What a gradient does past the end of its ramp — SVG's `spreadMethod`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Spread {
+    /// The end colour carries on: every gradient before there was a
+    /// choice, and SVG's default.
+    #[default]
+    Pad,
+    /// The ramp runs back the other way, and forward again, and so on.
+    Reflect,
+    /// The ramp starts again from its beginning.
+    Repeat,
+}
+
+impl Spread {
+    /// Where along the ramp, `0..=1`, a position `t` on the gradient's
+    /// line or out from its centre lands.
+    pub fn place(self, t: f32) -> f32 {
+        if !t.is_finite() {
+            return 0.0;
+        }
+        match self {
+            Spread::Pad => t.clamp(0.0, 1.0),
+            Spread::Repeat => t.rem_euclid(1.0),
+            Spread::Reflect => {
+                let u = t.rem_euclid(2.0);
+                if u > 1.0 {
+                    2.0 - u
+                } else {
+                    u
+                }
+            }
+        }
+    }
 }
 
 /// The inverse of a radial gradient's axes (`Gradient::Radial::axes`),
@@ -165,6 +205,13 @@ pub fn invert_axes(a: [f32; 4]) -> Option<[f32; 4]> {
 }
 
 impl Gradient {
+    /// What the gradient does past the end of its ramp.
+    pub fn spread(&self) -> Spread {
+        match self {
+            Gradient::Linear { spread, .. } | Gradient::Radial { spread, .. } => *spread,
+        }
+    }
+
     pub fn stops(&self) -> &[GradientStop] {
         match self {
             Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,

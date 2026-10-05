@@ -39,6 +39,7 @@ import {
   Effect,
   EffectKind,
   Gradient,
+  GradientSpread,
   GradientStop,
   KeptStyle,
   LayerInfo,
@@ -12207,7 +12208,7 @@ function KindProps({
               ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
                   patch({
                     gradient: {
-                      Linear: { ...endpoints(deg), stops: gradStops },
+                      Linear: { ...grad.Linear, ...endpoints(deg), stops: gradStops },
                     },
                   }),
                 )
@@ -12222,6 +12223,28 @@ function KindProps({
                       gradient: { Radial: { ...grad.Radial, radius: r } },
                     }),
                 )}
+            {/* What it does past the ends of its ramp — a file's
+                spreadMethod, and the stripes a reflect or a repeat makes. */}
+            <label className="row">
+              Past the ends
+              <select
+                value={("Linear" in grad ? grad.Linear.spread : grad.Radial.spread) ?? "Pad"}
+                onChange={(e) => {
+                  const spread = e.target.value as GradientSpread;
+                  onEdit(
+                    "Linear" in grad
+                      ? patch({ gradient: { Linear: { ...grad.Linear, spread } } })
+                      : patch({ gradient: { Radial: { ...grad.Radial, spread } } }),
+                    false,
+                  );
+                }}
+                aria-label="Gradient spread"
+              >
+                <option value="Pad">Carry the end colour on</option>
+                <option value="Reflect">Reflect</option>
+                <option value="Repeat">Repeat</option>
+              </select>
+            </label>
           </>
         )}
         <label className="row">

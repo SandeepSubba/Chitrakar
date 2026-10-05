@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~589),
+- **Verify before committing:** `cargo test --workspace` (~593),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4860,9 +4860,25 @@ without reading anything else.*
      a radial shading up to a device pixel further out than its rings,
      with axes or without, so the PDF witness compares where along the
      ramp a pixel is, drawn large.
+     **And past the ends.** A gradient's `spreadMethod` — reflect,
+     repeat — had no field and came in padded: `Gradient::spread` now
+     (`Spread::{Pad, Reflect, Repeat}`, additive, `Spread::place` the one
+     statement of it), on both kinds. The CPU and the GPU place the ramp
+     position through it (the GPU's spread rides in a colour slot a
+     gradient left empty), keeping a line or a ring of no size the end
+     colour it always was; SVG writes `spreadMethod`; and PDF, whose own
+     extension only pads, stretches the shading over every whole period
+     the shape's box reaches — a line's ends pushed out, a ring's reach
+     grown — with the spread already applied to what its function holds,
+     a pad writing exactly what it wrote before. The panel offers it
+     beside the gradient (the block that walks gradients in the browser
+     suite reads one pixel past a ring's rim under all three), and the
+     angle slider keeps it rather than rebuilding the gradient bare.
+     Held against the CPU on the GPU, against resvg in SVG and against
+     ghostscript in PDF, each failing when its own layer is undone.
      Left out of the tests, and said so there: a focal point off the
-     centre and a spread other than pad, which the engine has no field
-     for — the next thing to add — and strokes under a skew or an uneven
+     centre, which the engine has no field for — the next thing to add —
+     and strokes under a skew or an uneven
      scale, since a path comes in in page space with its pen, where a
      reader turns the pen with the path; keeping each path in its own
      space with the transform on the layer is the fix for that. Long

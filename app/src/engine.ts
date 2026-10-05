@@ -169,6 +169,9 @@ export interface Stroke {
 
 export type Marker = "None" | "Arrow" | "Bar" | "Dot";
 
+/** What a gradient does past the ends of its ramp — SVG's spreadMethod. */
+export type GradientSpread = "Pad" | "Reflect" | "Repeat";
+
 export type StrokeAlign = "Inside" | "Centre" | "Outside";
 export type StrokeCap = "Butt" | "Round" | "Square";
 export type StrokeJoin = "Miter" | "Round" | "Bevel";
@@ -304,6 +307,8 @@ export type Gradient =
         from: [number, number];
         to: [number, number];
         stops: GradientStop[];
+        /** Past the ends of the ramp. Left out, `Pad`. */
+        spread?: GradientSpread;
       };
     }
   | {
@@ -315,6 +320,8 @@ export type Gradient =
          * before its length is taken — a file's radial as it came in.
          * Left out, the identity. */
         axes?: [number, number, number, number] | null;
+        /** Past the ends of the ramp. Left out, `Pad`. */
+        spread?: GradientSpread;
       };
     };
 

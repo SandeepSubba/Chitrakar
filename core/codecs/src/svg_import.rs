@@ -656,6 +656,7 @@ fn gradient_of(
                 from,
                 to,
                 stops: stops_of(g.stops(), alpha),
+                spread: spread_of(g.spread_method()),
             })
         }
         // A file's rings are circles in the gradient's own space, which
@@ -685,10 +686,20 @@ fn gradient_of(
                 center,
                 radius: 1.0,
                 stops: stops_of(g.stops(), alpha),
+                spread: spread_of(g.spread_method()),
                 axes: Some(axes),
             })
         }
         _ => None,
+    }
+}
+
+/// What a file's gradient does past its ends, said the engine's way.
+fn spread_of(m: usvg::SpreadMethod) -> chitrakar_doc::Spread {
+    match m {
+        usvg::SpreadMethod::Pad => chitrakar_doc::Spread::Pad,
+        usvg::SpreadMethod::Reflect => chitrakar_doc::Spread::Reflect,
+        usvg::SpreadMethod::Repeat => chitrakar_doc::Spread::Repeat,
     }
 }
 
@@ -1043,7 +1054,10 @@ mod tests {
         let NodeKind::Vector { gradient, .. } = &shapes[4].kind else {
             panic!()
         };
-        let Some(Gradient::Linear { from, to, stops }) = gradient else {
+        let Some(Gradient::Linear {
+            from, to, stops, ..
+        }) = gradient
+        else {
             panic!("a linear gradient")
         };
         assert!(
@@ -2639,14 +2653,14 @@ mod tests {
     /// bulging past its anchors had its gradient laid over the anchors'
     /// box rather than the curve's.
     ///
-    /// Not yet: a focus off the centre and a spread other than pad, which
-    /// the engine has no field for.
+    /// And past its ends, what its `spreadMethod` says — reflect, repeat —
+    /// which had no field to land in and came in padded
+    /// (`Gradient::spread`). Not yet: a focus off the centre.
     #[test]
     fn a_gradient_written_elsewhere_comes_in_painting_what_a_reader_paints() {
         let one = Allow {
             strokes: false,
             dashes: false,
-            spread: false,
             focal: false,
             many: false,
             ..ALL

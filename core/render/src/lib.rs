@@ -5018,6 +5018,8 @@ enum Paint {
         stops: Vec<(f32, LinearRgba)>,
         /// Local-space box the normalized gradient coordinates map onto.
         box_: (f32, f32, f32, f32),
+        /// What it does past the ends of its ramp.
+        spread: chitrakar_doc::Spread,
     },
 }
 
@@ -5071,14 +5073,20 @@ impl Paint {
             kind,
             stops,
             box_: local_bounds(shape),
+            spread: g.spread(),
         })
     }
 
     /// Colour at a point in the shape's local space.
     fn at(&self, lx: f32, ly: f32) -> LinearRgba {
-        let (kind, stops, (x0, y0, x1, y1)) = match self {
+        let (kind, stops, (x0, y0, x1, y1), spread) = match self {
             Paint::Solid(c) => return *c,
-            Paint::Gradient { kind, stops, box_ } => (kind, stops, *box_),
+            Paint::Gradient {
+                kind,
+                stops,
+                box_,
+                spread,
+            } => (kind, stops, *box_, *spread),
         };
         // Normalized box coordinates, SVG's objectBoundingBox units: a
         // radial gradient is therefore an ellipse in a non-square shape,
@@ -5096,7 +5104,9 @@ impl Paint {
                 let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
                 let len2 = dx * dx + dy * dy;
                 if len2 < 1e-12 {
-                    0.0
+                    // A line of no length is the first colour throughout,
+                    // whatever the spread.
+                    return ramp(stops, 0.0);
                 } else {
                     ((u - from[0]) * dx + (v - from[1]) * dy) / len2
                 }
@@ -5107,7 +5117,8 @@ impl Paint {
                 axes,
             } => {
                 if *radius < 1e-6 {
-                    1.0
+                    // And a ring of no size the last.
+                    return ramp(stops, 1.0);
                 } else {
                     // The offset through the gradient's own axes first,
                     // which is the identity unless it says otherwise.
@@ -5116,9 +5127,10 @@ impl Paint {
                     (a * a + b * b).sqrt() / radius
                 }
             }
-        }
-        .clamp(0.0, 1.0);
-        ramp(stops, t)
+        };
+        // Past the ends, what the gradient's spread says: the end colour
+        // on, the ramp back again, or the ramp from its start.
+        ramp(stops, spread.place(t))
     }
 }
 
@@ -14959,6 +14971,7 @@ mod tests {
                 from: [0.0, 0.0],
                 to: [1.0, 0.0],
                 stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+                spread: Default::default(),
             },
         );
 
@@ -14985,6 +14998,69 @@ mod tests {
         assert_eq!(s.get(8, 2).to_srgb8(), s.get(8, 29).to_srgb8());
     }
 
+    /// Past the end of its ramp a gradient does what its spread says: the
+    /// end colour carries on, the ramp runs back, or it starts again.
+    #[test]
+    fn a_gradient_past_its_ends_does_what_its_spread_says() {
+        // Black to white over the first quarter of the box: the other
+        // three quarters are past the end.
+        let across = |spread: chitrakar_doc::Spread| {
+            let mut doc = Document::new(32, 32, ColorMode::Rgb);
+            gradient_rect(
+                &mut doc,
+                Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [0.25, 0.0],
+                    stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+                    spread,
+                },
+            );
+            let s = render(&doc).unwrap();
+            (0..32)
+                .map(|x| chitrakar_color::linear_to_srgb(s.get(x, 16).r))
+                .collect::<Vec<f32>>()
+        };
+        use chitrakar_doc::Spread::*;
+        let pad = across(Pad);
+        assert!(
+            pad[12] > 0.95 && pad[28] > 0.95,
+            "padded, white on past the end"
+        );
+        let back = across(Reflect);
+        assert!(
+            back[12] < 0.5 && back[14] < back[10],
+            "reflected, back down after the end"
+        );
+        assert!(
+            back[22] > 0.6 && back[20] > back[17],
+            "and up again after that"
+        );
+        let again = across(Repeat);
+        assert!(
+            again[8] < 0.1 && again[16] < 0.1,
+            "repeated, black at each start"
+        );
+        assert!(again[6] > 0.7 && again[14] > 0.7, "white just before it");
+        // A ring the same: a small one, reflected, is dark again further out.
+        let mut doc = Document::new(32, 32, ColorMode::Rgb);
+        gradient_rect(
+            &mut doc,
+            Gradient::Radial {
+                center: [0.5, 0.5],
+                radius: 0.125,
+                stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+                axes: None,
+                spread: Reflect,
+            },
+        );
+        let s = render(&doc).unwrap();
+        let at = |x: u32| chitrakar_color::linear_to_srgb(s.get(x, 16).r);
+        assert!(
+            at(20) > 0.8 && at(24) < 0.2,
+            "about a radius out light, two out dark again"
+        );
+    }
+
     /// The middle of a red-to-blue ramp is the one a designer drew and
     /// the one SVG, PDF and every browser will draw from the exported
     /// file: the stops mix on the values a device shows. Mixed in linear
@@ -14998,6 +15074,7 @@ mod tests {
                 from: [0.0, 0.0],
                 to: [1.0, 0.0],
                 stops: vec![stop(0.0, 1.0, 0.0, 0.0), stop(1.0, 0.0, 0.0, 1.0)],
+                spread: Default::default(),
             },
         );
         let s = render(&doc).unwrap();
@@ -15024,6 +15101,7 @@ mod tests {
                 center: [0.5, 0.5],
                 radius: 0.5,
                 stops: vec![stop(0.0, 1.0, 1.0, 1.0), stop(1.0, 0.0, 0.0, 0.0)],
+                spread: Default::default(),
                 axes: None,
             },
         );
@@ -15054,6 +15132,7 @@ mod tests {
                 from: [0.0, 0.0],
                 to: [1.0, 0.0],
                 stops: vec![stop(0.0, 0.0, 0.0, 0.0), stop(1.0, 1.0, 1.0, 1.0)],
+                spread: Default::default(),
             },
         );
         let before = render(&doc).unwrap().get(4, 16).to_srgb8();
@@ -15075,6 +15154,7 @@ mod tests {
                 from: [0.0, 0.0],
                 to: [1.0, 0.0],
                 stops: vec![stop(0.0, 0.0, 1.0, 0.0), stop(1.0, 0.0, 1.0, 0.0)],
+                spread: Default::default(),
             },
         );
         // The node still carries fill: RED underneath; green must win.
