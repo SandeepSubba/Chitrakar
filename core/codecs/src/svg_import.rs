@@ -497,7 +497,29 @@ impl Ring {
 /// The path's subpaths in document space, cubic beziers kept as handles
 /// and quadratics raised to cubics.
 fn rings_of(path: &usvg::Path) -> Vec<Ring> {
+    rings_in(path, path.abs_transform())
+}
+
+/// Where a stroked path is kept: in the page's own space, its pen scaled
+/// with it, while the file's transform only moves, turns and scales it
+/// evenly — and otherwise in the path's own space with that transform
+/// on the layer, since a pen that is round in the file's space is an
+/// ellipse on the page under a skew or an uneven scale, leaning with the
+/// line. Brought into page space the pen stayed round and took one width
+/// for both ways, so a stroke under either came in too thick along one
+/// axis and too thin along the other. `None` for page space.
+fn own_space(path: &usvg::Path) -> Option<usvg::Transform> {
+    path.stroke()?;
     let t = path.abs_transform();
+    let (x, y) = ((t.sx, t.ky), (t.kx, t.sy));
+    let (xx, yy) = (x.0 * x.0 + x.1 * x.1, y.0 * y.0 + y.1 * y.1);
+    let square = (x.0 * y.0 + x.1 * y.1).abs() <= 1e-4 * (xx * yy).sqrt();
+    let even = (xx - yy).abs() <= 1e-4 * xx.max(yy);
+    (!(square && even)).then_some(t)
+}
+
+/// The path's subpaths through `t`.
+fn rings_in(path: &usvg::Path, t: usvg::Transform) -> Vec<Ring> {
     let map = |p: usvg::tiny_skia_path::Point| -> [f32; 2] {
         let mut q = p;
         t.map_point(&mut q);
@@ -605,11 +627,10 @@ fn stops_of(stops: &[usvg::Stop], alpha: f32) -> Vec<GradientStop> {
 /// gradient's own, then into the box the shape covers.
 fn gradient_of(
     paint: &usvg::Paint,
-    path: &usvg::Path,
+    abs: usvg::Transform,
     bbox: [f32; 4],
     alpha: f32,
 ) -> Option<Gradient> {
-    let abs = path.abs_transform();
     let (bw, bh) = ((bbox[2] - bbox[0]).max(1e-6), (bbox[3] - bbox[1]).max(1e-6));
     let norm = |t: usvg::Transform, x: f32, y: f32| -> [f32; 2] {
         let mut p = usvg::tiny_skia_path::Point::from_xy(x, y);
@@ -830,7 +851,32 @@ fn union_if_wound_alike(flat: &[Vec<[f32; 2]>]) -> Option<Vec<Vec<[f32; 2]>>> {
 /// and the stroke on the file's own path above it, which is the order SVG
 /// paints the two in.
 fn shapes_of(path: &usvg::Path, opacity: f32) -> Vec<Node> {
-    let rings = rings_of(path);
+    let space = own_space(path);
+    let mut out = shapes_in(
+        path,
+        space.map_or_else(|| path.abs_transform(), |_| usvg::Transform::default()),
+        opacity,
+    );
+    if let Some(t) = space {
+        let placed = chitrakar_doc::Transform {
+            a: t.sx,
+            b: t.ky,
+            c: t.kx,
+            d: t.sy,
+            e: t.tx,
+            f: t.ty,
+        };
+        for node in &mut out {
+            node.transform = placed;
+        }
+    }
+    out
+}
+
+/// The layers a path comes in as, its rings through `t` — the page's
+/// transform, or none when the layer is to carry it (`own_space`).
+fn shapes_in(path: &usvg::Path, t: usvg::Transform, opacity: f32) -> Vec<Node> {
+    let rings = rings_in(path, t);
     if rings.is_empty() {
         return Vec::new();
     }
@@ -838,16 +884,16 @@ fn shapes_of(path: &usvg::Path, opacity: f32) -> Vec<Node> {
     let corrected =
         edge.len() != rings.len() || edge.iter().zip(&rings).any(|(a, b)| a.points != b.points);
     if !corrected || path.stroke().is_none() || path.fill().is_none() {
-        return shape_of(path, edge, opacity).into_iter().collect();
+        return shape_of(path, edge, t, opacity).into_iter().collect();
     }
     let mut out = Vec::new();
-    if let Some(mut fill) = shape_of(path, edge, opacity) {
+    if let Some(mut fill) = shape_of(path, edge, t, opacity) {
         if let NodeKind::Vector { stroke, .. } = &mut fill.kind {
             *stroke = None;
         }
         out.push(fill);
     }
-    if let Some(mut line) = shape_of(path, rings, opacity) {
+    if let Some(mut line) = shape_of(path, rings, t, opacity) {
         if let NodeKind::Vector { fill, gradient, .. } = &mut line.kind {
             *fill = None;
             *gradient = None;
@@ -857,7 +903,12 @@ fn shapes_of(path: &usvg::Path, opacity: f32) -> Vec<Node> {
     out
 }
 
-fn shape_of(path: &usvg::Path, mut rings: Vec<Ring>, opacity: f32) -> Option<Node> {
+fn shape_of(
+    path: &usvg::Path,
+    mut rings: Vec<Ring>,
+    t: usvg::Transform,
+    opacity: f32,
+) -> Option<Node> {
     if rings.is_empty() {
         return None;
     }
@@ -896,11 +947,14 @@ fn shape_of(path: &usvg::Path, mut rings: Vec<Ring>, opacity: f32) -> Option<Nod
         *fill = None;
         if let Some(f) = path.fill() {
             let alpha = f.opacity().get() * opacity;
-            *gradient = gradient_of(f.paint(), path, bbox, alpha);
+            *gradient = gradient_of(f.paint(), t, bbox, alpha);
             *fill = solid_of(f.paint(), alpha);
         }
         *stroke = path.stroke().and_then(|s| {
-            let (sx, sy) = path.abs_transform().get_scale();
+            // In the page's space under an even scale, the pen scales
+            // with it; in the path's own, `t` is the identity and the pen
+            // is the file's as written.
+            let (sx, sy) = t.get_scale();
             let scale = (sx.abs() + sy.abs()) / 2.0;
             Some(Stroke {
                 color: solid_of(s.paint(), s.opacity().get() * opacity)?,
@@ -2563,12 +2617,14 @@ mod tests {
     /// each of its two edges, rounded to two different cells could not
     /// be closed (`chain`).
     ///
-    /// Left out, and said so: gradients, which have a test of their own
-    /// below; and strokes
-    /// under a transform that skews or scales unevenly, since a path
-    /// comes in in the page's own space and its pen with it, where a
-    /// reader turns the pen with the path. Fills are taken under every
-    /// transform and wrapper.
+    /// And a stroke under a transform that skews or scales unevenly came
+    /// in with a round pen of one width, the path brought into the
+    /// page's space and its pen with it, where a reader turns and
+    /// stretches the pen with the path: 50 of 400 files over ten pixels
+    /// out, the worst 125. Such a path is kept in its own space with the
+    /// transform on the layer now (`own_space`), and strokes are taken
+    /// under every transform as fills are. Gradients have a test of
+    /// their own, below.
     #[test]
     fn a_file_written_elsewhere_comes_in_as_a_reader_draws_it() {
         let fills = Allow {
@@ -2579,7 +2635,6 @@ mod tests {
         };
         let lines = Allow {
             gradients: false,
-            transforms: false,
             ..ALL
         };
         for opaque in [true, false] {
@@ -2684,5 +2739,45 @@ mod tests {
                  the first {first:?}\n{svg}"
             );
         }
+    }
+
+    /// A line under an uneven scale is as thick as a reader draws it —
+    /// three times its pen across, where the scale is three — and keeps
+    /// the file's pen and transform rather than a round pen of one width
+    /// in the page's space; under an even scale it stays in page space.
+    #[test]
+    fn a_pen_under_an_uneven_scale_stretches_with_its_line() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+  <path d="M8 10 H56" stroke="#000000" stroke-width="4" fill="none" transform="scale(1 3)"/>
+</svg>"##;
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        let line = &imported.shapes[0];
+        let NodeKind::Vector {
+            stroke: Some(stroke),
+            ..
+        } = &line.kind
+        else {
+            panic!("a stroked layer");
+        };
+        assert_eq!(stroke.width, 4.0, "the file's pen");
+        assert_eq!(
+            (line.transform.a, line.transform.d),
+            (1.0, 3.0),
+            "the file's scale"
+        );
+        let page = chitrakar_render::render(&brought_in(svg, 64, 64)).unwrap();
+        let theirs = reader_draws(svg, 64, 64);
+        let inked = |a: f32| a > 0.5;
+        let ours = (0..64).filter(|&y| inked(page.get(32, y).a)).count();
+        let reader = (0..64)
+            .filter(|&y| theirs[(y * 64 + 32) as usize][3] > 127)
+            .count();
+        assert_eq!(reader, 12, "a reader draws it twelve across");
+        assert_eq!(ours, reader, "and so does the engine");
+
+        let even = svg.replace("scale(1 3)", "scale(2)");
+        let imported = import_svg(even.as_bytes()).unwrap();
+        let line = &imported.shapes[0];
+        assert_eq!(line.transform, chitrakar_doc::Transform::default());
     }
 }

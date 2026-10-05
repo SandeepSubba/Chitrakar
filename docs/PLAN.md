@@ -879,7 +879,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~597),
+- **Verify before committing:** `cargo test --workspace` (~598),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4911,12 +4911,18 @@ without reading anything else.*
      pointerdown now prevents the default, and the canvas host is
      `user-select: none` (its in-place text box excepted) so the other
      handles that read Shift cannot start one either.
-     Left out of the tests, and said so there: strokes under a skew or
-     an uneven
-     scale, since a path comes in in page space with its pen, where a
-     reader turns the pen with the path; keeping each path in its own
-     space with the transform on the layer is the fix for that. Long
-     dashed curves drift a pixel or so against resvg; finer flattening
+     **And a pen that leans with its path.** A stroke under a skew or
+     an uneven scale came in with a round pen of one width — the path
+     brought into page space and its pen with it, where a reader skews
+     and stretches the pen with the path: with transforms let into the
+     stroked files, 50 of 400 were over ten pixels out and the worst
+     125. A stroked path whose transform is not a similarity is kept in
+     its own space now, the transform on the layer (`own_space`; the
+     layer's mask stays in page space, where masks live), so its pen,
+     its dashes and its gradient are the file's as written; everything
+     else still comes in in page space as it did. Strokes are taken
+     under every transform in the import test now, inside its old
+     bounds (the worst file 20 pixels). Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,
