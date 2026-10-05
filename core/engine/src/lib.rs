@@ -5955,28 +5955,10 @@ impl Session {
                 "the SVG holds nothing to draw".into(),
             ));
         }
-        // The pictures first, so each has a resource id before any layer
-        // names it. Pooling is content-addressed, so the same picture
-        // used twice in one file is pooled once.
-        let pictures: Vec<(usize, Node)> = imported
-            .images
-            .into_iter()
-            .map(|pic| {
-                let resource_id = self.doc.add_resource(pic.width, pic.height, pic.rgba);
-                let mut node = Node::raster(
-                    &pic.name,
-                    chitrakar_doc::RasterRef {
-                        resource_id,
-                        width: pic.width,
-                        height: pic.height,
-                    },
-                );
-                node.transform = pic.transform;
-                node.opacity = pic.opacity;
-                node.mask = pic.clip;
-                (pic.below, node)
-            })
-            .collect();
+        // The pictures and the soft masks' pixels pooled first, so each
+        // has a resource id before any layer names it. Pooling is
+        // content-addressed, so the same picture used twice in one file
+        // is pooled once.
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let group = self.doc.peek_next_id();
@@ -5985,29 +5967,11 @@ impl Session {
             index,
             node: Box::new(Node::group(name)),
         }];
-        // Back into one painter's order: a picture sits above the shapes
-        // that were emitted before it and below the rest, which is what
-        // `below` counted as the file was walked.
-        let mut pictures = pictures.into_iter().peekable();
-        let mut at = 0usize;
-        let push = |cmds: &mut Vec<Command>, at: &mut usize, node: Node| {
-            cmds.push(Command::AddNode {
-                parent: group,
-                index: *at,
-                node: Box::new(node),
-            });
-            *at += 1;
-        };
-        for (i, shape) in imported.shapes.into_iter().enumerate() {
-            while pictures.peek().is_some_and(|(below, _)| *below <= i) {
-                let (_, pic) = pictures.next().expect("peeked");
-                push(&mut cmds, &mut at, pic);
-            }
-            push(&mut cmds, &mut at, shape);
-        }
-        for (_, pic) in pictures {
-            push(&mut cmds, &mut at, pic);
-        }
+        // The file's own layers, in the groups it keeps (a group seen
+        // through a mask with grey in it), numbered on from the group
+        // that holds them all.
+        let first = chitrakar_doc::NodeId(group.0 + 1);
+        cmds.extend(imported.into_commands(&mut self.doc, group, 0, first));
         self.apply_labeled(Command::Batch(cmds), Some(format!("Place {name}")))?;
         Ok(group)
     }

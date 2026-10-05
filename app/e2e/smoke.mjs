@@ -4348,6 +4348,30 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert((await names()).join() === beforeSvg.join(), "one undo takes it back");
+  // A mask with grey in it fades what it covers: the masked group comes
+  // in as a group wearing it, light where the mask is white and gone
+  // where it is black.
+  const fadingSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <linearGradient id="g"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></linearGradient>
+    <mask id="m"><rect x="10" y="10" width="100" height="40" fill="url(#g)"/></mask>
+    <g id="fading" mask="url(#m)"><rect x="10" y="10" width="100" height="40" fill="#20a040"/></g></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "faded.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(fadingSvg),
+  });
+  await page.waitForTimeout(400);
+  assert((await names()).includes("fading"), `the masked group is a group (${await names()})`);
+  const strong = await canvasPixel(14, 30);
+  const half = await canvasPixel(60, 30);
+  const gone = await canvasPixel(106, 30);
+  assert(
+    strong[3] > half[3] + 60 && half[3] > gone[3] + 60 && gone[3] < 40,
+    `it fades along the mask's ramp (${strong} -> ${half} -> ${gone})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "and one undo takes that back too");
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

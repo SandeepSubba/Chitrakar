@@ -4945,8 +4945,33 @@ without reading anything else.*
      turned by `patternTransform`, dots in box units through a viewBox
      under a stroke, and a skewed ellipse in a scaled group — are held
      to resvg pixel by pixel (`a_pattern_fill_comes_in_painted`), and
-     each fails with the group fix or the outline mask taken out. Long
-     dashed curves drift a pixel or so against resvg; finer flattening
+     each fails with the group fix or the outline mask taken out.
+     **And a mask with grey in it.** A `<mask>` drawn in anything but
+     opaque white — a gradient fading a picture out, a half-opaque shape
+     — was passed over, and what it should have faded came in whole.
+     It is drawn now as a reader draws it (`soft_mask`): its contents
+     brought in by `walk` and drawn by the engine in the space of the
+     group wearing it, cut to the mask's rectangle, read as luminance
+     times alpha on the values a device shows (or alpha alone), a mask
+     on the mask multiplied in, and the region the group is also cut to
+     folded in as well; kept as a raster mask, white with the coverage in
+     alpha. It goes on a *group*: a fade does not distribute over the
+     layers under it the way a clip does — two overlapping layers each
+     faded to half are three quarters where they overlap — so the
+     importer's output, flat until now, keeps the groups a file needs
+     (`ImportedGroup`; a region-only mask still flattens as a clip), and
+     `ImportedSvg::into_commands` is now the one place a file's layers,
+     pictures and mask pixels become a document — the engine's placing,
+     the tests' and the pattern tile's all go through it. Held to resvg
+     on four files away from either renderer's edges
+     (`a_soft_mask_fades_what_it_covers`); ignoring the mask, reading
+     luminance as alpha, dropping the folded-in clip, and putting the
+     mask on each layer instead of the group each fail it. Shades that
+     meet inside one pixel of a mask mix in linear light here and in a
+     device's values in resvg, which is the engine's compositing and was
+     left. Group *opacity* is still folded into each layer's colours,
+     the same non-distributing approximation the mask was about to make;
+     it has a home now if it is wanted. Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,

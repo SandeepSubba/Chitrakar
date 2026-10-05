@@ -22,6 +22,188 @@ pub struct ImportedSvg {
     /// pooled pixels and this crate has no document to pool them in —
     /// the caller adds the resource and gets the id back.
     pub images: Vec<ImportedImage>,
+    /// The pixels of the soft masks groups wear (`ImportedMask`), which
+    /// want pooling just as pictures do; a group's raster mask names one
+    /// by its `key` until it is (`into_commands`).
+    pub masks: Vec<ImportedMask>,
+    /// The groups the file's layers stay in, where flattening them away
+    /// would change the picture (`ImportedGroup`).
+    pub groups: Vec<ImportedGroup>,
+    /// Which of `groups` each of `shapes` is in, if any.
+    pub shape_groups: Vec<Option<usize>>,
+}
+
+/// A group a file's layers come in inside rather than flattened: one
+/// seen through a mask with grey in it. A fade does not distribute over
+/// the layers under it the way a clip does — two overlapping layers each
+/// faded to half are three quarters where they overlap, one group faded
+/// to half is half — so the mask goes on the group, over what its layers
+/// make together, as a reader puts it.
+pub struct ImportedGroup {
+    pub name: String,
+    pub mask: Option<chitrakar_doc::Mask>,
+    /// The group it is inside, if any.
+    pub within: Option<usize>,
+}
+
+/// A greyscale mask a file's layers are seen through — a `<mask>` with
+/// real grey in it, drawn — as the coverage it lets through in alpha
+/// over white, which is what a raster mask reads as that coverage.
+pub struct ImportedMask {
+    /// What a layer's `MaskKind::Raster::resource_id` says until the
+    /// pixels are pooled.
+    pub key: String,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+impl ImportedSvg {
+    /// The commands that put the file's layers into `doc` under `parent`
+    /// from `index` on, bottom first and in their groups, with every
+    /// picture and every soft mask's pixels pooled in `doc` and referred
+    /// to by the id it gave them. `first` is the id the first layer added
+    /// will be given — `doc.peek_next_id()` unless commands ahead of these
+    /// in the same batch add layers of their own.
+    pub fn into_commands(
+        self,
+        doc: &mut chitrakar_doc::Document,
+        parent: chitrakar_doc::NodeId,
+        index: usize,
+        first: chitrakar_doc::NodeId,
+    ) -> Vec<chitrakar_doc::Command> {
+        Gathered {
+            shapes: self.shapes,
+            within: self.shape_groups,
+            pics: self.images,
+            masks: self.masks,
+            groups: self.groups,
+        }
+        .into_commands(doc, parent, index, first)
+    }
+}
+
+/// What a walk of a file gathers: the shapes in painter's order and the
+/// group each is in, the pictures with their places among them, the
+/// groups, and the pixels of the soft masks they wear.
+#[derive(Default)]
+struct Gathered {
+    shapes: Vec<Node>,
+    within: Vec<Option<usize>>,
+    pics: Vec<ImportedImage>,
+    masks: Vec<ImportedMask>,
+    groups: Vec<ImportedGroup>,
+}
+
+impl Gathered {
+    fn into_commands(
+        self,
+        doc: &mut chitrakar_doc::Document,
+        parent: chitrakar_doc::NodeId,
+        index: usize,
+        first: chitrakar_doc::NodeId,
+    ) -> Vec<chitrakar_doc::Command> {
+        let ids: std::collections::HashMap<String, String> = self
+            .masks
+            .into_iter()
+            .map(|m| (m.key, doc.add_resource(m.width, m.height, m.rgba)))
+            .collect();
+        let pooled = |mask: &mut Option<chitrakar_doc::Mask>| {
+            if let Some(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Raster { resource_id, .. },
+                ..
+            }) = mask
+            {
+                if let Some(id) = ids.get(resource_id.as_str()) {
+                    *resource_id = id.clone();
+                }
+            }
+        };
+        // Every layer in painter's order with the group it is in.
+        let mut pictures: Vec<(usize, Option<usize>, Node)> = self
+            .pics
+            .into_iter()
+            .map(|pic| {
+                let resource_id = doc.add_resource(pic.width, pic.height, pic.rgba);
+                let mut node = Node::raster(
+                    &pic.name,
+                    chitrakar_doc::RasterRef {
+                        resource_id,
+                        width: pic.width,
+                        height: pic.height,
+                    },
+                );
+                node.transform = pic.transform;
+                node.opacity = pic.opacity;
+                node.mask = pic.clip;
+                (pic.below, pic.within, node)
+            })
+            .collect();
+        pictures.reverse();
+        let mut order: Vec<(Option<usize>, Node)> = Vec::new();
+        for (i, (shape, within)) in self.shapes.into_iter().zip(self.within).enumerate() {
+            while pictures.last().is_some_and(|(below, _, _)| *below <= i) {
+                order.extend(pictures.pop().map(|(_, w, pic)| (w, pic)));
+            }
+            order.push((within, shape));
+        }
+        while let Some((_, w, pic)) = pictures.pop() {
+            order.push((w, pic));
+        }
+        // Each layer goes into its group, the groups made as they are
+        // first needed, inside the groups they are in.
+        let mut next = first.0;
+        let mut cmds = Vec::new();
+        let mut top = index;
+        // The groups open now, outermost first: which, its id, how many
+        // layers it holds so far.
+        let mut open: Vec<(usize, chitrakar_doc::NodeId, usize)> = Vec::new();
+        let mut add = |cmds: &mut Vec<chitrakar_doc::Command>,
+                       open: &mut Vec<(usize, chitrakar_doc::NodeId, usize)>,
+                       mut node: Node| {
+            pooled(&mut node.mask);
+            let (under, at) = match open.last_mut() {
+                Some((_, id, n)) => {
+                    *n += 1;
+                    (*id, *n - 1)
+                }
+                None => {
+                    top += 1;
+                    (parent, top - 1)
+                }
+            };
+            cmds.push(chitrakar_doc::Command::AddNode {
+                parent: under,
+                index: at,
+                node: Box::new(node),
+            });
+            next += 1;
+            chitrakar_doc::NodeId(next - 1)
+        };
+        for (within, node) in order {
+            let mut chain = Vec::new();
+            let mut at = within;
+            while let Some(g) = at {
+                chain.push(g);
+                at = self.groups[g].within;
+            }
+            chain.reverse();
+            let kept = open
+                .iter()
+                .zip(&chain)
+                .take_while(|((g, _, _), c)| g == *c)
+                .count();
+            open.truncate(kept);
+            for &g in &chain[kept..] {
+                let mut group = Node::group(&self.groups[g].name);
+                group.mask = self.groups[g].mask.clone();
+                let id = add(&mut cmds, &mut open, group);
+                open.push((g, id, 0));
+            }
+            add(&mut cmds, &mut open, node);
+        }
+        cmds
+    }
 }
 
 /// A picture the file had inside it, decoded, with where it goes.
@@ -37,6 +219,8 @@ pub struct ImportedImage {
     /// How many of `shapes` are below it, which is its place in
     /// painter's order.
     pub below: usize,
+    /// Which of the file's groups it is in, if any (`ImportedGroup`).
+    pub within: Option<usize>,
     /// What it is seen through, where the file put it inside a clip.
     pub clip: Option<chitrakar_doc::Mask>,
 }
@@ -48,14 +232,16 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     // Text in a face the file cannot supply is set in the bundled one.
     opt.font_family = "DejaVu Sans".to_string();
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
-    let mut shapes = Vec::new();
-    let mut images = Vec::new();
-    walk(tree.root(), 1.0, None, None, &mut shapes, &mut images);
+    let mut got = Gathered::default();
+    walk(tree.root(), 1.0, None, None, None, &mut got);
     Ok(ImportedSvg {
         width: tree.size().width(),
         height: tree.size().height(),
-        shapes,
-        images,
+        shapes: got.shapes,
+        shape_groups: got.within,
+        images: got.pics,
+        masks: got.masks,
+        groups: got.groups,
     })
 }
 
@@ -63,16 +249,13 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
 ///
 /// An SVG mask is greyscale: coverage is the luminance (or the alpha) of
 /// whatever is drawn in it, so a mask painted in grey fades what it
-/// covers and a mask with a gradient in it fades it unevenly. Nothing
-/// here can hold that as a mask without pooling pixels for it, which is
-/// the picture problem again and a raster mask besides — so a mask with
-/// real grey in it is still passed over, and content it should have
-/// faded still arrives whole.
+/// covers and a mask with a gradient in it fades it unevenly. That comes
+/// in as a raster mask on a group of its own (`soft_mask`, `walk`).
 ///
-/// What *is* carried is the common case, and the loud one: a mask drawn
+/// What is carried as a region instead is the common case: a mask drawn
 /// as opaque white shapes, which is a region and nothing more. Used that
-/// way a mask is a clip with a different spelling, and leaving it out put
-/// artwork on the page the file says is not there.
+/// way a mask is a clip with a different spelling, and it stays one — an
+/// outline that can be edited, and no group the file did not need.
 ///
 /// Every condition below is a guard rather than a nicety: fail any of
 /// them and the answer is `None`, which is exactly what happened before
@@ -309,13 +492,15 @@ fn as_doc(t: usvg::Transform) -> chitrakar_doc::Transform {
 /// that group placed as if it were not there (a TODO in usvg's
 /// `push_pattern_transform`). Each layer under it is put right by the
 /// difference between where it stands and where usvg says it does.
+///
+/// `within` is the group the layers here go into (`ImportedGroup`).
 fn walk(
     group: &usvg::Group,
     opacity: f32,
     clip: Option<&Vec<Vec<[f32; 2]>>>,
+    within: Option<usize>,
     truth: Option<usvg::Transform>,
-    out: &mut Vec<Node>,
-    pics: &mut Vec<ImportedImage>,
+    got: &mut Gathered,
 ) {
     // What a layer standing at `said` is out by: the truth over what usvg
     // said, which a path and a text both take from the group they are in.
@@ -332,16 +517,23 @@ fn walk(
     // inside it. Opacity and blending do not distribute that way, which
     // is why they are still folded into the colours instead.
     // A clip path and a mask are both "show only here", so they meet as
-    // one region — and a mask only joins in when it *is* a region. See
-    // `mask_rings`.
-    //
+    // one region when the mask *is* a region (`mask_rings`). A mask with
+    // grey in it does not distribute — it fades what the layers make
+    // together, not each of them — so the group stays a group, wearing it
+    // as a raster mask drawn from it with the region it is cut to as well
+    // (`soft_mask`), and what is under it starts uncut.
     //
     // Two regions that do not meet show nothing, and what is under them
     // stays out (`narrowed`). The inner region used to be kept instead, so
     // a frame standing wholly outside the frame it sits in — hidden on the
     // page — came back whole. Only what cannot be traced keeps the inner
     // region, as before.
-    let here = match (clip_rings(group), mask_rings(group)) {
+    let masked = mask_rings(group);
+    let soft_here = match (group.mask(), &masked) {
+        (Some(m), None) => Some(m),
+        _ => None,
+    };
+    let here = match (clip_rings(group), masked) {
         (None, None) => None,
         (Some(only), None) | (None, Some(only)) => Some(only),
         (Some(a), Some(b)) => narrowed(b, a),
@@ -356,16 +548,34 @@ fn walk(
     if clip.as_ref().is_some_and(|c| c.is_empty()) {
         return;
     }
+    let (clip, within) = match soft_here {
+        Some(m) => {
+            let at = truth.unwrap_or_else(|| group.abs_transform());
+            let mask = soft_mask(m, at, clip.as_ref(), got);
+            got.groups.push(ImportedGroup {
+                name: if group.id().is_empty() {
+                    "Masked".to_string()
+                } else {
+                    group.id().to_string()
+                },
+                mask,
+                within,
+            });
+            (None, Some(got.groups.len() - 1))
+        }
+        None => (clip, within),
+    };
     let clip = clip.as_ref();
+    let worn = clip.map(|c| mask_of(c));
     for child in group.children() {
         match child {
             usvg::Node::Group(g) => walk(
                 g,
                 opacity,
                 clip,
+                within,
                 truth.map(|t| t.pre_concat(g.transform())),
-                out,
-                pics,
+                got,
             ),
             usvg::Node::Path(p) => {
                 if p.is_visible() {
@@ -375,8 +585,10 @@ fn walk(
                     let patterned = match p.fill().map(|f| (f, f.paint())) {
                         Some((f, usvg::Paint::Pattern(pattern))) => {
                             let alpha = f.opacity().get() * opacity;
-                            if let Some(pic) = pattern_picture(p, pattern, alpha, clip, out.len()) {
-                                pics.push(pic);
+                            let below = got.shapes.len();
+                            if let Some(mut pic) = pattern_picture(p, pattern, alpha, clip, below) {
+                                pic.within = within;
+                                got.pics.push(pic);
                             }
                             true
                         }
@@ -387,11 +599,12 @@ fn walk(
                     }
                     let fixed = fix(p.abs_transform());
                     for mut node in shapes_of(p, opacity) {
-                        node.mask = clip.map(|c| mask_of(c));
+                        node.mask = worn.clone();
                         if let Some(f) = fixed {
                             node.transform = f.compose(node.transform);
                         }
-                        out.push(node);
+                        got.shapes.push(node);
+                        got.within.push(within);
                     }
                 }
             }
@@ -405,14 +618,14 @@ fn walk(
             // stroke with it; a clip is in the space the layer sits in and
             // stays where it is.
             usvg::Node::Text(t) => {
-                let before = out.len();
-                walk(t.flattened(), opacity, clip, None, out, pics);
+                let before = got.shapes.len();
+                walk(t.flattened(), opacity, clip, within, None, got);
                 let a = t.abs_transform();
                 let placed = match fix(a) {
                     Some(f) => f.compose(as_doc(a)),
                     None => as_doc(a),
                 };
-                for node in &mut out[before..] {
+                for node in &mut got.shapes[before..] {
                     node.transform = placed.compose(node.transform);
                 }
             }
@@ -426,17 +639,229 @@ fn walk(
                 match img.kind() {
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
-                    usvg::ImageKind::SVG(tree) => walk(tree.root(), opacity, clip, None, out, pics),
+                    usvg::ImageKind::SVG(tree) => {
+                        walk(tree.root(), opacity, clip, within, None, got)
+                    }
                     kind => {
-                        if let Some(mut pic) = picture_of(img, kind, opacity, out.len()) {
-                            pic.clip = clip.map(|c| mask_of(c));
-                            pics.push(pic);
+                        if let Some(mut pic) = picture_of(img, kind, opacity, got.shapes.len()) {
+                            pic.clip = worn.clone();
+                            pic.within = within;
+                            got.pics.push(pic);
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// The most pixels a soft mask is drawn with before it is drawn coarser.
+const SOFT_MOST: f32 = 16_000_000.0;
+
+/// What a soft mask on a group placed at `at` lets through, with
+/// `region` cut out of it as well, as a raster mask over the box both
+/// reach — in document units, a pixel a unit unless that is more than
+/// `SOFT_MOST` — whose pixels go into `got` to be pooled.
+///
+/// The mask is drawn as a reader draws it: its contents (brought in by
+/// `walk`, like any of the file's) in the space of the group wearing it,
+/// cut to the mask's own rectangle, and read as luminance times alpha on
+/// the colours a device shows, or alpha alone; a mask on the mask
+/// multiplies in.
+fn soft_mask(
+    m: &usvg::Mask,
+    at: usvg::Transform,
+    region: Option<&Vec<Vec<[f32; 2]>>>,
+    got: &mut Gathered,
+) -> Option<chitrakar_doc::Mask> {
+    // The box every mask's rectangle and the region all reach.
+    let mut reach = [f32::MIN, f32::MIN, f32::MAX, f32::MAX];
+    let mut meet = |pts: &mut dyn Iterator<Item = [f32; 2]>| {
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in pts {
+            b = [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ];
+        }
+        reach = [
+            reach[0].max(b[0]),
+            reach[1].max(b[1]),
+            reach[2].min(b[2]),
+            reach[3].min(b[3]),
+        ];
+    };
+    meet(&mut rect_ring(m.rect(), at).into_iter());
+    if let Some(r) = region {
+        meet(&mut r.iter().flatten().copied());
+    }
+    let (x0, y0) = (reach[0].floor(), reach[1].floor());
+    let (x1, y1) = (reach[2].ceil(), reach[3].ceil());
+    let key = format!("svg-mask:{}", got.masks.len());
+    let raster = |w: u32, h: u32, transform: chitrakar_doc::Transform| chitrakar_doc::Mask {
+        kind: chitrakar_doc::MaskKind::Raster {
+            resource_id: key.clone(),
+            width: w,
+            height: h,
+            transform,
+        },
+        invert: false,
+        feather: 0.0,
+    };
+    if !(x1 - x0 >= 1.0 && y1 - y0 >= 1.0 && (x1 - x0).is_finite() && (y1 - y0).is_finite()) {
+        // Nothing reaches anywhere: a mask that lets nothing through.
+        got.masks.push(ImportedMask {
+            key: key.clone(),
+            width: 1,
+            height: 1,
+            rgba: vec![255, 255, 255, 0],
+        });
+        return Some(raster(1, 1, chitrakar_doc::Transform::default()));
+    }
+    let k = (SOFT_MOST / ((x1 - x0) * (y1 - y0))).sqrt().min(1.0);
+    let (w, h) = (
+        ((x1 - x0) * k).ceil().max(1.0) as u32,
+        ((y1 - y0) * k).ceil().max(1.0) as u32,
+    );
+    // Document → the mask's pixels.
+    let grid = usvg::Transform::from_scale(k, k).pre_translate(-x0, -y0);
+    let mut cover = vec![1.0f32; (w * h) as usize];
+    mask_cover(m, at, grid, w, h, &mut cover)?;
+    if let Some(r) = region {
+        let shown = draw_coverage(w, h, |doc| {
+            let root = doc.root();
+            let main = placed(r.clone(), grid);
+            let mut node = Node::vector(
+                "region",
+                VectorShape::Path {
+                    handles: vec![[0.0; 4]; main[0].len()],
+                    points: main[0].clone(),
+                    closed: true,
+                    smooth: false,
+                    subpaths: main[1..].to_vec(),
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+            }
+            vec![chitrakar_doc::Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            }]
+        })?;
+        for (c, px) in cover.iter_mut().zip(&shown.pixels) {
+            *c *= px.a.clamp(0.0, 1.0);
+        }
+    }
+    got.masks.push(ImportedMask {
+        key: key.clone(),
+        width: w,
+        height: h,
+        rgba: cover
+            .iter()
+            .flat_map(|c| [255, 255, 255, (c.clamp(0.0, 1.0) * 255.0).round() as u8])
+            .collect(),
+    });
+    Some(raster(
+        w,
+        h,
+        chitrakar_doc::Transform {
+            a: 1.0 / k,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0 / k,
+            e: x0,
+            f: y0,
+        },
+    ))
+}
+
+/// A rectangle in a group's space as the ring it is on the page.
+fn rect_ring(r: usvg::NonZeroRect, at: usvg::Transform) -> Vec<[f32; 2]> {
+    placed(
+        vec![vec![
+            [r.left(), r.top()],
+            [r.right(), r.top()],
+            [r.right(), r.bottom()],
+            [r.left(), r.bottom()],
+        ]],
+        at,
+    )
+    .remove(0)
+}
+
+/// One mask's coverage multiplied into `cover`, a `w`×`h` grid that
+/// `grid` carries the document onto; and the mask on it, if any.
+fn mask_cover(
+    m: &usvg::Mask,
+    at: usvg::Transform,
+    grid: usvg::Transform,
+    w: u32,
+    h: u32,
+    cover: &mut [f32],
+) -> Option<()> {
+    let seen = grid.pre_concat(at);
+    let drawn = draw_coverage(w, h, |doc| {
+        // Its contents, in the space of the group wearing it — usvg's
+        // word for where they stand is no better here than in a pattern.
+        let mut inside = Gathered::default();
+        walk(
+            m.root(),
+            1.0,
+            None,
+            None,
+            Some(usvg::Transform::default()),
+            &mut inside,
+        );
+        let root = doc.root();
+        let group = doc.peek_next_id();
+        let mut g = Node::group("mask");
+        g.transform = as_doc(seen);
+        // Cut to the mask's own rectangle.
+        g.mask = Some(mask_of(&[rect_ring(m.rect(), seen)]));
+        let mut cmds = vec![chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(g),
+        }];
+        let first = chitrakar_doc::NodeId(group.0 + 1);
+        cmds.extend(inside.into_commands(doc, group, 0, first));
+        cmds
+    })?;
+    let luminance = m.kind() == usvg::MaskType::Luminance;
+    for (c, px) in cover.iter_mut().zip(&drawn.pixels) {
+        let [r, g, b, a] = px.to_srgb8();
+        let a = a as f32 / 255.0;
+        *c *= if luminance {
+            (0.2125 * r as f32 + 0.7154 * g as f32 + 0.0721 * b as f32) / 255.0 * a
+        } else {
+            a
+        };
+    }
+    match m.mask() {
+        Some(inner) => mask_cover(inner, at, grid, w, h, cover),
+        None => Some(()),
+    }
+}
+
+/// A page `w`×`h` with what `build` puts on it, drawn by the engine.
+fn draw_coverage(
+    w: u32,
+    h: u32,
+    build: impl FnOnce(&mut chitrakar_doc::Document) -> Vec<chitrakar_doc::Command>,
+) -> Option<chitrakar_render::Surface> {
+    let mut doc = chitrakar_doc::Document::new(w, h, chitrakar_color::ColorMode::Rgb);
+    let cmds = build(&mut doc);
+    doc.apply(chitrakar_doc::Command::Batch(cmds)).ok()?;
+    chitrakar_render::render(&doc).ok()
 }
 
 /// The most pixels a pattern's picture is drawn with before it is drawn
@@ -546,6 +971,7 @@ fn pattern_picture(
         },
         opacity,
         below,
+        within: None,
         clip: Some(mask_of(&outline)),
     })
 }
@@ -559,76 +985,30 @@ fn draw_tile(
     sx: f32,
     sy: f32,
 ) -> Option<chitrakar_render::Surface> {
-    let mut shapes = Vec::new();
-    let mut pics = Vec::new();
     // The tile's own space is where the pattern's contents stand.
+    let mut got = Gathered::default();
     walk(
         root,
         1.0,
         None,
+        None,
         Some(usvg::Transform::default()),
-        &mut shapes,
-        &mut pics,
+        &mut got,
     );
-    let mut doc = chitrakar_doc::Document::new(w, h, chitrakar_color::ColorMode::Rgb);
-    let root_id = doc.root();
-    let group = doc.peek_next_id();
-    let mut cmds = vec![chitrakar_doc::Command::AddNode {
-        parent: root_id,
-        index: 0,
-        node: Box::new({
-            let mut g = Node::group("tile");
-            g.transform = chitrakar_doc::Transform {
-                a: sx,
-                b: 0.0,
-                c: 0.0,
-                d: sy,
-                e: 0.0,
-                f: 0.0,
-            };
-            g
-        }),
-    }];
-    let mut pictures: Vec<(usize, Node)> = pics
-        .into_iter()
-        .map(|pic| {
-            let resource_id = doc.add_resource(pic.width, pic.height, pic.rgba);
-            let mut node = Node::raster(
-                &pic.name,
-                chitrakar_doc::RasterRef {
-                    resource_id,
-                    width: pic.width,
-                    height: pic.height,
-                },
-            );
-            node.transform = pic.transform;
-            node.opacity = pic.opacity;
-            node.mask = pic.clip;
-            (pic.below, node)
-        })
-        .collect();
-    pictures.reverse();
-    let mut at = 0usize;
-    let mut push = |cmds: &mut Vec<chitrakar_doc::Command>, node: Node| {
-        cmds.push(chitrakar_doc::Command::AddNode {
-            parent: group,
-            index: at,
-            node: Box::new(node),
-        });
-        at += 1;
-    };
-    for (i, shape) in shapes.into_iter().enumerate() {
-        while pictures.last().is_some_and(|(below, _)| *below <= i) {
-            let (_, pic) = pictures.pop()?;
-            push(&mut cmds, pic);
-        }
-        push(&mut cmds, shape);
-    }
-    while let Some((_, pic)) = pictures.pop() {
-        push(&mut cmds, pic);
-    }
-    doc.apply(chitrakar_doc::Command::Batch(cmds)).ok()?;
-    chitrakar_render::render(&doc).ok()
+    draw_coverage(w, h, |doc| {
+        let root_id = doc.root();
+        let group = doc.peek_next_id();
+        let mut g = Node::group("tile");
+        g.transform = as_doc(usvg::Transform::from_scale(sx, sy));
+        let mut cmds = vec![chitrakar_doc::Command::AddNode {
+            parent: root_id,
+            index: 0,
+            node: Box::new(g),
+        }];
+        let first = chitrakar_doc::NodeId(group.0 + 1);
+        cmds.extend(got.into_commands(doc, group, 0, first));
+        cmds
+    })
 }
 
 /// A tile's colour at a point in its pixels, the tile repeating every way
@@ -706,6 +1086,7 @@ fn picture_of(
         },
         opacity,
         below,
+        within: None,
         clip: None,
     })
 }
@@ -2167,47 +2548,9 @@ mod tests {
     fn brought_in(svg: &str, width: u32, height: u32) -> Document {
         let imported = import_svg(svg.as_bytes()).unwrap();
         let mut out = Document::new(width, height, chitrakar_color::ColorMode::Rgb);
-        let root = out.root();
-        let mut pictures: Vec<(usize, Node)> = imported
-            .images
-            .into_iter()
-            .map(|pic| {
-                let resource_id = out.add_resource(pic.width, pic.height, pic.rgba);
-                let mut node = Node::raster(
-                    &pic.name,
-                    chitrakar_doc::RasterRef {
-                        resource_id,
-                        width: pic.width,
-                        height: pic.height,
-                    },
-                );
-                node.transform = pic.transform;
-                node.opacity = pic.opacity;
-                node.mask = pic.clip;
-                (pic.below, node)
-            })
-            .collect();
-        pictures.reverse();
-        let mut at = 0usize;
-        let mut push = |out: &mut Document, node: Node| {
-            out.apply(Command::AddNode {
-                parent: root,
-                index: at,
-                node: Box::new(node),
-            })
-            .unwrap();
-            at += 1;
-        };
-        for (i, shape) in imported.shapes.into_iter().enumerate() {
-            while pictures.last().is_some_and(|(below, _)| *below <= i) {
-                let (_, pic) = pictures.pop().unwrap();
-                push(&mut out, pic);
-            }
-            push(&mut out, shape);
-        }
-        while let Some((_, pic)) = pictures.pop() {
-            push(&mut out, pic);
-        }
+        let (root, first) = (out.root(), out.peek_next_id());
+        let cmds = imported.into_commands(&mut out, root, 0, first);
+        out.apply(Command::Batch(cmds)).unwrap();
         out
     }
 
@@ -3092,6 +3435,78 @@ mod tests {
                 cover + colour <= 8,
                 "file {n}: {cover} pixels covered and {colour} coloured otherwise, the first \
                  {first:?}\n{svg}"
+            );
+        }
+    }
+
+    /// A mask with real grey in it fades what it covers as a reader fades
+    /// it — a luminance ramp, an alpha mask of half-opaque content, a grey
+    /// in the box's units under a moved and scaled group, and a soft mask
+    /// meeting a clip and a mask that is a plain region — as a raster mask
+    /// on the group they are in. Such a mask used to be passed over, and
+    /// what it should have faded came in whole. (Shades that meet inside
+    /// one pixel of the mask are mixed in linear light here and in the
+    /// device's values by resvg, so the grey and the white in the third
+    /// file are kept a little apart.)
+    #[test]
+    fn a_soft_mask_fades_what_it_covers() {
+        let head = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">"##;
+        let files = [
+            r##"<linearGradient id="g"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></linearGradient>
+<mask id="m"><rect x="0" y="0" width="64" height="48" fill="url(#g)"/></mask>
+<g mask="url(#m)"><rect x="4" y="4" width="56" height="40" fill="#d02020"/></g>"##,
+            r##"<mask id="m" mask-type="alpha"><circle cx="32" cy="24" r="18" fill="#000000" fill-opacity="0.5"/><circle cx="20" cy="20" r="10" fill="#000000"/></mask>
+<g mask="url(#m)"><rect x="4" y="4" width="56" height="40" fill="#2040d0"/><circle cx="44" cy="30" r="10" fill="#20a020"/></g>"##,
+            r##"<mask id="m" maskContentUnits="objectBoundingBox"><rect x="0.1" y="0.1" width="0.5" height="0.8" fill="#808080"/><rect x="0.65" y="0.1" width="0.25" height="0.8" fill="#ffffff"/></mask>
+<g transform="translate(6 4) scale(0.8 1.1)"><rect x="2" y="2" width="60" height="34" fill="#e0a010" mask="url(#m)"/></g>"##,
+            r##"<clipPath id="c"><circle cx="32" cy="24" r="20"/></clipPath>
+<radialGradient id="r"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#202020"/></radialGradient>
+<mask id="soft"><rect width="64" height="48" fill="url(#r)"/></mask>
+<mask id="hard"><rect x="10" y="0" width="30" height="48" fill="#ffffff"/></mask>
+<g mask="url(#soft)" clip-path="url(#c)"><g mask="url(#hard)"><rect width="64" height="48" fill="#6020a0"/></g><rect x="40" y="10" width="20" height="10" fill="#109090"/></g>"##,
+        ];
+        for (n, body) in files.iter().enumerate() {
+            let svg = format!("{head}\n{body}\n</svg>");
+            let ours = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
+            let theirs = reader_draws(&svg, 64, 48);
+            let mut off = 0;
+            let mut first = None;
+            let mut asked = 0;
+            for y in 1..47u32 {
+                for x in 1..63u32 {
+                    let o = ours.get(x, y).to_srgb8();
+                    let t = theirs[(y * 64 + x) as usize];
+                    // Away from the reader's own edges, where two
+                    // rasterizers put a partly covered pixel a shade
+                    // apart; it is the fades this asks about.
+                    let edge = (-1..=1i32).any(|j| {
+                        (-1..=1i32).any(|i| {
+                            let q = theirs[((y as i32 + j) * 64 + x as i32 + i) as usize];
+                            (0..4).any(|k| (q[k] as i32 - t[k] as i32).abs() > 24)
+                        })
+                    });
+                    if edge {
+                        continue;
+                    }
+                    asked += 1;
+                    // Premultiplied, so a colour where nothing shows is
+                    // nothing, and a fade is compared as one.
+                    let pm = |c: [u8; 4], k: usize| c[k] as i32 * c[3] as i32 / 255;
+                    let worst = (0..3)
+                        .map(|k| (pm(o, k) - pm(t, k)).abs())
+                        .chain([(o[3] as i32 - t[3] as i32).abs()])
+                        .max()
+                        .unwrap();
+                    if worst > 16 {
+                        off += 1;
+                        first.get_or_insert((x, y, o, t));
+                    }
+                }
+            }
+            assert!(asked > 2000, "file {n}: asked of enough of it ({asked})");
+            assert!(
+                off <= 2,
+                "file {n}: {off} pixels faded otherwise, the first {first:?}\n{svg}"
             );
         }
     }
