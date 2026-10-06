@@ -132,10 +132,10 @@ pub fn encode_jpeg(
 /// engine brings down only on what they paint (`render_child`), which
 /// SVG has no way to say. And layers inside a frame: the engine draws
 /// a plain frame where it stands, so a blend inside it reaches the
-/// page, and a frame travels as a clipped group, which every reader
-/// isolates — written down in the plan as a choice to make. The first
-/// and the last are switches, since what a reader gets wrong is the
-/// reader's own.
+/// page; SVG says that now by putting the frame's cut on each layer
+/// (`svg::passes_through`) and PDF by cutting rather than grouping, so
+/// this one is a switch too, kept for frames a reader still isolates.
+/// The four modes are a switch since what resvg gets wrong is its own.
 #[cfg(test)]
 pub(crate) fn blended_page(
     seed: u64,

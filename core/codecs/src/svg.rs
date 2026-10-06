@@ -34,6 +34,7 @@ pub fn export_svg(doc: &Document) -> Result<String, DocError> {
         1,
         &mut defs,
         Transform::default(),
+        "",
     )?;
     if !defs.is_empty() {
         let _ = write!(out, "  <defs>\n{defs}  </defs>\n");
@@ -53,6 +54,9 @@ fn write_children(
     // writes its original's layers again at the copy's own place, so the
     // tree above a layer does not say where this writing of it lands.
     space: Transform,
+    // The cut each layer here wears in place of the frame holding them
+    // (`passes_through`), or nothing.
+    cut: &str,
 ) -> Result<(), DocError> {
     // Where this group's own markup starts, so that a filter layer can
     // wrap everything written before it: an adjustment or a filter
@@ -107,7 +111,7 @@ fn write_children(
             let _ = writeln!(out, "{pad}</g>");
             continue;
         }
-        write_node(doc, child, out, depth, defs, true, space)?;
+        write_node(doc, child, out, depth, defs, true, cut, space)?;
     }
     Ok(())
 }
@@ -182,6 +186,7 @@ fn softening(doc: &Document, id: NodeId) -> Option<f32> {
 /// One layer's markup, at `depth` levels of indentation. Pulled out of
 /// the walk so a copy of a layer can ask for the layer's own markup
 /// again, inside the copy's place.
+#[allow(clippy::too_many_arguments)]
 fn write_node(
     doc: &Document,
     child: NodeId,
@@ -195,6 +200,10 @@ fn write_node(
     // copy of a held layer carried the original's hold to its own place
     // and was cut to whatever lay under the original.
     held: bool,
+    // The cut of a frame that lets its layers' blends through to the page
+    // (`passes_through`), worn by this layer instead of by the frame, or
+    // nothing.
+    cut: &str,
     // How the space the layer sits in reaches the page (`write_children`).
     space: Transform,
 ) -> Result<(), DocError> {
@@ -248,7 +257,8 @@ fn write_node(
         // reader as no blend at all. On the wrapper it brings down what
         // the layer makes, masked and with its effects, which is what the
         // engine brings down.
-        let wrapped = effects.is_some() || !masked.is_empty() || !confined.is_empty();
+        let wrapped =
+            !cut.is_empty() || effects.is_some() || !masked.is_empty() || !confined.is_empty();
         let common = if wrapped {
             let mut plain = node.clone();
             plain.blend = BlendMode::Normal;
@@ -260,6 +270,12 @@ fn write_node(
             BlendMode::Normal => String::new(),
             other => format!(r#" style="mix-blend-mode:{}""#, css_blend(other)),
         };
+        // A frame's cut, outermost of all: the frame cuts everything it
+        // holds, a layer's shadow included.
+        if !cut.is_empty() {
+            let blend = std::mem::take(&mut blend);
+            let _ = writeln!(out, "{pad}<g{cut}{blend}>");
+        }
         if let Some(filter) = &effects {
             let blend = std::mem::take(&mut blend);
             let _ = writeln!(out, r#"{pad}<g filter="url(#{filter})"{blend}>"#);
@@ -276,7 +292,8 @@ fn write_node(
         // them is isolated by the engine, and says so (`isolated`).
         let common = match &node.kind {
             NodeKind::Group | NodeKind::Artboard { .. }
-                if chitrakar_render::reads_backdrop(doc, child).unwrap_or(false) =>
+                if chitrakar_render::reads_backdrop(doc, child).unwrap_or(false)
+                    && !passes_through(doc, child, held, space) =>
             {
                 isolated(common)
             }
@@ -310,6 +327,7 @@ fn write_node(
                     depth + 1,
                     defs,
                     space.compose(node.transform),
+                    "",
                 )?;
                 let _ = writeln!(out, "{pad}</g>");
             }
@@ -366,6 +384,7 @@ fn write_node(
                             depth + 1,
                             defs,
                             false,
+                            "",
                             space.compose(node.transform),
                         )?;
                     }
@@ -402,6 +421,7 @@ fn write_node(
                             depth + 2,
                             defs,
                             false,
+                            "",
                             space.compose(node.transform).compose(back),
                         )?;
                         let _ = writeln!(out, "{pad}  </g>");
@@ -440,7 +460,17 @@ fn write_node(
                     defs,
                     r#"<clipPath id="{name}"><rect x="{bx}" y="{by}" width="{bw}" height="{bh}"/></clipPath>"#
                 );
-                let _ = writeln!(out, r#"{pad}<g{common} clip-path="url(#{name})">"#);
+                // A frame the engine draws where it stands lets the blends
+                // of what it holds through to the page; cut as a group, it
+                // would be isolated in every reader. So the cut goes on
+                // each layer in it instead (`passes_through`).
+                let through = passes_through(doc, child, held, space);
+                let cut = format!(r#" clip-path="url(#{name})""#);
+                if through {
+                    let _ = writeln!(out, "{pad}<g{common}>");
+                } else {
+                    let _ = writeln!(out, r#"{pad}<g{common}{cut}>"#);
+                }
                 if let Some(color) = background {
                     let ground = paint_attrs(doc, Some(color), None, None, child, defs, false, 1.0);
                     // Over the box the frame is cut to, which is what the
@@ -458,6 +488,7 @@ fn write_node(
                     depth + 1,
                     defs,
                     space.compose(node.transform),
+                    if through { &cut } else { "" },
                 )?;
                 let _ = writeln!(out, "{pad}</g>");
             }
@@ -974,6 +1005,9 @@ fn write_node(
         if effects.is_some() {
             let _ = writeln!(out, "{pad}</g>");
         }
+        if !cut.is_empty() {
+            let _ = writeln!(out, "{pad}</g>");
+        }
     }
     Ok(())
 }
@@ -1249,6 +1283,43 @@ fn outlines_d(outlines: &[crate::strokes::Outline]) -> String {
         d.push_str(" Z ");
     }
     d.trim_end().to_string()
+}
+
+/// Whether a frame is drawn by the engine where it stands, letting what
+/// it holds blend with the page under it — plain and upright, as
+/// `render_child` has it — while holding a blended layer that needs the
+/// page. Such a frame goes to SVG with its cut on each layer it holds
+/// rather than on itself, since a clipped group is isolated in every
+/// reader and the blends would meet only what the frame holds.
+///
+/// Not a frame holding what works on the page (an adjustment, a filter,
+/// a clone), which SVG has other troubles with, nor one holding another
+/// such frame: its cut would be read in that frame's space, not this
+/// one's. Both go as they always have.
+fn passes_through(doc: &Document, id: NodeId, held: bool, space: Transform) -> bool {
+    let Ok(node) = doc.node(id) else {
+        return false;
+    };
+    if !matches!(node.kind, NodeKind::Artboard { .. }) {
+        return false;
+    }
+    let t = space.compose(node.transform);
+    let plain = node.opacity >= 1.0
+        && node.blend == BlendMode::Normal
+        && node.mask.is_none()
+        && node.effects.is_empty()
+        && !(held && node.clipped)
+        && t.b.abs() < 1e-6
+        && t.c.abs() < 1e-6;
+    let blends = chitrakar_render::reads_backdrop(doc, id).unwrap_or(false)
+        && !chitrakar_render::works_on_what_is_under(doc, id).unwrap_or(true);
+    let nested = doc.children_of(id).is_ok_and(|kids| {
+        kids.iter().any(|&k| {
+            matches!(doc.node(k).map(|n| &n.kind), Ok(NodeKind::Artboard { .. }))
+                && chitrakar_render::reads_backdrop(doc, k).unwrap_or(false)
+        })
+    });
+    plain && blends && !nested
 }
 
 /// The blend a copy is brought down by when it has none of its own: the
@@ -4455,11 +4526,18 @@ mod tests {
     /// are laid only where the page is now. And a copy of a clone layer
     /// went down Normal, where the engine brings it down by the clone's
     /// own blend (`copied_blend`).
+    ///
+    /// And with blends inside frames, a third: the engine draws a plain
+    /// frame where it stands, so a Multiply layer in it multiplies the
+    /// page, but a frame travelled as a clipped group, which every reader
+    /// isolates. Such a frame wears no cut of its own now; each layer in
+    /// it wears the frame's, with the layer's blend on that wrapper
+    /// (`passes_through`).
     #[test]
     fn a_reader_blends_an_opaque_page_as_the_engine_does() {
         let mut blended = 0;
         for seed in 0..800u64 {
-            let doc = crate::blended_page(seed, true, true);
+            let doc = crate::blended_page(seed, true, false);
             blended += doc
                 .nodes()
                 .filter(|(_, n)| n.visible && n.blend != BlendMode::Normal)

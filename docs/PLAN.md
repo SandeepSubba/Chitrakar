@@ -5022,7 +5022,7 @@ without reading anything else.*
      [84, 60, 0] by hand from SetLum and ClipColor, the engine's answer;
      resvg draws [115, 60, 0]); frames and copies holding what works on
      the page, the engine's own construction; and blends inside frames,
-     which is **a choice to make** (below). Clone layers were left out
+     which was a choice to make, since made (below). Clone layers were left out
      too at first, a clone lifting from under a blended copy travelling
      as a picture that disagreed with the page; chased, it was two bugs,
      neither about blends. A clone drawn aside to be exported, as its
@@ -5042,13 +5042,19 @@ without reading anything else.*
      page; it is an isolated transparency group now, on the engine's
      terms, and fails undone. A frame goes to PDF as a clip, not a group,
      so a blend inside a plain frame reaches the page there as it does
-     on the engine's — PDF already says what SVG cannot. The choice
-     about frames: the
-     engine draws a plain frame where it stands, so a blend inside it
-     reaches the page, while a frame travels as a clipped group, which
-     every reader isolates. Either the export takes the cut off the
-     frame and puts it on each layer inside (the wrapper taking each
-     one's blend), or plain frames isolate a blend the way groups do.
+     on the engine's — PDF already says what SVG could not. The choice
+     about frames — the engine draws a plain frame where it stands, so a
+     blend inside it reaches the page, while a frame travelled to SVG as
+     a clipped group, which every reader isolates — was put to the
+     owner and taken the way that changes no picture in the editor: the
+     export says pass-through now. A plain upright frame holding blended
+     paint (`passes_through`) wears no cut of its own; each layer in it
+     wears the frame's, outermost, with its blend on that wrapper, as a
+     mask's wrapper takes it. A frame holding what works on the page, or
+     another such frame (whose cut would be read in the wrong space),
+     goes as before. The SVG reader check takes blends inside frames now
+     and fails with the old export put back (page 408: a Multiply layer
+     in a plain frame).
      Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
