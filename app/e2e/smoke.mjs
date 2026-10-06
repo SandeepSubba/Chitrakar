@@ -4412,6 +4412,22 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert((await names()).join() === beforeSvg.join(), "and one undo takes the blended file back");
+  // A shadow written in the file comes in as the layer's own effect: past
+  // the card's lower edge there is shadow, where nothing was before.
+  const shadowed = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <filter id="f" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="6" stdDeviation="1" flood-color="#000000" flood-opacity="0.8"/></filter>
+    <rect id="card" x="10" y="10" width="60" height="30" fill="#ffffff" filter="url(#f)"/></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "shadowed.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(shadowed),
+  });
+  await page.waitForTimeout(400);
+  const underCard = await canvasPixel(40, 43);
+  assert(underCard[3] > 100, `the card casts its shadow below it (${underCard})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "and one undo takes the shadowed file back");
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

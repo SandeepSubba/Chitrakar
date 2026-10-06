@@ -47,6 +47,8 @@ pub struct ImportedGroup {
     pub opacity: f32,
     /// How what its layers make together comes down on what is under it.
     pub blend: chitrakar_doc::BlendMode,
+    /// The effects drawn from what its layers make together.
+    pub effects: Vec<chitrakar_doc::Effect>,
     /// The group it is inside, if any.
     pub within: Option<usize>,
 }
@@ -141,6 +143,7 @@ impl Gathered {
                 node.transform = pic.transform;
                 node.opacity = pic.opacity;
                 node.blend = pic.blend;
+                node.effects = pic.effects;
                 node.mask = pic.clip;
                 (pic.below, pic.within, node)
             })
@@ -205,6 +208,7 @@ impl Gathered {
                 group.mask = self.groups[g].mask.clone();
                 group.opacity = self.groups[g].opacity;
                 group.blend = self.groups[g].blend;
+                group.effects = self.groups[g].effects.clone();
                 let id = add(&mut cmds, &mut open, group);
                 open.push((g, id, 0));
             }
@@ -231,6 +235,8 @@ pub struct ImportedImage {
     pub within: Option<usize>,
     /// How it comes down on what is under it.
     pub blend: chitrakar_doc::BlendMode,
+    /// The effects drawn from it.
+    pub effects: Vec<chitrakar_doc::Effect>,
     /// What it is seen through, where the file put it inside a clip.
     pub clip: Option<chitrakar_doc::Mask>,
 }
@@ -484,6 +490,312 @@ fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
     }
 }
 
+/// A filter's effects, said the engine's way, or `None` when any of it is
+/// something else. Read off the graph of primitives three ways, which are
+/// the three ways a shadow arrives: as `feDropShadow`; as the chain this
+/// editor's exporter writes for each of its effects, merged under and
+/// over the source (`svg::effect_filter`); and as the chain design tools
+/// export — the alpha taken, offset and blurred, given its colour by a
+/// colour matrix, and blended in under the source. Anything else, and
+/// the filter is passed over as every filter was before: a layer that
+/// comes in plainer than the file, never wrong in some other way.
+///
+/// `at` is where the filtered group stands: offsets and blurs are in its
+/// user space, and the engine's are in the page's.
+fn effects_of(group: &usvg::Group, at: usvg::Transform) -> Option<Vec<chitrakar_doc::Effect>> {
+    use chitrakar_doc::Effect;
+    use usvg::filter::{Input, Kind};
+    let mut out = Vec::new();
+    for filter in group.filters() {
+        let prims = filter.primitives();
+        let last = prims.last()?;
+        let named = |input: &Input| -> Option<&usvg::filter::Primitive> {
+            match input {
+                Input::Reference(name) => prims.iter().rev().find(|p| p.result() == name),
+                _ => None,
+            }
+        };
+        let page = Page { at };
+        match last.kind() {
+            Kind::DropShadow(d) if *d.input() == Input::SourceGraphic => {
+                let (dx, dy) = page.offset(d.dx(), d.dy());
+                out.push(Effect::DropShadow {
+                    dx,
+                    dy,
+                    blur: page.blur((d.std_dev_x().get() + d.std_dev_y().get()) / 2.0),
+                    color: color_of(d.color(), 1.0),
+                    opacity: d.opacity().get(),
+                });
+            }
+            // This editor's own: what goes under the source, the source,
+            // and what goes over it.
+            Kind::Merge(m) => {
+                let at_source = m.inputs().iter().position(|i| *i == Input::SourceGraphic)?;
+                for (k, input) in m.inputs().iter().enumerate() {
+                    if k == at_source {
+                        continue;
+                    }
+                    let fx = page.tinted(named(input)?, &named, k > at_source)?;
+                    out.push(fx);
+                }
+            }
+            // A design tool's: the source blended in over the shadows,
+            // each blended in over the ones before it, down to nothing.
+            Kind::Blend(b)
+                if *b.input1() == Input::SourceGraphic && b.mode() == usvg::BlendMode::Normal =>
+            {
+                let mut shadows = Vec::new();
+                let mut at_blend = named(b.input2())?;
+                loop {
+                    match at_blend.kind() {
+                        Kind::Blend(b) if b.mode() == usvg::BlendMode::Normal => {
+                            shadows.push(page.tinted(named(b.input1())?, &named, false)?);
+                            match named(b.input2()) {
+                                Some(below) => at_blend = below,
+                                None => break,
+                            }
+                        }
+                        // Where the chain starts: nothing at all.
+                        Kind::Flood(f) if f.opacity().get() <= 0.0 => break,
+                        // Or a shadow on its own, with nothing under it.
+                        _ => {
+                            shadows.push(page.tinted(at_blend, &named, false)?);
+                            break;
+                        }
+                    }
+                }
+                shadows.reverse();
+                out.extend(shadows);
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A filter's own space carried to the page's.
+struct Page {
+    at: usvg::Transform,
+}
+
+impl Page {
+    fn offset(&self, dx: f32, dy: f32) -> (f32, f32) {
+        let t = self.at;
+        (t.sx * dx + t.kx * dy, t.ky * dx + t.sy * dy)
+    }
+
+    /// The engine's blur for a reader's standard deviation in the
+    /// filter's space: the one whose spread — what the exporter writes
+    /// for it (`svg::effect_filter`) — is nearest, so an effect that went
+    /// out comes back as itself. The engine blurs by three boxes of one
+    /// radius, `r`, and spreads by `√(r(r+1))`.
+    fn blur(&self, std_dev: f32) -> f32 {
+        let t = self.at;
+        let scale = (t.sx.hypot(t.ky)).max(t.kx.hypot(t.sy)).max(1e-6);
+        let s = std_dev * scale;
+        if s <= 0.01 {
+            return 0.0;
+        }
+        let spread = |r: f32| (r * (r + 1.0)).sqrt();
+        let mut r = 1.0f32;
+        while spread(r + 1.0) - s < s - spread(r) {
+            r += 1.0;
+        }
+        // The sigma the engine turns into that radius: its box width is
+        // the W3C's, `⌊σ·3√(2π)/4 + ½⌋`, halved; `2r` halves to `r`.
+        let k = 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0;
+        2.0 * r / k / scale
+    }
+
+    /// One effect from the primitive that makes it, coloured: a flood
+    /// cut to a silhouette (this editor's), or a colour matrix laying a
+    /// colour over one (a design tool's).
+    fn tinted<'a>(
+        &self,
+        p: &'a usvg::filter::Primitive,
+        named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+        over: bool,
+    ) -> Option<chitrakar_doc::Effect> {
+        use chitrakar_doc::Effect;
+        use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind};
+        match p.kind() {
+            // Cut to the source again: an inner shadow, which sits over.
+            Kind::Composite(c)
+                if over
+                    && c.operator() == CompositeOperator::In
+                    && *c.input2() == Input::SourceAlpha =>
+            {
+                let (color, opacity, shape) = self.flooded(named(c.input1())?, named)?;
+                let (dx, dy, blur, inverted, grown) = self.shaped(shape, named)?;
+                (inverted && grown.is_none()).then_some(Effect::InnerShadow {
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    opacity,
+                })
+            }
+            Kind::Composite(_) if !over => {
+                let (color, opacity, shape) = self.flooded(p, named)?;
+                let (dx, dy, blur, inverted, grown) = self.shaped(shape, named)?;
+                if inverted {
+                    return None;
+                }
+                Some(match grown {
+                    Some(width) if dx == 0.0 && dy == 0.0 && blur == 0.0 => Effect::Outline {
+                        width,
+                        color,
+                        opacity,
+                    },
+                    Some(_) => return None,
+                    None => Effect::DropShadow {
+                        dx,
+                        dy,
+                        blur,
+                        color,
+                        opacity,
+                    },
+                })
+            }
+            // A colour matrix laying one colour over a shadow's alpha.
+            Kind::ColorMatrix(m) if !over => {
+                let ColorMatrixKind::Matrix(v) = m.kind() else {
+                    return None;
+                };
+                let only = |row: usize, keep: usize| {
+                    (0..4).all(|c| c == keep || v[row * 5 + c].abs() < 1e-6)
+                };
+                if !(only(0, 9) && only(1, 9) && only(2, 9) && only(3, 3)) {
+                    return None;
+                }
+                let channel = |c: f32| match p.color_interpolation() {
+                    usvg::filter::ColorInterpolation::SRGB => c,
+                    usvg::filter::ColorInterpolation::LinearRGB => {
+                        chitrakar_color::linear_to_srgb(c.clamp(0.0, 1.0))
+                    }
+                };
+                let color = AuthoredColor::Srgb {
+                    r: channel(v[4]).clamp(0.0, 1.0),
+                    g: channel(v[9]).clamp(0.0, 1.0),
+                    b: channel(v[14]).clamp(0.0, 1.0),
+                    a: 1.0,
+                };
+                let opacity = v[18].clamp(0.0, 1.0);
+                let (dx, dy, blur, inverted, grown) = self.shaped(named(m.input())?, named)?;
+                (!inverted && grown.is_none()).then_some(Effect::DropShadow {
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    opacity,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// A flood cut to a shape — `feFlood` then `feComposite in` with the
+    /// shape second — as its colour, its opacity and the shape.
+    fn flooded<'a>(
+        &self,
+        p: &'a usvg::filter::Primitive,
+        named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+    ) -> Option<(AuthoredColor, f32, &'a usvg::filter::Primitive)> {
+        use usvg::filter::{CompositeOperator, Kind};
+        let Kind::Composite(c) = p.kind() else {
+            return None;
+        };
+        if c.operator() != CompositeOperator::In {
+            return None;
+        }
+        let Kind::Flood(f) = named(c.input1())?.kind() else {
+            return None;
+        };
+        Some((
+            color_of(f.color(), 1.0),
+            f.opacity().get(),
+            named(c.input2())?,
+        ))
+    }
+
+    /// The silhouette a shadow is made from, walked back to the alpha it
+    /// starts at: how far it is moved, how much it is blurred, whether
+    /// the alpha was turned inside out (an inner shadow's) and how far it
+    /// was grown (an outline's). A step that is not one of those, and the
+    /// answer is `None`.
+    fn shaped<'a>(
+        &self,
+        mut p: &'a usvg::filter::Primitive,
+        named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+    ) -> Option<(f32, f32, f32, bool, Option<f32>)> {
+        use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind, TransferFunction};
+        let (mut dx, mut dy, mut blur, mut inverted, mut grown) = (0.0, 0.0, 0.0, false, None);
+        for _ in 0..16 {
+            let input = match p.kind() {
+                Kind::Offset(o) => {
+                    let (x, y) = self.offset(o.dx(), o.dy());
+                    dx += x;
+                    dy += y;
+                    o.input()
+                }
+                Kind::GaussianBlur(g) => {
+                    blur = self.blur((g.std_dev_x().get() + g.std_dev_y().get()) / 2.0);
+                    g.input()
+                }
+                Kind::Morphology(m) if m.operator() == usvg::filter::MorphologyOperator::Dilate => {
+                    let t = self.at;
+                    let scale = (t.sx.hypot(t.ky)).max(t.kx.hypot(t.sy));
+                    grown = Some((m.radius_x().get() + m.radius_y().get()) / 2.0 * scale);
+                    m.input()
+                }
+                // A design tool knocks the shape out of its own shadow,
+                // which under an opaque shape is nothing at all.
+                Kind::Composite(c) if c.operator() == CompositeOperator::Out => c.input1(),
+                Kind::ComponentTransfer(c) => {
+                    let identity = |f: &TransferFunction| matches!(f, TransferFunction::Identity);
+                    if !(identity(c.func_r()) && identity(c.func_g()) && identity(c.func_b())) {
+                        return None;
+                    }
+                    match c.func_a() {
+                        TransferFunction::Table(t)
+                            if t.len() == 2 && t[0] == 1.0 && t[1] == 0.0 =>
+                        {
+                            inverted = true;
+                        }
+                        // The exporter's hard edge for an outline.
+                        TransferFunction::Linear { slope, .. } if *slope >= 100.0 => {}
+                        _ => return None,
+                    }
+                    c.input()
+                }
+                // A design tool's hard alpha: the alpha alone, scaled up.
+                Kind::ColorMatrix(m) => {
+                    let ColorMatrixKind::Matrix(v) = m.kind() else {
+                        return None;
+                    };
+                    let alpha_only = (0..15).all(|i| v[i].abs() < 1e-6)
+                        && v[15].abs() < 1e-6
+                        && v[16].abs() < 1e-6
+                        && v[17].abs() < 1e-6
+                        && v[18] > 0.0
+                        && v[19].abs() < 1e-6;
+                    if !alpha_only {
+                        return None;
+                    }
+                    m.input()
+                }
+                _ => return None,
+            };
+            match input {
+                Input::SourceAlpha => return Some((dx, dy, blur, inverted, grown)),
+                Input::SourceGraphic => return None,
+                Input::Reference(_) => p = named(input)?,
+            }
+        }
+        None
+    }
+}
+
 /// Whether anything under a group comes down by a blend of its own,
 /// which usvg says on a group around it.
 fn holds_a_blend(group: &usvg::Group) -> bool {
@@ -505,7 +817,10 @@ fn draws_more_than_one(group: &usvg::Group) -> bool {
                 usvg::Node::Group(g) => count(g, n),
                 usvg::Node::Path(p) if p.is_visible() => *n += 1,
                 usvg::Node::Image(i) if i.is_visible() => *n += 1,
-                usvg::Node::Text(_) => *n += 1,
+                // A block of text comes in as an outline a glyph, so it
+                // is more than one layer whatever it says: faded, or
+                // casting a shadow, it does so as one.
+                usvg::Node::Text(_) => *n += 2,
                 _ => {}
             }
         }
@@ -518,10 +833,12 @@ fn draws_more_than_one(group: &usvg::Group) -> bool {
 /// Where what a walk finds goes: into which of the file's groups, if
 /// any, and with what blend — a group's own, carried down to the one
 /// layer under it when there is only one (`walk`).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Place {
     within: Option<usize>,
     blend: chitrakar_doc::BlendMode,
+    /// A filter's effects, carried down to the one layer under it.
+    effects: Vec<chitrakar_doc::Effect>,
 }
 
 /// A blend as the document says it; the two lists are the same sixteen.
@@ -602,6 +919,19 @@ fn walk(
     // inside it keeps the blend inside it: flattened, the blend would
     // reach everything under the group.
     let isolating = group.should_isolate() && holds_a_blend(group) && draws_more_than_one(group);
+    // A filter that is a shadow, an outline or an inner shadow comes in as
+    // the engine's own effects (`effects_of`); on one layer they are that
+    // layer's, and on more — or faded, since a fade takes the shadow with
+    // it, or inside another such group — the group's. Any other filter is
+    // passed over, as every filter was.
+    let fx = if group.filters().is_empty() {
+        None
+    } else {
+        effects_of(group, truth.unwrap_or_else(|| group.abs_transform()))
+            .filter(|fx| !fx.is_empty())
+    };
+    let effected = fx.is_some()
+        && (draws_more_than_one(group) || !place.effects.is_empty() || group.opacity().get() < 1.0);
     let opacity = if faded {
         opacity
     } else {
@@ -646,42 +976,46 @@ fn walk(
     if clip.as_ref().is_some_and(|c| c.is_empty()) {
         return;
     }
-    let (clip, within, opacity) = if soft_here.is_some() || faded || blended || isolating {
-        let at = truth.unwrap_or_else(|| group.abs_transform());
-        let mask = soft_here.and_then(|m| soft_mask(m, at, clip.as_ref(), got));
-        // A group kept for its fade alone is still cut to its region, by
-        // the region on each layer under it, which distributes.
-        let clip = if soft_here.is_some() { None } else { clip };
-        got.groups.push(ImportedGroup {
-            name: if !group.id().is_empty() {
-                group.id().to_string()
-            } else if soft_here.is_some() {
-                "Masked".to_string()
-            } else if faded {
-                "Faded".to_string()
-            } else if blended {
-                "Blended".to_string()
-            } else {
-                "Group".to_string()
-            },
-            mask,
-            // What was folded on the way down comes onto the group too.
-            opacity: if faded {
-                opacity * group.opacity().get()
-            } else {
-                opacity
-            },
-            blend: if mine != chitrakar_doc::BlendMode::Normal {
-                mine
-            } else {
-                place.blend
-            },
-            within,
-        });
-        (clip, Some(got.groups.len() - 1), 1.0)
-    } else {
-        (clip, within, opacity)
-    };
+    let (clip, within, opacity) =
+        if soft_here.is_some() || faded || blended || isolating || effected {
+            let at = truth.unwrap_or_else(|| group.abs_transform());
+            let mask = soft_here.and_then(|m| soft_mask(m, at, clip.as_ref(), got));
+            // A group kept for its fade alone is still cut to its region, by
+            // the region on each layer under it, which distributes.
+            let clip = if soft_here.is_some() { None } else { clip };
+            got.groups.push(ImportedGroup {
+                name: if !group.id().is_empty() {
+                    group.id().to_string()
+                } else if soft_here.is_some() {
+                    "Masked".to_string()
+                } else if faded {
+                    "Faded".to_string()
+                } else if blended {
+                    "Blended".to_string()
+                } else if effected {
+                    "Shadowed".to_string()
+                } else {
+                    "Group".to_string()
+                },
+                mask,
+                // What was folded on the way down comes onto the group too.
+                opacity: if faded {
+                    opacity * group.opacity().get()
+                } else {
+                    opacity
+                },
+                blend: if mine != chitrakar_doc::BlendMode::Normal {
+                    mine
+                } else {
+                    place.blend
+                },
+                effects: fx.clone().unwrap_or_else(|| place.effects.clone()),
+                within,
+            });
+            (clip, Some(got.groups.len() - 1), 1.0)
+        } else {
+            (clip, within, opacity)
+        };
     // What is under this group goes in there, with the group's blend when
     // it is not a group of its own.
     let place = Place {
@@ -693,6 +1027,11 @@ fn walk(
         } else {
             place.blend
         },
+        effects: if within != place.within {
+            Vec::new()
+        } else {
+            fx.unwrap_or_else(|| place.effects.clone())
+        },
     };
     let clip = clip.as_ref();
     let worn = clip.map(|c| mask_of(c));
@@ -702,7 +1041,7 @@ fn walk(
                 g,
                 opacity,
                 clip,
-                place,
+                place.clone(),
                 truth.map(|t| t.pre_concat(g.transform())),
                 got,
             ),
@@ -718,6 +1057,7 @@ fn walk(
                             if let Some(mut pic) = pattern_picture(p, pattern, alpha, clip, below) {
                                 pic.within = within;
                                 pic.blend = place.blend;
+                                pic.effects = place.effects.clone();
                                 got.pics.push(pic);
                             }
                             true
@@ -728,9 +1068,14 @@ fn walk(
                         continue;
                     }
                     let fixed = fix(p.abs_transform());
-                    for mut node in shapes_of(p, opacity) {
+                    for (k, mut node) in shapes_of(p, opacity).into_iter().enumerate() {
                         node.mask = worn.clone();
                         node.blend = place.blend;
+                        // A path that came in as a fill and a stroke over
+                        // it casts its shadow once, from the first.
+                        if k == 0 {
+                            node.effects = place.effects.clone();
+                        }
                         if let Some(f) = fixed {
                             node.transform = f.compose(node.transform);
                         }
@@ -750,7 +1095,7 @@ fn walk(
             // stays where it is.
             usvg::Node::Text(t) => {
                 let before = got.shapes.len();
-                walk(t.flattened(), opacity, clip, place, None, got);
+                walk(t.flattened(), opacity, clip, place.clone(), None, got);
                 let a = t.abs_transform();
                 let placed = match fix(a) {
                     Some(f) => f.compose(as_doc(a)),
@@ -771,13 +1116,14 @@ fn walk(
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
                     usvg::ImageKind::SVG(tree) => {
-                        walk(tree.root(), opacity, clip, place, None, got)
+                        walk(tree.root(), opacity, clip, place.clone(), None, got)
                     }
                     kind => {
                         if let Some(mut pic) = picture_of(img, kind, opacity, got.shapes.len()) {
                             pic.clip = worn.clone();
                             pic.within = within;
                             pic.blend = place.blend;
+                            pic.effects = place.effects.clone();
                             got.pics.push(pic);
                         }
                     }
@@ -1105,6 +1451,7 @@ fn pattern_picture(
         below,
         within: None,
         blend: chitrakar_doc::BlendMode::Normal,
+        effects: Vec::new(),
         clip: Some(mask_of(&outline)),
     })
 }
@@ -1221,6 +1568,7 @@ fn picture_of(
         below,
         within: None,
         blend: chitrakar_doc::BlendMode::Normal,
+        effects: Vec::new(),
         clip: None,
     })
 }
@@ -2581,8 +2929,8 @@ mod tests {
     /// A page nobody wrote, cut down to what an SVG and this importer
     /// both carry: shapes, paths, strokes, gradients, pictures, groups,
     /// frames, copies, text, masks, blends, faded groups and layers held
-    /// to the one below. Left out: effects, which the importer has no
-    /// layer for, and the layers that work on what is under them. Masks,
+    /// to the one below, and effects but outlines. Left out: outlines
+    /// (below), and the layers that work on what is under them. Masks,
     /// blends, fades and holds were left out too until the importer
     /// kept the groups they need (`ImportedGroup`); let back in, they
     /// found two things the *exporter* had wrong (`isolated`, and the
@@ -2598,11 +2946,27 @@ mod tests {
             if page.parent_of(id).is_none() {
                 continue;
             }
-            doc.apply(Command::SetEffects {
-                id,
-                effects: vec![],
-            })
-            .unwrap();
+            // An outline's edge is where the layer is half as covered as
+            // its own opacity, and a vector's opacity goes to SVG as the
+            // fade of each paint, which comes back as the colours' own:
+            // so a faded layer's outline came back with its edge at half
+            // the full cover its faded silhouette never reaches. The
+            // threshold travels — the exporter writes it — but there is
+            // no field to give it back to. Outlines on layers at full
+            // opacity come back (`an_effect_exported_comes_back_as_itself`).
+            if n.effects
+                .iter()
+                .any(|e| matches!(e, chitrakar_doc::Effect::Outline { .. }))
+            {
+                let kept: Vec<_> = n
+                    .effects
+                    .iter()
+                    .filter(|e| !matches!(e, chitrakar_doc::Effect::Outline { .. }))
+                    .cloned()
+                    .collect();
+                doc.apply(Command::SetEffects { id, effects: kept })
+                    .unwrap();
+            }
             let closed_guide = matches!(
                 &n.kind,
                 NodeKind::Text(t) if matches!(
@@ -2797,7 +3161,17 @@ mod tests {
                         continue;
                     }
                     let t = after.get(x as u32, y as u32).to_srgb8();
-                    if (0..4).any(|q| c[q].abs_diff(t[q]) > 20) {
+                    // Premultiplied: what a pixel all but empty holds is
+                    // rounding, and a shadow's faint tail is all such
+                    // pixels.
+                    let pm = |c: [u8; 4], q: usize| {
+                        if q == 3 {
+                            c[3] as i32
+                        } else {
+                            c[q] as i32 * c[3] as i32 / 255
+                        }
+                    };
+                    if (0..4).any(|q| (pm(c, q) - pm(t, q)).abs() > 20) {
                         off.push((x, y, c, t));
                     }
                 }
@@ -3717,5 +4091,147 @@ mod tests {
         let again = import_svg(crate::export_svg(&doc).unwrap().as_bytes()).unwrap();
         let blends: Vec<B> = again.shapes.iter().map(|s| s.blend).collect();
         assert_eq!(blends, vec![B::Normal, B::Normal, B::Difference, B::Hue]);
+    }
+
+    /// A shadow written elsewhere comes in as the engine's own and is
+    /// drawn where a reader draws it — `feDropShadow` on a shape and on a
+    /// group of two (kept a group, so the shadow is of the two together),
+    /// and the chain a design tool exports: the alpha taken hard, moved,
+    /// blurred, knocked out of the shape, coloured by a colour matrix and
+    /// blended in under it. Every filter used to be passed over, so a card
+    /// with a shadow came in without one.
+    #[test]
+    fn a_shadow_written_elsewhere_comes_in_as_a_shadow() {
+        use chitrakar_doc::Effect;
+        let head = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">"##;
+        let files = [
+            r##"<filter id="f" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="3" dy="4" stdDeviation="2" flood-color="#203040" flood-opacity="0.7"/></filter>
+<rect x="10" y="8" width="34" height="24" fill="#e04030" filter="url(#f)"/>"##,
+            r##"<filter id="f" x="0" y="0" width="64" height="48" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dx="2" dy="4"/><feGaussianBlur stdDeviation="3"/>
+<feComposite in2="hardAlpha" operator="out"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0.1 0 0 0 0 0.2 0 0 0 0 0.5 0 0 0 0.45 0"/>
+<feBlend mode="normal" in2="BackgroundImageFix" result="effect1_dropShadow"/>
+<feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/></filter>
+<circle cx="30" cy="22" r="14" fill="#40b060" filter="url(#f)"/>"##,
+            r##"<filter id="f" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="-3" dy="3" stdDeviation="1.5" flood-color="#000000" flood-opacity="0.5"/></filter>
+<g filter="url(#f)"><rect x="14" y="10" width="26" height="20" fill="#3060e0"/><circle cx="40" cy="28" r="10" fill="#f0c020"/></g>"##,
+        ];
+        for (n, body) in files.iter().enumerate() {
+            let svg = format!("{head}\n{body}\n</svg>");
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            let shadows = imported
+                .shapes
+                .iter()
+                .flat_map(|s| s.effects.iter())
+                .chain(imported.groups.iter().flat_map(|g| g.effects.iter()))
+                .filter(|e| matches!(e, Effect::DropShadow { .. }))
+                .count();
+            assert_eq!(shadows, 1, "file {n}: one shadow, where the file put it");
+            let (off, asked, first) = faded_bad(&svg);
+            assert!(asked > 1500, "file {n}: asked of enough of it ({asked})");
+            assert!(
+                off <= 4,
+                "file {n}: {off} pixels shadowed otherwise, the first {first:?}\n{svg}"
+            );
+        }
+    }
+
+    /// This editor's own effects — a drop shadow, an outline and an inner
+    /// shadow — go out as filters and come back as themselves.
+    #[test]
+    fn an_effect_exported_comes_back_as_itself() {
+        use chitrakar_doc::Effect;
+        let mut doc = Document::new(64, 48, ColorMode::Rgb);
+        let root = doc.root();
+        let mut card = Node::vector(
+            "card",
+            VectorShape::Rect {
+                width: 30.0,
+                height: 20.0,
+                radius: 3.0,
+            },
+        );
+        card.transform = chitrakar_doc::Transform::translation(14.0, 12.0);
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        if let NodeKind::Vector { fill, .. } = &mut card.kind {
+            *fill = Some(ink(0.9, 0.5, 0.2));
+        }
+        card.effects = vec![
+            Effect::DropShadow {
+                dx: 3.0,
+                dy: 4.0,
+                blur: 2.5,
+                color: ink(0.1, 0.1, 0.3),
+                opacity: 0.6,
+            },
+            Effect::Outline {
+                width: 2.0,
+                color: ink(0.2, 0.7, 0.3),
+                opacity: 1.0,
+            },
+            Effect::InnerShadow {
+                dx: 1.0,
+                dy: 2.0,
+                blur: 1.5,
+                color: ink(0.0, 0.0, 0.0),
+                opacity: 0.5,
+            },
+        ];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(card),
+        })
+        .unwrap();
+        let svg = crate::export_svg(&doc).unwrap();
+        let back = import_svg(svg.as_bytes()).unwrap();
+        let fx = &back.shapes[0].effects;
+        assert_eq!(fx.len(), 3, "all three came back: {fx:?}");
+        let before = chitrakar_render::render(&doc).unwrap();
+        let after = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
+        let worst = before
+            .pixels
+            .iter()
+            .zip(&after.pixels)
+            .map(|(p, q)| {
+                (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 0.02,
+            "the page came back as it was, worst {worst}; {fx:?}"
+        );
+    }
+
+    /// Every blur the engine has comes back at its own radius: what the
+    /// exporter writes for it (`√(r(r+1))` at the engine's radius `r`)
+    /// is read back to a blur of that radius, in the page's units and in
+    /// a space scaled by two.
+    #[test]
+    fn a_blur_exported_comes_back_at_its_radius() {
+        use chitrakar_render::blur::plane_radius;
+        for scale in [1.0f32, 2.0] {
+            let page = Page {
+                at: usvg::Transform::from_scale(scale, scale),
+            };
+            for k in 2..240 {
+                let blur = k as f32 * 0.05;
+                let r = plane_radius(blur * scale) as f32;
+                let written = (r * (r + 1.0)).sqrt() / scale;
+                let back = page.blur(written);
+                assert_eq!(
+                    plane_radius(back * scale),
+                    plane_radius(blur * scale),
+                    "a blur of {blur} at scale {scale} wrote {written} and read {back}"
+                );
+            }
+        }
     }
 }

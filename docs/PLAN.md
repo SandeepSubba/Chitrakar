@@ -431,13 +431,15 @@ without reading anything else.*
   stays hidden, a mask that is only a region with it: nesting
   intersects, several outlines union, and the region rides down to each
   shape as an ordinary vector mask.
-  What is still left out, each for a stated reason: a `filter`, so a
-  blurred element comes in sharp — there is no way yet to say "blur this
-  one layer", a filter layer here reaching everything below it and a
-  clip to the shape cutting the very spread that makes it a blur; a mask
-  with real grey in it, which wants a raster mask and the pixels pooled
-  for it. Every one of those is a layer that arrives plainer than the
-  file, never one that arrives missing. (Two more were on this list: a
+  What is still left out, each for a stated reason: a `filter` other
+  than a shadow, an outline or an inner shadow (those come in as the
+  engine's own effects now, see "And a shadow" in §0's import notes), so
+  a blurred element comes in sharp — there is no way yet to say "blur
+  this one layer", a filter layer here reaching everything below it and
+  a clip to the shape cutting the very spread that makes it a blur.
+  That is a layer that arrives plainer than the file, never one that
+  arrives missing. (A mask with real grey in it was on this list too,
+  and comes in now.) (Two more were on this list: a
   pattern fill, which comes in now as a picture of its tile repeated
   and seen through the shape's outline, and `stroke-dashoffset`, which
   has a field now — see the later entries.)
@@ -880,7 +882,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~606),
+- **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -5055,6 +5057,31 @@ without reading anything else.*
      goes as before. The SVG reader check takes blends inside frames now
      and fails with the old export put back (page 408: a Multiply layer
      in a plain frame).
+     **And a shadow.** Every SVG `filter` was passed over, so a card with
+     a drop shadow came in without one. A filter is read now for the
+     engine's three effects (`effects_of`): `feDropShadow`; the chain
+     this editor's exporter writes for a drop shadow, an outline and an
+     inner shadow, merged under and over the source; and the chain design
+     tools export — hard alpha, offset, blur, the shape knocked out, a
+     colour matrix laying the colour, blended in under the source,
+     several deep. Offsets and blurs go from the filter's space to the
+     page's, and a blur becomes the engine blur whose exported spread
+     (`√(r(r+1))` at its box radius) is nearest, so every blur the
+     engine has comes back at its own radius
+     (`a_blur_exported_comes_back_at_its_radius`). On one layer the
+     effects are its own; on more, faded, or text (which arrives a glyph
+     at a time) the group's. Anything else is passed over as before.
+     Held to resvg on three files (`a_shadow_written_elsewhere_comes_in_
+     as_a_shadow`), round-tripped whole (`an_effect_exported_comes_back_
+     as_itself`), and let into the 400-page export round trip, which
+     fails with the recogniser off — all but outlines: an outline's edge
+     is where its layer is half as covered as its opacity, a vector's
+     opacity goes to SVG as the fade of each paint and comes back as the
+     colours' own, so a faded layer's outline came back with its edge at
+     half the full cover its silhouette never reaches. The exporter
+     writes that threshold; there is no field yet to give it back to.
+     The colour round trip compares premultiplied now, since a shadow's
+     faint tail is pixels whose own colour is rounding.
      Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
@@ -6753,7 +6780,7 @@ without reading anything else.*
      apart.
      Two more of the same class are found and not fixed, which is worth
      writing down rather than leaving for the next search to rediscover.
-     A `filter` is dropped, so a blurred element comes in sharp — at two
+     A `filter` is dropped (a shadow's is not, now), so a blurred element comes in sharp — at two
      pixels outside a blurred rect resvg draws a quarter coverage and
      this draws nothing. That one is not an importer gap but a model one:
      a filter layer here applies to everything below it, and clipping it
