@@ -4393,6 +4393,25 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert((await names()).join() === beforeSvg.join(), "one undo for that one as well");
+  // A blend comes in as the file says it: a circle at Multiply over a
+  // gold ground is the two multiplied, not the circle's own colour.
+  const multiplied = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <rect x="10" y="10" width="60" height="40" fill="#ffc040"/>
+    <circle id="dim" cx="40" cy="30" r="15" fill="#8080ff" style="mix-blend-mode:multiply"/></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "multiplied.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(multiplied),
+  });
+  await page.waitForTimeout(400);
+  const product = await canvasPixel(40, 30);
+  assert(
+    Math.abs(product[0] - 128) <= 3 && Math.abs(product[1] - 96) <= 3 && Math.abs(product[2] - 64) <= 3,
+    `the circle multiplies the ground under it (${product}, want 128,96,64)`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "and one undo takes the blended file back");
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

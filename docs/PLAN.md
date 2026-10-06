@@ -880,7 +880,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~601),
+- **Verify before committing:** `cargo test --workspace` (~605),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4982,7 +4982,55 @@ without reading anything else.*
      group cut to a clip with a stroke over a fill — and failing with
      the fold put back (`a_faded_group_fades_as_one`); the browser suite
      reads half, not three quarters, where two layers of a placed file
-     overlap. Long dashed curves drift a pixel or so against resvg; finer flattening
+     overlap.
+     **And a blend, both ways.** `mix-blend-mode` — which the exporter
+     has always written — came back Normal. A blended element with one
+     layer under it gives that layer its blend; with more, or with a
+     blend inside it as well (two blends are two steps), it is an
+     `ImportedGroup` wearing it; and a group a reader isolates (a clip, a
+     fade, a mask, `isolation:isolate`) with a blend inside keeps it
+     inside (`a_blend_comes_in_as_the_file_says_it`). Letting masks,
+     blends, fades and held layers back into the export round trip
+     (`portable`, 400 pages, coverage and colour) then found three bugs
+     that were not the importer's. The exporter wrote a group whose
+     layers blend as a plain `<g>`, which SVG does not isolate, so a
+     Darken layer in a group darkened the whole page in every reader:
+     such a group, frame or copy says `isolation:isolate` now, on the
+     engine's own terms (a copy only where its stand-ins read the page).
+     A masked or held layer's wrapper isolated it, so its blend met
+     nothing: the outermost wrapper takes the blend now, as the effects
+     wrapper always did. And the *engine* drew a blended frame inside a
+     blended frame as nothing but the page under it: a frame whose
+     contents read the page was sent down the road for contents that
+     work on it — an adjustment, a clone — drawn in place and alongside,
+     the difference added back as what they made of the page, and for a
+     blend that difference is the blend meeting the page. For a frame
+     with a blend of its own that road is taken now only for what works
+     on the page (`reads_in_place`, `works_on_what_is_under`); a frame
+     merely faded or masked still draws its blends where it stands, so
+     a mask that hides nothing still changes nothing — which the first
+     draft of this broke, and `a_mask_that_hides_nothing_is_no_mask`
+     said so. And a hidden layer works on nothing — a hidden adjustment
+     had sent a frame down that road too
+     (`a_blended_frame_in_a_blended_frame_draws_what_two_groups_draw`).
+     A reader is held to the blended pages as well now
+     (`a_reader_blends_an_opaque_page_as_the_engine_does`, 800 pages),
+     failing with either export fix undone, and
+     `a_masked_layer_keeps_its_blend_in_svg` for the wrapper. Left out of
+     it, each said there: the four non-separable modes, where resvg's
+     arithmetic is not the W3C's (a blue brush at Luminosity over gold is
+     [84, 60, 0] by hand from SetLum and ClipColor, the engine's answer;
+     resvg draws [115, 60, 0]); frames and copies holding what works on
+     the page, the engine's own construction; clone layers, since one
+     lifting from under a blended copy travels as a picture that
+     disagrees with what the engine lays (`clone_pixels`) — found and not
+     chased; and blends inside frames, which is **a choice to make**: the
+     engine draws a plain frame where it stands, so a blend inside it
+     reaches the page, while a frame travels as a clipped group, which
+     every reader isolates. Either the export takes the cut off the
+     frame and puts it on each layer inside (the wrapper taking each
+     one's blend), or plain frames isolate a blend the way groups do.
+     Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,

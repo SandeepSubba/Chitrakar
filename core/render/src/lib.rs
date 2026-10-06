@@ -354,9 +354,52 @@ pub fn reads_backdrop(doc: &Document, group: NodeId) -> Result<bool, DocError> {
 /// what a copy draws is a list, put together from the original's layers
 /// and the copy's own, and it has to be isolated on the same terms.
 pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, DocError> {
+    any_reads_under(doc, layers, true)
+}
+
+/// Whether anything inside a group or a frame *works on* the pixels
+/// underneath it — an adjustment, a filter, a clone layer — rather than
+/// laying paint down, as a blended layer does however it is brought
+/// down. A frame with a blend of its own is drawn where it stands only
+/// for one of these (`reads_in_place`): blended paint inside it meets
+/// only what the frame holds, as in any SVG reader.
+pub fn works_on_what_is_under(doc: &Document, group: NodeId) -> Result<bool, DocError> {
+    any_reads_under(doc, doc.children_of(group)?, false)
+}
+
+/// Whether a frame brought down by `blend` is drawn where it stands for
+/// what it holds. Faded or masked and brought down by Normal, it is for
+/// anything inside that reads the page, a blended layer included — so a
+/// frame's blends land on the page however it is faded, and a mask that
+/// hides nothing changes nothing. Brought down by a blend of its own,
+/// what it paints has to be brought down whole, so it is only for what
+/// *works on* the page (`works_on_what_is_under`): a blended frame inside
+/// a blended frame had been brought down on the page as well as inside
+/// the outer one, and the two together left nothing but the page.
+fn reads_in_place(doc: &Document, frame: NodeId, blend: BlendMode) -> Result<bool, DocError> {
+    if blend == BlendMode::Normal {
+        reads_backdrop(doc, frame)
+    } else {
+        works_on_what_is_under(doc, frame)
+    }
+}
+
+/// `any_reads_backdrop`, with blended paint counted as reading what is
+/// under it or not.
+fn any_reads_under(doc: &Document, layers: &[NodeId], blends: bool) -> Result<bool, DocError> {
+    let inside = |id: NodeId| -> Result<bool, DocError> {
+        any_reads_under(doc, doc.children_of(id)?, blends)
+    };
     for &child in layers {
         let node = doc.node(child)?;
-        if node.blend != BlendMode::Normal {
+        // A layer that is not shown reads nothing and works on nothing:
+        // a hidden adjustment in a frame sent the frame down the road
+        // for what changes the page, where a blended frame inside it
+        // was brought down on the page as well as inside the frame.
+        if !node.visible {
+            continue;
+        }
+        if blends && node.blend != BlendMode::Normal {
             return Ok(true);
         }
         match &node.kind {
@@ -365,9 +408,7 @@ pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, Doc
             NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => {
                 return Ok(true)
             }
-            NodeKind::Group | NodeKind::Artboard { .. } if reads_backdrop(doc, child)? => {
-                return Ok(true)
-            }
+            NodeKind::Group | NodeKind::Artboard { .. } if inside(child)? => return Ok(true),
             // A copy sees what the original sees — or, where it stands in
             // for some of the original's layers, what it actually draws.
             // The graph has no cycles, so following it terminates.
@@ -378,7 +419,7 @@ pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, Doc
                     Vec::new()
                 };
                 if !stand_ins.is_empty() {
-                    if any_reads_backdrop(doc, &stand_ins)? {
+                    if any_reads_under(doc, &stand_ins, blends)? {
                         return Ok(true);
                     }
                     continue;
@@ -394,10 +435,10 @@ pub fn any_reads_backdrop(doc: &Document, layers: &[NodeId]) -> Result<bool, Doc
                 };
                 let reads = match &master.kind {
                     NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. } => true,
-                    NodeKind::Group | NodeKind::Artboard { .. } => reads_backdrop(doc, *of)?,
+                    NodeKind::Group | NodeKind::Artboard { .. } => inside(*of)?,
                     _ => false,
                 };
-                if reads || master.blend != BlendMode::Normal {
+                if reads || (blends && master.blend != BlendMode::Normal) {
                     return Ok(true);
                 }
             }
@@ -1149,7 +1190,7 @@ fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<bool,
         return Ok(false);
     }
     let t = parent.compose(node.transform);
-    Ok(t.b.abs() < 1e-6 && t.c.abs() < 1e-6 && reads_backdrop(doc, id)?)
+    Ok(t.b.abs() < 1e-6 && t.c.abs() < 1e-6 && reads_in_place(doc, id, node.blend)?)
 }
 
 pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
@@ -2560,7 +2601,7 @@ fn render_child(
                 // that only lays paint the second part is nothing and this
                 // is the frame composited whole; at Normal it is exactly
                 // the road above.
-                if upright && reads_backdrop(doc, child)? {
+                if upright && reads_in_place(doc, child, blend)? {
                     let inside = board.intersect(clip);
                     if inside.is_empty() {
                         return Ok(());
@@ -22508,5 +22549,124 @@ mod tests {
             close(&blended, &fill_only),
             "multiplied: {blended:?} vs the fill alone {fill_only:?}"
         );
+    }
+
+    /// A blended frame inside a blended frame draws what the same two
+    /// groups draw — the inner one's blend meets only what the outer one
+    /// holds — and a hidden adjustment inside changes nothing. The outer
+    /// frame, its contents reading the page by a blend, was sent down
+    /// the road for contents that *work on* the page (an adjustment, a
+    /// clone): drawn in place and alongside, the difference between the
+    /// two added back as what the contents made of the page. For a blend
+    /// that difference is the blend meeting the page, so an Overlay frame
+    /// inside an Exclusion frame came out as nothing but the page under
+    /// it. And a hidden adjustment counted as working on the page.
+    #[test]
+    fn a_blended_frame_in_a_blended_frame_draws_what_two_groups_draw() {
+        let draw = |frames: bool, hidden_adjustment: bool| {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = Node::vector(
+                "ground",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.3,
+                    b: 0.2,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(ground),
+            })
+            .unwrap();
+            let holder = |name: &str| {
+                let mut n = Node::group(name);
+                if frames {
+                    n.kind = NodeKind::Artboard {
+                        width: 30.0,
+                        height: 24.0,
+                        background: None,
+                        export_scale: 1.0,
+                    };
+                }
+                n
+            };
+            let mut outer = holder("outer");
+            outer.blend = BlendMode::Exclusion;
+            outer.transform = Transform::translation(4.0, 2.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(outer),
+            })
+            .unwrap();
+            let outer = doc.children_of(root).unwrap()[1];
+            let mut inner = holder("inner");
+            inner.blend = BlendMode::Overlay;
+            doc.apply(Command::AddNode {
+                parent: outer,
+                index: 0,
+                node: Box::new(inner),
+            })
+            .unwrap();
+            let inner = doc.children_of(outer).unwrap()[0];
+            let mut paint = Node::vector(
+                "paint",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut paint.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.35,
+                    g: 0.93,
+                    b: 0.37,
+                    a: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: inner,
+                index: 0,
+                node: Box::new(paint),
+            })
+            .unwrap();
+            if hidden_adjustment {
+                let mut adj =
+                    Node::adjustment("dim", chitrakar_doc::Adjustment::Exposure { stops: -2.0 });
+                adj.visible = false;
+                doc.apply(Command::AddNode {
+                    parent: inner,
+                    index: 1,
+                    node: Box::new(adj),
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap().get(10, 10).to_srgb8()
+        };
+        // Overlay over nothing is the paint; Exclusion of it over the
+        // ground, in the values a device shows.
+        let ex = |a: f32, b: f32| a + b - 2.0 * a * b;
+        let want =
+            [ex(0.8, 0.35), ex(0.3, 0.93), ex(0.2, 0.37)].map(|v| (v * 255.0).round() as i32);
+        for frames in [false, true] {
+            for hidden in [false, true] {
+                let got = draw(frames, hidden);
+                assert!(
+                    (0..3).all(|k| (got[k] as i32 - want[k]).abs() <= 2),
+                    "frames {frames}, a hidden adjustment {hidden}: {got:?}, want {want:?}"
+                );
+            }
+        }
     }
 }

@@ -213,20 +213,6 @@ fn write_node(
         // left on the layer would meet nothing — which brings the effects
         // down by the blend too, as the engine does.
         let effects = effect_filter(doc, child, defs);
-        let common = if effects.is_some() {
-            let mut plain = node.clone();
-            plain.blend = BlendMode::Normal;
-            common_attrs(&plain)
-        } else {
-            common_attrs(node)
-        };
-        if let Some(filter) = &effects {
-            let blend = match node.blend {
-                BlendMode::Normal => String::new(),
-                other => format!(r#" style="mix-blend-mode:{}""#, css_blend(other)),
-            };
-            let _ = writeln!(out, r#"{pad}<g filter="url(#{filter})"{blend}>"#);
-        }
         // A mask is authored in the space the layer sits in, so it goes
         // on a wrapper that carries no transform of its own: SVG reads a
         // userSpaceOnUse mask in the space in force where it is
@@ -241,12 +227,64 @@ fn write_node(
         } else {
             String::new()
         };
+        // The outermost wrapper takes the layer's blend: a filter and a
+        // mask each isolate what is inside them, so a blend left on the
+        // layer would meet nothing — a masked Overlay layer came out of a
+        // reader as no blend at all. On the wrapper it brings down what
+        // the layer makes, masked and with its effects, which is what the
+        // engine brings down.
+        let wrapped = effects.is_some() || !masked.is_empty() || !confined.is_empty();
+        let common = if wrapped {
+            let mut plain = node.clone();
+            plain.blend = BlendMode::Normal;
+            common_attrs(&plain)
+        } else {
+            common_attrs(node)
+        };
+        let mut blend = match node.blend {
+            BlendMode::Normal => String::new(),
+            other => format!(r#" style="mix-blend-mode:{}""#, css_blend(other)),
+        };
+        if let Some(filter) = &effects {
+            let blend = std::mem::take(&mut blend);
+            let _ = writeln!(out, r#"{pad}<g filter="url(#{filter})"{blend}>"#);
+        }
         if !confined.is_empty() {
-            let _ = writeln!(out, "{pad}<g{confined}>");
+            let blend = std::mem::take(&mut blend);
+            let _ = writeln!(out, "{pad}<g{confined}{blend}>");
         }
         if !masked.is_empty() {
-            let _ = writeln!(out, "{pad}<g{masked}>");
+            let blend = std::mem::take(&mut blend);
+            let _ = writeln!(out, "{pad}<g{masked}{blend}>");
         }
+        // A group, a frame or a copy whose layers read what is under
+        // them is isolated by the engine, and says so (`isolated`).
+        let common = match &node.kind {
+            NodeKind::Group | NodeKind::Artboard { .. }
+                if chitrakar_render::reads_backdrop(doc, child).unwrap_or(false) =>
+            {
+                isolated(common)
+            }
+            // A copy is isolated where the engine isolates it: when layers
+            // of its own stand in for the original's and read what is
+            // under them. A copy drawing the original entire draws it
+            // straight in, the original's own blend and all.
+            NodeKind::Instance { of, .. } => {
+                let stand_ins = if chitrakar_render::takes_stand_ins(doc, *of) {
+                    chitrakar_render::copy_children(doc, child)?
+                } else {
+                    Vec::new()
+                };
+                if !stand_ins.is_empty()
+                    && chitrakar_render::any_reads_backdrop(doc, &stand_ins).unwrap_or(false)
+                {
+                    isolated(common)
+                } else {
+                    common
+                }
+            }
+            _ => common,
+        };
         match &node.kind {
             NodeKind::Group => {
                 let _ = writeln!(out, "{pad}<g{common}>");
@@ -1196,6 +1234,22 @@ fn outlines_d(outlines: &[crate::strokes::Outline]) -> String {
         d.push_str(" Z ");
     }
     d.trim_end().to_string()
+}
+
+/// A group's attributes with `isolation:isolate` in them, for a group
+/// whose layers read what is under them (`reads_backdrop`): the engine
+/// draws such a group on a surface of its own, so a blend inside it
+/// meets only what is inside it. A plain `<g>` is not isolated in SVG,
+/// so a Darken layer in a group darkened the whole page in a reader.
+fn isolated(common: String) -> String {
+    match common.find(r#" style=""#) {
+        Some(at) => {
+            let mut s = common;
+            s.insert_str(at + r#" style=""#.len(), "isolation:isolate;");
+            s
+        }
+        None => format!(r#"{common} style="isolation:isolate""#),
+    }
 }
 
 fn common_attrs(node: &chitrakar_doc::Node) -> String {
@@ -4345,6 +4399,170 @@ mod tests {
                 off[0].3
             );
         }
+    }
+
+    /// The same opaque pages with their blends put back: a reader brings
+    /// each blended layer down on what the engine brings it down on. Two
+    /// things it found. A group whose layers blend is drawn by the engine
+    /// on a surface of its own, so the blend meets only what is in the
+    /// group — but a plain `<g>` is not isolated in SVG, so a Darken layer
+    /// in a group darkened the whole page in a reader; such a group says
+    /// `isolation:isolate` now. And a layer's mask, or what it is held
+    /// to, goes on a wrapper that isolates the layer, so a blend left on
+    /// the layer met nothing; the outermost wrapper takes it now, as the
+    /// effects wrapper always did.
+    #[test]
+    fn a_reader_blends_an_opaque_page_as_the_engine_does() {
+        let mut blended = 0;
+        for seed in 0..800u64 {
+            let mut doc = chitrakar_doc::fixture::opaque_page(seed);
+            let page = chitrakar_doc::fixture::page(seed);
+            for (id, n) in page.nodes() {
+                // Not a frame or a copy holding what works on the page
+                // under it — a clone, an adjustment: what those make of
+                // the page and what the blend brings down are the
+                // engine's own construction (`render_child`), which SVG
+                // has no way to say.
+                let in_place = n.kind.holds_children()
+                    && chitrakar_render::works_on_what_is_under(&doc, *id).unwrap_or(false);
+                // And not the four modes that move a colour as a whole —
+                // hue, saturation, colour, luminosity — where resvg's
+                // arithmetic is not the W3C's: worked by hand from the
+                // spec's SetLum and ClipColor, a blue brush at Luminosity
+                // over a gold page is [84, 60, 0], the engine's answer,
+                // and resvg draws [115, 60, 0].
+                let separable = !matches!(
+                    n.blend,
+                    BlendMode::Hue
+                        | BlendMode::Saturation
+                        | BlendMode::Color
+                        | BlendMode::Luminosity
+                );
+                // Nor a layer inside a frame: the engine draws a plain
+                // frame where it stands, so a blend inside it reaches the
+                // page, and a frame travels as a clipped group, which
+                // every reader isolates. Saying it would take the cut off
+                // the frame and onto each layer in it; written down in
+                // the plan as a choice to make, not made here.
+                let in_frame = {
+                    let mut up = page.parent_of(*id);
+                    let mut found = false;
+                    while let Some(p) = up {
+                        found |=
+                            matches!(page.node(p).map(|m| &m.kind), Ok(NodeKind::Artboard { .. }));
+                        up = page.parent_of(p);
+                    }
+                    found
+                };
+                if n.blend != BlendMode::Normal
+                    && separable
+                    && !in_place
+                    && !in_frame
+                    && doc.node(*id).is_ok_and(|m| m.visible)
+                {
+                    blended += 1;
+                    doc.apply(Command::SetBlendMode {
+                        id: *id,
+                        blend: n.blend,
+                    })
+                    .unwrap();
+                }
+            }
+            // And no clone layers: what one lifts from under a blended
+            // copy travels as a picture that disagrees with what the
+            // engine lays (`clone_pixels`), which is its own question —
+            // found here, written down in the plan, and left.
+            for (id, n) in page.nodes() {
+                if matches!(n.kind, NodeKind::Clone { .. })
+                    || chitrakar_render::copies_a_clone(&page, *id)
+                {
+                    doc.apply(Command::SetVisible {
+                        id: *id,
+                        visible: false,
+                    })
+                    .unwrap();
+                }
+            }
+            let theirs = resvg_pixels(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
+            let px = |x: i32, y: i32| ours.get(x as u32, y as u32).to_srgb8();
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    let flat = c[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let n = px(x + i, y + j);
+                                (0..4).all(|k| n[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    let k = ((y * w + x) * 4) as usize;
+                    let t = [theirs[k], theirs[k + 1], theirs[k + 2], theirs[k + 3]];
+                    if (0..4).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, t));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 2,
+                "page {seed}: {} flat pixels a reader blends otherwise, the first at \
+                 ({}, {}) — the engine {:?}, the reader {:?}",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
+        assert!(blended > 400, "asked of enough blends ({blended})");
+    }
+
+    /// A blended layer seen through a mask comes down blended in a reader.
+    #[test]
+    fn a_masked_layer_keeps_its_blend_in_svg() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let ground = filled(&mut doc, "ground", 40.0, 30.0);
+        let top = filled(&mut doc, "top", 30.0, 20.0);
+        doc.apply(Command::SetTransform {
+            id: top,
+            transform: Transform::translation(5.0, 5.0),
+        })
+        .unwrap();
+        let _ = ground;
+        doc.apply(Command::SetBlendMode {
+            id: top,
+            blend: BlendMode::Difference,
+        })
+        .unwrap();
+        doc.apply(Command::SetMask {
+            id: top,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 30.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::default(),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        let theirs = resvg_pixels(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let o = ours.get(12, 15).to_srgb8();
+        let t = &theirs[(15 * 40 + 12) * 4..(15 * 40 + 12) * 4 + 4];
+        assert!(
+            (0..3).all(|k| o[k].abs_diff(t[k]) <= 3),
+            "the engine {o:?}, the reader {t:?}"
+        );
     }
 
     /// A radial gradient whose rings go through axes of their own leaves

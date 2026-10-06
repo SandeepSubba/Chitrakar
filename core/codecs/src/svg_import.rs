@@ -34,8 +34,8 @@ pub struct ImportedSvg {
 }
 
 /// A group a file's layers come in inside rather than flattened: one
-/// seen through a mask with grey in it, or faded with more than one
-/// layer under it. A fade does not distribute over the layers under it
+/// seen through a mask with grey in it, or faded or blended with more
+/// than one layer under it. A fade does not distribute over the layers under it
 /// the way a clip does — two overlapping layers each faded to half are
 /// three quarters where they overlap, one group faded to half is half —
 /// so the mask and the fade go on the group, over what its layers make
@@ -45,6 +45,8 @@ pub struct ImportedGroup {
     pub mask: Option<chitrakar_doc::Mask>,
     /// How faded the group is, over what its layers make together.
     pub opacity: f32,
+    /// How what its layers make together comes down on what is under it.
+    pub blend: chitrakar_doc::BlendMode,
     /// The group it is inside, if any.
     pub within: Option<usize>,
 }
@@ -138,6 +140,7 @@ impl Gathered {
                 );
                 node.transform = pic.transform;
                 node.opacity = pic.opacity;
+                node.blend = pic.blend;
                 node.mask = pic.clip;
                 (pic.below, pic.within, node)
             })
@@ -201,6 +204,7 @@ impl Gathered {
                 let mut group = Node::group(&self.groups[g].name);
                 group.mask = self.groups[g].mask.clone();
                 group.opacity = self.groups[g].opacity;
+                group.blend = self.groups[g].blend;
                 let id = add(&mut cmds, &mut open, group);
                 open.push((g, id, 0));
             }
@@ -225,6 +229,8 @@ pub struct ImportedImage {
     pub below: usize,
     /// Which of the file's groups it is in, if any (`ImportedGroup`).
     pub within: Option<usize>,
+    /// How it comes down on what is under it.
+    pub blend: chitrakar_doc::BlendMode,
     /// What it is seen through, where the file put it inside a clip.
     pub clip: Option<chitrakar_doc::Mask>,
 }
@@ -237,7 +243,7 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     opt.font_family = "DejaVu Sans".to_string();
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let mut got = Gathered::default();
-    walk(tree.root(), 1.0, None, None, None, &mut got);
+    walk(tree.root(), 1.0, None, Place::default(), None, &mut got);
     Ok(ImportedSvg {
         width: tree.size().width(),
         height: tree.size().height(),
@@ -478,6 +484,15 @@ fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
     }
 }
 
+/// Whether anything under a group comes down by a blend of its own,
+/// which usvg says on a group around it.
+fn holds_a_blend(group: &usvg::Group) -> bool {
+    group.children().iter().any(|child| match child {
+        usvg::Node::Group(g) => g.blend_mode() != usvg::BlendMode::Normal || holds_a_blend(g),
+        _ => false,
+    })
+}
+
 /// Whether more than one layer would come in from under a group, which
 /// is when a fade on it stops being any one layer's.
 fn draws_more_than_one(group: &usvg::Group) -> bool {
@@ -500,6 +515,38 @@ fn draws_more_than_one(group: &usvg::Group) -> bool {
     n > 1
 }
 
+/// Where what a walk finds goes: into which of the file's groups, if
+/// any, and with what blend — a group's own, carried down to the one
+/// layer under it when there is only one (`walk`).
+#[derive(Clone, Copy, Default)]
+struct Place {
+    within: Option<usize>,
+    blend: chitrakar_doc::BlendMode,
+}
+
+/// A blend as the document says it; the two lists are the same sixteen.
+fn blend_of(mode: usvg::BlendMode) -> chitrakar_doc::BlendMode {
+    use chitrakar_doc::BlendMode as B;
+    match mode {
+        usvg::BlendMode::Normal => B::Normal,
+        usvg::BlendMode::Multiply => B::Multiply,
+        usvg::BlendMode::Screen => B::Screen,
+        usvg::BlendMode::Overlay => B::Overlay,
+        usvg::BlendMode::Darken => B::Darken,
+        usvg::BlendMode::Lighten => B::Lighten,
+        usvg::BlendMode::ColorDodge => B::ColorDodge,
+        usvg::BlendMode::ColorBurn => B::ColorBurn,
+        usvg::BlendMode::HardLight => B::HardLight,
+        usvg::BlendMode::SoftLight => B::SoftLight,
+        usvg::BlendMode::Difference => B::Difference,
+        usvg::BlendMode::Exclusion => B::Exclusion,
+        usvg::BlendMode::Hue => B::Hue,
+        usvg::BlendMode::Saturation => B::Saturation,
+        usvg::BlendMode::Color => B::Color,
+        usvg::BlendMode::Luminosity => B::Luminosity,
+    }
+}
+
 /// A transform the way the document says one.
 fn as_doc(t: usvg::Transform) -> chitrakar_doc::Transform {
     chitrakar_doc::Transform {
@@ -519,15 +566,17 @@ fn as_doc(t: usvg::Transform) -> chitrakar_doc::Transform {
 /// `push_pattern_transform`). Each layer under it is put right by the
 /// difference between where it stands and where usvg says it does.
 ///
-/// `within` is the group the layers here go into (`ImportedGroup`).
+/// `place` is the group the layers here go into (`ImportedGroup`) and
+/// the blend they come down with.
 fn walk(
     group: &usvg::Group,
     opacity: f32,
     clip: Option<&Vec<Vec<[f32; 2]>>>,
-    within: Option<usize>,
+    place: Place,
     truth: Option<usvg::Transform>,
     got: &mut Gathered,
 ) {
+    let within = place.within;
     // What a layer standing at `said` is out by: the truth over what usvg
     // said, which a path and a text both take from the group they are in.
     let fix = |said: usvg::Transform| {
@@ -538,6 +587,21 @@ fn walk(
     // goes into its colours as it always has; on more than one it is the
     // group's (`ImportedGroup`), and what is under it starts unfaded.
     let faded = group.opacity().get() < 1.0 && draws_more_than_one(group);
+    // A blend is the same: on one layer it is that layer's, and on more
+    // than one it is how what they make together comes down. (`mix-blend-
+    // mode`, which this editor's own exporter writes, came back Normal.)
+    let mine = blend_of(group.blend_mode());
+    // It is carried down to a lone layer only where nothing under the
+    // group blends as well: two blends, one inside the other, are two
+    // steps, and one layer can wear only one of them.
+    let blended = mine != chitrakar_doc::BlendMode::Normal
+        && (draws_more_than_one(group) || holds_a_blend(group));
+    // And a group that is isolated — `isolation:isolate`, which this
+    // editor's exporter writes on a group whose layers blend, or a fade,
+    // a clip or a mask, which isolate in every reader — with a blend
+    // inside it keeps the blend inside it: flattened, the blend would
+    // reach everything under the group.
+    let isolating = group.should_isolate() && holds_a_blend(group) && draws_more_than_one(group);
     let opacity = if faded {
         opacity
     } else {
@@ -582,7 +646,7 @@ fn walk(
     if clip.as_ref().is_some_and(|c| c.is_empty()) {
         return;
     }
-    let (clip, within, opacity) = if soft_here.is_some() || faded {
+    let (clip, within, opacity) = if soft_here.is_some() || faded || blended || isolating {
         let at = truth.unwrap_or_else(|| group.abs_transform());
         let mask = soft_here.and_then(|m| soft_mask(m, at, clip.as_ref(), got));
         // A group kept for its fade alone is still cut to its region, by
@@ -593,8 +657,12 @@ fn walk(
                 group.id().to_string()
             } else if soft_here.is_some() {
                 "Masked".to_string()
-            } else {
+            } else if faded {
                 "Faded".to_string()
+            } else if blended {
+                "Blended".to_string()
+            } else {
+                "Group".to_string()
             },
             mask,
             // What was folded on the way down comes onto the group too.
@@ -603,11 +671,28 @@ fn walk(
             } else {
                 opacity
             },
+            blend: if mine != chitrakar_doc::BlendMode::Normal {
+                mine
+            } else {
+                place.blend
+            },
             within,
         });
         (clip, Some(got.groups.len() - 1), 1.0)
     } else {
         (clip, within, opacity)
+    };
+    // What is under this group goes in there, with the group's blend when
+    // it is not a group of its own.
+    let place = Place {
+        within,
+        blend: if within != place.within {
+            chitrakar_doc::BlendMode::Normal
+        } else if mine != chitrakar_doc::BlendMode::Normal {
+            mine
+        } else {
+            place.blend
+        },
     };
     let clip = clip.as_ref();
     let worn = clip.map(|c| mask_of(c));
@@ -617,7 +702,7 @@ fn walk(
                 g,
                 opacity,
                 clip,
-                within,
+                place,
                 truth.map(|t| t.pre_concat(g.transform())),
                 got,
             ),
@@ -632,6 +717,7 @@ fn walk(
                             let below = got.shapes.len();
                             if let Some(mut pic) = pattern_picture(p, pattern, alpha, clip, below) {
                                 pic.within = within;
+                                pic.blend = place.blend;
                                 got.pics.push(pic);
                             }
                             true
@@ -644,6 +730,7 @@ fn walk(
                     let fixed = fix(p.abs_transform());
                     for mut node in shapes_of(p, opacity) {
                         node.mask = worn.clone();
+                        node.blend = place.blend;
                         if let Some(f) = fixed {
                             node.transform = f.compose(node.transform);
                         }
@@ -663,7 +750,7 @@ fn walk(
             // stays where it is.
             usvg::Node::Text(t) => {
                 let before = got.shapes.len();
-                walk(t.flattened(), opacity, clip, within, None, got);
+                walk(t.flattened(), opacity, clip, place, None, got);
                 let a = t.abs_transform();
                 let placed = match fix(a) {
                     Some(f) => f.compose(as_doc(a)),
@@ -684,12 +771,13 @@ fn walk(
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
                     usvg::ImageKind::SVG(tree) => {
-                        walk(tree.root(), opacity, clip, within, None, got)
+                        walk(tree.root(), opacity, clip, place, None, got)
                     }
                     kind => {
                         if let Some(mut pic) = picture_of(img, kind, opacity, got.shapes.len()) {
                             pic.clip = worn.clone();
                             pic.within = within;
+                            pic.blend = place.blend;
                             got.pics.push(pic);
                         }
                     }
@@ -861,7 +949,7 @@ fn mask_cover(
             m.root(),
             1.0,
             None,
-            None,
+            Place::default(),
             Some(usvg::Transform::default()),
             &mut inside,
         );
@@ -1016,6 +1104,7 @@ fn pattern_picture(
         opacity,
         below,
         within: None,
+        blend: chitrakar_doc::BlendMode::Normal,
         clip: Some(mask_of(&outline)),
     })
 }
@@ -1035,7 +1124,7 @@ fn draw_tile(
         root,
         1.0,
         None,
-        None,
+        Place::default(),
         Some(usvg::Transform::default()),
         &mut got,
     );
@@ -1131,6 +1220,7 @@ fn picture_of(
         opacity,
         below,
         within: None,
+        blend: chitrakar_doc::BlendMode::Normal,
         clip: None,
     })
 }
@@ -2270,18 +2360,7 @@ mod tests {
     #[test]
     fn what_a_clip_path_hides_stays_hidden() {
         let drawn = |svg: &str, w: u32, h: u32| {
-            let imported = import_svg(svg.as_bytes()).unwrap();
-            let mut doc = Document::new(w, h, ColorMode::Rgb);
-            let root = doc.root();
-            for (i, n) in imported.shapes.iter().enumerate() {
-                doc.apply(Command::AddNode {
-                    parent: root,
-                    index: i,
-                    node: Box::new(n.clone()),
-                })
-                .unwrap();
-            }
-            let ours = chitrakar_render::render(&doc).unwrap();
+            let ours = chitrakar_render::render(&brought_in(svg, w, h)).unwrap();
             let tree = {
                 let mut opt = usvg::Options::default();
                 opt.fontdb_mut().load_font_data(FACE.to_vec());
@@ -2401,20 +2480,7 @@ mod tests {
     /// new one.
     #[test]
     fn a_mask_that_is_only_a_region_is_carried_as_one() {
-        let drawn = |svg: &str| {
-            let imported = import_svg(svg.as_bytes()).unwrap();
-            let mut doc = Document::new(60, 40, ColorMode::Rgb);
-            let root = doc.root();
-            for (i, n) in imported.shapes.iter().enumerate() {
-                doc.apply(Command::AddNode {
-                    parent: root,
-                    index: i,
-                    node: Box::new(n.clone()),
-                })
-                .unwrap();
-            }
-            chitrakar_render::render(&doc).unwrap()
-        };
+        let drawn = |svg: &str| chitrakar_render::render(&brought_in(svg, 60, 40)).unwrap();
         let theirs = |svg: &str| {
             let mut opt = usvg::Options::default();
             opt.fontdb_mut().load_font_data(FACE.to_vec());
@@ -2477,9 +2543,9 @@ mod tests {
         }
 
         // Painted grey rather than white: a real shade, so it must not be
-        // read as a region. resvg fades the content to about half; this
-        // leaves it whole, which is the loss being kept rather than a
-        // region being invented.
+        // read as a region. resvg fades the content to about half inside
+        // it and hides it outside, and so does this now — as a raster
+        // mask on a group of its own (`soft_mask`), not as a region.
         let soft = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40">
              <defs><mask id="m">
                <rect x="5" y="5" width="20" height="30" fill="#808080"/>
@@ -2493,28 +2559,37 @@ mod tests {
             imported.shapes.iter().all(|n| n.mask.is_none()),
             "a mask painted grey is not a region"
         );
-        // Which is to say: outside it, this still shows what the file
-        // fades — the known loss, asserted so that carrying it later is
-        // a change somebody notices.
-        let ours = drawn(soft);
         assert!(
-            ours.get(45, 20).a > 0.5,
-            "still whole outside a grey mask, which is the loss kept"
+            matches!(
+                imported.groups.first().and_then(|g| g.mask.as_ref()),
+                Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Raster { .. },
+                    ..
+                })
+            ),
+            "it is a raster mask on the group"
+        );
+        let ours = drawn(soft);
+        let half = ours.get(15, 20).a;
+        assert!(
+            ours.get(45, 20).a < 0.01 && (half - 0.5).abs() < 0.05,
+            "hidden outside a grey mask and half inside it, got {} and {half}",
+            ours.get(45, 20).a
         );
     }
 
     /// A page nobody wrote, cut down to what an SVG and this importer
     /// both carry: shapes, paths, strokes, gradients, pictures, groups,
-    /// frames, copies and text. Left out, because the importer does not
-    /// bring them in (masks travel as pictures, which it passes over as
-    /// greyscale; effects and blends it has no layer for; a group's
-    /// opacity it folds into each of its layers, which is the same only
-    /// where they do not overlap): masks, blends, effects, holds, faded
-    /// groups, frames and copies, and the layers that work on what is
-    /// under them. Text keeps what a reader can set exactly — not a
-    /// synthesized italic or bold, which the bundled face has no cut for
-    /// and a reader will not fake, nor text round a closed guide, which
-    /// the page wraps past the guide's start and SVG cannot.
+    /// frames, copies, text, masks, blends, faded groups and layers held
+    /// to the one below. Left out: effects, which the importer has no
+    /// layer for, and the layers that work on what is under them. Masks,
+    /// blends, fades and holds were left out too until the importer
+    /// kept the groups they need (`ImportedGroup`); let back in, they
+    /// found two things the *exporter* had wrong (`isolated`, and the
+    /// blend a mask's wrapper takes). Text keeps what a reader can set
+    /// exactly — not a synthesized italic or bold, which the bundled face
+    /// has no cut for and a reader will not fake, nor text round a closed
+    /// guide, which the page wraps past the guide's start and SVG cannot.
     fn portable(seed: u64) -> Document {
         let mut doc = chitrakar_doc::fixture::page(seed);
         let page = doc.clone();
@@ -2523,20 +2598,11 @@ mod tests {
             if page.parent_of(id).is_none() {
                 continue;
             }
-            for c in [
-                Command::SetMask { id, mask: None },
-                Command::SetBlendMode {
-                    id,
-                    blend: chitrakar_doc::BlendMode::Normal,
-                },
-                Command::SetEffects {
-                    id,
-                    effects: vec![],
-                },
-                Command::SetClipped { id, clipped: false },
-            ] {
-                doc.apply(c).unwrap();
-            }
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![],
+            })
+            .unwrap();
             let closed_guide = matches!(
                 &n.kind,
                 NodeKind::Text(t) if matches!(
@@ -2558,9 +2624,7 @@ mod tests {
                 doc.apply(Command::SetVisible { id, visible: false })
                     .unwrap();
             }
-            if n.kind.holds_children() {
-                doc.apply(Command::SetOpacity { id, opacity: 1.0 }).unwrap();
-            }
+
             if let NodeKind::Text(t) = &n.kind {
                 let mut t = t.clone();
                 t.italic = false;
@@ -3597,5 +3661,61 @@ mod tests {
             "one layer, no group"
         );
         assert_eq!(faded_bad(&one).0, 0);
+    }
+
+    /// A blend comes in as the file says it — a layer's own where the
+    /// blended element is one layer, a group's where it is more — and
+    /// comes down as a reader brings it down, over an opaque page so the
+    /// question is the blend and not how translucent paint mixes. It used
+    /// to come in Normal, so a page this editor exported with its blends
+    /// came back without them.
+    #[test]
+    fn a_blend_comes_in_as_the_file_says_it() {
+        use chitrakar_doc::BlendMode as B;
+        let head = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">
+<rect width="64" height="48" fill="#3080c0"/><rect x="32" width="32" height="48" fill="#e0b040"/>"##;
+        let files = [
+            (
+                r##"<circle cx="32" cy="24" r="18" fill="#c04060" style="mix-blend-mode:multiply"/>"##,
+                B::Multiply,
+                false,
+            ),
+            (
+                r##"<g style="mix-blend-mode:screen"><circle cx="24" cy="24" r="16" fill="#40c060"/><circle cx="40" cy="24" r="16" fill="#a03080"/></g>"##,
+                B::Screen,
+                true,
+            ),
+            (
+                r##"<rect x="6" y="6" width="52" height="16" fill="#80ff40" style="mix-blend-mode:difference"/><rect x="6" y="26" width="52" height="16" fill="#ff2080" style="mix-blend-mode:hue"/>"##,
+                B::Difference,
+                false,
+            ),
+            (
+                r##"<rect x="6" y="6" width="52" height="36" fill="#60a0ff" style="mix-blend-mode:color-burn"/>"##,
+                B::ColorBurn,
+                false,
+            ),
+        ];
+        for (n, (body, mode, grouped)) in files.iter().enumerate() {
+            let svg = format!("{head}\n{body}\n</svg>");
+            let imported = import_svg(svg.as_bytes()).unwrap();
+            let said = if *grouped {
+                imported.groups.first().map(|g| g.blend)
+            } else {
+                imported.shapes.get(2).map(|s| s.blend)
+            };
+            assert_eq!(said, Some(*mode), "file {n}: the blend it says");
+            let (off, asked, first) = faded_bad(&svg);
+            assert!(asked > 2000, "file {n}: asked of enough of it ({asked})");
+            assert!(
+                off <= 2,
+                "file {n}: {off} pixels blended otherwise, the first {first:?}\n{svg}"
+            );
+        }
+        // And this editor's own export comes back with what it wrote.
+        let doc = brought_in(&format!("{head}\n{}\n</svg>", files[2].0), 64, 48);
+        let again = import_svg(crate::export_svg(&doc).unwrap().as_bytes()).unwrap();
+        let blends: Vec<B> = again.shapes.iter().map(|s| s.blend).collect();
+        assert_eq!(blends, vec![B::Normal, B::Normal, B::Difference, B::Hue]);
     }
 }
