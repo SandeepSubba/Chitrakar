@@ -107,11 +107,25 @@ export async function writeFiles(
   }
   const folder = await call<string | null>("choose_folder", { title });
   if (!folder) return false;
-  for (const f of files) {
-    const path = await call<string>("join_path", { folder, name: f.name });
-    await writePath(path, f.make());
-  }
+  const paths = await Promise.all(
+    files.map((f) => call<string>("join_path", { folder, name: f.name })),
+  );
+  // A save panel asks before writing over a file; a folder has no
+  // panel to ask, so this does — once, for all of them.
+  const there = await call<string[]>("already_there", { paths });
+  if (there.length > 0 && !window.confirm(replacing(there))) return false;
+  for (const [i, f] of files.entries()) await writePath(paths[i], f.make());
   return true;
+}
+
+/** The question asked before writing over files already in a folder. */
+export function replacing(there: string[]): string {
+  const names = there.map(baseName);
+  const listed =
+    names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")} and ${names.length - 3} more`;
+  return there.length === 1
+    ? `${names[0]} is already in ${folderName(there[0])}. Replace it?`
+    : `${there.length} of these files are already in ${folderName(there[0])} (${listed}). Replace them?`;
 }
 
 function download(bytes: Uint8Array, name: string, type: string) {

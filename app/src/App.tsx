@@ -384,23 +384,26 @@ async function getDraft(): Promise<Uint8Array | null> {
     req.onerror = () => resolve(null);
   });
 }
-/** The draft's name, kept beside it so a restored document is still
- * called what it was called. */
-async function putDraftName(name: string): Promise<void> {
+/** What is kept beside the draft, so a restored document comes back as
+ * what it was and not only as its layers: `name`, what it was called;
+ * `path`, the file it had in the desktop shell, so Save writes back to
+ * it; `saved`, whether that file already held it. */
+type DraftNote = "name" | "path" | "saved";
+async function putDraftNote(key: DraftNote, value: string): Promise<void> {
   const db = await draftDb();
   if (!db) return;
   db.transaction(DRAFT_STORE, "readwrite")
     .objectStore(DRAFT_STORE)
-    .put(name, "name");
+    .put(value, key);
 }
-async function getDraftName(): Promise<string | null> {
+async function getDraftNote(key: DraftNote): Promise<string | null> {
   const db = await draftDb();
   if (!db) return null;
   return new Promise((resolve) => {
     const req = db
       .transaction(DRAFT_STORE)
       .objectStore(DRAFT_STORE)
-      .get("name");
+      .get(key);
     req.onsuccess = () =>
       resolve(typeof req.result === "string" ? req.result : null);
     req.onerror = () => resolve(null);
@@ -414,6 +417,8 @@ async function clearDraft(): Promise<void> {
     .objectStore(DRAFT_STORE);
   store.delete("current");
   store.delete("name");
+  store.delete("path");
+  store.delete("saved");
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
@@ -1250,11 +1255,17 @@ export function App() {
    * save is a download. */
   const [docPath, setDocPath] = useState<string | null>(null);
   const draftName = useRef<string | null>(null);
+  const draftPath = useRef<string | null>(null);
+  const draftSaved = useRef(false);
   useEffect(() => {
     getDraft().then(
       (bytes) => bytes && bytes.length > 0 && setRecoverable(bytes),
     );
-    getDraftName().then((name) => (draftName.current = name));
+    getDraftNote("name").then((name) => (draftName.current = name));
+    getDraftNote("path").then((path) => (draftPath.current = path || null));
+    // A draft kept before this was written down is taken as unsaved: a
+    // question too many is cheaper than work lost twice.
+    getDraftNote("saved").then((saved) => (draftSaved.current = saved === "yes"));
   }, []);
   useEffect(() => {
     // Nothing to keep until there is something on the page: the empty
@@ -1271,13 +1282,17 @@ export function App() {
     const t = setTimeout(() => {
       try {
         putDraft(session.save());
-        putDraftName(docName);
+        putDraftNote("name", docName);
+        putDraftNote("path", docPath ?? "");
+        putDraftNote("saved", unsaved ? "no" : "yes");
       } catch {
         // A draft that cannot be written is not worth an alert.
       }
     }, 1500);
     return () => clearTimeout(t);
-  }, [session, saveTick, layers.length, docName, prefs.keepDraft]);
+    // `unsaved` is declared further down, with the history it reads;
+    // `savedAt` is what moves it when nothing else here does.
+  }, [session, saveTick, layers.length, docName, docPath, savedAt, prefs.keepDraft]);
 
   /** Faces a text block can be set in. The bundled one is always there;
    * the rest are fetched from /fonts once per page load and registered
@@ -7113,7 +7128,13 @@ export function App() {
             onClick={() => {
               const bytes = recoverable;
               setRecoverable(null);
-              openDocumentBytes(bytes, draftName.current ?? undefined);
+              if (!openDocumentBytes(bytes, draftName.current ?? undefined)) return;
+              // Back with the file it had, so Save writes there again;
+              // and, unless that file already held it, as work still to
+              // save — it is a draft because it was not written down,
+              // and coming back must not make it look as if it had been.
+              setDocPath(draftPath.current);
+              if (!draftSaved.current) setSavedAt(-1);
             }}
           >
             Restore

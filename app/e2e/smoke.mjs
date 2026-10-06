@@ -10149,6 +10149,10 @@ assert(
       (await page.locator(".recover").count()) === 0,
     `Restore brings the document back (${rowsBefore} layers)`,
   );
+  assert(
+    (await page.locator(".unsaved-dot").count()) === 1,
+    "and as work still to save, which is what it was",
+  );
 }
 
 // 11. A finger is not a pointer. On a device that says its pointer is
@@ -12876,6 +12880,7 @@ assert(
   let shellAsked = "";
   shell.on("dialog", async (d) => {
     if (d.type() === "confirm") shellAsked = d.message();
+    else if (d.type() === "beforeunload") shellAsked = "beforeunload";
     else shellErrors.push(`dialog: ${d.message()}`);
     await (shellAnswer === "accept" ? d.accept() : d.dismiss());
   });
@@ -12912,7 +12917,13 @@ assert(
       },
       unregisterCallback: (id) => callbacks.delete(id),
       invoke: async (cmd, args, options) => {
-        calls.push({ cmd, args: args instanceof Uint8Array ? `${args.length} bytes` : args });
+        calls.push({
+          cmd,
+          args:
+            args instanceof Uint8Array
+              ? { bytes: args.length, path: decodeURIComponent(options.headers.path) }
+              : args,
+        });
         switch (cmd) {
           case "plugin:event|listen": {
             const id = next++;
@@ -12935,6 +12946,8 @@ assert(
             return answers.folder.shift() ?? null;
           case "join_path":
             return `${args.folder}/${args.name}`;
+          case "already_there":
+            return args.paths.filter((p) => fs.has(p));
           case "read_path": {
             const bytes = fs.get(args.path);
             if (!bytes) throw `${args.path}: No such file or directory`;
@@ -13157,6 +13170,36 @@ assert(
     !(await shell.isVisible('[role=dialog][aria-label="Export"]')),
     "and the window closes",
   );
+  // The same set into the same folder again: the files are there, and
+  // with no save panel to ask about them, the app asks, once.
+  const setAgain = async () => {
+    await answer("folder", "/home/ané/Exports");
+    await shell.keyboard.press("Control+Shift+E");
+    await shell.waitForSelector('[role=dialog][aria-label="Export"]');
+    await shell.click('.export-formats .preset:text-is("PNG")');
+    await shell.click('.export-scales .preset:text-is("Set")');
+    shellAsked = "";
+    await shell.click(".modal-actions .primary");
+  };
+  const writesThen = (await asked("write_path")).length;
+  shellAnswer = "dismiss";
+  await setAgain();
+  await shell.waitForTimeout(500);
+  shellAnswer = "accept";
+  assert(
+    shellAsked ===
+      "3 of these files are already in Exports (winter@1x.png, winter@2x.png, winter@3x.png). Replace them?" &&
+      (await asked("write_path")).length === writesThen &&
+      (await shell.isVisible('[role=dialog][aria-label="Export"]')),
+    `writing over files in a folder asks, and a no writes nothing (${shellAsked})`,
+  );
+  await shell.keyboard.press("Escape");
+  await setAgain();
+  await shell.waitForSelector('[role=dialog][aria-label="Export"]', { state: "detached", timeout: 15000 });
+  assert(
+    (await asked("write_path")).length === writesThen + 3,
+    "and a yes writes them all",
+  );
 
   // The window is called what the document is, marked while there is
   // work to save.
@@ -13244,6 +13287,40 @@ assert(
       (await shell.evaluate((p) => window.__shell.fs.get(p).length, autumn)) !==
         (await shell.evaluate((p) => window.__shell.fs.get(p).length, winter)),
     `and Save writes back to the file it was dropped from, without asking (${writes} write)`,
+  );
+
+  // A crash, and the draft brought back: with its file, so Save writes
+  // there again, and still unsaved, since that is why it is a draft.
+  await rect(300, 300);
+  await shell.waitForTimeout(2200);
+  await shell.reload();
+  await shell.waitForSelector("#engine-canvas");
+  await shell.waitForTimeout(600);
+  await shell.click(".recover >> text=Restore");
+  await shell.waitForTimeout(600);
+  assert(
+    (await unsavedDot()) === 1 && (await title()) === "• autumn — Chitrakar",
+    `a draft restored is still work to save (${await title()})`,
+  );
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  const restoredWrites = await asked("write_path");
+  assert(
+    (await asked("choose_to_save")).length === 0 &&
+      restoredWrites.length === 1 &&
+      restoredWrites[0].path === autumn,
+    `and saves back to the file it had (${JSON.stringify(restoredWrites)})`,
+  );
+  // Saved, then lost: the draft knows it was saved, and comes back so.
+  await shell.waitForTimeout(2200);
+  await shell.reload();
+  await shell.waitForSelector("#engine-canvas");
+  await shell.waitForTimeout(600);
+  await shell.click(".recover >> text=Restore");
+  await shell.waitForTimeout(600);
+  assert(
+    (await unsavedDot()) === 0 && (await title()) === "autumn — Chitrakar",
+    "a draft of a saved document comes back saved",
   );
   assert(shellErrors.length === 0, `nothing went wrong on the way (${shellErrors.join(" | ")})`);
   await shell.close();

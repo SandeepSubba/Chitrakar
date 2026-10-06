@@ -157,6 +157,13 @@ fn join_path(folder: String, name: String) -> Result<String, String> {
     files::path_to_string(std::path::Path::new(&folder).join(name))
 }
 
+/// Which of these paths something is already at, so an export of
+/// several files into a folder can ask before writing over them.
+#[tauri::command]
+async fn already_there(paths: Vec<String>) -> Vec<String> {
+    files::already_there(&paths)
+}
+
 /// Smoke-test command: create an engine session natively and report on it.
 /// Replaced by real native-engine plumbing if/when a platform needs the
 /// native render path.
@@ -182,7 +189,8 @@ pub fn run() {
             choose_folder,
             read_path,
             write_path,
-            join_path
+            join_path,
+            already_there
         ])
         .run(tauri::generate_context!())
         .expect("error while running Chitrakar");

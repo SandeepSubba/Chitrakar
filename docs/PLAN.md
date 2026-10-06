@@ -922,9 +922,15 @@ without reading anything else.*
   destroy` and `allow-set-title` for these; the stand-in bridge
   delivers events the shell's way (a callback registered by number) and
   block 9ca closes the window and drops files through it.
-  Not done: a document restored from the draft has no path, so its
-  first Save asks; an export to a folder writes over files of the same
-  name there without asking.
+  The draft keeps the file too, and whether the file already held
+  what the draft holds (`name`, `path`, `saved` beside the bytes):
+  restored, a document saves back where it was, and comes back as work
+  still to save unless it had been saved — before, a restored draft
+  came back looking saved, in the browser as well, so the work it
+  rescued could be lost a second time without a question. An export of
+  several files into a folder asks before writing over any already
+  there, once for all of them (`already_there`), since there is no
+  save panel to ask.
 - **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -112,6 +112,17 @@ pub fn with_extension(path: PathBuf, filters: &[Filter]) -> PathBuf {
     PathBuf::from(named)
 }
 
+/// Which of these paths something is already at. A save panel asks
+/// about replacing a file itself; writing several into a folder has no
+/// panel to ask, so the app asks, and this is what it asks about.
+pub fn already_there(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .filter(|p| fs::symlink_metadata(p).is_ok())
+        .cloned()
+        .collect()
+}
+
 fn has_extension(name: &str, ext: &str) -> bool {
     Path::new(name)
         .extension()
@@ -152,6 +163,28 @@ mod tests {
         assert!(dir.join("in-the-way").is_dir());
         let left: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(left.len(), 1, "a part file was left behind: {left:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_is_already_there_is_named_and_nothing_else() {
+        let dir =
+            std::env::temp_dir().join(format!("chitrakar-files-there-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let at = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        fs::write(at("poster@1x.png"), b"png").unwrap();
+        fs::create_dir_all(at("poster@3x.png")).unwrap();
+        let asked = [
+            at("poster@1x.png"),
+            at("poster@2x.png"),
+            at("poster@3x.png"),
+        ];
+        // A folder in the way is in the way as much as a file is.
+        assert_eq!(
+            already_there(&asked),
+            vec![at("poster@1x.png"), at("poster@3x.png")]
+        );
+        assert!(already_there(&[]).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
