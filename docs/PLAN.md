@@ -909,12 +909,25 @@ without reading anything else.*
   extensions, the whole write); the browser suite stands the shell in
   with a bridge whose filesystem is a Map and whose panels answer from a
   queue (block 9ca), which is all the app ever sees of a shell anyway.
-  Not done: a file dropped on the window, or restored from the draft,
-  has no path, so its first Save asks; an export to a folder writes
-  over files of the same name there without asking.
+  Files dropped on the window come by path too: the shell takes a drop
+  of files itself (the page never sees one the browser's way, so before
+  this a photograph dropped on the desktop window simply did not
+  arrive), a picture is read and placed, and a document opens with its
+  file, so Save writes back to it. Closing the window asks about unsaved
+  work — a window closed from its title bar never fires `beforeunload`,
+  so the close box used to throw work away without a word — and the
+  title bar says the document's name, with a • while there is work to
+  save. Opening by dropping asks about unsaved work in a browser too,
+  which it never had. The shell's capability grants `core:window:allow-
+  destroy` and `allow-set-title` for these; the stand-in bridge
+  delivers events the shell's way (a callback registered by number) and
+  block 9ca closes the window and drops files through it.
+  Not done: a document restored from the draft has no path, so its
+  first Save asks; an export to a folder writes over files of the same
+  name there without asking.
 - **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1360 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both

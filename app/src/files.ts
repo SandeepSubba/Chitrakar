@@ -122,3 +122,23 @@ function download(bytes: Uint8Array, name: string, type: string) {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+/** What a picture is, by its name — for a file arriving by path, which
+ * carries no type the way a browser's `File` does. `null` for anything
+ * that is not a picture, which a drop then passes over the way a
+ * browser's drop passes over what is not `image/*`. */
+export function imageType(name: string): string | null {
+  const ext = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase() ?? "";
+  const types: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    svg: "image/svg+xml",
+    gif: "image/gif",
+    webp: "image/webp",
+    tif: "image/tiff",
+    tiff: "image/tiff",
+    bmp: "image/bmp",
+  };
+  return types[ext] ?? null;
+}

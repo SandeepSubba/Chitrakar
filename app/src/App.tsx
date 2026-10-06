@@ -16,6 +16,7 @@ import {
   chooseToOpen,
   chooseToSave,
   folderName,
+  imageType,
   readPath,
   writeFiles,
   writePath,
@@ -6445,6 +6446,9 @@ export function App() {
     const files = Array.from(e.dataTransfer.files);
     const doc = files.find((f) => f.name.toLowerCase().endsWith(".chitra"));
     if (doc) {
+      // Opening by dropping is still opening: what has not been saved
+      // is asked about the same as by any other way in.
+      if (!mayDiscard()) return;
       doc
         .arrayBuffer()
         .then((buf) => openDocumentBytes(new Uint8Array(buf), doc.name));
@@ -6454,6 +6458,79 @@ export function App() {
       if (file.type.startsWith("image/")) placeImageFile(file);
     }
   };
+
+  /** Files dropped on the desktop shell's window. The shell takes a drop
+   * of files itself rather than handing it to the page — which would
+   * otherwise never see it at all — and says where they are, so a
+   * document dropped on the window has its file the way one opened from
+   * the panel does, and Save writes back to it. */
+  const onShellDrop = async (paths: string[]) => {
+    const doc = paths.find((p) => p.toLowerCase().endsWith(".chitra"));
+    if (doc) {
+      if (mayDiscard()) await openPath(doc);
+      return;
+    }
+    for (const path of paths) {
+      const type = imageType(path);
+      if (!type) continue;
+      try {
+        const bytes = await readPath(path);
+        placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
+      } catch (err) {
+        alert(`Could not place ${baseName(path)}: ${err}`);
+      }
+    }
+  };
+  const onShellDropRef = useRef(onShellDrop);
+  onShellDropRef.current = onShellDrop;
+  /** Whether there is work nobody has written down, for a question asked
+   * from outside a render — the window being closed. */
+  const unsavedRef = useRef(false);
+  unsavedRef.current = unsaved;
+  useEffect(() => {
+    if (!isTauri()) return;
+    const gone: (() => void)[] = [];
+    let left = false;
+    (async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      const keep = (un: () => void) => (left ? un() : gone.push(un));
+      // Closing the window: a browser tab asks through beforeunload, and
+      // a window closed from its title bar never fires it — so without
+      // this, the close box threw work away without a word.
+      keep(
+        await getCurrentWindow().onCloseRequested((e) => {
+          if (
+            unsavedRef.current &&
+            !window.confirm(
+              "This document has changes that have not been saved. Closing the window leaves them behind.",
+            )
+          ) {
+            e.preventDefault();
+          }
+        }),
+      );
+      keep(
+        await getCurrentWebview().onDragDropEvent((e) => {
+          if (e.payload.type === "drop") onShellDropRef.current(e.payload.paths);
+        }),
+      );
+    })().catch((err) => console.warn("the shell's window events were not available:", err));
+    return () => {
+      left = true;
+      gone.forEach((un) => un());
+    };
+  }, []);
+  // The window is called what the document is, with a mark while there
+  // is work to save — what every desktop editor's title bar says.
+  useEffect(() => {
+    if (!isTauri()) return;
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().setTitle(`${unsaved ? "• " : ""}${docName || "untitled"} — Chitrakar`),
+      )
+      .catch(() => {});
+  }, [docName, unsaved]);
 
   // A picture from another application becomes a layer, and the paste
   // *event* is what serves it: only the event can see what another

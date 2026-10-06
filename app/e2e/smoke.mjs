@@ -3315,6 +3315,23 @@ assert(
     (await page.locator(".panel ul li.selected").count()) === 1,
     "and it is picked, ready to move",
   );
+  // A document dropped on work not yet saved asks first, as opening it
+  // any other way does: a no keeps the work, and nothing is read.
+  lastDialog = "";
+  dialogAnswer = "dismiss";
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([new Uint8Array([1, 2, 3])], "other.chitra"));
+    const host = document.querySelector(".canvas-host");
+    host.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+  await page.waitForTimeout(300);
+  dialogAnswer = "accept";
+  assert(
+    lastDialog.includes("not been saved") &&
+      (await page.locator(".panel ul li", { hasText: "shot.png" }).count()) === 1,
+    `a document dropped on unsaved work asks first, and a no keeps it (${lastDialog})`,
+  );
 
   const pasted = await makeImage();
   await page.evaluate((file) => {
@@ -12853,21 +12870,63 @@ assert(
   const shell = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const shellErrors = [];
   shell.on("pageerror", (e) => shellErrors.push(String(e)));
+  // Alerts are failures unless a step says it expects one; a question
+  // is answered as `shellAnswer` says and remembered in `shellAsked`.
+  let shellAnswer = "accept";
+  let shellAsked = "";
   shell.on("dialog", async (d) => {
-    shellErrors.push(`dialog: ${d.message()}`);
-    await d.accept();
+    if (d.type() === "confirm") shellAsked = d.message();
+    else shellErrors.push(`dialog: ${d.message()}`);
+    await (shellAnswer === "accept" ? d.accept() : d.dismiss());
   });
   await shell.addInitScript(() => {
     const fs = new Map();
     const answers = { open: [], save: [], folder: [] };
     const calls = [];
-    window.__shell = { fs, answers, calls };
+    // Events the way the shell delivers them: a listener is a callback
+    // registered by number, and an event is that callback called.
+    const callbacks = new Map();
+    const listeners = [];
+    let next = 1;
+    const emit = async (event, payload) => {
+      for (const l of listeners.filter((l) => l.event === event)) {
+        await callbacks.get(l.handler)?.({ event, id: l.id, payload });
+      }
+    };
+    window.__shell = { fs, answers, calls, emit, title: "", closed: false };
+    window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+      unregisterListener: (event, id) => {
+        const at = listeners.findIndex((l) => l.event === event && l.id === id);
+        if (at >= 0) listeners.splice(at, 1);
+      },
+    };
     window.__TAURI_INTERNALS__ = {
-      transformCallback: () => 0,
-      unregisterCallback: () => {},
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { label: "main", windowLabel: "main" },
+      },
+      transformCallback: (callback) => {
+        const id = next++;
+        callbacks.set(id, callback);
+        return id;
+      },
+      unregisterCallback: (id) => callbacks.delete(id),
       invoke: async (cmd, args, options) => {
         calls.push({ cmd, args: args instanceof Uint8Array ? `${args.length} bytes` : args });
         switch (cmd) {
+          case "plugin:event|listen": {
+            const id = next++;
+            listeners.push({ event: args.event, handler: args.handler, id });
+            return id;
+          }
+          case "plugin:event|unlisten":
+            return null;
+          case "plugin:window|set_title":
+            window.__shell.title = args.value;
+            return null;
+          case "plugin:window|destroy":
+            window.__shell.closed = true;
+            return null;
           case "choose_to_open":
             return answers.open.shift() ?? null;
           case "choose_to_save":
@@ -13097,6 +13156,94 @@ assert(
   assert(
     !(await shell.isVisible('[role=dialog][aria-label="Export"]')),
     "and the window closes",
+  );
+
+  // The window is called what the document is, marked while there is
+  // work to save.
+  const title = () => shell.evaluate(() => window.__shell.title);
+  assert((await title()) === "winter — Chitrakar", `the window is named for the document (${await title()})`);
+  await rect(220, 220);
+  assert((await title()) === "• winter — Chitrakar", `and marked once there is work to save (${await title()})`);
+
+  // Closing the window from its title bar asks first, where a browser
+  // tab would, and only then.
+  const closeWindow = async () => {
+    shellAsked = "";
+    await shell.evaluate(() => window.__shell.emit("tauri://close-requested", null));
+    await shell.waitForTimeout(150);
+    return shell.evaluate(() => {
+      const was = window.__shell.closed;
+      window.__shell.closed = false;
+      return was;
+    });
+  };
+  shellAnswer = "dismiss";
+  assert(
+    !(await closeWindow()) && shellAsked.includes("Closing the window"),
+    `closing with work unsaved asks, and a no keeps the window (${shellAsked})`,
+  );
+  shellAnswer = "accept";
+  assert(await closeWindow(), "and a yes closes it");
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  assert(
+    (await closeWindow()) && shellAsked === "",
+    "with nothing unsaved the window just closes",
+  );
+  assert((await title()) === "winter — Chitrakar", "and saving takes the mark off");
+
+  // Files dropped on the window arrive by path: the shell takes a drop
+  // itself, so the page never sees one the browser's way.
+  const drop = (paths) =>
+    shell.evaluate(
+      (p) => window.__shell.emit("tauri://drag-drop", { paths: p, position: { x: 400, y: 300 } }),
+      paths,
+    );
+  const before = await layerCount();
+  await drop(["/home/ané/Notes/list.txt"]);
+  await shell.waitForTimeout(300);
+  assert((await layerCount()) === before, "a dropped file that is not a picture is passed over");
+  await drop(["/home/ané/Posters/winter.png"]);
+  await shell.waitForTimeout(600);
+  assert(
+    (await layerCount()) === before + 1 &&
+      (await shell.locator(".panel ul li .layer-name", { hasText: "winter.png" }).count()) === 1,
+    "a dropped picture is placed, under its own name",
+  );
+  // A document dropped on the window opens with its file, so Save
+  // writes back to where it came from.
+  const autumn = "/home/ané/Drops/autumn.chitra";
+  await shell.evaluate(
+    ([from, to]) => window.__shell.fs.set(to, window.__shell.fs.get(from).slice()),
+    [winter, autumn],
+  );
+  shellAnswer = "dismiss";
+  await drop([autumn]);
+  await shell.waitForTimeout(400);
+  assert(
+    shellAsked.includes("not been saved") && (await layerCount()) === before + 1,
+    "dropping a document on unsaved work asks first, and a no keeps the work",
+  );
+  shellAnswer = "accept";
+  await drop([autumn]);
+  await shell.waitForTimeout(600);
+  assert(
+    (await shell.inputValue('input[aria-label="Document name"]')) === "autumn" &&
+      (await title()) === "autumn — Chitrakar",
+    "a yes opens the dropped document",
+  );
+  const asksBefore = (await asked("choose_to_save")).length;
+  const writesBefore = (await asked("write_path")).length;
+  await rect(240, 60);
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  const writes = (await asked("write_path")).length - writesBefore;
+  assert(
+    (await asked("choose_to_save")).length === asksBefore &&
+      writes === 1 &&
+      (await shell.evaluate((p) => window.__shell.fs.get(p).length, autumn)) !==
+        (await shell.evaluate((p) => window.__shell.fs.get(p).length, winter)),
+    `and Save writes back to the file it was dropped from, without asking (${writes} write)`,
   );
   assert(shellErrors.length === 0, `nothing went wrong on the way (${shellErrors.join(" | ")})`);
   await shell.close();
