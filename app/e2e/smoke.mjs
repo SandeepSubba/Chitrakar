@@ -4372,6 +4372,27 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert((await names()).join() === beforeSvg.join(), "and one undo takes that back too");
+  // A group faded with two overlapping layers in it is faded as one
+  // picture: half where they overlap, not three quarters.
+  const halfGroup = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <g id="half" opacity="0.5"><rect x="10" y="10" width="50" height="40" fill="#d02020"/>
+    <rect x="35" y="25" width="50" height="40" fill="#2040d0"/></g></svg>`;
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "half.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(halfGroup),
+  });
+  await page.waitForTimeout(400);
+  assert((await names()).includes("half"), `the faded group is a group (${await names()})`);
+  const overlap = await canvasPixel(45, 35);
+  const alone = await canvasPixel(20, 20);
+  assert(
+    Math.abs(overlap[3] - 128) <= 3 && Math.abs(alone[3] - 128) <= 3 && overlap[2] > overlap[0],
+    `half everywhere, the top layer's colour where they overlap (${overlap} and ${alone})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "one undo for that one as well");
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

@@ -34,14 +34,17 @@ pub struct ImportedSvg {
 }
 
 /// A group a file's layers come in inside rather than flattened: one
-/// seen through a mask with grey in it. A fade does not distribute over
-/// the layers under it the way a clip does — two overlapping layers each
-/// faded to half are three quarters where they overlap, one group faded
-/// to half is half — so the mask goes on the group, over what its layers
-/// make together, as a reader puts it.
+/// seen through a mask with grey in it, or faded with more than one
+/// layer under it. A fade does not distribute over the layers under it
+/// the way a clip does — two overlapping layers each faded to half are
+/// three quarters where they overlap, one group faded to half is half —
+/// so the mask and the fade go on the group, over what its layers make
+/// together, as a reader puts them.
 pub struct ImportedGroup {
     pub name: String,
     pub mask: Option<chitrakar_doc::Mask>,
+    /// How faded the group is, over what its layers make together.
+    pub opacity: f32,
     /// The group it is inside, if any.
     pub within: Option<usize>,
 }
@@ -197,6 +200,7 @@ impl Gathered {
             for &g in &chain[kept..] {
                 let mut group = Node::group(&self.groups[g].name);
                 group.mask = self.groups[g].mask.clone();
+                group.opacity = self.groups[g].opacity;
                 let id = add(&mut cmds, &mut open, group);
                 open.push((g, id, 0));
             }
@@ -474,6 +478,28 @@ fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
     }
 }
 
+/// Whether more than one layer would come in from under a group, which
+/// is when a fade on it stops being any one layer's.
+fn draws_more_than_one(group: &usvg::Group) -> bool {
+    fn count(group: &usvg::Group, n: &mut usize) {
+        for child in group.children() {
+            if *n > 1 {
+                return;
+            }
+            match child {
+                usvg::Node::Group(g) => count(g, n),
+                usvg::Node::Path(p) if p.is_visible() => *n += 1,
+                usvg::Node::Image(i) if i.is_visible() => *n += 1,
+                usvg::Node::Text(_) => *n += 1,
+                _ => {}
+            }
+        }
+    }
+    let mut n = 0;
+    count(group, &mut n);
+    n > 1
+}
+
 /// A transform the way the document says one.
 fn as_doc(t: usvg::Transform) -> chitrakar_doc::Transform {
     chitrakar_doc::Transform {
@@ -508,7 +534,15 @@ fn walk(
         let truth = truth?;
         Some(as_doc(truth.pre_concat(said.invert()?)))
     };
-    let opacity = opacity * group.opacity().get();
+    // A fade on a group with one layer under it is that layer's own, and
+    // goes into its colours as it always has; on more than one it is the
+    // group's (`ImportedGroup`), and what is under it starts unfaded.
+    let faded = group.opacity().get() < 1.0 && draws_more_than_one(group);
+    let opacity = if faded {
+        opacity
+    } else {
+        opacity * group.opacity().get()
+    };
     // What this group is seen through, and everything under it with it. A
     // clip is the one thing about a group that survives the group being
     // flattened away: it multiplies coverage by nought or one, and that
@@ -548,22 +582,32 @@ fn walk(
     if clip.as_ref().is_some_and(|c| c.is_empty()) {
         return;
     }
-    let (clip, within) = match soft_here {
-        Some(m) => {
-            let at = truth.unwrap_or_else(|| group.abs_transform());
-            let mask = soft_mask(m, at, clip.as_ref(), got);
-            got.groups.push(ImportedGroup {
-                name: if group.id().is_empty() {
-                    "Masked".to_string()
-                } else {
-                    group.id().to_string()
-                },
-                mask,
-                within,
-            });
-            (None, Some(got.groups.len() - 1))
-        }
-        None => (clip, within),
+    let (clip, within, opacity) = if soft_here.is_some() || faded {
+        let at = truth.unwrap_or_else(|| group.abs_transform());
+        let mask = soft_here.and_then(|m| soft_mask(m, at, clip.as_ref(), got));
+        // A group kept for its fade alone is still cut to its region, by
+        // the region on each layer under it, which distributes.
+        let clip = if soft_here.is_some() { None } else { clip };
+        got.groups.push(ImportedGroup {
+            name: if !group.id().is_empty() {
+                group.id().to_string()
+            } else if soft_here.is_some() {
+                "Masked".to_string()
+            } else {
+                "Faded".to_string()
+            },
+            mask,
+            // What was folded on the way down comes onto the group too.
+            opacity: if faded {
+                opacity * group.opacity().get()
+            } else {
+                opacity
+            },
+            within,
+        });
+        (clip, Some(got.groups.len() - 1), 1.0)
+    } else {
+        (clip, within, opacity)
     };
     let clip = clip.as_ref();
     let worn = clip.map(|c| mask_of(c));
@@ -3467,47 +3511,91 @@ mod tests {
         ];
         for (n, body) in files.iter().enumerate() {
             let svg = format!("{head}\n{body}\n</svg>");
-            let ours = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
-            let theirs = reader_draws(&svg, 64, 48);
-            let mut off = 0;
-            let mut first = None;
-            let mut asked = 0;
-            for y in 1..47u32 {
-                for x in 1..63u32 {
-                    let o = ours.get(x, y).to_srgb8();
-                    let t = theirs[(y * 64 + x) as usize];
-                    // Away from the reader's own edges, where two
-                    // rasterizers put a partly covered pixel a shade
-                    // apart; it is the fades this asks about.
-                    let edge = (-1..=1i32).any(|j| {
-                        (-1..=1i32).any(|i| {
-                            let q = theirs[((y as i32 + j) * 64 + x as i32 + i) as usize];
-                            (0..4).any(|k| (q[k] as i32 - t[k] as i32).abs() > 24)
-                        })
-                    });
-                    if edge {
-                        continue;
-                    }
-                    asked += 1;
-                    // Premultiplied, so a colour where nothing shows is
-                    // nothing, and a fade is compared as one.
-                    let pm = |c: [u8; 4], k: usize| c[k] as i32 * c[3] as i32 / 255;
-                    let worst = (0..3)
-                        .map(|k| (pm(o, k) - pm(t, k)).abs())
-                        .chain([(o[3] as i32 - t[3] as i32).abs()])
-                        .max()
-                        .unwrap();
-                    if worst > 16 {
-                        off += 1;
-                        first.get_or_insert((x, y, o, t));
-                    }
-                }
-            }
+            let (off, asked, first) = faded_bad(&svg);
             assert!(asked > 2000, "file {n}: asked of enough of it ({asked})");
             assert!(
                 off <= 2,
                 "file {n}: {off} pixels faded otherwise, the first {first:?}\n{svg}"
             );
         }
+    }
+
+    /// How many pixels a file comes in faded otherwise than a reader fades
+    /// it — premultiplied, so a fade is compared as one — away from the
+    /// reader's own edges, where two rasterizers put a partly covered
+    /// pixel a shade apart; how many were asked; and the first.
+    fn faded_bad(svg: &str) -> (usize, usize, Option<Mismatch>) {
+        let ours = chitrakar_render::render(&brought_in(svg, 64, 48)).unwrap();
+        let theirs = reader_draws(svg, 64, 48);
+        let (mut off, mut asked, mut first) = (0, 0, None);
+        for y in 1..47i32 {
+            for x in 1..63i32 {
+                let o = ours.get(x as u32, y as u32).to_srgb8();
+                let t = theirs[(y * 64 + x) as usize];
+                let edge = (-1..=1i32).any(|j| {
+                    (-1..=1i32).any(|i| {
+                        let q = theirs[((y + j) * 64 + x + i) as usize];
+                        (0..4).any(|k| (q[k] as i32 - t[k] as i32).abs() > 24)
+                    })
+                });
+                if edge {
+                    continue;
+                }
+                asked += 1;
+                let pm = |c: [u8; 4], k: usize| c[k] as i32 * c[3] as i32 / 255;
+                let worst = (0..3)
+                    .map(|k| (pm(o, k) - pm(t, k)).abs())
+                    .chain([(o[3] as i32 - t[3] as i32).abs()])
+                    .max()
+                    .unwrap();
+                if worst > 16 {
+                    off += 1;
+                    first.get_or_insert((x, y, o, t));
+                }
+            }
+        }
+        (off, asked, first)
+    }
+
+    /// A group faded with more than one layer under it is faded as one
+    /// picture, as a reader fades it — two overlapping layers in a group
+    /// at half are half where they overlap, not three quarters — so it
+    /// comes in as a group wearing the fade; nested, cut to a clip, and
+    /// with a stroke over a fill under it. A fade on a group with one
+    /// layer under it stays in that layer, which is exact there. (Nothing
+    /// faded here lands on anything opaque: translucent paint over a
+    /// colour is mixed in linear light here and in a device's values by
+    /// resvg, which is a different question from what is grouped.)
+    #[test]
+    fn a_faded_group_fades_as_one() {
+        let head = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48">"##;
+        let files = [
+            r##"<g opacity="0.5"><rect x="4" y="4" width="36" height="30" fill="#d02020"/><rect x="22" y="14" width="36" height="30" fill="#2040d0"/></g>"##,
+            r##"<g opacity="0.7"><rect x="2" y="2" width="10" height="40" fill="#20a040"/>
+<g opacity="0.5"><circle cx="30" cy="24" r="15" fill="#e0c020"/><circle cx="44" cy="24" r="14" fill="#8020a0"/></g></g>"##,
+            r##"<clipPath id="c"><rect x="8" y="6" width="48" height="36"/></clipPath>
+<g opacity="0.6" clip-path="url(#c)"><rect width="64" height="48" fill="#30a0c0"/><path d="M4 40 L32 6 L60 40 Z" fill="#f08020" stroke="#202060" stroke-width="5"/></g>"##,
+        ];
+        for (n, body) in files.iter().enumerate() {
+            let svg = format!("{head}\n{body}\n</svg>");
+            assert!(
+                !import_svg(svg.as_bytes()).unwrap().groups.is_empty(),
+                "file {n}: kept as a group"
+            );
+            let (off, asked, first) = faded_bad(&svg);
+            assert!(asked > 1500, "file {n}: asked of enough of it ({asked})");
+            assert!(
+                off <= 2,
+                "file {n}: {off} pixels faded otherwise, the first {first:?}\n{svg}"
+            );
+        }
+        let one = format!(
+            "{head}<g opacity=\"0.5\"><rect x=\"4\" y=\"4\" width=\"30\" height=\"30\" fill=\"#d02020\"/></g></svg>"
+        );
+        assert!(
+            import_svg(one.as_bytes()).unwrap().groups.is_empty(),
+            "one layer, no group"
+        );
+        assert_eq!(faded_bad(&one).0, 0);
     }
 }

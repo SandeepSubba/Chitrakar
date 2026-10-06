@@ -880,7 +880,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~598),
+- **Verify before committing:** `cargo test --workspace` (~601),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -4969,9 +4969,20 @@ without reading anything else.*
      mask on each layer instead of the group each fail it. Shades that
      meet inside one pixel of a mask mix in linear light here and in a
      device's values in resvg, which is the engine's compositing and was
-     left. Group *opacity* is still folded into each layer's colours,
-     the same non-distributing approximation the mask was about to make;
-     it has a home now if it is wanted. Long dashed curves drift a pixel or so against resvg; finer flattening
+     left. **And a faded group, faded as one.** Group *opacity* had
+     always been folded into each layer's colours — the same
+     non-distributing approximation the mask nearly made, so two
+     overlapping rectangles in a group at half came in three quarters
+     opaque where they met. A faded group with more than one layer under
+     it (`draws_more_than_one`) is an `ImportedGroup` wearing the fade
+     now, whatever was folded above it coming onto it too; a fade over
+     one layer still goes into that layer, where it is exact, and adds no
+     group the file did not need. Held to resvg on three files — two
+     overlapping layers, a faded group inside a faded group, a faded
+     group cut to a clip with a stroke over a fill — and failing with
+     the fold put back (`a_faded_group_fades_as_one`); the browser suite
+     reads half, not three quarters, where two layers of a placed file
+     overlap. Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.
      The twenty-sixth was **a second picture on the first one's bytes,
