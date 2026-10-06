@@ -48,7 +48,16 @@ cd app && npm run dev                       # browser dev on :5173 (builds wasm 
 cd app && npm run build                     # wasm + typecheck + bundle
 cd app && npm test                          # unit tests, then the browser suite
 cd shells/tauri/src-tauri && ../../../app/node_modules/.bin/tauri dev    # desktop
+cd shells/tauri/src-tauri && cargo test     # the shell's own (needs webkit2gtk-4.1 dev libs)
 ```
+
+In the desktop shell a document has a file: Save writes back to it,
+Save as and Open use the system's panels, exports ask where (a folder
+for several files), and File › Open recent keeps `prefs.recent`.
+`app/src/files.ts` is the one place that knows whether it is in a
+browser or the shell; the shell's commands are in
+`shells/tauri/src-tauri/src/lib.rs`, and smoke block 9ca drives all of
+it through a stand-in bridge.
 
 CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
@@ -75,7 +84,7 @@ that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose.
 
-The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1330 pixel-level
+The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1360 pixel-level
 assertions driving the built app in headless Chromium; it has caught real
 bugs). Run `npm run build && npm run test:e2e` in `app/`. Extend it whenever
 UI behavior changes. While writing one, `node e2e/one.mjs 9af` (or

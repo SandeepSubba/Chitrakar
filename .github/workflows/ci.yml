@@ -69,7 +69,7 @@ jobs:
       - run: npm run test:e2e
 
   shell:
-    name: Tauri shell (check, Linux)
+    name: Tauri shell (clippy and tests, Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,5 +93,9 @@ jobs:
       # tauri-build resolves frontendDist at compile time, so build the UI first.
       - run: npm ci && npm run build
         working-directory: app
-      - run: cargo check
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: shells/tauri/src-tauri
+      # What the shell does with files by path — the whole write, a path
+      # through a header — tested without a window.
+      - run: cargo test
         working-directory: shells/tauri/src-tauri

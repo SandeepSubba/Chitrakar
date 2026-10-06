@@ -18,6 +18,8 @@ export const COMMANDS = [
   { id: "new", label: "New document", group: "File", chord: "mod+n" },
   { id: "open", label: "Open…", group: "File", chord: "mod+o" },
   { id: "save", label: "Save", group: "File", chord: "mod+s" },
+  // Only in the desktop shell, where a document has somewhere to be.
+  { id: "save-as", label: "Save as…", group: "File", chord: "mod+shift+s" },
   { id: "export", label: "Export PNG", group: "File", chord: "mod+e" },
   { id: "export-window", label: "Export…", group: "File", chord: "mod+shift+e" },
   { id: "preferences", label: "Preferences", group: "File", chord: "mod+," },

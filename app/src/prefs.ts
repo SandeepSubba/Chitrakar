@@ -107,7 +107,20 @@ export type Prefs = {
   brushes: BrushPreset[];
   /** The exports kept by name. */
   exportSetups: ExportSetup[];
+  /** The documents opened or saved most lately, by path, newest first.
+   * Only the desktop shell has paths to keep; in a browser this stays
+   * empty. About the person and the machine, which is why it is here
+   * and not in any document. */
+  recent: string[];
 };
+
+/** How many documents File › Open recent remembers. */
+export const RECENT_MOST = 10;
+
+/** `recent` with `path` put first: opened or saved again, it is the
+ * newest, and it is in the list once. */
+export const withRecent = (recent: string[], path: string): string[] =>
+  [path, ...recent.filter((r) => r !== path)].slice(0, RECENT_MOST);
 
 export const DEFAULTS: Prefs = {
   units: "px",
@@ -131,6 +144,7 @@ export const DEFAULTS: Prefs = {
   toolKeys: {},
   commandKeys: {},
   exportSetups: [],
+  recent: [],
   barDocument: true,
   barSelection: true,
   barZoom: true,
@@ -274,6 +288,13 @@ export function clamp(p: Prefs): Prefs {
             jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
           }))
       : [],
+    // Paths each once, as many as the menu shows.
+    recent: Array.isArray(p.recent)
+      ? p.recent
+          .filter((r): r is string => typeof r === "string" && r !== "")
+          .filter((r, i, all) => all.indexOf(r) === i)
+          .slice(0, RECENT_MOST)
+      : [],
     // Each brush a name and two numbers within what the brush takes,
     // names each once; anything else on the list is dropped rather than
     // handed to a tool.
@@ -313,8 +334,12 @@ export function writePrefs(p: Prefs) {
 export function usePrefs() {
   const [prefs, setAll] = useState<Prefs>(readPrefs);
   useEffect(() => writePrefs(prefs), [prefs]);
+  // A patch, or a patch worked out from the preferences as they are
+  // when it lands — for a change made after waiting on something, by
+  // which time the ones it was read from may not be the ones there are.
   const set = useCallback(
-    (patch: Partial<Prefs>) => setAll((p) => clamp({ ...p, ...patch })),
+    (patch: Partial<Prefs> | ((p: Prefs) => Partial<Prefs>)) =>
+      setAll((p) => clamp({ ...p, ...(typeof patch === "function" ? patch(p) : patch) })),
     [],
   );
   const reset = useCallback(() => setAll({ ...DEFAULTS }), []);

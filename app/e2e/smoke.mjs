@@ -12844,6 +12844,264 @@ assert(
   await pickTool("Move");
 }
 
+// 9ca. In the desktop shell a document has a file: Save writes back to
+// it, Save as and Open use the system's panels, exports ask where, and
+// File › Open recent remembers. The shell is stood in for by a bridge
+// with a filesystem in a Map and panels that answer from a queue — the
+// app cannot tell, since all it ever sees of the shell is `invoke`.
+{
+  const shell = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const shellErrors = [];
+  shell.on("pageerror", (e) => shellErrors.push(String(e)));
+  shell.on("dialog", async (d) => {
+    shellErrors.push(`dialog: ${d.message()}`);
+    await d.accept();
+  });
+  await shell.addInitScript(() => {
+    const fs = new Map();
+    const answers = { open: [], save: [], folder: [] };
+    const calls = [];
+    window.__shell = { fs, answers, calls };
+    window.__TAURI_INTERNALS__ = {
+      transformCallback: () => 0,
+      unregisterCallback: () => {},
+      invoke: async (cmd, args, options) => {
+        calls.push({ cmd, args: args instanceof Uint8Array ? `${args.length} bytes` : args });
+        switch (cmd) {
+          case "choose_to_open":
+            return answers.open.shift() ?? null;
+          case "choose_to_save":
+            return answers.save.shift() ?? null;
+          case "choose_folder":
+            return answers.folder.shift() ?? null;
+          case "join_path":
+            return `${args.folder}/${args.name}`;
+          case "read_path": {
+            const bytes = fs.get(args.path);
+            if (!bytes) throw `${args.path}: No such file or directory`;
+            return bytes.slice().buffer;
+          }
+          case "write_path":
+            fs.set(decodeURIComponent(options.headers.path), args.slice());
+            return null;
+          default:
+            // The menu bar and anything else: refused, as a shell too
+            // old to have them would, so the menu comes back in the
+            // window where it can be clicked.
+            throw `no such command: ${cmd}`;
+        }
+      },
+    };
+  });
+  await shell.goto("http://localhost:8123/");
+  await shell.waitForSelector("#engine-canvas");
+  await shell.waitForTimeout(600);
+  const there = () => shell.evaluate(() => [...window.__shell.fs.keys()].sort());
+  const head = (path) =>
+    shell.evaluate((p) => {
+      const b = window.__shell.fs.get(p);
+      return b ? String.fromCharCode(...b.slice(0, 4)) : "";
+    }, path);
+  const asked = (cmd) =>
+    shell.evaluate((c) => window.__shell.calls.filter((k) => k.cmd === c).map((k) => k.args), cmd);
+  const answer = (kind, path) =>
+    shell.evaluate(([k, p]) => window.__shell.answers[k].push(p), [kind, path]);
+  const layerCount = () => shell.locator(".panel ul li .layer-name").count();
+  const unsavedDot = () => shell.locator(".unsaved-dot").count();
+  const rect = async (x, y) => {
+    await shell.keyboard.press("r");
+    const b = await shell.locator("#engine-page").boundingBox();
+    await shell.mouse.move(b.x + x, b.y + y);
+    await shell.mouse.down();
+    await shell.mouse.move(b.x + x + 60, b.y + y + 40, { steps: 4 });
+    await shell.mouse.up();
+    await shell.waitForTimeout(250);
+    await shell.keyboard.press("v");
+  };
+  const fileRow = async (label) => {
+    await shell.click(`.menu-label:text-is("File")`);
+    await shell.waitForTimeout(120);
+    return shell.locator(".menu-pop:not(.sub) .menu-item", { hasText: label });
+  };
+
+  assert(
+    (await shell.locator(".menubar").count()) === 1,
+    "a shell whose menu bar would not take the menu keeps it in the window",
+  );
+  await rect(40, 40);
+  const one = await layerCount();
+  assert(one === 1 && (await unsavedDot()) === 1, `a document with a shape, not yet saved (${one})`);
+
+  // The first save has nowhere to go but where the panel says.
+  const summer = "/home/ané/Posters/summer.chitra";
+  await answer("save", summer);
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  const firstAsk = (await asked("choose_to_save"))[0];
+  assert(
+    firstAsk?.name === "untitled.chitra" &&
+      firstAsk.beside === null &&
+      firstAsk.filters?.[0]?.extensions?.[0] === "chitra",
+    `the first save asks where, offering the document's name (${JSON.stringify(firstAsk)})`,
+  );
+  assert((await head(summer)) === "PK\u0003\u0004", "and writes the document where the panel said, path and all");
+  assert(
+    (await shell.inputValue('input[aria-label="Document name"]')) === "summer" &&
+      (await unsavedDot()) === 0,
+    "and the document is called what the file is, and saved",
+  );
+
+  // The second save does not ask: the document has a file now.
+  await rect(160, 40);
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  assert((await asked("choose_to_save")).length === 1, "a second save writes back without a panel");
+  assert(
+    (await asked("write_path")).length === 2 && (await unsavedDot()) === 0,
+    "over the file it came from",
+  );
+
+  // A name typed in the bar is the name exports and Save as offer; Save
+  // still writes back to the file there is.
+  await shell.fill('input[aria-label="Document name"]', "winter");
+  await shell.keyboard.press("Enter");
+  await rect(40, 160);
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  assert(
+    (await asked("choose_to_save")).length === 1 && (await there()).join() === summer,
+    "renaming in the bar does not move the file",
+  );
+  assert(
+    (await shell.inputValue('input[aria-label="Document name"]')) === "winter",
+    "and saving does not take the typed name back",
+  );
+  const three = await layerCount();
+  assert(three === 3, `three shapes in the file (${three})`);
+
+  // A save panel put away writes nothing and leaves the work unsaved.
+  await rect(160, 160);
+  await shell.keyboard.press("Control+Shift+S");
+  await shell.waitForTimeout(400);
+  assert(
+    (await asked("choose_to_save")).length === 2 && (await unsavedDot()) === 1,
+    "a cancelled Save as writes nothing and the dot stays",
+  );
+  const ask2 = (await asked("choose_to_save"))[1];
+  assert(
+    ask2.name === "winter.chitra" && ask2.beside === summer,
+    `Save as offers the typed name, beside the file there is (${JSON.stringify(ask2)})`,
+  );
+  const winter = "/home/ané/Posters/winter.chitra";
+  await answer("save", winter);
+  await (await fileRow("Save as…")).click();
+  await shell.waitForTimeout(400);
+  assert(
+    (await there()).join() === [summer, winter].sort().join() && (await unsavedDot()) === 0,
+    "Save as from the menu writes the new file and leaves the old",
+  );
+  const four = await layerCount();
+
+  // Open recent: newest first, by name.
+  const recent = await (await fileRow("Open recent")).first();
+  await recent.hover();
+  await shell.waitForTimeout(150);
+  const rows = await shell.locator(".menu-pop.sub .menu-item").allTextContents();
+  assert(
+    rows[0].includes("winter.chitra") && rows[1].includes("summer.chitra"),
+    `File › Open recent lists the documents, newest first (${rows.join(" | ")})`,
+  );
+  await shell.locator(".menu-pop.sub .menu-item", { hasText: "summer.chitra" }).click();
+  await shell.waitForTimeout(600);
+  assert(
+    (await layerCount()) === three &&
+      (await shell.inputValue('input[aria-label="Document name"]')) === "summer" &&
+      (await unsavedDot()) === 0,
+    `and opens the one picked, as it was last saved (${await layerCount()} layers, ${three} then)`,
+  );
+
+  // Open through the panel, which the shell's Ctrl+O reaches.
+  await answer("open", winter);
+  await shell.keyboard.press("Control+o");
+  await shell.waitForTimeout(600);
+  assert(
+    (await layerCount()) === four &&
+      (await shell.inputValue('input[aria-label="Document name"]')) === "winter",
+    "Open asks the panel and opens what it names",
+  );
+  assert(
+    (await asked("choose_to_open"))[0]?.filters?.[0]?.extensions?.[0] === "chitra",
+    "offering documents",
+  );
+  await rect(100, 100);
+  await shell.keyboard.press("Control+s");
+  await shell.waitForTimeout(400);
+  assert(
+    (await asked("choose_to_save")).length === 3 && (await asked("write_path")).length === 5,
+    "and a document opened by path saves back to it without asking",
+  );
+
+  // A file that has gone is said so, and taken off the list.
+  await shell.evaluate((p) => window.__shell.fs.delete(p), summer);
+  shellErrors.length = 0;
+  await (await fileRow("Open recent")).first().hover();
+  await shell.waitForTimeout(150);
+  await shell.locator(".menu-pop.sub .menu-item", { hasText: "summer.chitra" }).click();
+  await shell.waitForTimeout(400);
+  assert(
+    shellErrors.length === 1 && shellErrors[0].includes("Could not open summer.chitra"),
+    `a recent file that has gone says so (${shellErrors.join(" | ")})`,
+  );
+  shellErrors.length = 0;
+  assert(
+    (await layerCount()) === four + 1 &&
+      (await shell.inputValue('input[aria-label="Document name"]')) === "winter",
+    "and the document that was open is still open",
+  );
+  const kept = await shell.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).recent);
+  assert(kept.join() === winter, `and it is off the list (${kept.join(", ")})`);
+
+  // An export asks where, beside the document; a set asks for a folder.
+  await answer("save", "/home/ané/Posters/winter.png");
+  await shell.keyboard.press("Control+e");
+  await shell.waitForTimeout(500);
+  const ask4 = (await asked("choose_to_save"))[3];
+  assert(
+    ask4.name === "winter.png" && ask4.beside === winter && ask4.filters[0].extensions[0] === "png",
+    `an export asks where, offering a PNG beside the document (${JSON.stringify(ask4)})`,
+  );
+  assert(
+    (await head("/home/ané/Posters/winter.png")) === "\u0089PNG",
+    "and writes a PNG there",
+  );
+  await shell.keyboard.press("Control+Shift+E");
+  await shell.waitForSelector('[role=dialog][aria-label="Export"]');
+  await shell.click('.export-formats .preset:text-is("PNG")');
+  await shell.click('.export-scales .preset:text-is("Set")');
+  await shell.click(".modal-actions .primary");
+  await shell.waitForTimeout(400);
+  assert(
+    (await asked("choose_folder")).length === 1 &&
+      (await shell.isVisible('[role=dialog][aria-label="Export"]')),
+    "a set asks for a folder, and a folder not given leaves the window up",
+  );
+  await answer("folder", "/home/ané/Exports");
+  await shell.click(".modal-actions .primary");
+  await shell.waitForSelector('[role=dialog][aria-label="Export"]', { state: "detached", timeout: 15000 });
+  const exported = (await there()).filter((p) => p.startsWith("/home/ané/Exports/"));
+  assert(
+    exported.length === 3 && exported.every((p) => /winter@[123]x\.png$/.test(p)),
+    `and given one, writes the three into it (${exported.join(", ")})`,
+  );
+  for (const p of exported) assert((await head(p)) === "\u0089PNG", `${p} is a PNG`);
+  assert(
+    !(await shell.isVisible('[role=dialog][aria-label="Export"]')),
+    "and the window closes",
+  );
+  assert(shellErrors.length === 0, `nothing went wrong on the way (${shellErrors.join(" | ")})`);
+  await shell.close();
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

@@ -1,4 +1,7 @@
 fn main() {
+    // Set below only where the Swift compiled; declared everywhere so
+    // the compiler knows the name is meant.
+    println!("cargo::rustc-check-cfg=cfg(has_subject_matte)");
     tauri_build::build();
     #[cfg(target_os = "macos")]
     build_subject_matte();

@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import type { ExportArea, ExportFormat, ExportSetup, Prefs } from "./prefs";
+import type { Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
  *
@@ -132,6 +133,7 @@ export function ExportDialog({
   selectionBounds,
   hasIcc,
   keptRegions,
+  write,
   onClose,
 }: {
   session: WasmSession;
@@ -150,6 +152,9 @@ export function ExportDialog({
   /** The regions kept by name, in the order the engine holds them: a
    * slice each, when the area asked for is all of them. */
   keptRegions: string[];
+  /** Write the files out, the way the platform writes them; false is a
+   * panel cancelled, a failure throws. */
+  write: (files: Outgoing[]) => Promise<boolean>;
   onClose: () => void;
 }) {
   const format = prefs.exportFormat;
@@ -395,33 +400,29 @@ export function ExportDialog({
         }`
       : nameAt(scale);
 
-  const run = useCallback(() => {
+  const run = useCallback(async () => {
     if (refusal) return;
+    // Every scale asked for, and within each, every slice: the set
+    // and the slices multiply rather than choosing between each
+    // other, which is what an asset pipeline wanting three sizes of
+    // four slices means by it.
+    const files: Outgoing[] = scales.flatMap((s) =>
+      slices.map((slice, at) => ({
+        name: nameAt(s, slice),
+        type: spec.mime,
+        make: () => encodeAt(s, slice === null ? null : at),
+      })),
+    );
     try {
-      // Every scale asked for, and within each, every slice: the set
-      // and the slices multiply rather than choosing between each
-      // other, which is what an asset pipeline wanting three sizes of
-      // four slices means by it.
-      for (const s of scales) {
-        for (const [at, slice] of slices.entries()) {
-          const bytes = encodeAt(s, slice === null ? null : at);
-          const url = URL.createObjectURL(
-            new Blob([bytes as BlobPart], { type: spec.mime }),
-          );
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = nameAt(s, slice);
-          a.click();
-          URL.revokeObjectURL(url);
-        }
-      }
-      onClose();
+      // A panel put away leaves the window up, with what was in it:
+      // nobody who cancels a save panel meant to start again.
+      if (await write(files)) onClose();
     } catch (err) {
       setFailed(String(err));
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.
-  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, onClose]);
+  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, write, onClose]);
 
   const runRef = useRef(run);
   runRef.current = run;

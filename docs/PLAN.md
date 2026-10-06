@@ -882,9 +882,39 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
+- **Desktop shell, files by path:** in the shell a document has a file.
+  Save writes back over the one it was opened from or last saved to and
+  asks only the first time; Save as (Ctrl+Shift+S, shell only — a
+  browser's every save is already a new file) asks again and carries on
+  there; Open and Ctrl+O use the system's panel; an export asks where,
+  beside the document, and an export of several files (a set, slices,
+  every artboard) asks for a folder once rather than a panel per file;
+  File › Open recent lists the last ten by name (a folder beside the
+  name only when two share one), newest first, and a file that has gone
+  says so and comes off the list. The list is `prefs.recent` — about
+  the person and the machine, not the file. A browser is unchanged:
+  `app/src/files.ts` is the one place that knows which it is in. The
+  commands are the shell's own (`choose_to_open`, `choose_to_save`,
+  `choose_folder`, `read_path`, `write_path`, `join_path` in
+  `shells/tauri/src-tauri/src/lib.rs`): bytes cross as bytes and a
+  write's path beside them in a header, percent-encoded since a header
+  is ASCII, and a write lands whole or not at all — beside the file
+  first, renamed over it once it is all down (`files::write_whole`), so
+  a full disk halfway through a save leaves the old document rather
+  than half of each. Panels run in async commands, since a blocking
+  panel on the thread that draws the window deadlocks it. The shell
+  crate builds and tests here once `libwebkit2gtk-4.1-dev
+  libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev` are
+  installed (`cd shells/tauri/src-tauri && cargo test`: path decoding,
+  extensions, the whole write); the browser suite stands the shell in
+  with a bridge whose filesystem is a Map and whose panels answer from a
+  queue (block 9ca), which is all the app ever sees of a shell anyway.
+  Not done: a file dropped on the window, or restored from the draft,
+  has no path, so its first Save asks; an export to a folder writes
+  over files of the same name there without asking.
 - **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
-  and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
+  and in `app/`: `npm run build && npm run test:e2e` (~1360 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
   block against the harness alone, in seconds rather than the quarter of
   an hour the whole suite takes — the suite is still the gate). Both
@@ -6886,14 +6916,11 @@ without reading anything else.*
        press on the outline adds one — see *Chrome*.
      - ✅ **Scale the page and everything on it** (Page › Scale the
        page…), one factor both ways — see *Chrome* for why not two.
-     - **Open recent**, on the desktop shell where a path can be
+     - ✅ **Open recent**, on the desktop shell where a path can be
        reopened; a browser cannot reopen a file by name, so there it
-       stays a draft. Blocked behind the shell opening and saving by
-       path at all: today both go through the browser's file input and
-       download even in the shell (see "What the two windows do not do
-       yet" under Phase 5), and a Tauri build cannot be exercised
-       here. The native save panel is the first half and this the
-       second; both want a machine with the shell's toolchain.
+       stays a draft. It wanted the shell to open and save by path at
+       all, which it does now, with the system's panels — see §0
+       *Desktop shell, files by path*.
      - ✅ **Named styles**, beside the palette and on Layer › Styles,
        kept in the document — see *Chrome*.
      - ✅ **Brush presets**, chips over the paint row, kept in
@@ -6903,8 +6930,8 @@ without reading anything else.*
      - ✅ A **shape library** (the Shape tool, U): triangle, diamond,
        arrow, chevron, callout, heart, each a path preset — see
        *Chrome*. That was the last item on this list: everything the
-       September review found worth doing is done except Open recent,
-       which waits on the shell.
+       September review found worth doing is done (Open recent came
+       last, once the shell could open and save by path).
      - A **Text** menu (Affinity) or Type menu (Photoshop) is *not*
        wanted yet: everything about text is on the panel where the
        text is, and a menu of the same controls would be the
@@ -7787,10 +7814,10 @@ chitrakar/
   PDF was already right by the route it takes, since a copy holding
   anything not live goes over as pixels, and SVG omits adjustments
   wherever they are and says so in the markup.
-- **What the two windows do not do yet.** The export window writes
-  through the browser's download, so the desktop shell gets no native
-  save panel and no choice of folder — Tauri's dialog plugin is already
-  a dependency, so this is plumbing rather than a decision. The export
+- **What the two windows do not do yet.** The export window wrote
+  through the browser's download even in the desktop shell; it asks the
+  system's save panel there now, and a folder for a set ✅ (§0 *Desktop
+  shell, files by path*). The export
   preview is in ✅ (the file itself, decoded, beside the settings; a
   PDF or a TIFF shows the page standing in), and so is the `@1x/@2x/@3x`
   set ✅ (three files in one press), exports kept by name ✅ (chips above

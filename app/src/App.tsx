@@ -9,7 +9,18 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { usePrefs } from "./prefs";
+import { usePrefs, withRecent } from "./prefs";
+import {
+  DOCUMENTS,
+  baseName,
+  chooseToOpen,
+  chooseToSave,
+  folderName,
+  readPath,
+  writeFiles,
+  writePath,
+  type Outgoing,
+} from "./files";
 import { SHAPE_PRESETS, presetPath } from "./shapes";
 import {
   ALWAYS_SHOWN,
@@ -1232,6 +1243,11 @@ export function App() {
    * one typed in the bar. Every save and every export is named after it,
    * so a file keeps its name through a session. */
   const [docName, setDocName] = useState("untitled");
+  /** Where the document lives on disk, in the desktop shell, once it has
+   * been opened from or saved to a file: Save writes back there. A
+   * browser never learns a path, so there this stays null and every
+   * save is a download. */
+  const [docPath, setDocPath] = useState<string | null>(null);
   const draftName = useRef<string | null>(null);
   useEffect(() => {
     getDraft().then(
@@ -1537,6 +1553,7 @@ export function App() {
       paintCount.current = 0;
       setCloneFrom(null);
       setDocName("untitled");
+      setDocPath(null);
       setSavedAt(0);
       refresh(s);
       fitView();
@@ -4729,7 +4746,10 @@ export function App() {
             if (mayDiscard()) setNewDocOpen(true);
             return;
           case "open":
-            if (mayDiscard()) pick(openInputRef);
+            openDocument();
+            return;
+          case "save-as":
+            if (isTauri()) saveFileAs();
             return;
           case "to-front":
             orderSelected(true);
@@ -6114,31 +6134,70 @@ export function App() {
    * that will not load — and a failure that says nothing looks exactly
    * like a browser that quietly refused the download. So each one is
    * named, and says so. Answers whether the file was actually made. */
-  const saveAs = (
-    what: string,
-    name: string,
-    type: string,
-    make: () => Uint8Array,
-  ): boolean => {
+  const saveMany = async (what: string, files: Outgoing[]): Promise<boolean> => {
     try {
-      download(make(), name, type);
-      return true;
+      return await writeFiles(what, files, docPath);
     } catch (err) {
       alert(`${what} failed: ${err}`);
       return false;
     }
   };
+  const saveAs = (what: string, name: string, type: string, make: () => Uint8Array) =>
+    saveMany(what, [{ name, type, make }]);
 
-  const saveFile = () => {
+  /** A document opened or saved by path goes to the top of File › Open
+   * recent. */
+  const remember = (path: string) =>
+    setPrefs((p) => ({ recent: withRecent(p.recent, path) }));
+  const forget = (path: string) =>
+    setPrefs((p) => ({ recent: p.recent.filter((r) => r !== path) }));
+
+  /** One save at a time: a second press of Ctrl+S while the panel of the
+   * first is still up would otherwise put up a second panel. */
+  const saving = useRef(false);
+  /** Save the document, to `path` or, with none, to wherever the save
+   * panel says. Only the desktop shell has paths. */
+  const saveToPath = async (path: string | null) => {
+    if (!session || saving.current) return;
+    saving.current = true;
+    try {
+      // What is saved is the document as it is now, so it is now that
+      // is marked saved, whatever is done while the panel is up.
+      const at = history.past.length;
+      const bytes = session.save();
+      const target =
+        path ?? (await chooseToSave("Save", `${fileName()}.chitra`, docPath, DOCUMENTS));
+      if (!target) return;
+      await writePath(target, bytes);
+      setDocPath(target);
+      // A name chosen in the panel is the document's name from now on.
+      // Saving back to the file it already has leaves alone whatever
+      // has been typed in the bar since.
+      if (!path) setDocName(baseName(target).replace(/\.chitra$/i, ""));
+      setSavedAt(at);
+      remember(target);
+    } catch (err) {
+      alert(`Save failed: ${err}`);
+    } finally {
+      saving.current = false;
+    }
+  };
+
+  const saveFile = async () => {
     if (!session) return;
-    const written = saveAs(
+    if (isTauri()) return saveToPath(docPath);
+    const at = history.past.length;
+    const written = await saveAs(
       "Save",
       `${fileName()}.chitra`,
       "application/zip",
       () => session.save(),
     );
-    if (written) setSavedAt(history.past.length);
+    if (written) setSavedAt(at);
   };
+  /** Save somewhere else, and carry on there. Only where there is a
+   * somewhere: a browser's every save is already a new file. */
+  const saveFileAs = () => saveToPath(null);
 
   const exportPng = () => {
     if (!session) return;
@@ -6191,18 +6250,19 @@ export function App() {
     if (!session) return;
     const boards = layers.filter((l) => l.kind === "artboard");
     if (boards.length === 0) return;
-    for (const board of boards) {
-      const at = frameScale(board.id as NodeId);
-      const made = saveAs(
-        "PNG export",
-        frameFile(board.name, at),
-        "image/png",
-        () => session.export_artboard_png(board.id, at),
-      );
-      // One frame that will not come out stops the set: a page of
-      // half-written files is worse than a page that says why.
-      if (!made) return;
-    }
+    // One frame that will not come out stops the set: a page of
+    // half-written files is worse than a page that says why.
+    saveMany(
+      "PNG export",
+      boards.map((board) => {
+        const at = frameScale(board.id as NodeId);
+        return {
+          name: frameFile(board.name, at),
+          type: "image/png",
+          make: () => session.export_artboard_png(board.id, at),
+        };
+      }),
+    );
   };
 
   /** Every frame as a page of one PDF, in the order they sit on the
@@ -6249,7 +6309,7 @@ export function App() {
   };
 
   /** Open a .chitra from its bytes, whether chosen or dropped. */
-  const openDocumentBytes = (bytes: Uint8Array, name?: string) => {
+  const openDocumentBytes = (bytes: Uint8Array, name?: string): boolean => {
     try {
       const s = WasmSession.open(bytes);
       // Faces the file carried are registered by the open; offer them.
@@ -6264,10 +6324,49 @@ export function App() {
       setProofing(false);
       setGamutWarn(false);
       setSavedAt(0);
+      // Bytes come with no path; one opened by path is given it back by
+      // the caller.
+      setDocPath(null);
       refresh(s);
       fitView();
+      return true;
     } catch (err) {
       alert(`Could not open document: ${err}`);
+      return false;
+    }
+  };
+
+  /** Open a document by its path, in the desktop shell. A path that no
+   * longer opens — moved, deleted, a disk not there — is taken off the
+   * recent list, since offering it again would only fail again. */
+  const openPath = async (path: string) => {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readPath(path);
+    } catch (err) {
+      alert(`Could not open ${baseName(path)}: ${err}`);
+      forget(path);
+      return;
+    }
+    if (openDocumentBytes(bytes, baseName(path))) {
+      setDocPath(path);
+      remember(path);
+    }
+  };
+
+  /** Open, the way the platform opens: the system's panel in the shell,
+   * the browser's file input otherwise. */
+  const openDocument = async () => {
+    if (!mayDiscard()) return;
+    if (!isTauri()) {
+      pick(openInputRef);
+      return;
+    }
+    try {
+      const path = await chooseToOpen("Open", DOCUMENTS);
+      if (path) await openPath(path);
+    } catch (err) {
+      alert(`Open failed: ${err}`);
     }
   };
 
@@ -6544,12 +6643,43 @@ export function App() {
           "open",
           "open",
           "Open…",
-          () => {
-            if (mayDiscard()) pick(openInputRef);
-          },
+          openDocument,
           isTauri() ? hint("open") : undefined,
         ),
+        // Only where there are paths to remember: a browser is never
+        // told where a file it was handed came from.
+        ...(isTauri() && prefs.recent.length > 0
+          ? [
+              sub("open-recent", "open", "Open recent", [
+                  ...prefs.recent.map((path, i) => {
+                    // Two files of one name are told apart by their
+                    // folders, and only then: the name is what people
+                    // look for.
+                    const name = baseName(path);
+                    const twin = prefs.recent.some(
+                      (other) => other !== path && baseName(other) === name,
+                    );
+                    return item(
+                      `recent-${i}`,
+                      "open",
+                      twin ? `${name} — ${folderName(path)}` : name,
+                      () => {
+                        if (mayDiscard()) openPath(path);
+                      },
+                    );
+                  }),
+                  SEP,
+                  item("recent-clear", "trash", "Clear the list", () =>
+                    setPrefs({ recent: [] }),
+                  ),
+              ]),
+            ]
+          : []),
         item("save", "save", "Save", saveFile, hint("save")),
+        // Save in a browser is already a new file every time.
+        ...(isTauri()
+          ? [item("save-as", "save", "Save as…", saveFileAs, hint("save-as"))]
+          : []),
         SEP,
         // Bringing something in is its own kind of act — neither opening
         // a document nor saving one — so it sits between them rather
@@ -6969,9 +7099,7 @@ export function App() {
           </button>
           <button
             className="chrome-button icon-only"
-            onClick={() => {
-              if (mayDiscard()) pick(openInputRef);
-            }}
+            onClick={openDocument}
             title="Open…"
             aria-label="Open"
           >
@@ -7476,6 +7604,7 @@ export function App() {
           prefs={prefs}
           setPrefs={setPrefs}
           fileName={fileName}
+          write={(files) => writeFiles("Export", files, docPath)}
           hasRegion={antRings.length > 0}
           selectionBounds={() => {
             // A region is what leaves when there is one, so its own box
@@ -12589,11 +12718,3 @@ function KindProps({
   return null;
 }
 
-function download(bytes: Uint8Array, name: string, type: string) {
-  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
-}
