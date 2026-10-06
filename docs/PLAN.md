@@ -5021,10 +5021,20 @@ without reading anything else.*
      arithmetic is not the W3C's (a blue brush at Luminosity over gold is
      [84, 60, 0] by hand from SetLum and ClipColor, the engine's answer;
      resvg draws [115, 60, 0]); frames and copies holding what works on
-     the page, the engine's own construction; clone layers, since one
-     lifting from under a blended copy travels as a picture that
-     disagrees with what the engine lays (`clone_pixels`) — found and not
-     chased; and blends inside frames, which is **a choice to make**: the
+     the page, the engine's own construction; and blends inside frames,
+     which is **a choice to make** (below). Clone layers were left out
+     too at first, a clone lifting from under a blended copy travelling
+     as a picture that disagreed with the page; chased, it was two bugs,
+     neither about blends. A clone drawn aside to be exported, as its
+     thumbnail and its SVG picture are (`clone_alone`), laid its strokes
+     over all the room drawn past the page, so a stroke reaching past
+     the page's edge left paint out there and a later stroke lifting
+     from past the edge lifted it — a patch the page never showed; they
+     are laid only where the page is now. And a copy of a clone layer
+     went into an SVG brought down Normal, where the engine brings it
+     down by the clone's own blend (`copied_blend`). Clone layers are on
+     the blended pages now, and each fix fails them undone. The choice
+     about frames: the
      engine draws a plain frame where it stands, so a blend inside it
      reaches the page, while a frame travels as a clipped group, which
      every reader isolates. Either the export takes the cut off the

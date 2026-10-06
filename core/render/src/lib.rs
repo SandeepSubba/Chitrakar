@@ -1515,6 +1515,25 @@ fn clone_alone(
     let Some(behind) = clone_behind(doc, id, shifted) else {
         return Ok(false);
     };
+    // Laid only where the page is, as the page lays it: a stroke reaching
+    // past the page's edge leaves nothing there, so a later stroke lifting
+    // from past the edge lifts nothing. Laid over the whole of the room
+    // drawn aside, the first stroke's paint survived out there and the
+    // second lifted it — a patch in the exported picture the page never
+    // showed.
+    let page = match transformed_bounds(
+        shift.compose(view),
+        doc.meta.width as f32,
+        doc.meta.height as f32,
+    ) {
+        Bounds::Rect(x0, y0, x1, y1) => whole.intersect(ClipRect {
+            x0: x0.floor().max(0.0) as u32,
+            y0: y0.floor().max(0.0) as u32,
+            x1: (x1.ceil().max(0.0) as u32).min(w),
+            y1: (y1.ceil().max(0.0) as u32).min(h),
+        }),
+        _ => return Ok(false),
+    };
     let mut shown = Surface::new(w, h);
     lay_clone(
         doc,
@@ -1522,7 +1541,7 @@ fn clone_alone(
         behind,
         &mut shown,
         under,
-        (whole, whole),
+        (page, page),
         None,
         shifted,
     );

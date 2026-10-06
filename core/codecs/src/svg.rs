@@ -203,6 +203,21 @@ fn write_node(
         if !node.visible || node.opacity <= 0.0 {
             return Ok(());
         }
+        // A copy of a clone layer travels as a picture of what the clone
+        // lays (`clone_pixels`), which is laid plainly; the engine brings
+        // it down by the blend of what it copies, where the copy stands
+        // (`copies_a_blend`), so the picture is brought down by that blend
+        // too. It had been brought down Normal, the clone's own blend lost.
+        let copied;
+        let node =
+            if node.blend == BlendMode::Normal && chitrakar_render::copies_a_clone(doc, child) {
+                let mut n = node.clone();
+                n.blend = copied_blend(doc, child);
+                copied = n;
+                &copied
+            } else {
+                node
+            };
         let pad = "  ".repeat(depth);
         // A layer's effects travel as a filter on a wrapper outside all
         // of its own: outside its transform, since an offset is written in
@@ -1234,6 +1249,25 @@ fn outlines_d(outlines: &[crate::strokes::Outline]) -> String {
         d.push_str(" Z ");
     }
     d.trim_end().to_string()
+}
+
+/// The blend a copy is brought down by when it has none of its own: the
+/// first one along the copies to what they copy.
+fn copied_blend(doc: &Document, id: NodeId) -> BlendMode {
+    let mut at = id;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        let Ok(node) = doc.node(at) else {
+            break;
+        };
+        if node.blend != BlendMode::Normal {
+            return node.blend;
+        }
+        match &node.kind {
+            NodeKind::Instance { of, .. } => at = *of,
+            _ => break,
+        }
+    }
+    BlendMode::Normal
 }
 
 /// A group's attributes with `isolation:isolate` in them, for a group
@@ -4411,78 +4445,25 @@ mod tests {
     /// to, goes on a wrapper that isolates the layer, so a blend left on
     /// the layer met nothing; the outermost wrapper takes it now, as the
     /// effects wrapper always did.
+    ///
+    /// Then, with clone layers on the pages too, two more. A clone layer
+    /// travels as a picture of what it lays, drawn aside over room past
+    /// the page (`clone_alone`), and its strokes were laid over all of
+    /// that room: a stroke reaching past the page's edge left paint out
+    /// there, and a later stroke lifting from past the edge lifted it — a
+    /// patch the page never showed, where the page lifts nothing. They
+    /// are laid only where the page is now. And a copy of a clone layer
+    /// went down Normal, where the engine brings it down by the clone's
+    /// own blend (`copied_blend`).
     #[test]
     fn a_reader_blends_an_opaque_page_as_the_engine_does() {
         let mut blended = 0;
         for seed in 0..800u64 {
-            let mut doc = chitrakar_doc::fixture::opaque_page(seed);
-            let page = chitrakar_doc::fixture::page(seed);
-            for (id, n) in page.nodes() {
-                // Not a frame or a copy holding what works on the page
-                // under it — a clone, an adjustment: what those make of
-                // the page and what the blend brings down are the
-                // engine's own construction (`render_child`), which SVG
-                // has no way to say.
-                let in_place = n.kind.holds_children()
-                    && chitrakar_render::works_on_what_is_under(&doc, *id).unwrap_or(false);
-                // And not the four modes that move a colour as a whole —
-                // hue, saturation, colour, luminosity — where resvg's
-                // arithmetic is not the W3C's: worked by hand from the
-                // spec's SetLum and ClipColor, a blue brush at Luminosity
-                // over a gold page is [84, 60, 0], the engine's answer,
-                // and resvg draws [115, 60, 0].
-                let separable = !matches!(
-                    n.blend,
-                    BlendMode::Hue
-                        | BlendMode::Saturation
-                        | BlendMode::Color
-                        | BlendMode::Luminosity
-                );
-                // Nor a layer inside a frame: the engine draws a plain
-                // frame where it stands, so a blend inside it reaches the
-                // page, and a frame travels as a clipped group, which
-                // every reader isolates. Saying it would take the cut off
-                // the frame and onto each layer in it; written down in
-                // the plan as a choice to make, not made here.
-                let in_frame = {
-                    let mut up = page.parent_of(*id);
-                    let mut found = false;
-                    while let Some(p) = up {
-                        found |=
-                            matches!(page.node(p).map(|m| &m.kind), Ok(NodeKind::Artboard { .. }));
-                        up = page.parent_of(p);
-                    }
-                    found
-                };
-                if n.blend != BlendMode::Normal
-                    && separable
-                    && !in_place
-                    && !in_frame
-                    && doc.node(*id).is_ok_and(|m| m.visible)
-                {
-                    blended += 1;
-                    doc.apply(Command::SetBlendMode {
-                        id: *id,
-                        blend: n.blend,
-                    })
-                    .unwrap();
-                }
-            }
-            // And no clone layers: what one lifts from under a blended
-            // copy travels as a picture that disagrees with what the
-            // engine lays (`clone_pixels`), which is its own question —
-            // found here, written down in the plan, and left.
-            for (id, n) in page.nodes() {
-                if matches!(n.kind, NodeKind::Clone { .. })
-                    || chitrakar_render::copies_a_clone(&page, *id)
-                {
-                    doc.apply(Command::SetVisible {
-                        id: *id,
-                        visible: false,
-                    })
-                    .unwrap();
-                }
-            }
+            let doc = blended_page(seed);
+            blended += doc
+                .nodes()
+                .filter(|(_, n)| n.visible && n.blend != BlendMode::Normal)
+                .count();
             let theirs = resvg_pixels(&doc);
             let ours = chitrakar_render::render(&doc).unwrap();
             let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
@@ -4794,5 +4775,53 @@ mod tests {
             }
         }
         assert!(asked > 1000, "asked of enough of it ({asked})");
+    }
+
+    /// A random page made opaque (`opaque_page`) with its blends put
+    /// back, but for four kinds left out, each for a reason. The four
+    /// modes that move a colour as a whole — hue, saturation, colour,
+    /// luminosity — where resvg's arithmetic is not the W3C's: worked by
+    /// hand from the spec's SetLum and ClipColor, a blue brush at
+    /// Luminosity over a gold page is [84, 60, 0], the engine's answer,
+    /// and resvg draws [115, 60, 0]. Frames and copies holding what works
+    /// on the page under them — a clone, an adjustment — whose blend the
+    /// engine brings down only on what they paint (`render_child`), which
+    /// SVG has no way to say. And layers inside a frame: the engine draws
+    /// a plain frame where it stands, so a blend inside it reaches the
+    /// page, and a frame travels as a clipped group, which every reader
+    /// isolates — written down in the plan as a choice to make.
+    fn blended_page(seed: u64) -> Document {
+        let mut doc = chitrakar_doc::fixture::opaque_page(seed);
+        let page = chitrakar_doc::fixture::page(seed);
+        for (id, n) in page.nodes() {
+            let in_place = n.kind.holds_children()
+                && chitrakar_render::works_on_what_is_under(&doc, *id).unwrap_or(false);
+            let separable = !matches!(
+                n.blend,
+                BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
+            );
+            let in_frame = {
+                let mut up = page.parent_of(*id);
+                let mut found = false;
+                while let Some(p) = up {
+                    found |= matches!(page.node(p).map(|m| &m.kind), Ok(NodeKind::Artboard { .. }));
+                    up = page.parent_of(p);
+                }
+                found
+            };
+            if n.blend != BlendMode::Normal
+                && separable
+                && !in_place
+                && !in_frame
+                && doc.node(*id).is_ok_and(|m| m.visible)
+            {
+                doc.apply(Command::SetBlendMode {
+                    id: *id,
+                    blend: n.blend,
+                })
+                .unwrap();
+            }
+        }
+        doc
     }
 }
