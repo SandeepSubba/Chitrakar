@@ -4459,7 +4459,7 @@ mod tests {
     fn a_reader_blends_an_opaque_page_as_the_engine_does() {
         let mut blended = 0;
         for seed in 0..800u64 {
-            let doc = blended_page(seed);
+            let doc = crate::blended_page(seed, true, true);
             blended += doc
                 .nodes()
                 .filter(|(_, n)| n.visible && n.blend != BlendMode::Normal)
@@ -4775,53 +4775,5 @@ mod tests {
             }
         }
         assert!(asked > 1000, "asked of enough of it ({asked})");
-    }
-
-    /// A random page made opaque (`opaque_page`) with its blends put
-    /// back, but for four kinds left out, each for a reason. The four
-    /// modes that move a colour as a whole — hue, saturation, colour,
-    /// luminosity — where resvg's arithmetic is not the W3C's: worked by
-    /// hand from the spec's SetLum and ClipColor, a blue brush at
-    /// Luminosity over a gold page is [84, 60, 0], the engine's answer,
-    /// and resvg draws [115, 60, 0]. Frames and copies holding what works
-    /// on the page under them — a clone, an adjustment — whose blend the
-    /// engine brings down only on what they paint (`render_child`), which
-    /// SVG has no way to say. And layers inside a frame: the engine draws
-    /// a plain frame where it stands, so a blend inside it reaches the
-    /// page, and a frame travels as a clipped group, which every reader
-    /// isolates — written down in the plan as a choice to make.
-    fn blended_page(seed: u64) -> Document {
-        let mut doc = chitrakar_doc::fixture::opaque_page(seed);
-        let page = chitrakar_doc::fixture::page(seed);
-        for (id, n) in page.nodes() {
-            let in_place = n.kind.holds_children()
-                && chitrakar_render::works_on_what_is_under(&doc, *id).unwrap_or(false);
-            let separable = !matches!(
-                n.blend,
-                BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
-            );
-            let in_frame = {
-                let mut up = page.parent_of(*id);
-                let mut found = false;
-                while let Some(p) = up {
-                    found |= matches!(page.node(p).map(|m| &m.kind), Ok(NodeKind::Artboard { .. }));
-                    up = page.parent_of(p);
-                }
-                found
-            };
-            if n.blend != BlendMode::Normal
-                && separable
-                && !in_place
-                && !in_frame
-                && doc.node(*id).is_ok_and(|m| m.visible)
-            {
-                doc.apply(Command::SetBlendMode {
-                    id: *id,
-                    blend: n.blend,
-                })
-                .unwrap();
-            }
-        }
-        doc
     }
 }

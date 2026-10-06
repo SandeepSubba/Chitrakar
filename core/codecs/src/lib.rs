@@ -121,6 +121,67 @@ pub fn encode_jpeg(
     Ok(out.into_inner())
 }
 
+/// A random page made opaque (`opaque_page`) with its blends put
+/// back, but for four kinds left out, each for a reason. The four
+/// modes that move a colour as a whole — hue, saturation, colour,
+/// luminosity — where resvg's arithmetic is not the W3C's: worked by
+/// hand from the spec's SetLum and ClipColor, a blue brush at
+/// Luminosity over a gold page is [84, 60, 0], the engine's answer,
+/// and resvg draws [115, 60, 0]. Frames and copies holding what works
+/// on the page under them — a clone, an adjustment — whose blend the
+/// engine brings down only on what they paint (`render_child`), which
+/// SVG has no way to say. And layers inside a frame: the engine draws
+/// a plain frame where it stands, so a blend inside it reaches the
+/// page, and a frame travels as a clipped group, which every reader
+/// isolates — written down in the plan as a choice to make. The first
+/// and the last are switches, since what a reader gets wrong is the
+/// reader's own.
+#[cfg(test)]
+pub(crate) fn blended_page(
+    seed: u64,
+    all_but_four: bool,
+    not_in_frames: bool,
+) -> chitrakar_doc::Document {
+    let mut doc = chitrakar_doc::fixture::opaque_page(seed);
+    let page = chitrakar_doc::fixture::page(seed);
+    for (id, n) in page.nodes() {
+        let in_place = n.kind.holds_children()
+            && chitrakar_render::works_on_what_is_under(&doc, *id).unwrap_or(false);
+        let separable = !matches!(
+            n.blend,
+            chitrakar_doc::BlendMode::Hue
+                | chitrakar_doc::BlendMode::Saturation
+                | chitrakar_doc::BlendMode::Color
+                | chitrakar_doc::BlendMode::Luminosity
+        );
+        let in_frame = {
+            let mut up = page.parent_of(*id);
+            let mut found = false;
+            while let Some(p) = up {
+                found |= matches!(
+                    page.node(p).map(|m| &m.kind),
+                    Ok(chitrakar_doc::NodeKind::Artboard { .. })
+                );
+                up = page.parent_of(p);
+            }
+            found
+        };
+        if n.blend != chitrakar_doc::BlendMode::Normal
+            && (separable || !all_but_four)
+            && !in_place
+            && (!in_frame || !not_in_frames)
+            && doc.node(*id).is_ok_and(|m| m.visible)
+        {
+            doc.apply(chitrakar_doc::Command::SetBlendMode {
+                id: *id,
+                blend: n.blend,
+            })
+            .unwrap();
+        }
+    }
+    doc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

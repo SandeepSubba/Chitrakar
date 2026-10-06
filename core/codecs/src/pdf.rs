@@ -1207,8 +1207,25 @@ impl Page {
             NodeKind::Vector { fill, gradient, stroke: Some(_), .. }
                 if fill.is_some() || gradient.is_some()
         );
+        // And a group holding a layer that blends, which the engine draws
+        // on a surface of its own so the blend meets only what the group
+        // holds (`reads_backdrop`); drawn straight onto the page here, a
+        // Saturation layer in a group took its colour from the page. A
+        // copy on the engine's terms: where layers of its own stand in
+        // and read the page — one drawing the original entire draws it
+        // straight in, and the original isolates itself.
+        let holds_a_blend = match &node.kind {
+            NodeKind::Group => chitrakar_render::reads_backdrop(&self.doc, id)?,
+            NodeKind::Instance { of, .. } if chitrakar_render::takes_stand_ins(&self.doc, *of) => {
+                let stand_ins = chitrakar_render::copy_children(&self.doc, id)?;
+                !stand_ins.is_empty()
+                    && chitrakar_render::any_reads_backdrop(&self.doc, &stand_ins)?
+            }
+            _ => false,
+        };
         let isolate = node.mask.is_some()
             || hold.is_some()
+            || holds_a_blend
             || (paints_twice && node.blend != BlendMode::Normal)
             || (many && (node.opacity < 1.0 || node.blend != BlendMode::Normal));
         let outer = isolate.then(|| std::mem::take(&mut self.content));
@@ -5829,6 +5846,66 @@ mod tests {
                 off[0].3
             );
         }
+    }
+
+    /// The same opaque pages with their blends put back
+    /// (`crate::blended_page`), all sixteen modes and inside frames too:
+    /// ghostscript brings each blended layer down on what the engine
+    /// brings it down on. It found a group holding a blended layer drawn
+    /// straight onto the page, where the engine isolates such a group —
+    /// a Saturation layer in a group took its colour from the page — and
+    /// such a group is a transparency group of its own now. A frame is a
+    /// clip here rather than a group, so a blend inside a plain frame
+    /// reaches the page as it does on the engine's page; and ghostscript
+    /// works the four non-separable modes as the W3C does, as the engine
+    /// does, which resvg does not.
+    #[test]
+    fn ghostscript_blends_an_opaque_page_as_the_engine_does() {
+        let mut blended = 0;
+        for seed in 0..300u64 {
+            let doc = crate::blended_page(seed, false, false);
+            blended += doc
+                .nodes()
+                .filter(|(_, n)| n.visible && n.blend != chitrakar_doc::BlendMode::Normal)
+                .count();
+            let Some(theirs) = ghostscript_rgba(&doc) else {
+                return;
+            };
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let (w, h) = (doc.meta.width as i32, doc.meta.height as i32);
+            let px = |x: i32, y: i32| ours.get(x as u32, y as u32).to_srgb8();
+            let mut off = Vec::new();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let c = px(x, y);
+                    let flat = c[3] == 255
+                        && (-1..=1).all(|j| {
+                            (-1..=1).all(|i| {
+                                let n = px(x + i, y + j);
+                                (0..4).all(|k| n[k].abs_diff(c[k]) <= 3)
+                            })
+                        });
+                    if !flat {
+                        continue;
+                    }
+                    let t = theirs[(y * w + x) as usize];
+                    if (0..3).any(|q| c[q].abs_diff(t[q]) > 20) {
+                        off.push((x, y, c, t));
+                    }
+                }
+            }
+            assert!(
+                off.len() <= 2,
+                "page {seed}: {} flat pixels ghostscript blends otherwise, the first at \
+                 ({}, {}) — the engine {:?}, ghostscript {:?}",
+                off.len(),
+                off[0].0,
+                off[0].1,
+                off[0].2,
+                off[0].3
+            );
+        }
+        assert!(blended > 150, "asked of enough blends ({blended})");
     }
 
     /// What is not painted in a picture takes the colour beside it, and

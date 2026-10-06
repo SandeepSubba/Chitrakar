@@ -880,7 +880,7 @@ without reading anything else.*
   caused to be written. Its inference — that nothing outside the renderer
   had ever looked at a copy's stand-ins — holds, since nothing in gpu or
   engine fails even now.
-- **Verify before committing:** `cargo test --workspace` (~605),
+- **Verify before committing:** `cargo test --workspace` (~606),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1330 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -5033,7 +5033,16 @@ without reading anything else.*
      are laid only where the page is now. And a copy of a clone layer
      went into an SVG brought down Normal, where the engine brings it
      down by the clone's own blend (`copied_blend`). Clone layers are on
-     the blended pages now, and each fix fails them undone. The choice
+     the blended pages now, and each fix fails them undone. PDF was
+     asked the same of ghostscript
+     (`ghostscript_blends_an_opaque_page_as_the_engine_does`, 300 pages,
+     all sixteen modes, blends inside frames as well) and had the same
+     first bug: a group holding a blended layer was drawn straight onto
+     the page, so a Saturation layer in a group took its colour from the
+     page; it is an isolated transparency group now, on the engine's
+     terms, and fails undone. A frame goes to PDF as a clip, not a group,
+     so a blend inside a plain frame reaches the page there as it does
+     on the engine's — PDF already says what SVG cannot. The choice
      about frames: the
      engine draws a plain frame where it stands, so a blend inside it
      reaches the page, while a frame travels as a clipped group, which
