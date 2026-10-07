@@ -30,3 +30,9 @@ chitrakar-codecs = { path = "../../../core/codecs" }
 # self-contained inference engine matters more here than the last of the
 # speed, since this runs once per press of a button.
 tract-onnx = "0.23"
+
+# A file double-clicked while the app runs starts a second copy on
+# Windows and Linux; this hands that copy's command line to the first and
+# lets it go. A Mac app is one copy already and is told by the system.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

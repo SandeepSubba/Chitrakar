@@ -207,13 +207,39 @@ fn opened_while_running(app: &tauri::AppHandle, event: tauri::RunEvent) {
     }
 }
 
+/// Windows and Linux: a file double-clicked while the app runs started a
+/// second copy, which hands its command line over here and goes. The
+/// window comes forward, as a Mac app's does, and the files join the
+/// queue the page takes from.
+#[cfg(any(windows, target_os = "linux"))]
+fn second_copy(app: &tauri::AppHandle, args: Vec<String>, cwd: String) {
+    use tauri::{Emitter, Manager};
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    let files = opening::files_in_args(
+        args.into_iter().map(std::ffi::OsString::from),
+        std::path::Path::new(&cwd),
+    );
+    if !files.is_empty() {
+        app.state::<opening::Waiting>().add(files);
+        let _ = app.emit("chitrakar://opened", ());
+    }
+}
+
 /// Everywhere else the files came on the command line, at the start.
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
 fn opened_while_running(_app: &tauri::AppHandle, _event: tauri::RunEvent) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First, as the plugin asks: a second copy should go before it has
+    // set anything else up.
+    #[cfg(any(windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(second_copy));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![

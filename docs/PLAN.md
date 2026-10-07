@@ -947,9 +947,11 @@ without reading anything else.*
   compiles Objective-C against Apple's SDK — so CI runs the shell's
   clippy on a macOS runner too (`shell-macos`), which covers the Swift
   subject matte's build as well.
-  Not done: a second file double-clicked on Windows or Linux starts a
-  second copy of the app rather than reaching the first (that wants the
-  single-instance plugin).
+  A file double-clicked while the app runs reaches the copy already
+  running on Windows and Linux too: the single-instance plugin hands
+  the second launch's command line to the first (`second_copy`), which
+  brings its window forward and queues the files as above — without it,
+  every double-click started another copy of the app.
 - **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
