@@ -931,6 +931,25 @@ without reading anything else.*
   several files into a folder asks before writing over any already
   there, once for all of them (`already_there`), since there is no
   save panel to ask.
+  A document double-clicked opens: the bundle declares `.chitra` as the
+  app's own (`fileAssociations`, an exported type on macOS) and PNG,
+  JPEG and SVG as files it can also open, and the shell gathers what it
+  is asked to open — the command line on Windows and Linux
+  (`opening::files_in_args`, made whole against where the app started),
+  `RunEvent::Opened` on macOS, which comes after launch and again for
+  every file opened while it runs. They wait in a queue
+  (`opening::Waiting`) until the page asks (`opened_files`), at start
+  and on each `chitrakar://opened` nudge, so a file that arrives before
+  the page is there is opened all the same, and each only once. A
+  document opens with its file and a picture is placed, as a drop. The
+  macOS branch cannot compile on Linux at all — not even a `cargo check
+  --target x86_64-apple-darwin`, since a dependency's build script
+  compiles Objective-C against Apple's SDK — so CI runs the shell's
+  clippy on a macOS runner too (`shell-macos`), which covers the Swift
+  subject matte's build as well.
+  Not done: a second file double-clicked on Windows or Linux starts a
+  second copy of the app rather than reaching the first (that wants the
+  single-instance plugin).
 - **Verify before committing:** `cargo test --workspace` (~609),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -17,6 +17,7 @@ import {
   chooseToSave,
   folderName,
   imageType,
+  openedFiles,
   readPath,
   writeFiles,
   writePath,
@@ -6536,6 +6537,28 @@ export function App() {
       gone.forEach((un) => un());
     };
   }, []);
+  // Files the system asked the app to open: double-clicked, or sent
+  // with "Open with". They wait in the shell until there is an engine to
+  // open them with, so they are asked for once it is up, and again each
+  // time the shell says more have come — on macOS a file opened while
+  // the app runs arrives that way. A document opens with its file, a
+  // picture is placed, exactly as a drop on the window.
+  const hearingOpened = useRef(false);
+  useEffect(() => {
+    if (!isTauri() || !session || hearingOpened.current) return;
+    hearingOpened.current = true;
+    const take = () =>
+      openedFiles()
+        .then((paths) => {
+          if (paths.length > 0) return onShellDropRef.current(paths);
+        })
+        .catch((err) => console.warn("files asked to be opened:", err));
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("chitrakar://opened", () => take()))
+      .then(() => take())
+      .catch((err) => console.warn("files asked to be opened:", err));
+  }, [session]);
+
   // The window is called what the document is, with a mark while there
   // is work to save — what every desktop editor's title bar says.
   useEffect(() => {

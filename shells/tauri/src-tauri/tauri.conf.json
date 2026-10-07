@@ -35,6 +35,52 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "chitra"
+        ],
+        "name": "Chitrakar document",
+        "description": "Chitrakar document",
+        "role": "Editor",
+        "rank": "Owner",
+        "mimeType": "application/x-chitrakar",
+        "exportedType": {
+          "identifier": "com.chitrakar.document",
+          "conformsTo": [
+            "public.data"
+          ]
+        }
+      },
+      {
+        "ext": [
+          "png"
+        ],
+        "name": "PNG image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/png"
+      },
+      {
+        "ext": [
+          "jpg",
+          "jpeg"
+        ],
+        "name": "JPEG image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/jpeg"
+      },
+      {
+        "ext": [
+          "svg"
+        ],
+        "name": "SVG drawing",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/svg+xml"
+      }
     ]
   }
 }

@@ -12884,10 +12884,13 @@ assert(
     else shellErrors.push(`dialog: ${d.message()}`);
     await (shellAnswer === "accept" ? d.accept() : d.dismiss());
   });
-  await shell.addInitScript(() => {
-    const fs = new Map();
+  // Seeded with files already on its disk and files the system has
+  // asked it to open — a document double-clicked to start the app.
+  const standInShell = (seed) => {
+    const fs = new Map(Object.entries(seed.fs ?? {}).map(([k, v]) => [k, new Uint8Array(v)]));
     const answers = { open: [], save: [], folder: [] };
     const calls = [];
+    const opened = [...(seed.opened ?? [])];
     // Events the way the shell delivers them: a listener is a callback
     // registered by number, and an event is that callback called.
     const callbacks = new Map();
@@ -12898,7 +12901,7 @@ assert(
         await callbacks.get(l.handler)?.({ event, id: l.id, payload });
       }
     };
-    window.__shell = { fs, answers, calls, emit, title: "", closed: false };
+    window.__shell = { fs, answers, calls, emit, opened, title: "", closed: false };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: (event, id) => {
         const at = listeners.findIndex((l) => l.event === event && l.id === id);
@@ -12948,6 +12951,8 @@ assert(
             return `${args.folder}/${args.name}`;
           case "already_there":
             return args.paths.filter((p) => fs.has(p));
+          case "opened_files":
+            return opened.splice(0);
           case "read_path": {
             const bytes = fs.get(args.path);
             if (!bytes) throw `${args.path}: No such file or directory`;
@@ -12964,7 +12969,8 @@ assert(
         }
       },
     };
-  });
+  };
+  await shell.addInitScript(standInShell, {});
   await shell.goto("http://localhost:8123/");
   await shell.waitForSelector("#engine-canvas");
   await shell.waitForTimeout(600);
@@ -13146,6 +13152,10 @@ assert(
     (await head("/home/ané/Posters/winter.png")) === "\u0089PNG",
     "and writes a PNG there",
   );
+  // Kept for a later window: a reload starts the stand-in's disk afresh.
+  const pngBytes = await shell.evaluate(() =>
+    Array.from(window.__shell.fs.get("/home/ané/Posters/winter.png")),
+  );
   await shell.keyboard.press("Control+Shift+E");
   await shell.waitForSelector('[role=dialog][aria-label="Export"]');
   await shell.click('.export-formats .preset:text-is("PNG")');
@@ -13311,6 +13321,8 @@ assert(
       restoredWrites[0].path === autumn,
     `and saves back to the file it had (${JSON.stringify(restoredWrites)})`,
   );
+  const autumnBytes = await shell.evaluate((p) => Array.from(window.__shell.fs.get(p)), autumn);
+  const autumnLayers = await layerCount();
   // Saved, then lost: the draft knows it was saved, and comes back so.
   await shell.waitForTimeout(2200);
   await shell.reload();
@@ -13322,6 +13334,60 @@ assert(
     (await unsavedDot()) === 0 && (await title()) === "autumn — Chitrakar",
     "a draft of a saved document comes back saved",
   );
+
+  // A document double-clicked starts the app with it open, and with its
+  // file; a picture sent to the app while it runs is placed. A window of
+  // its own, since what a shell was started with is a thing a page is
+  // told once.
+  const launched = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const launchedErrors = [];
+  launched.on("pageerror", (e) => launchedErrors.push(String(e)));
+  launched.on("dialog", async (d) => {
+    launchedErrors.push(`dialog: ${d.message()}`);
+    await d.accept();
+  });
+  const picture = "/home/ané/Posters/winter.png";
+  await launched.addInitScript(standInShell, {
+    fs: { [autumn]: autumnBytes, [picture]: pngBytes },
+    opened: [autumn],
+  });
+  await launched.goto("http://localhost:8123/");
+  await launched.waitForSelector("#engine-canvas");
+  await launched.waitForTimeout(900);
+  const launchedLayers = () => launched.locator(".panel ul li .layer-name").count();
+  assert(
+    (await launched.inputValue('input[aria-label="Document name"]')) === "autumn" &&
+      (await launchedLayers()) === autumnLayers &&
+      (await launched.locator(".unsaved-dot").count()) === 0,
+    `a document the app was started with is open, as saved (${await launchedLayers()} layers)`,
+  );
+  await launched.keyboard.press("Control+s");
+  await launched.waitForTimeout(400);
+  const launchedWrites = await launched.evaluate(() =>
+    window.__shell.calls.filter((c) => c.cmd === "write_path" || c.cmd === "choose_to_save"),
+  );
+  assert(
+    launchedWrites.length === 1 && launchedWrites[0].args.path === autumn,
+    `and saves back to its file without asking (${JSON.stringify(launchedWrites)})`,
+  );
+  await launched.evaluate((p) => {
+    window.__shell.opened.push(p);
+    return window.__shell.emit("chitrakar://opened", null);
+  }, picture);
+  await launched.waitForTimeout(600);
+  assert(
+    (await launched.locator(".panel ul li .layer-name", { hasText: "winter.png" }).count()) === 1,
+    "a picture sent to the running app is placed",
+  );
+  const before2 = await launchedLayers();
+  await launched.evaluate(() => window.__shell.emit("chitrakar://opened", null));
+  await launched.waitForTimeout(300);
+  assert(
+    (await launchedLayers()) === before2,
+    "and a nudge with nothing waiting opens nothing — each file is opened once",
+  );
+  assert(launchedErrors.length === 0, `nothing went wrong (${launchedErrors.join(" | ")})`);
+  await launched.close();
   assert(shellErrors.length === 0, `nothing went wrong on the way (${shellErrors.join(" | ")})`);
   await shell.close();
 }

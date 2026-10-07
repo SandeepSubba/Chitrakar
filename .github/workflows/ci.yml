@@ -99,3 +99,24 @@ jobs:
       # through a header — tested without a window.
       - run: cargo test
         working-directory: shells/tauri/src-tauri
+
+  shell-macos:
+    # What only compiles on a Mac: the files the system opens with the
+    # app (RunEvent::Opened) and the Swift that asks Vision for a subject.
+    name: Tauri shell (check, macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shells/tauri/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: app
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: shells/tauri/src-tauri

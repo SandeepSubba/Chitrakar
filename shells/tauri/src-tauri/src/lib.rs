@@ -10,6 +10,7 @@ use chitrakar_engine::{ColorMode, Session};
 
 mod files;
 mod onnx;
+mod opening;
 mod subject;
 
 /// Ask the system for the subject of a photograph.
@@ -164,6 +165,14 @@ async fn already_there(paths: Vec<String>) -> Vec<String> {
     files::already_there(&paths)
 }
 
+/// The files the system has asked the app to open and nobody has opened
+/// yet. The page asks once it can open them, and again each time the
+/// shell says more have come.
+#[tauri::command]
+fn opened_files(waiting: tauri::State<'_, opening::Waiting>) -> Vec<String> {
+    waiting.take()
+}
+
 /// Smoke-test command: create an engine session natively and report on it.
 /// Replaced by real native-engine plumbing if/when a platform needs the
 /// native render path.
@@ -175,6 +184,32 @@ fn engine_version() -> String {
         session.document().node_count()
     )
 }
+
+/// macOS: the app is started bare and told which files afterwards, and
+/// told again for every file opened while it runs.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+fn opened_while_running(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    use tauri::{Emitter, Manager};
+    let tauri::RunEvent::Opened { urls } = event else {
+        return;
+    };
+    let files: Vec<String> = urls
+        .iter()
+        .filter_map(|u| u.to_file_path().ok())
+        .filter_map(|p| p.into_os_string().into_string().ok())
+        .collect();
+    if !files.is_empty() {
+        app.state::<opening::Waiting>().add(files);
+        // A nudge, not the files: the page takes them from the queue,
+        // so a file that came before the page was there to hear about it
+        // is opened all the same, and only once.
+        let _ = app.emit("chitrakar://opened", ());
+    }
+}
+
+/// Everywhere else the files came on the command line, at the start.
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+fn opened_while_running(_app: &tauri::AppHandle, _event: tauri::RunEvent) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -190,8 +225,20 @@ pub fn run() {
             read_path,
             write_path,
             join_path,
-            already_there
+            already_there,
+            opened_files
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Chitrakar");
+        .manage(opening::Waiting::default())
+        .setup(|app| {
+            // Windows and Linux: a file double-clicked starts the app with
+            // its path on the command line.
+            use tauri::Manager;
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let files = opening::files_in_args(std::env::args_os(), &cwd);
+            app.state::<opening::Waiting>().add(files);
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Chitrakar")
+        .run(opened_while_running);
 }

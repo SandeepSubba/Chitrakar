@@ -118,6 +118,11 @@ export async function writeFiles(
   return true;
 }
 
+/** The files the system has asked the app to open — a document
+ * double-clicked, a picture sent with "Open with" — that nothing has
+ * opened yet. Each is handed out once. */
+export const openedFiles = () => call<string[]>("opened_files");
+
 /** The question asked before writing over files already in a folder. */
 export function replacing(there: string[]): string {
   const names = there.map(baseName);
