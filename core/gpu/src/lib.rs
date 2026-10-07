@@ -14166,6 +14166,111 @@ mod tests {
         }
     }
 
+    /// A line thinner than a pixel is outlined here as on the CPU: its
+    /// middle is a ridge, and counts as inside though it is never half
+    /// covered — across it either way, at full opacity and faded.
+    ///
+    /// Upright and level, the two agree pixel for pixel: such a line's
+    /// coverage is the same number on both. Slanted they cannot — a path
+    /// is covered here by four samples, so a third of a pixel comes out
+    /// as a quarter or a half, and an outline measured from it inherits
+    /// that — so a slanted one is asked only to be outlined at all.
+    #[test]
+    fn a_hairline_is_outlined_as_the_cpu_outlines_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = AuthoredColor::Srgb {
+            r: 0.8,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        let outline = chitrakar_doc::Effect::Outline {
+            width: 2.5,
+            color: AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.3,
+                b: 0.9,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        };
+        for (thin, opacity) in [(0.3f32, 1.0f32), (0.25, 1.0), (0.3, 0.5)] {
+            let mut doc = Document::new(64, 48, chitrakar_color::ColorMode::Rgb);
+            let rect = |width: f32, height: f32| VectorShape::Rect {
+                width,
+                height,
+                radius: 0.0,
+            };
+            let outlined = |doc: &mut Document, shape: VectorShape, at: Transform| {
+                let id = add(doc, filled("hairline", shape, ink.clone()), at);
+                doc.apply(Command::SetEffects {
+                    id,
+                    effects: vec![outline.clone()],
+                })
+                .unwrap();
+                doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+            };
+            outlined(
+                &mut doc,
+                rect(thin, 30.0),
+                Transform::translation(10.0, 6.0),
+            );
+            outlined(
+                &mut doc,
+                rect(30.0, thin),
+                Transform::translation(20.0, 10.0),
+            );
+            let mine = gpu.render(&doc).unwrap();
+            let theirs = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &theirs);
+            assert!(
+                mean < 0.004 && worst < 0.1,
+                "{thin} wide at {opacity}: mean {mean:.5}, worst {worst:.3}"
+            );
+            for (x, y) in [(8, 20), (12, 20), (30, 8), (30, 12)] {
+                assert!(
+                    theirs.get(x, y).b > 0.3 && mine.get(x, y).b > 0.3,
+                    "{thin} wide at {opacity}: outlined at ({x}, {y}) on both"
+                );
+            }
+            // Slanted, as a thin parallelogram: outlined at all, both
+            // sides of it, two pixels off its middle.
+            let (cos, sin) = (0.5f32.cos(), 0.5f32.sin());
+            let mut slanted = Document::new(64, 48, chitrakar_color::ColorMode::Rgb);
+            outlined(
+                &mut slanted,
+                VectorShape::Path {
+                    points: vec![
+                        [0.0, 0.0],
+                        [30.0 * cos, 30.0 * sin],
+                        [30.0 * cos - thin * sin, 30.0 * sin + thin * cos],
+                        [-thin * sin, thin * cos],
+                    ],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                Transform::translation(20.0, 20.0),
+            );
+            let mine = gpu.render(&slanted).unwrap();
+            let theirs = chitrakar_render::render(&slanted).unwrap();
+            let middle = [20.0 + 15.0 * cos, 20.0 + 15.0 * sin];
+            for side in [-2.0f32, 2.0] {
+                let (x, y) = (
+                    (middle[0] - side * sin).round() as u32,
+                    (middle[1] + side * cos).round() as u32,
+                );
+                assert!(
+                    theirs.get(x, y).b > 0.3 && mine.get(x, y).b > 0.3,
+                    "{thin} wide at {opacity}, slanted: outlined at ({x}, {y}) on both"
+                );
+            }
+        }
+    }
+
     /// A clone layer wearing an effect is drawn, the reference's way.
     ///
     /// It used to go back: a clone paints with what is under it, so it was

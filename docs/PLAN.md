@@ -952,7 +952,7 @@ without reading anything else.*
   the second launch's command line to the first (`second_copy`), which
   brings its window forward and queues the files as above — without it,
   every double-click started another copy of the app.
-- **Verify before committing:** `cargo test --workspace` (~609),
+- **Verify before committing:** `cargo test --workspace` (~614),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2602,6 +2602,13 @@ without reading anything else.*
      geometry out where the CPU renderer works its own out and from the
      same numbers, which is what makes the two land on the same picture
      rather than on two plausible ones.
+     A known difference, found while holding hairline outlines to the
+     CPU and not yet chased: a *slanted* rectangle a third of a pixel
+     wide is covered differently here, by up to 0.3 — a rectangle's
+     coverage comes from its signed distance, which is not its area when
+     it is that thin — and a slanted thin path, covered by four samples,
+     by as much. Upright and level they agree. Nothing in the fixture is
+     that thin, which is why no audit has said so.
      What is left to *wire*: it now takes a view
      (`GpuRenderer::render_view`), which was the half that mattered — the
      surface has stopped being the page, so a viewport can be drawn from
@@ -5152,6 +5159,60 @@ without reading anything else.*
      writes that threshold; there is no field yet to give it back to.
      The colour round trip compares premultiplied now, since a shadow's
      faint tail is pixels whose own colour is rounding.
+     **And an outline, faded.** The threshold is the field: the edge the
+     exporter writes is half the layer's opacity, so `effects_of` reads
+     the fade back from it, and the layer it lands on gets it as its
+     opacity again, out of the paint it was folded into (`unfade`); a
+     group kept for its effects — a faded block of text, or a shape
+     whose tapered stroke went as a second path — takes it as its own
+     and what is under it comes in unfaded. Exact for text, whose glyphs
+     do not overlap; a fill and a stroke drawn as a second shape were
+     two faded paints and are one faded group, a little lighter where
+     both are. With that, outlines went into the 400-page round trip,
+     and it found two more things, both real:
+     the **engine would not outline a hairline**. An outline is measured
+     from where a layer is half covered, and a line thinner than a pixel
+     — a hairline path, the stem of a letter set small — is never half
+     covered anywhere, so it cast no outline, or one in pieces wherever
+     its smoothing happened to cross a half (the fixture's first page: a
+     caption, outlined round its capital C and nothing else). The middle
+     of such a line is a *ridge* across it — at least as covered as both
+     neighbours along one axis, and more than one of them, both by a
+     margin — and counts as inside now, in both renderers
+     (`chitrakar_render`'s `ridge`, the shader's `field_cover`): a soft
+     edge fading away is a slope, never a ridge, so a feathered picture's
+     outline stays where it was, and a solid shape's ridges are past half
+     already, so a solid outline does not move by a pixel
+     (`a_line_thinner_than_a_pixel_is_outlined`,
+     `a_soft_edge_is_outlined_where_it_is_half_covered`). The margin is
+     not decoration: without it the level line of a soft edge was a
+     ridge of rounding noise, and the GPU's noise is not the CPU's — the
+     clone layer's outline audit caught it at once. A ridge counts from
+     a fifth of the layer's opacity up: a tenth was tried first, and the
+     audit that adds an effect drawing nothing to every bare layer found
+     **a copy of a clone layer whose staged silhouette changes with
+     whether the clone it copies wears an effect** — a trace between a
+     tenth and a fifth covered on seed 19, which the half-covered edge
+     never saw and which a shadow on the copy shows as 0.025 in six
+     pixels on the engine as it was. Found, measured and not yet chased:
+     it is the copy's staging to put right (the same road the GPU
+     already declines), not the outline's. The GPU agrees pixel
+     for pixel on upright and level hairlines and outlines a slanted one
+     too, though not to the pixel: it covers a path with four samples,
+     so a third of a pixel comes out a quarter or a half, and an outline
+     measured from that inherits it
+     (`a_hairline_is_outlined_as_the_cpu_outlines_it`). SVG keeps the
+     plain half-covered step — a ridge is not something a filter can ask
+     cheaply — so a hairline's outline does not reach an SVG reader; the
+     engine draws it from the file again on the way back in.
+     And a **group's effects over a layer with effects of its own lost
+     one of the two**: a copy outlined round a layer casting a shadow
+     came back with the shadow and no outline, because the group's
+     effects were carried down to the one layer under it, which kept its
+     own. Such a group is a group now (`holds_a_filter`), outlined round
+     the shadow as the file draws it
+     (`a_groups_effects_over_a_layers_own_come_back_both`). Not about
+     outlines at all — a shadow over a shadow lost one the same way.
      Long dashed curves drift a pixel or so against resvg; finer flattening
      made it worse, so the difference is the reader's arc length as much
      as ours, and it was left.

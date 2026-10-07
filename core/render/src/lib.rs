@@ -3232,6 +3232,46 @@ fn shift_clip(clip: ClipRect, origin: (u32, u32)) -> ClipRect {
 /// this measures one: a two-pass chamfer transform from the silhouette,
 /// which is a couple of passes over the region and rounds corners the way
 /// a pen would.
+/// The least coverage a line thinner than a pixel can have and still be
+/// outlined, as a share of the layer's opacity: a line a fifth of a
+/// pixel wide. A tenth was tried first, and the audit that adds an
+/// effect drawing nothing to every bare layer
+/// (`an_effect_that_draws_nothing_is_no_effect`) found a copy of a clone
+/// layer whose staged silhouette carries a trace between a tenth and a
+/// fifth covered that changes with whether the clone it copies wears an
+/// effect — a difference the half-covered edge never saw, and a shadow
+/// shows only as a fortieth. That is the copy's to put right, not the
+/// outline's (PLAN §0); until it is, a fifth keeps an outline from
+/// amplifying it, and still reaches a caption's stems and a hairline a
+/// quarter of a pixel wide.
+const OUTLINE_FAINT: f32 = 0.2;
+
+/// How much a ridge must stand above one side, as a share of the least
+/// coverage that counts: about a sixtieth of the layer's opacity, well
+/// above arithmetic's noise and well below a hairline's own height.
+const OUTLINE_STEP: f32 = 0.08;
+
+/// Whether a pixel is the middle of a line thinner than a pixel: at least
+/// as covered as both its neighbours along one axis, and more covered
+/// than one of them. Half covered is where an outline's edge is, and a
+/// hairline, or the stem of a letter set small, is never half covered
+/// anywhere — so without this it cast no outline at all, or one in
+/// pieces wherever its smoothing happened to cross a half. The middle of
+/// such a line is a ridge across it; a soft edge fading away is a slope,
+/// which is never a ridge, so a feathered picture's outline stays where
+/// it was, and a solid shape's ridges are all past half already.
+///
+/// Both by a margin, `step`: coverage is arithmetic, and along a soft
+/// edge's level line two neighbours that should be equal differ in the
+/// last place — which made a ridge of noise, and one renderer's noise is
+/// not another's. With a margin a uniform slope can never be a ridge,
+/// however steep: it would have to rise by no more than `step` on one
+/// side and fall by more than it on the other.
+fn ridge(a: f32, across_x: [f32; 2], across_y: [f32; 2], step: f32) -> bool {
+    let crest = |[p, q]: [f32; 2]| a >= p.max(q) - step && (a > p + step || a > q + step);
+    crest(across_x) || crest(across_y)
+}
+
 fn outline_band(
     layer: &Surface,
     origin: (u32, u32),
@@ -3242,14 +3282,35 @@ fn outline_band(
 ) -> Surface {
     let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
     let mut inside = vec![false; w * h];
+    // Off the layer's surface is uncovered, which is what it is.
+    let cover_at = |x: i64, y: i64| -> f32 {
+        if x < origin.0 as i64
+            || y < origin.1 as i64
+            || x >= (origin.0 + layer.width) as i64
+            || y >= (origin.1 + layer.height) as i64
+        {
+            return 0.0;
+        }
+        layer.pixels[at_in(origin, layer.width, x as u32, y as u32)].a
+    };
+    // Half covered is inside. The layer was staged with its own opacity
+    // already applied, so half of *that* is where its edge is: a layer
+    // at a third opacity would otherwise have no inside at all, and cast
+    // no outline.
+    let edge = 0.5 * layer_opacity.max(1e-3);
+    let faint = OUTLINE_FAINT * layer_opacity.max(1e-3);
     for y in 0..h {
         for x in 0..w {
-            let i = at_in(origin, layer.width, x as u32 + clip.x0, y as u32 + clip.y0);
-            // Half covered is inside. The layer was staged with its own
-            // opacity already applied, so half of *that* is where its edge
-            // is: a layer at a third opacity would otherwise have no
-            // inside at all, and cast no outline.
-            inside[y * w + x] = layer.pixels[i].a >= 0.5 * layer_opacity.max(1e-3);
+            let (px, py) = ((x as u32 + clip.x0) as i64, (y as u32 + clip.y0) as i64);
+            let a = cover_at(px, py);
+            inside[y * w + x] = a >= edge
+                || (a > faint
+                    && ridge(
+                        a,
+                        [cover_at(px - 1, py), cover_at(px + 1, py)],
+                        [cover_at(px, py - 1), cover_at(px, py + 1)],
+                        faint * OUTLINE_STEP,
+                    ));
         }
     }
     // A true distance, the same one a region is grown by. A chamfer
@@ -16763,6 +16824,115 @@ mod tests {
         assert!(s.get(4, 4).a > 0.5, "the band turns the corner");
         assert_eq!(s.get(15, 15).a, 0.0, "and leaves the middle empty");
         assert!(s.get(15, 1).a > 0.5, "the straight edges still carry it");
+    }
+
+    /// A line thinner than a pixel is never half covered anywhere, and
+    /// half covered was the only inside an outline knew: a hairline cast
+    /// no outline at all, and a caption set small cast one in pieces,
+    /// wherever its smoothing happened to cross a half. The middle of a
+    /// thin line is a ridge across it, and counts.
+    #[test]
+    fn a_line_thinner_than_a_pixel_is_outlined() {
+        let outlined = |w: f32, h: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("hairline", w, h, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::Outline {
+                    width: 3.0,
+                    color: BLACK,
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // Upright and lying down, at a third of a pixel and a quarter.
+        for thin in [0.3f32, 0.25] {
+            let up = outlined(thin, 20.0);
+            for x in [27, 28, 29, 31, 32, 33] {
+                assert!(
+                    up.get(x, 40).a > 0.9,
+                    "a hairline {thin} wide is outlined three pixels out: at {x} {:?}",
+                    up.get(x, 40)
+                );
+            }
+            assert_eq!(up.get(26, 40).a, 0.0, "and no further");
+            let down = outlined(20.0, thin);
+            assert!(down.get(40, 27).a > 0.9 && down.get(40, 33).a > 0.9);
+        }
+    }
+
+    /// What counts a hairline in must not count a soft edge in: a picture
+    /// fading away is a slope, never a ridge, so its outline starts where
+    /// it is half covered, as before, and not out where it is faint.
+    #[test]
+    fn a_soft_edge_is_outlined_where_it_is_half_covered() {
+        const W: u32 = 64;
+        let mut rgba8 = Vec::new();
+        for _y in 0..W {
+            for x in 0..W {
+                // Opaque in the middle, fading to nothing over twenty
+                // pixels either side.
+                let d = (x as f32 - 31.5).abs();
+                let a = (1.0 - (d - 8.0) / 20.0).clamp(0.0, 1.0);
+                rgba8.extend([255, 0, 0, (a * 255.0).round() as u8]);
+            }
+        }
+        let mut doc = Document::new(W, W, ColorMode::Rgb);
+        let res = doc.add_resource(W, W, rgba8);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "soft",
+                chitrakar_doc::RasterRef {
+                    resource_id: res,
+                    width: W,
+                    height: W,
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let plain = render(&doc).unwrap();
+        doc.apply(Command::SetEffects {
+            id,
+            effects: vec![chitrakar_doc::Effect::Outline {
+                width: 2.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+            }],
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        // Half covered out to 18 from the middle — the last such pixels
+        // are 14 and 49 — and the outline two past them, and nowhere
+        // further out, where the picture is faint.
+        assert!(plain.get(14, 32).a >= 0.5 && plain.get(13, 32).a < 0.5);
+        let blue = |x: u32| s.get(x, 32).b > plain.get(x, 32).b + 0.05;
+        assert!(blue(12) && blue(51), "outlined where it is half covered");
+        for x in (0..9).chain(55..64) {
+            assert!(!blue(x), "but not out at {x}, where it is only faint");
+        }
     }
 
     #[test]

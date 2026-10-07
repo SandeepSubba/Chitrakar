@@ -502,10 +502,25 @@ fn mask_of(rings: &[Vec<[f32; 2]>]) -> chitrakar_doc::Mask {
 ///
 /// `at` is where the filtered group stands: offsets and blurs are in its
 /// user space, and the engine's are in the page's.
-fn effects_of(group: &usvg::Group, at: usvg::Transform) -> Option<Vec<chitrakar_doc::Effect>> {
+///
+/// With them, the fade of the layer they were drawn from, where an
+/// outline says what it was. An outline's edge is where its layer is half
+/// as covered as its opacity, and the exporter writes that edge into the
+/// filter (`svg::effect_filter`) — while a shape's opacity goes to SVG as
+/// the fade of each paint, which comes back as the colours' own. Read back
+/// from the edge, the fade can be given back to the layer, which is where
+/// the engine measures the edge from.
+fn effects_of(
+    group: &usvg::Group,
+    at: usvg::Transform,
+) -> Option<(Vec<chitrakar_doc::Effect>, Option<f32>)> {
     use chitrakar_doc::Effect;
     use usvg::filter::{Input, Kind};
     let mut out = Vec::new();
+    let page = Page {
+        at,
+        edge: std::cell::Cell::new(None),
+    };
     for filter in group.filters() {
         let prims = filter.primitives();
         let last = prims.last()?;
@@ -515,7 +530,6 @@ fn effects_of(group: &usvg::Group, at: usvg::Transform) -> Option<Vec<chitrakar_
                 _ => None,
             }
         };
-        let page = Page { at };
         match last.kind() {
             Kind::DropShadow(d) if *d.input() == Input::SourceGraphic => {
                 let (dx, dy) = page.offset(d.dx(), d.dy());
@@ -570,12 +584,20 @@ fn effects_of(group: &usvg::Group, at: usvg::Transform) -> Option<Vec<chitrakar_
             _ => return None,
         }
     }
-    Some(out)
+    // Half covered at full opacity is no fade at all.
+    let fade = page
+        .edge
+        .get()
+        .map(|edge| (2.0 * edge).clamp(0.0, 1.0))
+        .filter(|fade| *fade > 1e-3 && *fade < 0.999);
+    Some((out, fade))
 }
 
 /// A filter's own space carried to the page's.
 struct Page {
     at: usvg::Transform,
+    /// Where an outline among the effects puts its edge, as a coverage.
+    edge: std::cell::Cell<Option<f32>>,
 }
 
 impl Page {
@@ -763,7 +785,10 @@ impl Page {
                             inverted = true;
                         }
                         // The exporter's hard edge for an outline.
-                        TransferFunction::Linear { slope, .. } if *slope >= 100.0 => {}
+                        TransferFunction::Linear { slope, intercept } if *slope >= 100.0 => {
+                            // Half way up the step is the edge.
+                            self.edge.set(Some((0.5 - intercept) / slope));
+                        }
                         _ => return None,
                     }
                     c.input()
@@ -805,6 +830,49 @@ fn holds_a_blend(group: &usvg::Group) -> bool {
     })
 }
 
+/// A shape's fade given back to it as its opacity, out of the paint it
+/// was folded into on the way to SVG (`Place::fade`).
+fn unfade(node: &mut chitrakar_doc::Node, fade: f32) {
+    if let chitrakar_doc::NodeKind::Vector {
+        fill,
+        stroke,
+        gradient,
+        ..
+    } = &mut node.kind
+    {
+        let lift = |c: &mut AuthoredColor| {
+            if let AuthoredColor::Srgb { a, .. } = c {
+                *a = (*a / fade).min(1.0);
+            }
+        };
+        if let Some(fill) = fill {
+            lift(fill);
+        }
+        if let Some(stroke) = stroke {
+            lift(&mut stroke.color);
+        }
+        if let Some(gradient) = gradient {
+            for stop in gradient.stops_mut() {
+                lift(&mut stop.color);
+            }
+        }
+        node.opacity *= fade;
+    }
+}
+
+/// Whether anything under a group wears a filter of its own. A group's
+/// effects are drawn from what is under it as that comes out, its own
+/// filters included — a copy outlined round a layer that casts a
+/// shadow is outlined round the shadow too — so a group with effects
+/// over one is a group, and the two do not land on one layer, where one
+/// of them was lost.
+fn holds_a_filter(group: &usvg::Group) -> bool {
+    group.children().iter().any(|child| match child {
+        usvg::Node::Group(g) => !g.filters().is_empty() || holds_a_filter(g),
+        _ => false,
+    })
+}
+
 /// Whether more than one layer would come in from under a group, which
 /// is when a fade on it stops being any one layer's.
 fn draws_more_than_one(group: &usvg::Group) -> bool {
@@ -839,6 +907,10 @@ struct Place {
     blend: chitrakar_doc::BlendMode,
     /// A filter's effects, carried down to the one layer under it.
     effects: Vec<chitrakar_doc::Effect>,
+    /// The fade the layer those effects belong to had, when an outline
+    /// among them says so (`effects_of`): given back to it as its
+    /// opacity, out of the paint it was folded into.
+    fade: Option<f32>,
 }
 
 /// A blend as the document says it; the two lists are the same sixteen.
@@ -924,14 +996,18 @@ fn walk(
     // layer's, and on more — or faded, since a fade takes the shadow with
     // it, or inside another such group — the group's. Any other filter is
     // passed over, as every filter was.
-    let fx = if group.filters().is_empty() {
-        None
-    } else {
-        effects_of(group, truth.unwrap_or_else(|| group.abs_transform()))
-            .filter(|fx| !fx.is_empty())
+    let (fx, fade) = match (!group.filters().is_empty())
+        .then(|| effects_of(group, truth.unwrap_or_else(|| group.abs_transform())))
+        .flatten()
+    {
+        Some((fx, fade)) if !fx.is_empty() => (Some(fx), fade),
+        _ => (None, None),
     };
     let effected = fx.is_some()
-        && (draws_more_than_one(group) || !place.effects.is_empty() || group.opacity().get() < 1.0);
+        && (draws_more_than_one(group)
+            || !place.effects.is_empty()
+            || group.opacity().get() < 1.0
+            || holds_a_filter(group));
     let opacity = if faded {
         opacity
     } else {
@@ -976,6 +1052,9 @@ fn walk(
     if clip.as_ref().is_some_and(|c| c.is_empty()) {
         return;
     }
+    // A group kept for its effects, with an outline among them saying what
+    // fade its layer had.
+    let lifted = if effected { fade } else { None };
     let (clip, within, opacity) =
         if soft_here.is_some() || faded || blended || isolating || effected {
             let at = truth.unwrap_or_else(|| group.abs_transform());
@@ -998,12 +1077,14 @@ fn walk(
                     "Group".to_string()
                 },
                 mask,
-                // What was folded on the way down comes onto the group too.
+                // What was folded on the way down comes onto the group too,
+                // and the fade its outline says its layer had, which the
+                // paint under it was carrying (`effects_of`).
                 opacity: if faded {
                     opacity * group.opacity().get()
                 } else {
                     opacity
-                },
+                } * lifted.unwrap_or(1.0),
                 blend: if mine != chitrakar_doc::BlendMode::Normal {
                     mine
                 } else {
@@ -1012,7 +1093,17 @@ fn walk(
                 effects: fx.clone().unwrap_or_else(|| place.effects.clone()),
                 within,
             });
-            (clip, Some(got.groups.len() - 1), 1.0)
+            // What is under it comes in with that fade taken back out of
+            // its paint. Exact for text, whose glyphs do not overlap; where
+            // a fill and a stroke drawn as a second shape overlap, they
+            // were two faded paints and are now one faded group, which is
+            // a little lighter where both are — against an outline that
+            // was otherwise measured from a fade it could not see.
+            (
+                clip,
+                Some(got.groups.len() - 1),
+                1.0 / lifted.unwrap_or(1.0),
+            )
         } else {
             (clip, within, opacity)
         };
@@ -1026,6 +1117,13 @@ fn walk(
             mine
         } else {
             place.blend
+        },
+        fade: if within != place.within {
+            None
+        } else if fx.is_some() {
+            fade
+        } else {
+            place.fade
         },
         effects: if within != place.within {
             Vec::new()
@@ -1074,6 +1172,9 @@ fn walk(
                         // A path that came in as a fill and a stroke over
                         // it casts its shadow once, from the first.
                         if k == 0 {
+                            if let Some(fade) = place.fade {
+                                unfade(&mut node, fade);
+                            }
                             node.effects = place.effects.clone();
                         }
                         if let Some(f) = fixed {
@@ -1447,7 +1548,7 @@ fn pattern_picture(
             e: x0,
             f: y0,
         },
-        opacity,
+        opacity: opacity.min(1.0),
         below,
         within: None,
         blend: chitrakar_doc::BlendMode::Normal,
@@ -1564,7 +1665,7 @@ fn picture_of(
             e: placed.tx,
             f: placed.ty,
         },
-        opacity,
+        opacity: opacity.min(1.0),
         below,
         within: None,
         blend: chitrakar_doc::BlendMode::Normal,
@@ -1734,7 +1835,9 @@ fn color_of(c: usvg::Color, alpha: f32) -> AuthoredColor {
         r: c.red as f32 / 255.0,
         g: c.green as f32 / 255.0,
         b: c.blue as f32 / 255.0,
-        a: alpha,
+        // A fade handed back to the group a paint sits in is divided out
+        // of the paint, which can take it past opaque (`walk`).
+        a: alpha.clamp(0.0, 1.0),
     }
 }
 
@@ -2929,8 +3032,12 @@ mod tests {
     /// A page nobody wrote, cut down to what an SVG and this importer
     /// both carry: shapes, paths, strokes, gradients, pictures, groups,
     /// frames, copies, text, masks, blends, faded groups and layers held
-    /// to the one below, and effects but outlines. Left out: outlines
-    /// (below), and the layers that work on what is under them. Masks,
+    /// to the one below, and effects. Left out: the layers that work on
+    /// what is under them. Outlines were left out too until a faded
+    /// layer's could come back (`effects_of`'s fade); let in, they found
+    /// a hairline the engine itself would not outline
+    /// (`chitrakar_render`'s `ridge`) and a group's effects over a layer
+    /// with its own losing one of the two (`holds_a_filter`). Masks,
     /// blends, fades and holds were left out too until the importer
     /// kept the groups they need (`ImportedGroup`); let back in, they
     /// found two things the *exporter* had wrong (`isolated`, and the
@@ -2945,27 +3052,6 @@ mod tests {
             let id = *id;
             if page.parent_of(id).is_none() {
                 continue;
-            }
-            // An outline's edge is where the layer is half as covered as
-            // its own opacity, and a vector's opacity goes to SVG as the
-            // fade of each paint, which comes back as the colours' own:
-            // so a faded layer's outline came back with its edge at half
-            // the full cover its faded silhouette never reaches. The
-            // threshold travels — the exporter writes it — but there is
-            // no field to give it back to. Outlines on layers at full
-            // opacity come back (`an_effect_exported_comes_back_as_itself`).
-            if n.effects
-                .iter()
-                .any(|e| matches!(e, chitrakar_doc::Effect::Outline { .. }))
-            {
-                let kept: Vec<_> = n
-                    .effects
-                    .iter()
-                    .filter(|e| !matches!(e, chitrakar_doc::Effect::Outline { .. }))
-                    .cloned()
-                    .collect();
-                doc.apply(Command::SetEffects { id, effects: kept })
-                    .unwrap();
             }
             let closed_guide = matches!(
                 &n.kind,
@@ -4210,6 +4296,181 @@ mod tests {
         );
     }
 
+    /// How far apart two pictures of a page are at worst, premultiplied:
+    /// a pixel nearly transparent has no colour worth comparing.
+    fn worst_apart(a: &Document, b: &Document) -> f32 {
+        let (p, q) = (
+            chitrakar_render::render(a).unwrap(),
+            chitrakar_render::render(b).unwrap(),
+        );
+        p.pixels
+            .iter()
+            .zip(&q.pixels)
+            .map(|(p, q)| {
+                (p.r * p.a - q.r * q.a)
+                    .abs()
+                    .max((p.g * p.a - q.g * q.a).abs())
+                    .max((p.b * p.a - q.b * q.a).abs())
+                    .max((p.a - q.a).abs())
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    fn outlined_card(opacity: f32) -> Document {
+        let mut doc = Document::new(64, 48, ColorMode::Rgb);
+        let root = doc.root();
+        let mut card = Node::vector(
+            "card",
+            VectorShape::Rect {
+                width: 30.0,
+                height: 20.0,
+                radius: 3.0,
+            },
+        );
+        card.transform = chitrakar_doc::Transform::translation(14.0, 12.0);
+        if let NodeKind::Vector { fill, .. } = &mut card.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.5,
+                b: 0.2,
+                a: 1.0,
+            });
+        }
+        card.opacity = opacity;
+        card.effects = vec![chitrakar_doc::Effect::Outline {
+            width: 2.0,
+            color: AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.7,
+                b: 0.3,
+                a: 1.0,
+            },
+            opacity: 1.0,
+        }];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(card),
+        })
+        .unwrap();
+        doc
+    }
+
+    /// A faded layer's outline comes back. A shape's fade goes to SVG as
+    /// the fade of its paint and came back as the colour's own, and the
+    /// engine measures an outline's edge from the layer's opacity — half
+    /// of it — so the edge came back at half of full cover, which a shape
+    /// at a third never reaches. The exporter writes the edge into the
+    /// filter; read back from it, the fade is the layer's again.
+    #[test]
+    fn a_faded_layer_keeps_its_outline_through_svg() {
+        for opacity in [0.3f32, 0.6] {
+            let doc = outlined_card(opacity);
+            let svg = crate::export_svg(&doc).unwrap();
+            let back = import_svg(svg.as_bytes()).unwrap();
+            let card = &back.shapes[0];
+            assert!(
+                (card.opacity - opacity).abs() < 1e-3,
+                "the fade is the layer's again: {} for {opacity}",
+                card.opacity
+            );
+            let NodeKind::Vector {
+                fill: Some(fill), ..
+            } = &card.kind
+            else {
+                panic!("a card with a fill");
+            };
+            assert!(
+                (fill.alpha() - 1.0).abs() < 1e-3,
+                "and out of its paint: {fill:?}"
+            );
+            let worst = worst_apart(&doc, &brought_in(&svg, 64, 48));
+            assert!(
+                worst < 0.02,
+                "at {opacity} it came back as it was, worst {worst}"
+            );
+        }
+        // At full opacity there is no fade to give back.
+        let svg = crate::export_svg(&outlined_card(1.0)).unwrap();
+        assert_eq!(import_svg(svg.as_bytes()).unwrap().shapes[0].opacity, 1.0);
+    }
+
+    /// A group's effects over a layer with effects of its own come back,
+    /// both. The layer's filter sits inside the group's in the file, and
+    /// the group's effects were carried down to the one layer under it —
+    /// which already had its own, and kept those instead.
+    #[test]
+    fn a_groups_effects_over_a_layers_own_come_back_both() {
+        use chitrakar_doc::Effect;
+        let mut doc = outlined_card(1.0);
+        let root = doc.root();
+        let card = doc.children_of(root).unwrap()[0];
+        let outline = doc.node(card).unwrap().effects.clone();
+        doc.apply(Command::SetEffects {
+            id: card,
+            effects: vec![Effect::DropShadow {
+                dx: 3.0,
+                dy: 4.0,
+                blur: 1.5,
+                color: AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.3,
+                    a: 1.0,
+                },
+                opacity: 0.7,
+            }],
+        })
+        .unwrap();
+        let group = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::group("held")),
+        })
+        .unwrap();
+        doc.apply(Command::MoveNode {
+            id: card,
+            parent: group,
+            index: 0,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: group,
+            effects: outline,
+        })
+        .unwrap();
+        let svg = crate::export_svg(&doc).unwrap();
+        let back = import_svg(svg.as_bytes()).unwrap();
+        let kinds = |fx: &[Effect]| {
+            fx.iter()
+                .map(|e| match e {
+                    Effect::DropShadow { .. } => "shadow",
+                    Effect::Outline { .. } => "outline",
+                    Effect::InnerShadow { .. } => "inner",
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            back.groups
+                .iter()
+                .map(|g| kinds(&g.effects))
+                .collect::<Vec<_>>(),
+            vec![vec!["outline"]],
+            "the group's outline is the group's"
+        );
+        assert_eq!(
+            kinds(&back.shapes[0].effects),
+            vec!["shadow"],
+            "the shadow the card's"
+        );
+        let worst = worst_apart(&doc, &brought_in(&svg, 64, 48));
+        assert!(
+            worst < 0.03,
+            "and the page came back as it was, worst {worst}"
+        );
+    }
+
     /// Every blur the engine has comes back at its own radius: what the
     /// exporter writes for it (`√(r(r+1))` at the engine's radius `r`)
     /// is read back to a blur of that radius, in the page's units and in
@@ -4220,6 +4481,7 @@ mod tests {
         for scale in [1.0f32, 2.0] {
             let page = Page {
                 at: usvg::Transform::from_scale(scale, scale),
+                edge: std::cell::Cell::new(None),
             };
             for k in 2..240 {
                 let blur = k as f32 * 0.05;

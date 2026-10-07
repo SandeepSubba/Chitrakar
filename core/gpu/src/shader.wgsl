@@ -1383,11 +1383,50 @@ fn fs_field(in: ImageOut) -> @location(0) vec4f {
     // what coverage the answer turns. It comes down as one, not as the
     // tint: what the band's own passes carry is a distance, and a
     // distance has no colour until it has been cut to a width.
+    //
+    // Or the middle of a line thinner than a pixel, which is never half
+    // covered anywhere: the CPU renderer's `ridge`, read off the same
+    // pixels with the same share of the composite taken, the same least
+    // coverage (0.4 of the half that is an edge, which is the CPU's 0.2
+    // of the layer's opacity) and the same margin (0.08 of that).
     if in.params.x == 2.0 {
-        return vec4f(select(0.0, 1.0, a >= in.params.y));
+        let size = vec2i(textureDimensions(image));
+        let here = vec2i(floor(in.uv * vec2f(size)));
+        let c = field_cover(here, size, in.alpha);
+        let faint = 0.4 * in.params.y;
+        let thin = c > faint
+            && ridge(
+                c,
+                field_cover(here - vec2i(1, 0), size, in.alpha),
+                field_cover(here + vec2i(1, 0), size, in.alpha),
+                field_cover(here - vec2i(0, 1), size, in.alpha),
+                field_cover(here + vec2i(0, 1), size, in.alpha),
+                0.08 * faint,
+            );
+        return vec4f(select(0.0, 1.0, a >= in.params.y || thin));
     }
     let cover = select(a, 1.0 - a, in.params.x != 0.0);
     return in.grad * cover;
+}
+
+// How covered the layer is at `p`, with the composite's own share taken,
+// and nothing past its edge.
+fn field_cover(p: vec2i, size: vec2i, alpha: f32) -> f32 {
+    if p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y {
+        return 0.0;
+    }
+    return textureLoad(image, p, 0).a * alpha;
+}
+
+// The middle of a line thinner than a pixel: at least as covered as both
+// neighbours along one axis, and more than one of them. A soft edge
+// fading away is a slope and never this.
+// Both by a margin, `step`, so that arithmetic's noise along a soft
+// edge — which is not the same noise here as on the CPU — makes no ridge.
+fn ridge(c: f32, l: f32, r: f32, u: f32, d: f32, step: f32) -> bool {
+    let across_x = c >= max(l, r) - step && (c > l + step || c > r + step);
+    let across_y = c >= max(u, d) - step && (c > u + step || c > d + step);
+    return across_x || across_y;
 }
 
 // Whether the pixel at `p` is inside the silhouette the band is measured
