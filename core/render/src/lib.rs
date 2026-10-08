@@ -1602,6 +1602,14 @@ fn lay_clone(
         m,
         Some(&mut laid),
     );
+    let wearing = behind
+        .levels
+        .iter()
+        .filter(|l| matches!(l, Level::Wear(..)))
+        .count();
+    if wearing > 1 {
+        return lay_levels(doc, behind, dst, laid, (region, clip), cover);
+    }
     // Each copy on the way down to the clone lets through its
     // own mask's worth at its own opacity, of what the clone
     // laid — the same mix a copy of one without effects is
@@ -1662,6 +1670,98 @@ fn lay_clone(
     laid
 }
 
+/// What a clone layer lays when more than one layer on the way out to it
+/// wears effects: each level laid round what is inside it, inner to outer
+/// — the clone's own effects round its strokes, a copy's share of that,
+/// the copy's effects round the copy — as a copy of any other layer is
+/// staged, its effects grown from a picture that already holds the
+/// effects of what it copies. Then it all comes down by the blend.
+///
+/// It gave up instead, and the copy went to a surface of its own, where a
+/// clone has nothing to lift: what its effects were grown from was a
+/// stray trace, which changed with whether the clone it copies wore an
+/// effect at all — a shadow at no opacity on the clone moved the copy's
+/// outline (seed 19 of the fixture, found by the outline that counts a
+/// ridge as inside).
+fn lay_levels(
+    doc: &Document,
+    behind: CloneBehind<'_>,
+    dst: &mut Surface,
+    laid: Surface,
+    (region, clip): (ClipRect, ClipRect),
+    cover: Option<&Cover>,
+) -> Surface {
+    let fade = |pic: &mut Surface, mask: Option<&Mask>, space: Transform, opacity: f32| {
+        let plane = MaskRef::plane_over(Some(doc), mask, space, region, (dst.width, dst.height));
+        let m = MaskRef::new(mask, space).with_plane(plane.as_ref());
+        for y in region.y0..region.y1 {
+            for x in region.x0..region.x1 {
+                let a = coverage_at(doc, m, x, y) * opacity;
+                let i = (y * pic.width + x) as usize;
+                pic.pixels[i] = scale_alpha(pic.pixels[i], a);
+            }
+        }
+    };
+    // What it laid, let through as the copies let it through, with no
+    // effects: what is held to it is confined to that, as before.
+    let mut shape = laid.clone();
+    let mut pic = laid;
+    for level in behind.levels.iter().rev() {
+        match level {
+            Level::Fade(mask, space, opacity) => {
+                fade(&mut shape, *mask, *space, *opacity);
+                fade(&mut pic, *mask, *space, *opacity);
+            }
+            Level::Wear(node, space) => {
+                let mut next = Surface::new(dst.width, dst.height);
+                for effect in node.effects.iter().filter(|e| !e.over()) {
+                    draw_effect(
+                        &mut next,
+                        &pic,
+                        (0, 0),
+                        doc,
+                        effect,
+                        *space,
+                        region,
+                        region,
+                        BlendMode::Normal,
+                        node.opacity,
+                    );
+                }
+                composite_from(&mut next, &pic, (0, 0), 1.0, BlendMode::Normal, region);
+                for effect in node.effects.iter().filter(|e| e.over()) {
+                    draw_effect(
+                        &mut next,
+                        &pic,
+                        (0, 0),
+                        doc,
+                        effect,
+                        *space,
+                        region,
+                        region,
+                        BlendMode::Normal,
+                        node.opacity,
+                    );
+                }
+                pic = next;
+            }
+        }
+    }
+    // Whatever it is held to cuts the whole of it.
+    if let Some(c) = cover {
+        for y in region.y0..region.y1 {
+            for x in region.x0..region.x1 {
+                let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                let i = (y * pic.width + x) as usize;
+                pic.pixels[i] = scale_alpha(pic.pixels[i], a);
+                shape.pixels[i] = scale_alpha(shape.pixels[i], a);
+            }
+        }
+    }
+    composite_from(dst, &pic, (0, 0), 1.0, behind.blend, clip.intersect(region));
+    shape
+}
+
 /// What a clone layer — or a copy of one, through however many copies —
 /// lays, resolved down to the clone: its strokes in the space they are
 /// drawn in, the clone's own opacity and mask (which go on each stroke
@@ -1676,8 +1776,12 @@ fn lay_clone(
 /// too: it went down the road for a copy with no effects anywhere, and
 /// the shadow was simply missing, where the GPU backend drew it.
 ///
-/// `None` for anything else, and for a chain with effects on more than
-/// one layer, or anything hidden in it, which this does not resolve.
+/// Effects on more than one layer on the way down — a copy outlined round
+/// a clone layer that casts a shadow — are `levels`, laid inner to outer
+/// (`lay_clone`); `wears` is then the outermost.
+///
+/// `None` for anything else, and for a chain with anything hidden in it,
+/// which this does not resolve.
 struct CloneBehind<'a> {
     strokes: &'a [chitrakar_doc::PaintStroke],
     t: Transform,
@@ -1686,22 +1790,41 @@ struct CloneBehind<'a> {
     over: Vec<(Option<&'a Mask>, Transform, f32)>,
     blend: BlendMode,
     wears: &'a chitrakar_doc::Node,
+    /// Every layer on the way down that changes the picture as it goes,
+    /// outermost first: a copy letting through its share, a layer
+    /// wearing effects in the space it is drawn in.
+    levels: Vec<Level<'a>>,
+}
+
+/// One step of what a clone layer lays on its way out through the copies
+/// of it (`CloneBehind::levels`).
+enum Level<'a> {
+    /// A copy's mask and opacity, letting through its share.
+    Fade(Option<&'a Mask>, Transform, f32),
+    /// A layer's effects, drawn round what is inside it, in its parent's
+    /// space.
+    Wear(&'a chitrakar_doc::Node, Transform),
 }
 
 fn clone_behind(doc: &Document, id: NodeId, parent: Transform) -> Option<CloneBehind<'_>> {
     let (mut at, mut space) = (id, parent);
     let (mut over, mut blend) = (Vec::new(), BlendMode::Normal);
     let mut wears: Option<&chitrakar_doc::Node> = None;
+    let mut levels = Vec::new();
     for _ in 0..chitrakar_doc::MAX_DEPTH {
         let node = doc.node(at).ok()?;
         if at != id && !node.visible {
             return None;
         }
+        // Outermost first, so the effects wear round the fade: a copy's
+        // own share is in the picture its effects are drawn from, as a
+        // layer's opacity is in the surface its effects are drawn from.
         if !node.effects.is_empty() {
-            if wears.is_some() {
-                return None;
-            }
-            wears = Some(node);
+            wears.get_or_insert(node);
+            levels.push(Level::Wear(node, space));
+        }
+        if matches!(node.kind, NodeKind::Instance { .. }) {
+            levels.push(Level::Fade(node.mask.as_ref(), space, node.opacity));
         }
         if blend == BlendMode::Normal {
             blend = node.blend;
@@ -1719,6 +1842,7 @@ fn clone_behind(doc: &Document, id: NodeId, parent: Transform) -> Option<CloneBe
                         Some(w) => w,
                         None => doc.node(id).ok()?,
                     },
+                    levels,
                 });
             }
             NodeKind::Instance { of, .. } => {
@@ -3233,17 +3357,15 @@ fn shift_clip(clip: ClipRect, origin: (u32, u32)) -> ClipRect {
 /// which is a couple of passes over the region and rounds corners the way
 /// a pen would.
 /// The least coverage a line thinner than a pixel can have and still be
-/// outlined, as a share of the layer's opacity: a line a fifth of a
-/// pixel wide. A tenth was tried first, and the audit that adds an
-/// effect drawing nothing to every bare layer
-/// (`an_effect_that_draws_nothing_is_no_effect`) found a copy of a clone
-/// layer whose staged silhouette carries a trace between a tenth and a
-/// fifth covered that changes with whether the clone it copies wears an
-/// effect — a difference the half-covered edge never saw, and a shadow
-/// shows only as a fortieth. That is the copy's to put right, not the
-/// outline's (PLAN §0); until it is, a fifth keeps an outline from
-/// amplifying it, and still reaches a caption's stems and a hairline a
-/// quarter of a pixel wide.
+/// outlined, as a share of the layer's opacity: a line a fifth of a pixel
+/// wide. Below that is where two honest drawings of one shape part
+/// company — a block of text set by the text renderer and the same glyphs
+/// as paths agree to a hundredth at their stems and not at a turned
+/// letter's faintest smoothing — and an outline counting those pixels
+/// amplifies the difference into a pixel of band: a tenth was tried, and
+/// the SVG round trip, which brings text back as paths, found it on a
+/// copy of a turned caption (seed 221). A fifth still reaches a caption's
+/// stems and a hairline a quarter of a pixel wide.
 const OUTLINE_FAINT: f32 = 0.2;
 
 /// How much a ridge must stand above one side, as a share of the least
@@ -16824,6 +16946,150 @@ mod tests {
         assert!(s.get(4, 4).a > 0.5, "the band turns the corner");
         assert_eq!(s.get(15, 15).a, 0.0, "and leaves the middle empty");
         assert!(s.get(15, 1).a > 0.5, "the straight edges still carry it");
+    }
+
+    /// A copy of a clone layer, both wearing effects: the clone's laid round
+    /// its strokes, the copy's round that — as a copy of any other layer is
+    /// drawn. Two layers wearing effects on the way down was more than
+    /// this resolved, and the copy went to a surface of its own where a
+    /// clone has nothing to lift, so its effects were grown from a stray
+    /// trace: a shadow at *no opacity* on the clone moved the copy's
+    /// outline, and a real one was missing from the copy altogether.
+    #[test]
+    fn a_copy_of_a_clone_wears_its_effects_round_the_clones() {
+        let green = AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.8,
+            b: 0.2,
+            a: 1.0,
+        };
+        let page = |clone_wears: Vec<Effect>| {
+            let mut doc = Document::new(60, 60, ColorMode::Rgb);
+            let root = doc.root();
+            let pale = AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.9,
+                b: 0.85,
+                a: 1.0,
+            };
+            for (i, (w, h, x, y, c)) in [
+                (60.0f32, 60.0f32, 0.0f32, 0.0f32, pale),
+                (10.0, 10.0, 5.0, 10.0, RED),
+                // What the copy lifts, which is beside where it lays.
+                (10.0, 10.0, 5.0, 40.0, RED),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: filled_rect("part", w, h, c),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::clone_layer("clone")),
+            })
+            .unwrap();
+            let clone = doc.children_of(root).unwrap()[3];
+            // The red square lifted thirty pixels to the right.
+            let mut s = stroke(&[[40.0, 15.0]], 4.0, RED);
+            s.source = [-30.0, 0.0];
+            doc.apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(s),
+                on_mask: false,
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects {
+                id: clone,
+                effects: clone_wears,
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 4,
+                node: Box::new(Node::instance("copy", clone)),
+            })
+            .unwrap();
+            let copy = doc.children_of(root).unwrap()[4];
+            doc.apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(0.0, 30.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetEffects {
+                id: copy,
+                effects: vec![Effect::Outline {
+                    width: 1.5,
+                    color: green.clone(),
+                    opacity: 1.0,
+                }],
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let shadow = |opacity: f32| Effect::DropShadow {
+            dx: 5.0,
+            dy: 0.0,
+            blur: 0.0,
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity,
+        };
+        let bare = page(vec![]);
+        // The copy is there and outlined at all: red where it lays the
+        // dab, green round it.
+        assert!(
+            bare.get(40, 45).r > 0.5 && bare.get(40, 45).g < 0.3,
+            "{:?}",
+            bare.get(40, 45)
+        );
+        assert!(bare.get(35, 45).g > 0.5, "outlined: {:?}", bare.get(35, 45));
+        // A shadow that draws nothing changes nothing.
+        let nothing = page(vec![shadow(0.0)]);
+        let moved = bare
+            .pixels
+            .iter()
+            .zip(&nothing.pixels)
+            .filter(|(p, q)| (p.a - q.a).abs() + (p.r - q.r).abs() + (p.g - q.g).abs() > 1e-4)
+            .count();
+        assert_eq!(
+            moved, 0,
+            "a shadow at no opacity on the clone moved {moved} pixels"
+        );
+        // A real one is the copy's too, inside the copy's outline: dark
+        // just right of the dab, and the outline round the shadow's edge
+        // rather than round the dab's.
+        let shadowed = page(vec![shadow(1.0)]);
+        let (dab, beyond) = (shadowed.get(46, 45), shadowed.get(48, 45));
+        assert!(
+            dab.r < 0.2 && dab.g < 0.2,
+            "the copy casts the clone's shadow: {dab:?}"
+        );
+        assert!(
+            beyond.r < 0.2 && bare.get(48, 45).r > 0.6,
+            "the shadow reaches past where the bare outline did: {beyond:?}"
+        );
+        assert!(
+            shadowed.get(49, 45).g > 0.5 && shadowed.get(49, 45).r < 0.5,
+            "and the outline is round it: {:?}",
+            shadowed.get(49, 45)
+        );
     }
 
     /// A line thinner than a pixel is never half covered anywhere, and

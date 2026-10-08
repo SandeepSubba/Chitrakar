@@ -952,7 +952,7 @@ without reading anything else.*
   the second launch's command line to the first (`second_copy`), which
   brings its window forward and queues the files as above — without it,
   every double-click started another copy of the app.
-- **Verify before committing:** `cargo test --workspace` (~614),
+- **Verify before committing:** `cargo test --workspace` (~615),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -5188,15 +5188,27 @@ without reading anything else.*
      not decoration: without it the level line of a soft edge was a
      ridge of rounding noise, and the GPU's noise is not the CPU's — the
      clone layer's outline audit caught it at once. A ridge counts from
-     a fifth of the layer's opacity up: a tenth was tried first, and the
-     audit that adds an effect drawing nothing to every bare layer found
-     **a copy of a clone layer whose staged silhouette changes with
-     whether the clone it copies wears an effect** — a trace between a
-     tenth and a fifth covered on seed 19, which the half-covered edge
-     never saw and which a shadow on the copy shows as 0.025 in six
-     pixels on the engine as it was. Found, measured and not yet chased:
-     it is the copy's staging to put right (the same road the GPU
-     already declines), not the outline's. The GPU agrees pixel
+     a fifth of the layer's opacity up: below that is where two honest
+     drawings of one shape part company — text set by the text renderer
+     and the same glyphs as paths, at a turned letter's faintest
+     smoothing — and the SVG round trip, which brings text back as paths,
+     found a tenth amplifying it on a copy of a turned caption (seed 221).
+     On the way there the audit that
+     adds an effect drawing nothing to every bare layer found **a copy of
+     a clone layer whose silhouette changed with whether the clone it
+     copies wore an effect** — a trace between a tenth and a fifth
+     covered on seed 19, which the half-covered edge never saw and which
+     a shadow on the copy showed as 0.025 in six pixels. Two layers
+     wearing effects on the way from a copy down to its clone was more
+     than `clone_behind` resolved, so the copy went to a surface of its
+     own, where a clone has nothing to lift: its effects grew from a
+     stray trace, and a real shadow on the clone was missing from the
+     copy altogether. Each layer on the way is a level now — a copy's
+     share, a layer's effects in its own space — laid inner to outer
+     (`lay_levels`), the copy's effects grown from a picture that
+     already holds the clone's, as a copy of any other layer is drawn
+     (`a_copy_of_a_clone_wears_its_effects_round_the_clones`). The one
+     wearer that every page had before goes the way it went. The GPU agrees pixel
      for pixel on upright and level hairlines and outlines a slanted one
      too, though not to the pixel: it covers a path with four samples,
      so a third of a pixel comes out a quarter or a half, and an outline
