@@ -168,6 +168,27 @@ fn box_cover(q: vec2f) -> f32 {
         * clamp(0.5 - q.y / across(q.y), 0.0, 1.0);
 }
 
+// How much of this pixel a box covers, given where this point is from
+// the box's middle and how far the box reaches either side of it. What a
+// pixel and a box share along one axis, times the same along the other —
+// exact for a box standing square on the page, as `box_cover` is, and
+// exact as well for one thinner than a pixel, which `box_cover` is not:
+// its ramp is the overlap only while the box is at least a pixel across,
+// and a pixel whose middle sat inside a line a third of a pixel wide came
+// out two thirds covered rather than a third. Upright that never showed,
+// since the middles of the pixels such a line crosses lie outside it;
+// turned, half of them lie inside.
+fn slab(p: f32, r: f32) -> f32 {
+    let w = across(p);
+    let lo = max(abs(p) - 0.5 * w, -r);
+    let hi = min(abs(p) + 0.5 * w, r);
+    return clamp((hi - lo) / w, 0.0, 1.0);
+}
+
+fn box_area(p: vec2f, r: vec2f) -> f32 {
+    return slab(p.x, r.x) * slab(p.y, r.y);
+}
+
 // How much of this pixel the shape covers. `params.w` says which shape
 // it is — 0 a rounded rectangle, 1 an ellipse, and 2 or 3 the same two
 // as a stroke, whose band lies between two outlines: the shape grown by
@@ -238,7 +259,7 @@ fn coverage(in: VsOut) -> f32 {
         0.0,
         1.0,
     );
-    let solid = select(edge(plain), box_cover(q), sharp);
+    let solid = select(edge(plain), box_area(in.local - r, r), sharp);
     let banded = select(
         clamp(edge(outer) - edge(inner), 0.0, 1.0),
         square_band,

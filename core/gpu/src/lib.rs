@@ -14166,6 +14166,63 @@ mod tests {
         }
     }
 
+    /// A rectangle thinner than a pixel, turned, is covered by its area as
+    /// the CPU covers it. Its coverage here was a ramp a pixel wide across
+    /// each axis, which is the overlap only while the rectangle is at least
+    /// a pixel across: a pixel whose middle sat inside a line a third of a
+    /// pixel wide came out two thirds covered. Upright that never showed —
+    /// the middles of the pixels such a line crosses lie outside it — and
+    /// turned, half of them lie inside, by up to 0.3.
+    #[test]
+    fn a_thin_turned_rectangle_is_covered_by_its_area() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = AuthoredColor::Srgb {
+            r: 0.8,
+            g: 0.2,
+            b: 0.1,
+            a: 1.0,
+        };
+        for (thin, turn) in [
+            (0.3f32, 0.5f32),
+            (0.6, 0.5),
+            (0.3, 1.1),
+            (0.15, 0.3),
+            (2.0, 0.5),
+        ] {
+            let mut doc = Document::new(48, 48, chitrakar_color::ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "line",
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: thin,
+                        radius: 0.0,
+                    },
+                    ink.clone(),
+                ),
+                Transform::translation(8.0, 10.0).compose(Transform {
+                    a: turn.cos(),
+                    b: turn.sin(),
+                    c: -turn.sin(),
+                    d: turn.cos(),
+                    e: 0.0,
+                    f: 0.0,
+                }),
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.002 && worst < 0.12,
+                "{thin} wide turned {turn}: mean {mean:.5}, worst {worst:.3}"
+            );
+        }
+    }
+
     /// A line thinner than a pixel is outlined here as on the CPU: its
     /// middle is a ridge, and counts as inside though it is never half
     /// covered — across it either way, at full opacity and faded.

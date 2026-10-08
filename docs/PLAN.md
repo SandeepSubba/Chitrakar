@@ -952,7 +952,7 @@ without reading anything else.*
   the second launch's command line to the first (`second_copy`), which
   brings its window forward and queues the files as above — without it,
   every double-click started another copy of the app.
-- **Verify before committing:** `cargo test --workspace` (~615),
+- **Verify before committing:** `cargo test --workspace` (~616),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
@@ -2602,13 +2602,19 @@ without reading anything else.*
      geometry out where the CPU renderer works its own out and from the
      same numbers, which is what makes the two land on the same picture
      rather than on two plausible ones.
-     A known difference, found while holding hairline outlines to the
-     CPU and not yet chased: a *slanted* rectangle a third of a pixel
-     wide is covered differently here, by up to 0.3 — a rectangle's
-     coverage comes from its signed distance, which is not its area when
-     it is that thin — and a slanted thin path, covered by four samples,
-     by as much. Upright and level they agree. Nothing in the fixture is
-     that thin, which is why no audit has said so.
+     A *turned* rectangle thinner than a pixel was covered differently
+     here, by up to 0.3, found while holding hairline outlines to the
+     CPU: its coverage was a ramp a pixel wide across each axis, which
+     is the overlap only while the rectangle is at least a pixel across,
+     so a pixel whose middle sat inside a line a third of a pixel wide
+     came out two thirds covered. Upright it never showed — the middles
+     of the pixels such a line crosses lie outside it. Each axis is now
+     what a pixel and the rectangle really share along it (`slab`),
+     which is the ramp again for anything a pixel or wider
+     (`a_thin_turned_rectangle_is_covered_by_its_area`). A slanted thin
+     *path* still differs, by as much: a path is covered here by four
+     samples, so a third of a pixel comes out a quarter or a half.
+     Nothing in the fixture is that thin, which is why no audit said so.
      What is left to *wire*: it now takes a view
      (`GpuRenderer::render_view`), which was the half that mattered — the
      surface has stopped being the page, so a viewport can be drawn from
