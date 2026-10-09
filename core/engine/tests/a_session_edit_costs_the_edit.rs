@@ -64,11 +64,20 @@ fn build(n: usize) -> Duration {
     spent
 }
 
+/// The quickest of a few builds. A timer measures the machine as well as
+/// the work, and anything else the machine is doing only ever adds: one
+/// build in five came out half again over the ceiling with nothing about
+/// the work changed. The least of several is the work with the least of
+/// that added, which is what the ratio is about.
+fn quickest(n: usize) -> Duration {
+    (0..5).map(|_| build(n)).min().unwrap()
+}
+
 #[test]
 fn a_session_edit_costs_the_edit() {
     let _ = build(200);
-    let small = build(400);
-    let large = build(1600);
+    let small = quickest(400);
+    let large = quickest(1600);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
     assert!(
         ratio < 6.0,

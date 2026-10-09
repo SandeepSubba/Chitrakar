@@ -1760,6 +1760,11 @@ fn escape_xml(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[cfg(test)]
+pub(crate) fn base64_for_tests(bytes: &[u8]) -> String {
+    base64(bytes)
+}
+
 fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

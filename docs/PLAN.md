@@ -982,7 +982,29 @@ without reading anything else.*
   none of those eight pages has the dashed inside stroke the hang
   needed. The same guards protect what an SVG placed in a document can
   say, which goes through the same renderer.
-- **Verify before committing:** `cargo test --workspace` (~618),
+- **And an SVG that says one.** The same probe aimed at placing an SVG —
+  this editor's own export of the fixture's pages, one number at a time
+  set to an extreme — stopped the program on twenty of four hundred and
+  eighty. Three were this importer's: a shadow's blur found by counting
+  up from one (a step for every pixel of its width; a closed form now),
+  a soft mask held to a number of pixels but not to a side (one a
+  trillion wide and two tall asked for a row no machine has), and the
+  raster drawn under that mask. The rest were the reader's own — text
+  along a curve with a point out past 10¹² hung usvg's layout, and a
+  picture a billion times wider than tall panicked it — which nothing
+  here can reach, and in the browser a panic cannot be caught. So the
+  file is asked first (`past_reason`): a number past a billion in any
+  attribute or style sheet, or a picture more than a million times
+  wider than tall, is refused with a sentence saying which, leaving out
+  what is not a number (ids, classes, links, colours in hex, a
+  picture's data, other programs' attributes). A compressed SVG is
+  unpacked here rather than by the reader, so it is asked the same, and
+  refused rather than unpacked past 256 MB. Then 3,600 more, with
+  millions and millionths among the extremes so that what passes the
+  door is exercised too: none fatal
+  (`a_number_past_any_drawing_is_refused_before_the_reader_sees_it`,
+  `a_drawing_scaled_past_reason_comes_in_without_stopping_anything`).
+- **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single

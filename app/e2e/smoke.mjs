@@ -4445,6 +4445,34 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   assert((await names()).join() === beforeSvg.join(), "and one undo takes the shadowed file back");
+  // A file saying a number past any drawing is refused with a sentence,
+  // before the reader sees it — in the browser a reader that panics
+  // stops the engine for good, and one that hangs stops the page — and
+  // the editor carries on: the next file places as ever.
+  const hostile = `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36">
+    <defs><path id="g" d="M0,10 C10,0 20,20 30,1e30"/></defs>
+    <text font-size="8"><textPath href="#g">Hello world</textPath></text></svg>`;
+  lastDialog = "";
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "hostile.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(hostile),
+  });
+  await page.waitForTimeout(400);
+  assert(
+    lastDialog.includes("past anything a drawing holds") &&
+      (await names()).join() === beforeSvg.join(),
+    `a file past any drawing is refused, saying why, and places nothing (${lastDialog})`,
+  );
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+    name: "shadowed.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(shadowed),
+  });
+  await page.waitForTimeout(400);
+  assert((await canvasPixel(40, 43))[3] > 100, "and the next file places as ever");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
 
   // 8x12. Locking: a locked layer is not picked on the canvas and offers
   // no handles; unlocking gives it back.

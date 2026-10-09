@@ -243,6 +243,19 @@ pub struct ImportedImage {
 
 /// Bring an SVG in as shape layers.
 pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
+    // A compressed file is opened here rather than by the reader, so that
+    // what it says is asked about like any other file's, and so that a
+    // few kilobytes cannot unpack into more memory than there is.
+    let inflated;
+    let data = if data.starts_with(&[0x1f, 0x8b]) {
+        inflated = inflate_capped(data)?;
+        &inflated[..]
+    } else {
+        data
+    };
+    if let Some(why) = past_reason(data) {
+        return Err(why);
+    }
     let mut opt = usvg::Options::default();
     opt.fontdb_mut().load_font_data(FACE.to_vec());
     // Text in a face the file cannot supply is set in the bundled one.
@@ -258,6 +271,164 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
         images: got.pics,
         masks: got.masks,
         groups: got.groups,
+    })
+}
+
+/// The most an SVG file is unpacked to: far past any drawing, and short
+/// of what a few kilobytes made to unpack for ever would ask for.
+const INFLATED_MOST: u64 = 256 << 20;
+
+fn inflate_capped(data: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(data)
+        .take(INFLATED_MOST + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("the compressed file could not be opened: {e}"))?;
+    if out.len() as u64 > INFLATED_MOST {
+        return Err("the compressed file unpacks to more than any drawing holds".into());
+    }
+    Ok(out)
+}
+
+/// Past this, a number in an SVG is not a coordinate anybody drew: a
+/// billion pixels is a drawing a few kilometres across at a screen's
+/// resolution. And it is where the reader stops being able to cope — a
+/// curve with a point out near 10²⁰ hung its text layout for good — so it
+/// is asked about here, before the reader is handed the file.
+const SVG_NUMBER_MOST: f64 = 1e9;
+
+/// How lopsided a picture's box may be before the reader cannot place it:
+/// one about a billion times wider than tall stopped it outright.
+const IMAGE_SHAPE_MOST: f64 = 1e6;
+
+/// Why a file is refused before the reader sees it, if it is.
+///
+/// A file can say anything, and the reader believes it: a number past
+/// anything a drawing holds hung it, and a picture shaped like a thread
+/// panicked it — and in the browser there is no catching a panic, the
+/// engine stops. What it cannot be handed is asked about here instead:
+/// the numbers in every attribute and style sheet, leaving out what is
+/// not a number at all — an id, a class, a link, a colour written in
+/// hex, a picture's own data, and the attributes other programs keep
+/// for themselves.
+fn past_reason(data: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(data).ok()?;
+    let options = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    // What will not parse here will not parse for the reader either,
+    // which says so in its own words.
+    let doc = usvg::roxmltree::Document::parse_with_options(text, options).ok()?;
+    let not_numbers = [
+        "id",
+        "class",
+        "href",
+        "lang",
+        "title",
+        "font-family",
+        "version",
+    ];
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        for a in node.attributes() {
+            let name = a.name();
+            if a.namespace()
+                .is_some_and(|ns| ns != "http://www.w3.org/2000/svg")
+                || not_numbers.contains(&name)
+                || name.starts_with("aria-")
+                || name.starts_with("data-")
+                || a.value().trim_start().starts_with("data:")
+            {
+                continue;
+            }
+            if let Some(x) =
+                numbers_in(a.value()).find(|x| !x.is_finite() || x.abs() > SVG_NUMBER_MOST)
+            {
+                return Some(format!(
+                    "this file says {x:e} in `{name}`, which is past anything a drawing holds"
+                ));
+            }
+        }
+        if node.tag_name().name() == "style" {
+            if let Some(x) = node
+                .descendants()
+                .filter_map(|n| n.text())
+                .flat_map(numbers_in)
+                .find(|x| !x.is_finite() || x.abs() > SVG_NUMBER_MOST)
+            {
+                return Some(format!(
+                    "this file's style sheet says {x:e}, which is past anything a drawing holds"
+                ));
+            }
+        }
+        if node.tag_name().name() == "image" {
+            let side = |n: &str| node.attribute(n).and_then(|v| numbers_in(v).next());
+            if let (Some(w), Some(h)) = (side("width"), side("height")) {
+                let (w, h) = (w.abs(), h.abs());
+                if w > 0.0 && h > 0.0 && (w / h).max(h / w) > IMAGE_SHAPE_MOST {
+                    return Some(format!(
+                        "this file has a picture {w} by {h}, which cannot be placed"
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The numbers written in an attribute or a style sheet: a sign, digits,
+/// a point and an exponent, standing on their own — not the tail of a
+/// name, and not a colour in hex.
+fn numbers_in(text: &str) -> impl Iterator<Item = f64> + '_ {
+    let b = text.as_bytes();
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while i < b.len() {
+            let starts = b[i].is_ascii_digit()
+                || (b[i] == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit))
+                || ((b[i] == b'-' || b[i] == b'+')
+                    && b.get(i + 1)
+                        .is_some_and(|c| c.is_ascii_digit() || *c == b'.'));
+            let stands = i == 0
+                || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'#' || b[i - 1] == b'_');
+            if !(starts && stands) {
+                i += 1;
+                continue;
+            }
+            let s = i;
+            if b[i] == b'-' || b[i] == b'+' {
+                i += 1;
+            }
+            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+                i += 1;
+            }
+            if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+                let mut j = i + 1;
+                if j < b.len() && (b[j] == b'-' || b[j] == b'+') {
+                    j += 1;
+                }
+                if j < b.len() && b[j].is_ascii_digit() {
+                    while j < b.len() && b[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
+                }
+            }
+            // A run of hex digits after this is a colour or a name, not
+            // a number with something after it.
+            if i < b.len() && b[i].is_ascii_alphanumeric() && !matches!(b[i], b'e' | b'E') {
+                let hexish = b[i..].iter().take_while(|c| c.is_ascii_hexdigit()).count();
+                if hexish > 0 && text[s..i].chars().all(|c| c.is_ascii_hexdigit()) {
+                    i += hexish;
+                    continue;
+                }
+            }
+            if let Ok(x) = text[s..i].parse::<f64>() {
+                return Some(x);
+            }
+        }
+        None
     })
 }
 
@@ -619,10 +790,15 @@ impl Page {
             return 0.0;
         }
         let spread = |r: f32| (r * (r + 1.0)).sqrt();
-        let mut r = 1.0f32;
-        while spread(r + 1.0) - s < s - spread(r) {
-            r += 1.0;
-        }
+        // `√(r(r+1))` is within a sixteenth of `r + ½` from one up, so
+        // the nearest radius is there or beside it. Counted up from one,
+        // a blur a file said was a billion wide was a billion steps.
+        let guess = (s - 0.5).round().max(1.0);
+        let r = [guess - 1.0, guess, guess + 1.0]
+            .into_iter()
+            .filter(|r| *r >= 1.0)
+            .min_by(|a, b| (spread(*a) - s).abs().total_cmp(&(spread(*b) - s).abs()))
+            .unwrap_or(1.0);
         // The sigma the engine turns into that radius: its box width is
         // the W3C's, `⌊σ·3√(2π)/4 + ½⌋`, halved; `2r` halves to `r`.
         let k = 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0;
@@ -1299,7 +1475,15 @@ fn soft_mask(
         });
         return Some(raster(1, 1, chitrakar_doc::Transform::default()));
     }
-    let k = (SOFT_MOST / ((x1 - x0) * (y1 - y0))).sqrt().min(1.0);
+    // As many pixels as `SOFT_MOST` at most, and no side longer than a
+    // page can be: held to the total alone, a mask a billion wide and a
+    // few tall kept the total and asked for a row no machine has.
+    let side = chitrakar_doc::MAX_CANVAS_SIDE as f32;
+    let k = (SOFT_MOST / ((x1 - x0) * (y1 - y0)))
+        .sqrt()
+        .min(side / (x1 - x0))
+        .min(side / (y1 - y0))
+        .min(1.0);
     let (w, h) = (
         ((x1 - x0) * k).ceil().max(1.0) as u32,
         ((y1 - y0) * k).ceil().max(1.0) as u32,
@@ -4223,6 +4407,103 @@ mod tests {
                 "file {n}: {off} pixels shadowed otherwise, the first {first:?}\n{svg}"
             );
         }
+    }
+
+    /// What the reader cannot be handed is refused before it is.
+    ///
+    /// A probe set one number at a time in this editor's own SVGs to an
+    /// extreme, placing each and drawing it: twenty of four hundred and
+    /// eighty stopped the program. Six were the reader's own — a text
+    /// laid along a curve with a point out near 10³⁰ hung its layout, a
+    /// picture a billion times wider than tall panicked it — which no
+    /// change here can reach, and in the browser a panic cannot be
+    /// caught. So the file is asked first (`past_reason`).
+    #[test]
+    fn a_number_past_any_drawing_is_refused_before_the_reader_sees_it() {
+        let png = crate::encode_png(4, 4, &[200u8; 64]).unwrap();
+        let b64 = crate::svg::base64_for_tests(&png);
+        let curve = |m: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36"><defs><path id="g" d="M0,10 C10,0 20,20 30,{m}"/></defs><text font-size="8"><textPath href="#g">Hello world</textPath></text></svg>"##
+            )
+        };
+        let picture = |w: &str, h: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36"><image width="{w}" height="{h}" href="data:image/png;base64,{b64}"/></svg>"##
+            )
+        };
+        for (what, svg) in [
+            ("a curve out at 1e30", curve("1e30")),
+            ("and at -1e20", curve("-1e20")),
+            (
+                "a picture a billion times taller than wide",
+                picture("2", "2e9"),
+            ),
+            ("or wider than tall", picture("2", "1e-9")),
+        ] {
+            let refused = import_svg(svg.as_bytes());
+            assert!(refused.is_err(), "{what} is refused");
+        }
+        // Compressed is asked about the same, and a file made to unpack
+        // for ever is refused rather than unpacked.
+        let gz = |bytes: &[u8]| {
+            use std::io::Write;
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(bytes).unwrap();
+            e.finish().unwrap()
+        };
+        assert!(
+            import_svg(&gz(curve("1e30").as_bytes())).is_err(),
+            "compressed too"
+        );
+        let bomb = gz(&vec![b' '; (INFLATED_MOST + 1024) as usize]);
+        assert!(bomb.len() < 1 << 20, "a small file ({} bytes)", bomb.len());
+        assert!(import_svg(&bomb).is_err(), "that unpacks past any drawing");
+        // And what is not a number is not asked about: a colour in hex
+        // that reads like an exponent, names, and other programs' own
+        // attributes. Nor is a billion itself, or a curve near the edge
+        // of what a drawing holds.
+        let fine = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="48" height="36"><g id="layer1e99" inkscape:label="1e99" class="x2e40"><rect width="20" height="10" fill="#1e3000" data-n="9e99"/><rect x="1e9" width="1" height="1"/></g></svg>"##;
+        assert!(
+            import_svg(fine.as_bytes()).is_ok(),
+            "names and colours open"
+        );
+        assert!(
+            import_svg(curve("1e8").as_bytes()).is_ok(),
+            "a curve far out opens"
+        );
+        assert!(
+            import_svg(&gz(fine.as_bytes())).is_ok(),
+            "and opens compressed"
+        );
+    }
+
+    /// What the reader survives, this importer has to as well — and
+    /// numbers each within reason still multiply past it, as two groups
+    /// each stretched a millionfold do. A shadow's blur was found by
+    /// counting up from one, a step for every pixel of its width; and a
+    /// soft mask was held to a number of pixels but not to a side, so one
+    /// a trillion wide and two tall asked for a row no machine has.
+    #[test]
+    fn a_drawing_scaled_past_reason_comes_in_without_stopping_anything() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36">
+  <defs>
+    <filter id="s"><feDropShadow dx="2" dy="2" stdDeviation="3"/></filter>
+    <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="40" height="2"><rect width="40" height="2" fill="#777"/></mask>
+  </defs>
+  <g transform="scale(1e6 1)"><g transform="scale(1e6 1)">
+    <rect width="30" height="20" fill="#c33" filter="url(#s)"/>
+    <rect y="22" width="30" height="10" fill="#3c3" mask="url(#m)"/>
+  </g></g>
+</svg>"##;
+        let started = std::time::Instant::now();
+        let doc = brought_in(svg, 48, 36);
+        let _ = chitrakar_render::render(&doc).unwrap();
+        assert!(
+            started.elapsed().as_secs() < 30,
+            "and in reasonable time ({:?})",
+            started.elapsed()
+        );
     }
 
     /// This editor's own effects — a drop shadow, an outline and an inner
