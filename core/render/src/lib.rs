@@ -1491,11 +1491,31 @@ fn clone_alone(
         clip.x1 as f32,
         clip.y1 as f32,
     );
-    let (ox, oy) = ((nx0 - pad).floor(), (ny0 - pad).floor());
-    let (w, h) = (
-        ((nx1 + pad).ceil() - ox).max(1.0) as u32,
-        ((ny1 + pad).ceil() - oy).max(1.0) as u32,
-    );
+    // But never past the page, which is all there is to lift from:
+    // drawn where it stands, a stroke reaching off the page lifts
+    // nothing out there either. Grown by a reach alone, a clone lifting
+    // from a billion pixels away — or one in a group scaled past
+    // anything a screen shows — asked for a surface no machine has, and
+    // drawing its thumbnail, or putting it in an SVG, stopped the
+    // program.
+    let (mut lo, mut hi) = ([nx0 - pad, ny0 - pad], [nx1 + pad, ny1 + pad]);
+    if let Bounds::Rect(px0, py0, px1, py1) =
+        transformed_bounds(view, doc.meta.width as f32, doc.meta.height as f32)
+    {
+        lo = [lo[0].max(px0 - 1.0), lo[1].max(py0 - 1.0)];
+        hi = [hi[0].min(px1 + 1.0), hi[1].min(py1 + 1.0)];
+    }
+    let (ox, oy) = (lo[0].floor(), lo[1].floor());
+    let (wide, tall) = ((hi[0].ceil() - ox).max(1.0), (hi[1].ceil() - oy).max(1.0));
+    // A page seen so close that even its own extent is more than can be
+    // drawn has nothing to show on its own.
+    if !(wide <= chitrakar_doc::MAX_CANVAS_SIDE as f32
+        && tall <= chitrakar_doc::MAX_CANVAS_SIDE as f32
+        && chitrakar_doc::canvas_fits(wide as u32, tall as u32))
+    {
+        return Ok(false);
+    }
+    let (w, h) = (wide as u32, tall as u32);
     let shift = Transform::translation(-ox, -oy);
     let shifted = shift.compose(space);
     let whole = ClipRect {
@@ -4253,6 +4273,10 @@ pub fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
     }
 }
 
+/// The most dashes a stroke is broken into before it is drawn solid
+/// (`dashed_rings`).
+const MOST_DASHES: f64 = 100_000.0;
+
 /// The outline broken into the pieces a dash pattern leaves, as open
 /// polylines in the shape's own space.
 ///
@@ -4330,6 +4354,34 @@ pub fn dashed_rings(
         }
         (step, pattern[step].max(1e-4) - into, on)
     };
+    // A pattern far finer than the line it breaks up is a solid line to
+    // anybody looking, and walked dash by dash it is a walk that never
+    // ends: a hundred thousand dashes is more than any line on a page
+    // shows, and past it — a pattern of the least length on a long path,
+    // or a band grown past anything a page holds, which a file can ask
+    // for — the line is drawn solid. Out past where an `f32` can count,
+    // a step along it did not move it at all, and the walk did end
+    // never.
+    let finest = pattern
+        .iter()
+        .map(|d| d.max(1e-4))
+        .fold(f32::INFINITY, f32::min) as f64;
+    let length: f64 = rings
+        .iter()
+        .map(|(points, closed)| {
+            let n = points.len();
+            let segments = if *closed { n } else { n.saturating_sub(1) };
+            (0..segments)
+                .map(|i| {
+                    let (a, b) = (points[i], points[(i + 1) % n]);
+                    ((b[0] - a[0]) as f64).hypot((b[1] - a[1]) as f64)
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    if !(length.is_finite() && length / finest <= MOST_DASHES) {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for (points, closed) in rings {
         if points.len() < 2 {
@@ -4820,6 +4872,12 @@ pub fn pieces_bounds(pieces: &[StrokePiece]) -> Option<[f32; 4]> {
 /// outline states better than any number of pieces would.
 pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec<StrokePiece> {
     let mut out = Vec::new();
+    // A stroke of no width, or less, lays nothing — and a negative one,
+    // which a file can say, turned the band inside out and grew the ring
+    // its dashes walk past anything a page holds.
+    if !(stroke.width > 0.0 && stroke.width.is_finite()) {
+        return out;
+    }
     // A dashed stroke is drawn at one width, and each piece the pattern
     // left is a line of its own — so each gets the caps a line gets,
     // which is what makes a dashed rule end square instead of round.
@@ -6875,7 +6933,18 @@ pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextR
     let [bx0, by0, bx1, by1] = text::bounds(spec);
     let natural = (bx1 - bx0, by1 - by0);
     let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
-    let scale = max_scale(t).clamp(0.02, ceiling.max(0.02));
+    // The ceiling has the last word, over the floor too: a block whose
+    // own size is past anything a page holds — letters a billion pixels
+    // tall, or set a billion apart, which a file can say — was floored
+    // back up to a fiftieth and asked for a raster no machine has.
+    // And no letter drawn taller than a screen: each glyph is drawn into
+    // a buffer of its own size, so a block within the ceiling could still
+    // hold a few letters eight thousand pixels tall, each tens of millions
+    // of pixels of work for detail nobody could see — and a letter larger
+    // than that on screen is still sharp at twice the size it is drawn.
+    let ceiling = ceiling.min(2048.0 / spec.size.abs().max(1e-3));
+    let ceiling = if ceiling.is_finite() { ceiling } else { 0.0 };
+    let scale = max_scale(t).max(0.02).min(ceiling);
     (
         text::rasterize_on_grid(spec, scale, grid_phase(t, scale)),
         scale,
@@ -17089,6 +17158,65 @@ mod tests {
             shadowed.get(49, 45).g > 0.5 && shadowed.get(49, 45).r < 0.5,
             "and the outline is round it: {:?}",
             shadowed.get(49, 45)
+        );
+    }
+
+    /// A dashed stroke a file says something impossible about is drawn
+    /// or dropped, and never walked dash by dash for ever. A negative
+    /// width turned an inside band inside out and grew the ring its dashes
+    /// walk past anything a page holds, out where a step along it did not
+    /// move it; and a pattern of the least length along a long path was a
+    /// walk of hundreds of millions of dashes for a line that looks solid.
+    #[test]
+    fn a_dashed_stroke_past_reason_is_drawn_or_dropped_not_walked() {
+        let dashed = |shape: VectorShape, width: f32, dash: Vec<f32>| {
+            let mut doc = Document::new(48, 36, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector("dashed", shape);
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = None;
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width,
+                    widths: Vec::new(),
+                    dash,
+                    dash_offset: 0.0,
+                    cap: Default::default(),
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: Some(chitrakar_doc::StrokeAlign::Inside),
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let rect = VectorShape::Rect {
+            width: 30.0,
+            height: 20.0,
+            radius: 0.0,
+        };
+        // Inside out: nothing to draw, and nothing drawn.
+        let inside_out = dashed(rect.clone(), -1e30, vec![4.0, 2.0]);
+        assert!(inside_out.pixels.iter().all(|p| p.a == 0.0));
+        // A pattern finer than anybody sees, along a path a million
+        // pixels long — on the page, a solid line.
+        let long = VectorShape::Path {
+            points: vec![[0.0, 10.0], [1e6, 10.0]],
+            closed: false,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let fine = dashed(long, 2.0, vec![1e-4]);
+        assert!(
+            (2..46).all(|x| fine.get(x, 10).a > 0.5),
+            "drawn solid along the page"
         );
     }
 

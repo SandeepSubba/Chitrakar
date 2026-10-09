@@ -1624,6 +1624,109 @@ mod tests {
         }
     }
 
+    /// A file can say an extreme number anywhere, not only in a size.
+    ///
+    /// The sizes of the page and of every picture are checked on the way in
+    /// (`a_file_that_says_anything_is_refused_rather_than_believed`); what
+    /// a layer says about itself was believed, and drawn. So these were
+    /// tried across the fixture's pages, numbers set to extremes a hundred
+    /// at a time, each opened, drawn, and written as SVG and as PDF — and
+    /// sixteen in four hundred and eighty took the program down: a text
+    /// block a billion pixels tall or set a billion apart asked for a
+    /// raster no machine has; a clone layer in a group scaled past any
+    /// screen, or lifting from a billion pixels away, asked for a page
+    /// under it that size; a dashed stroke a negative width wide walked
+    /// a ring so long a step along it did not move. Each is what is
+    /// below, on every layer that has the field, and each has to come
+    /// out drawn or refused.
+    #[test]
+    fn a_layer_that_says_an_extreme_number_is_drawn_or_refused() {
+        let fields: &[(&[&str], &[f64])] = &[
+            (&["kind", "Text", "size"], &[1e30]),
+            (&["kind", "Text", "letter_spacing"], &[4294967296.0]),
+            (&["kind", "Text", "width"], &[1e30]),
+            (&["kind", "Text", "line_height"], &[1e30]),
+            (&["kind", "Vector", "stroke", "width"], &[-1e30]),
+            (&["kind", "Clone", "strokes", "0", "source", "0"], &[-1e30]),
+            (&["transform", "a"], &[1e-30]),
+            (&["transform", "d"], &[-1e30]),
+        ];
+        let mut tried = 0usize;
+        for seed in 0..8u64 {
+            let good = save_chitra(&chitrakar_doc::fixture::page(seed)).unwrap();
+            let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+            let mut manifest = String::new();
+            zip.by_name(MANIFEST_PATH)
+                .unwrap()
+                .read_to_string(&mut manifest)
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+            let others: Vec<(String, Vec<u8>)> = zip
+                .file_names()
+                .filter(|n| *n != MANIFEST_PATH)
+                .map(String::from)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|n| {
+                    let mut body = Vec::new();
+                    zip.by_name(&n).unwrap().read_to_end(&mut body).unwrap();
+                    (n, body)
+                })
+                .collect();
+            let ids: Vec<String> = value["document"]["nodes"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            for id in &ids {
+                for (path, extremes) in fields {
+                    for x in *extremes {
+                        let mut v = value.clone();
+                        let mut at = Some(&mut v["document"]["nodes"][id]);
+                        for step in *path {
+                            at = at.and_then(|here| match here {
+                                serde_json::Value::Array(a) => {
+                                    step.parse::<usize>().ok().and_then(|i| a.get_mut(i))
+                                }
+                                serde_json::Value::Object(o) => o.get_mut(*step),
+                                _ => None,
+                            });
+                        }
+                        match at {
+                            Some(n) if n.is_number() => *n = serde_json::json!(x),
+                            _ => continue,
+                        }
+                        let mut out = Vec::new();
+                        {
+                            let mut w = ZipWriter::new(Cursor::new(&mut out));
+                            w.start_file(MANIFEST_PATH, SimpleFileOptions::default())
+                                .unwrap();
+                            w.write_all(v.to_string().as_bytes()).unwrap();
+                            for (n, body) in &others {
+                                w.start_file(n, SimpleFileOptions::default()).unwrap();
+                                w.write_all(body).unwrap();
+                            }
+                            w.finish().unwrap();
+                        }
+                        tried += 1;
+                        // Drawn or refused; what is under test is that
+                        // the program is still here afterwards.
+                        if let Ok(doc) = load_chitra(&out) {
+                            let _ = chitrakar_render::render(&doc);
+                            let _ = crate::export_svg(&doc);
+                            let _ = crate::pdf::export_pdf_document(&doc);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tried > 30,
+            "enough of the fields were found to try ({tried})"
+        );
+    }
+
     #[test]
     fn a_damaged_file_is_refused_not_survived() {
         assert!(load_chitra(b"").is_err(), "nothing at all");

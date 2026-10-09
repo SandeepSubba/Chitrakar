@@ -279,11 +279,17 @@ const WEIGHT: f32 = 0.065;
 /// rather than printing a comb, and last exactly `width` along so the
 /// thickening is the amount asked for and not a step's worth less.
 fn smear_passes(width: f32) -> Vec<f32> {
-    if width <= 0.0 {
+    if !(width > 0.0 && width.is_finite()) {
         return vec![0.0];
     }
     // A third of a pixel: the outlines still overlap once antialiased.
-    let n = (width / 0.33).ceil().max(1.0);
+    // At most sixty-four, though: past a letter about 325 pixels tall a
+    // third of a pixel is a hair against stems tens of pixels wide, and
+    // the copies overlap at any step under a thousandth of the letter —
+    // where counted in thirds, a bold headline zoomed in was hundreds of
+    // passes over every glyph, and one a billion pixels tall, which a
+    // file can say, asked for more passes than there is memory to count.
+    let n = (width / 0.33).ceil().clamp(1.0, 64.0);
     (0..=n as usize).map(|i| width * i as f32 / n).collect()
 }
 
@@ -1337,6 +1343,31 @@ impl Palette {
     }
 }
 
+/// The most pixels a block is rasterized into: the renderer's ceiling
+/// keeps a block's longer side to 8192 at the scale it asks for, so this
+/// is only ever met by a block whose own measurements are past anything a
+/// page holds — which a file can say — and the answer then is nothing
+/// drawn rather than an allocation that stops the program.
+const MOST_PIXELS: f64 = 8192.0 * 8192.0;
+
+fn fits(w: f32, h: f32) -> bool {
+    w.is_finite() && h.is_finite() && (w.max(1.0) as f64) * (h.max(1.0) as f64) <= MOST_PIXELS
+}
+
+impl TextRaster {
+    /// A raster with nothing in it.
+    fn nothing() -> Self {
+        TextRaster {
+            width: 1,
+            height: 1,
+            coverage: vec![0.0],
+            colors: Vec::new(),
+            tint: Vec::new(),
+            origin: (0.0, 0.0),
+        }
+    }
+}
+
 /// Rasterize the block at natural size.
 pub fn rasterize(spec: &TextSpec) -> TextRaster {
     rasterize_at(spec, 1.0)
@@ -1361,12 +1392,17 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
 /// interpolated between texels, and every stem was smeared across two
 /// pixels at half strength. `origin` says where the slid grid starts.
 pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
-    let scale = scale.max(0.01);
+    if !(scale > 0.0 && scale.is_finite()) {
+        return TextRaster::nothing();
+    }
     if spec.along.is_some() {
         return rasterize_along(spec, scale, phase);
     }
     let l = layout(spec, scale);
     let (w, h) = (l.width + phase[0], l.height + phase[1]);
+    if !fits(w, h) {
+        return TextRaster::nothing();
+    }
     let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
     let mut coverage = vec![0f32; (width * height) as usize];
     // Every metric below comes from the scaled font, so advances, kerning
@@ -1473,6 +1509,9 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
 fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
     let (outlines, b) = along_outlines(spec, scale, phase);
     let (x0, y0) = (b[0].floor(), b[1].floor());
+    if !fits(b[2].ceil() - x0, b[3].ceil() - y0) {
+        return TextRaster::nothing();
+    }
     let (width, height) = (
         (b[2].ceil() - x0).max(1.0) as u32,
         (b[3].ceil() - y0).max(1.0) as u32,

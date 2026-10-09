@@ -952,7 +952,37 @@ without reading anything else.*
   the second launch's command line to the first (`second_copy`), which
   brings its window forward and queues the files as above — without it,
   every double-click started another copy of the app.
-- **Verify before committing:** `cargo test --workspace` (~616),
+- **A file that says an extreme number is drawn or refused.** The page's
+  and every picture's sizes were already checked on the way in; what a
+  *layer* says about itself was believed and drawn. A probe set numbers
+  in the fixture's pages to extremes (±10³⁰, ±10⁹, 2³², 10⁻³⁰, −1, 0),
+  each in a child process with a deadline so that an abort or a hang is
+  a finding rather than the end of the run, and opened, drew and wrote
+  each as SVG and PDF: sixteen of the first four hundred and eighty took
+  the program down. A text block a billion pixels tall or set a billion
+  apart was floored back up to a fiftieth of its size and asked for a
+  raster no machine has (the ceiling now has the last word, a raster
+  past 8192² is nothing drawn, and no letter is drawn taller than 2048
+  pixels); a synthesized bold was smeared in steps of a third of a
+  pixel however large the letter, so a bold headline zoomed in was
+  hundreds of passes a glyph and a huge one more than memory could count
+  (at most sixty-four now, each a thousandth of the letter at most); a
+  clone layer shown on its own, in a group scaled past any screen or
+  lifting from a billion pixels away, asked for a page under it that
+  size (cut to the page, which is all there is to lift from); and a
+  dashed stroke a negative width wide walked a ring so long that a step
+  along it did not move (a stroke of no width lays nothing, and past a
+  hundred thousand dashes a line is drawn solid). Then 3,600 more: none
+  fatal, four slow (three seconds for a layer scaled by billions drawn
+  into a PDF's effect picture), left. Kept as
+  `a_layer_that_says_an_extreme_number_is_drawn_or_refused` — a
+  catalogue of the fields that broke, over eight pages, in a minute and
+  a half of a debug build — and
+  `a_dashed_stroke_past_reason_is_drawn_or_dropped_not_walked`, since
+  none of those eight pages has the dashed inside stroke the hang
+  needed. The same guards protect what an SVG placed in a document can
+  say, which goes through the same renderer.
+- **Verify before committing:** `cargo test --workspace` (~618),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
   assertions; while writing one, `node e2e/one.mjs <block>` runs a single
