@@ -2014,6 +2014,13 @@ body {
 .palette .swatch.add:hover {
   color: var(--text);
 }
+/* The colours used lately: round, so they do not read as the document's
+   own palette — they are the person's, and nothing stands for them. */
+.palette.recent .swatch {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50%;
+}
 
 /* What a copy can differ in: one row per layer of the original. */
 .overrides {

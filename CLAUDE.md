@@ -162,7 +162,8 @@ resolves "system" before setting the attribute; what is drawn over the
 picture keeps its own colours); its Tools page decides which tools are on the rail (a tool put
 away keeps its key and waits behind a "…" slot at the rail's end) and
 which button groups the bar shows; `prefs.brushes` is the brushes kept
-by name, shown as chips over the paint tools' row. `app/src/tools.ts` is the one table
+by name, shown as chips over the paint tools' row. `prefs.recentColors` is the
+last eight colours used, a round-chipped row under the palette. `app/src/tools.ts` is the one table
 of tools — names, keys, icons, the rail's five sections — that the rail,
 the keyboard handler and that page all read; the keys are defaults, and
 `boundKeys(prefs.toolKeys)` is what is read at run time, so a tool key

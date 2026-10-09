@@ -9,7 +9,7 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { usePrefs, withRecent } from "./prefs";
+import { usePrefs, withRecent, withRecentColor } from "./prefs";
 import {
   DOCUMENTS,
   baseName,
@@ -5684,7 +5684,25 @@ export function App() {
    * from here on. With `named`, the colour stands for that palette entry
    * rather than being a copy of it: change the entry later and this layer
    * follows. */
+  /** The rail's fill well. Its `change` is when the system's picker is
+   * put away with a colour chosen, which is when a colour has been
+   * used; React's own `onChange` is every step of a drag through the
+   * picker, and the row would fill with the colours passed on the way. */
+  const fillWell = useRef<HTMLInputElement>(null);
+  const usedColourRef = useRef<(hex: string) => void>(() => {});
+  useEffect(() => {
+    const well = fillWell.current;
+    if (!well) return;
+    const chosen = () => usedColourRef.current(well.value);
+    well.addEventListener("change", chosen);
+    return () => well.removeEventListener("change", chosen);
+  }, []);
+  /** A colour that has been used goes to the front of the recent row. */
+  const usedColour = (hex: string) =>
+    setPrefs((p) => ({ recentColors: withRecentColor(p.recentColors, hex) }));
+  usedColourRef.current = usedColour;
   const applyColour = (hex: string, named?: string) => {
+    usedColour(hex);
     setFill(hex);
     setInkFrom(named ?? null);
     const flat = cmyk ? hexToCmykColor(hex) : hexColor(hex);
@@ -8209,6 +8227,7 @@ export function App() {
             </select>
           )}
           <input
+            ref={fillWell}
             type="color"
             value={fill}
             onChange={(e) => {
@@ -8280,6 +8299,26 @@ export function App() {
               +
             </button>
           </div>
+          {/* The colours used most lately, newest first — chosen in the
+              system's picker or given to a layer — and kept across
+              documents, since they are the person's habit rather than
+              the file's. A click uses one again, as a palette entry is
+              used, but by value: nothing stands for it, so nothing
+              follows it when it changes. */}
+          {prefs.recentColors.length > 0 && (
+            <div className="palette recent" role="group" aria-label="Recent colours">
+              {prefs.recentColors.map((hex) => (
+                <button
+                  key={hex}
+                  className="swatch"
+                  style={{ background: hex }}
+                  title={`${hex} — used lately`}
+                  aria-label={`Recent colour ${hex}`}
+                  onClick={() => applyColour(hex)}
+                />
+              ))}
+            </div>
+          )}
           {/* The looks kept by name, as chips: pressed, one is given to
               the picked layers; shift-pressed, it is re-kept from the
               picked layer; alt-pressed, it is forgotten. A look is a

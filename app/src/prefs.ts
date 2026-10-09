@@ -112,6 +112,21 @@ export type Prefs = {
    * empty. About the person and the machine, which is why it is here
    * and not in any document. */
   recent: string[];
+  /** The colours used most lately, newest first, as `#rrggbb`: chosen in
+   * the system's picker, or given to a layer. About the person — the
+   * same few colours follow them from one document to the next, which is
+   * what a document's own palette is not for. */
+  recentColors: string[];
+};
+
+/** How many colours the recent row keeps. */
+export const RECENT_COLORS_MOST = 8;
+
+/** `colors` with `hex` put first, spelled one way, once. */
+export const withRecentColor = (colors: string[], hex: string): string[] => {
+  const c = hex.toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(c)) return colors;
+  return [c, ...colors.filter((o) => o !== c)].slice(0, RECENT_COLORS_MOST);
 };
 
 /** How many documents File › Open recent remembers. */
@@ -145,6 +160,7 @@ export const DEFAULTS: Prefs = {
   commandKeys: {},
   exportSetups: [],
   recent: [],
+  recentColors: [],
   barDocument: true,
   barSelection: true,
   barZoom: true,
@@ -289,6 +305,14 @@ export function clamp(p: Prefs): Prefs {
           }))
       : [],
     // Paths each once, as many as the menu shows.
+    // Colours each once, spelled one way, as many as the row shows.
+    recentColors: Array.isArray(p.recentColors)
+      ? p.recentColors
+          .filter((c): c is string => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c))
+          .map((c) => c.toLowerCase())
+          .filter((c, i, all) => all.indexOf(c) === i)
+          .slice(0, RECENT_COLORS_MOST)
+      : [],
     recent: Array.isArray(p.recent)
       ? p.recent
           .filter((r): r is string => typeof r === "string" && r !== "")

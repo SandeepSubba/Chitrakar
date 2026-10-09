@@ -5405,14 +5405,14 @@ assert(
   const b = await page.locator("#engine-page").boundingBox();
   const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
   assert(
-    (await page.locator(".palette .swatch:not(.add)").count()) === 0,
+    (await page.locator('[aria-label="Palette"] .swatch:not(.add)').count()) === 0,
     "a new document starts with no palette",
   );
   await setColor("Fill colour", "#ff0066");
   await page.click('button[aria-label="Add to the palette"]');
   await page.waitForTimeout(250);
   assert(
-    (await page.locator(".palette .swatch:not(.add)").count()) === 1,
+    (await page.locator('[aria-label="Palette"] .swatch:not(.add)').count()) === 1,
     "the colour being drawn with goes into the palette",
   );
 
@@ -5429,7 +5429,7 @@ assert(
   await page.waitForTimeout(250);
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(200);
-  await page.locator(".palette .swatch:not(.add)").first().click();
+  await page.locator('[aria-label="Palette"] .swatch:not(.add)').first().click();
   await page.waitForTimeout(300);
   const px = await canvasPixel(200, 175);
   assert(
@@ -5438,19 +5438,68 @@ assert(
   );
 
   // Alt-click takes one out, and the whole palette saves with the file.
-  await page.locator(".palette .swatch:not(.add)").first().click({
+  await page.locator('[aria-label="Palette"] .swatch:not(.add)').first().click({
     modifiers: ["Alt"],
   });
   await page.waitForTimeout(250);
   assert(
-    (await page.locator(".palette .swatch:not(.add)").count()) === 1,
+    (await page.locator('[aria-label="Palette"] .swatch:not(.add)').count()) === 1,
     "alt-click takes a colour out of the palette",
   );
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(250);
   assert(
-    (await page.locator(".palette .swatch:not(.add)").count()) === 2,
+    (await page.locator('[aria-label="Palette"] .swatch:not(.add)').count()) === 2,
     "and one undo puts it back",
+  );
+
+  // The colours used lately: a palette colour given to a layer, and one
+  // chosen in the system's picker (which says so with a change), each
+  // go to the front of a row kept across documents.
+  const recent = page.locator('[aria-label="Recent colours"] .swatch');
+  const recentHexes = () =>
+    recent.evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+  assert(
+    (await recentHexes())[0] === "Recent colour #ff0066",
+    `a palette colour given to a layer is remembered (${await recentHexes()})`,
+  );
+  await page.locator('input[aria-label="Fill colour"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    ).set;
+    setter.call(el, "#33cc00");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForTimeout(200);
+  assert(
+    (await recentHexes())[0] === "Recent colour #33cc00" &&
+      (await recentHexes()).filter((h) => h === "Recent colour #ff0066").length === 1,
+    `a colour chosen in the picker goes to the front, once (${await recentHexes()})`,
+  );
+  const kept = await page.evaluate(
+    () => JSON.parse(localStorage.getItem("chitrakar:prefs") ?? "{}").recentColors,
+  );
+  assert(
+    Array.isArray(kept) && kept[0] === "#33cc00" && kept.includes("#ff0066"),
+    `the colours used lately are kept with the preferences (${kept})`,
+  );
+  // A recent colour clicked is given to the picked layer, by value.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await page.locator('[aria-label="Recent colour #33cc00"]').click();
+  await page.waitForTimeout(300);
+  const green = await canvasPixel(200, 175);
+  assert(
+    green[0] < 90 && green[1] > 160 && green[2] < 60,
+    `clicking a recent colour gives it to the picked layer (${green})`,
+  );
+  // And it outlives the document.
+  await newDocument(300, 200, "rgb");
+  assert(
+    (await recentHexes())[0] === "Recent colour #33cc00",
+    "the colours used lately are still there in a new document",
   );
 }
 
@@ -10766,7 +10815,7 @@ assert(
   await setColor("Fill colour", "#ff0066");
   await page.click('button[aria-label="Add to the palette"]');
   await page.waitForTimeout(250);
-  const swatch = page.locator(".palette .swatch:not(.add)").first();
+  const swatch = page.locator('[aria-label="Palette"] .swatch:not(.add)').first();
 
   // Two rectangles in that pink, drawn before the palette was reached for,
   // so both hold their own copy of it.

@@ -1021,6 +1021,14 @@ without reading anything else.*
   already refused at the door (`past_reason`). That is a call about the
   product's weight rather than its correctness, and is left to make —
   with nothing else in the way of making it.
+- **Colours used lately:** under the document's palette, a row of the
+  last eight colours used — given to a layer from the palette or the
+  row itself, or chosen in the system's picker (its `change`, not every
+  `input` of a drag through it) — newest first, round so they do not
+  read as palette entries. It is `prefs.recentColors`, kept across
+  documents because it is the person's habit rather than the file's; a
+  click gives one by value, so nothing follows it the way a named
+  palette colour is followed (smoke block 9j).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
