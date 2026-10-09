@@ -1087,6 +1087,9 @@ struct Place {
     /// among them says so (`effects_of`): given back to it as its
     /// opacity, out of the paint it was folded into.
     fade: Option<f32>,
+    /// Inside a text, whose outlines are in the text's own space and are
+    /// placed by the text (`walk`).
+    text: bool,
 }
 
 /// A blend as the document says it; the two lists are the same sixteen.
@@ -1294,6 +1297,7 @@ fn walk(
         } else {
             place.blend
         },
+        text: place.text,
         fade: if within != place.within {
             None
         } else if fx.is_some() {
@@ -1341,8 +1345,13 @@ fn walk(
                     if patterned && p.stroke().is_none() {
                         continue;
                     }
-                    let fixed = fix(p.abs_transform());
-                    for (k, mut node) in shapes_of(p, opacity).into_iter().enumerate() {
+                    let said = if place.text {
+                        usvg::Transform::default()
+                    } else {
+                        p.abs_transform()
+                    };
+                    let fixed = if place.text { None } else { fix(said) };
+                    for (k, mut node) in shapes_of(p, said, opacity).into_iter().enumerate() {
                         node.mask = worn.clone();
                         node.blend = place.blend;
                         // A path that came in as a fill and a stroke over
@@ -1371,8 +1380,26 @@ fn walk(
             // stroke with it; a clip is in the space the layer sits in and
             // stays where it is.
             usvg::Node::Text(t) => {
+                // Walked with the text's own placement as the truth, so
+                // each outline is put where the text stands whatever the
+                // reader said it was: the reader's glyphs used to come in
+                // the text's own space and its newer ones come placed,
+                // while a decoration line can say either — and composing
+                // the placement onto every one placed the newer glyphs
+                // twice, turned text turned again.
+                //
+                // Every outline a text is set in is read in the text's own
+                // space, whatever the reader says its transform is: the
+                // reader's glyphs used to say none and its newer ones say
+                // the text's, while its underlines still say none — and
+                // read through what each said, the newer glyphs were
+                // placed twice, a turned caption turned again.
                 let before = got.shapes.len();
-                walk(t.flattened(), opacity, clip, place.clone(), None, got);
+                let inside = Place {
+                    text: true,
+                    ..place.clone()
+                };
+                walk(t.flattened(), opacity, clip, inside, None, got);
                 let a = t.abs_transform();
                 let placed = match fix(a) {
                     Some(f) => f.compose(as_doc(a)),
@@ -1919,9 +1946,8 @@ fn rings_of(path: &usvg::Path) -> Vec<Ring> {
 /// line. Brought into page space the pen stayed round and took one width
 /// for both ways, so a stroke under either came in too thick along one
 /// axis and too thin along the other. `None` for page space.
-fn own_space(path: &usvg::Path) -> Option<usvg::Transform> {
+fn own_space(path: &usvg::Path, t: usvg::Transform) -> Option<usvg::Transform> {
     path.stroke()?;
-    let t = path.abs_transform();
     let (x, y) = ((t.sx, t.ky), (t.kx, t.sy));
     let (xx, yy) = (x.0 * x.0 + x.1 * x.1, y.0 * y.0 + y.1 * y.1);
     let square = (x.0 * y.0 + x.1 * y.1).abs() <= 1e-4 * (xx * yy).sqrt();
@@ -2263,11 +2289,11 @@ fn union_if_wound_alike(flat: &[Vec<[f32; 2]>]) -> Option<Vec<Vec<[f32; 2]>>> {
 /// up, a crossing turned into a corner. So the fill goes on the region,
 /// and the stroke on the file's own path above it, which is the order SVG
 /// paints the two in.
-fn shapes_of(path: &usvg::Path, opacity: f32) -> Vec<Node> {
-    let space = own_space(path);
+fn shapes_of(path: &usvg::Path, abs: usvg::Transform, opacity: f32) -> Vec<Node> {
+    let space = own_space(path, abs);
     let mut out = shapes_in(
         path,
-        space.map_or_else(|| path.abs_transform(), |_| usvg::Transform::default()),
+        space.map_or(abs, |_| usvg::Transform::default()),
         opacity,
     );
     if let Some(t) = space {

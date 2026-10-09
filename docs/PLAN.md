@@ -1004,6 +1004,23 @@ without reading anything else.*
   door is exercised too: none fatal
   (`a_number_past_any_drawing_is_refused_before_the_reader_sees_it`,
   `a_drawing_scaled_past_reason_comes_in_without_stopping_anything`).
+- **usvg 0.48, tried and measured, not taken (yet).** It mends several
+  of the reader's own crashes at the source (bounding boxes past the
+  integer range, non-finite values, `feComposite`), fixes text advances
+  and a transform applied twice, and moves text onto `skrifa` and
+  `harfrust`. Bumped, everything compiled unchanged and two tests failed,
+  both the 400-page round trip and both one real thing: the newer reader
+  hands a text's glyph outlines over already placed while its underlines
+  still come in the text's own space, and the importer placed every
+  outline itself, so a turned caption was turned twice. The importer now
+  reads every outline inside a text in the text's own space whatever the
+  reader says, which is right under both versions (`Place::text`), and is
+  in. The bump itself is not: the engine's WebAssembly grows from 2.33 MB
+  to 2.73 MB compressed (5.96 to 7.19 MB raw), four hundred kilobytes on
+  every load of the browser app, for a reader whose known failures are
+  already refused at the door (`past_reason`). That is a call about the
+  product's weight rather than its correctness, and is left to make —
+  with nothing else in the way of making it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
