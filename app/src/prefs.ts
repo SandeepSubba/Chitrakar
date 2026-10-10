@@ -27,7 +27,7 @@ export type Units = "px" | "mm" | "in";
 /** How the chrome is coloured: as the system says, or dark or light
  * whatever it says. */
 export type Theme = "system" | "dark" | "light";
-export type ExportFormat = "png" | "jpeg" | "pdf" | "svg" | "tiff";
+export type ExportFormat = "png" | "jpeg" | "webp" | "pdf" | "svg" | "tiff";
 /** A frame exports at the multiple the *frame* asks for, under a name
  * the frame gives it, so it stays a row on the menu rather than a
  * choice here — see `exportArtboard`. */
@@ -53,7 +53,7 @@ export type ExportSetup = {
   jpegQuality: number;
 };
 
-export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "pdf", "svg", "tiff"];
+export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "pdf", "svg", "tiff"];
 
 export type Prefs = {
   /** What the rulers and the geometry fields read in. */

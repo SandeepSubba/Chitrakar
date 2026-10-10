@@ -805,6 +805,21 @@ impl WasmSession {
         self.inner.kept_region_png(index, scale).map_err(to_js)
     }
 
+    /// The page inside what is picked out as a lossless WebP, the
+    /// region's coverage in its alpha as in the PNG.
+    pub fn selection_webp(&self, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .selection_raster(scale, crate::Raster::Webp)
+            .map_err(to_js)
+    }
+
+    /// A region kept by name as its own lossless WebP.
+    pub fn kept_region_webp(&self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .kept_region_raster(index, scale, crate::Raster::Webp)
+            .map_err(to_js)
+    }
+
     /// Take the page in to what is picked out.
     pub fn crop_to_selection(&mut self) -> Result<(), JsError> {
         self.inner.crop_to_selection().map_err(to_js)
@@ -1091,6 +1106,22 @@ impl WasmSession {
     ) -> Result<Vec<u8>, JsError> {
         let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
         self.inner.render_png_at(scale, region).map_err(to_js)
+    }
+
+    /// The same as a lossless WebP, which keeps transparency as a PNG
+    /// does.
+    pub fn export_webp_at(
+        &self,
+        scale: f32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Result<Vec<u8>, JsError> {
+        let region = (w > 0.0 && h > 0.0).then_some([x, y, w, h]);
+        self.inner
+            .render_raster_at(scale, region, crate::Raster::Webp)
+            .map_err(to_js)
     }
 
     /// The same for JPEG.

@@ -18,6 +18,7 @@ const KINDS: Record<string, Filter> = {
   png: { name: "PNG image", extensions: ["png"] },
   jpg: { name: "JPEG image", extensions: ["jpg", "jpeg"] },
   jpeg: { name: "JPEG image", extensions: ["jpg", "jpeg"] },
+  webp: { name: "WebP image", extensions: ["webp"] },
   pdf: { name: "PDF document", extensions: ["pdf"] },
   svg: { name: "SVG drawing", extensions: ["svg"] },
   tif: { name: "TIFF image", extensions: ["tif", "tiff"] },

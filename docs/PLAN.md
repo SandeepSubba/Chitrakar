@@ -1029,6 +1029,24 @@ without reading anything else.*
   documents because it is the person's habit rather than the file's; a
   click gives one by value, so nothing follows it the way a named
   palette colour is followed (smoke block 9j).
+- **WebP, out and in.** The Export window offers a lossless WebP
+  beside the PNG: the same picture, transparency and every pixel (the
+  engine's test decodes both; the smoke suite compares the two files
+  the browser decodes, byte for byte), usually far smaller — the smoke
+  page is 7 kB as a PNG and 0.4 kB as a WebP. It goes everywhere a PNG
+  does: the page, picked layers' box, a region in its own shape, a
+  slice per kept region, any scale or the @1x–@3x set
+  (`Raster::{Png, Webp}` in `core/codecs` is the last step of every one
+  of those paths; `export_webp_at`, `selection_webp`,
+  `kept_region_webp` on the wire). Only the *encoder* is in the engine
+  — +10 kB compressed. The decoder would be another 58 kB for something
+  every webview does, so placing a WebP — and a GIF or a BMP, which the
+  engine never read either though a drop offered them — goes through
+  the browser, which hands the engine a PNG of what it draws
+  (`app/src/picture.ts`, decided by the bytes rather than the name).
+  A lossy WebP is not offered: the encoder has only the lossless half,
+  and the JPEG is the lossy picture. The desktop shell opens `.webp`
+  files as it opens PNGs (smoke 8f2 and 9bh).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

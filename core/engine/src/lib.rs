@@ -73,6 +73,7 @@ thread_local! {
 pub fn clipboard_has_content() -> bool {
     CLIPBOARD.with(|c| c.borrow().is_some())
 }
+pub use chitrakar_codecs::Raster;
 pub use chitrakar_render::{Bounds, ClipRect, Surface};
 
 #[derive(Debug)]
@@ -4724,6 +4725,12 @@ impl Session {
     /// go, the way a softened fill's is: cut at the outline, the
     /// outward half of a fade is not there to fade.
     pub fn selection_png(&self, scale: f32) -> Result<Vec<u8>, EngineError> {
+        self.selection_raster(scale, Raster::Png)
+    }
+
+    /// The same as [`selection_png`](Self::selection_png), as a file of
+    /// either kind that keeps the region's shape in its transparency.
+    pub fn selection_raster(&self, scale: f32, kind: Raster) -> Result<Vec<u8>, EngineError> {
         let Some(region) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
@@ -4732,7 +4739,7 @@ impl Session {
                 "what is picked out has no outline".into(),
             ));
         };
-        self.png_of_region(&region, box_, scale)
+        self.raster_of_region(&region, box_, scale, kind)
     }
 
     /// The same for a region kept by name, without picking it first.
@@ -4742,6 +4749,16 @@ impl Session {
     /// region is a command, and a command is an edit. So this reads the
     /// region where it is kept and draws from it directly.
     pub fn kept_region_png(&self, index: usize, scale: f32) -> Result<Vec<u8>, EngineError> {
+        self.kept_region_raster(index, scale, Raster::Png)
+    }
+
+    /// A kept region as a file of either kind.
+    pub fn kept_region_raster(
+        &self,
+        index: usize,
+        scale: f32,
+        kind: Raster,
+    ) -> Result<Vec<u8>, EngineError> {
         let Some(kept) = self.doc.regions().get(index) else {
             return Err(EngineError::BadCommand("no region is kept there".into()));
         };
@@ -4749,16 +4766,17 @@ impl Session {
         let Some(box_) = self.region_bounds(&region) else {
             return Err(EngineError::BadCommand("that region has no outline".into()));
         };
-        self.png_of_region(&region, box_, scale)
+        self.raster_of_region(&region, box_, scale, kind)
     }
 
-    /// A region of the page as a PNG: the picture inside its box, with
+    /// A region of the page as a picture: what is inside its box, with
     /// everything outside the region itself taken back to nothing.
-    fn png_of_region(
+    fn raster_of_region(
         &self,
         region: &chitrakar_doc::Mask,
         [x0, y0, x1, y1]: [f32; 4],
         scale: f32,
+        kind: Raster,
     ) -> Result<Vec<u8>, EngineError> {
         let pad = region.feather * 3.0;
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
@@ -4821,7 +4839,7 @@ impl Session {
                 a: p.a * c,
             };
         }
-        chitrakar_codecs::encode_png(w, h, &out.to_srgb8())
+        kind.encode(w, h, &out.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -5744,8 +5762,19 @@ impl Session {
         scale: f32,
         region: Option<[f32; 4]>,
     ) -> Result<Vec<u8>, EngineError> {
+        self.render_raster_at(scale, region, Raster::Png)
+    }
+
+    /// A region at a scale as a file of either kind that keeps
+    /// transparency; see [`render_scaled`](Self::render_scaled).
+    pub fn render_raster_at(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+        kind: Raster,
+    ) -> Result<Vec<u8>, EngineError> {
         let surface = self.render_scaled(scale, region)?;
-        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+        kind.encode(surface.width, surface.height, &surface.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -10414,6 +10443,80 @@ mod tests {
         assert!(
             session.kept_region_png(1, 1.0).is_err(),
             "a region that is not kept says so"
+        );
+    }
+
+    #[test]
+    fn a_webp_export_is_the_png_export_pixel_for_pixel() {
+        // A half-faded disc on a clear page, so the edge is half covered
+        // and the corners hold nothing: the pixels where a format that
+        // keeps transparency could go wrong.
+        let mut session = Session::new(64, 48, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let mut disc =
+            chitrakar_doc::Node::vector("disc", VectorShape::Ellipse { rx: 22.0, ry: 16.0 });
+        disc.transform = Transform::translation(32.0, 24.0);
+        disc.opacity = 0.5;
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.3,
+                b: 0.1,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(disc),
+            })
+            .unwrap();
+        session
+            .pick_region(
+                VectorShape::Ellipse { rx: 12.0, ry: 9.0 },
+                Transform::translation(26.0, 20.0),
+                "replace",
+            )
+            .unwrap();
+        session.keep_selection("a slice").unwrap();
+
+        let same = |png: Vec<u8>, webp: Vec<u8>, what: &str| {
+            assert_eq!(&webp[8..12], b"WEBP", "{what} is a WebP");
+            let a = chitrakar_codecs::decode(&png).unwrap();
+            let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+            assert_eq!(d.dimensions(), (a.width, a.height), "{what}: size");
+            let mut b = vec![0; d.output_buffer_size().unwrap()];
+            d.read_image(&mut b).unwrap();
+            assert!(a.rgba8 == b, "{what}: the pixels differ");
+            assert!(
+                a.rgba8.chunks(4).any(|p| p[3] > 0 && p[3] < 255),
+                "{what} has half-covered pixels to keep"
+            );
+        };
+        same(
+            session.render_png_at(2.0, None).unwrap(),
+            session.render_raster_at(2.0, None, Raster::Webp).unwrap(),
+            "the page at twice",
+        );
+        same(
+            session
+                .render_png_at(1.0, Some([10.0, 8.0, 30.0, 20.0]))
+                .unwrap(),
+            session
+                .render_raster_at(1.0, Some([10.0, 8.0, 30.0, 20.0]), Raster::Webp)
+                .unwrap(),
+            "a box of the page",
+        );
+        same(
+            session.selection_png(1.0).unwrap(),
+            session.selection_raster(1.0, Raster::Webp).unwrap(),
+            "what is picked out",
+        );
+        same(
+            session.kept_region_png(0, 3.0).unwrap(),
+            session.kept_region_raster(0, 3.0, Raster::Webp).unwrap(),
+            "a kept region at three times",
         );
     }
 

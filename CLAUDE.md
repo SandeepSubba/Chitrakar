@@ -178,7 +178,10 @@ the defaults. `ExportDialog.tsx` (Ctrl+Shift+E) replaced thirteen File-menu
 rows with format × area × scale, and shows the file's real size — it
 encodes the bytes rather than estimating, and the same encode is what
 gets written, and is decoded again for the picture beside the settings
-(a PDF or TIFF shows the page standing in); `Set` writes @1x, @2x and
+(a PDF or TIFF shows the page standing in); a WebP is lossless and
+goes everywhere a PNG does (`Raster` in `core/codecs`), though only its
+encoder is in the engine — placing a WebP, GIF or BMP goes through the
+browser's decoder (`app/src/picture.ts`); `Set` writes @1x, @2x and
 @3x in one press; `prefs.exportSetups` keeps a window's answers by name
 as chips above the formats; the area "Each kept region" writes a file per
 region the document keeps by name (`Session::kept_region_png` reads one

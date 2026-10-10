@@ -33,6 +33,8 @@ pub enum CodecError {
     Io(#[from] std::io::Error),
     #[error("unsupported export format: {0}")]
     UnsupportedFormat(String),
+    #[error("failed to encode image: {0}")]
+    Encode(String),
 }
 
 /// Decoded source image: original dimensions and 8-bit sRGB RGBA bytes.
@@ -89,6 +91,44 @@ pub fn encode_png(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, Code
         ImageFormat::Png,
     )?;
     Ok(out.into_inner())
+}
+
+/// Encode 8-bit sRGB RGBA pixels as lossless WebP.
+///
+/// The same pixels a PNG holds, transparency and all, usually in less:
+/// what a page wants for a picture on the web that has to stay exact. A
+/// lossy WebP is not offered — the encoder has only the lossless half,
+/// and a JPEG is already the lossy picture.
+///
+/// Only the encoder is in the engine. Reading a WebP is the browser's
+/// work (the app hands the engine a PNG of it): the decoder is six
+/// times the encoder's weight in the WebAssembly, for something every
+/// webview already does.
+pub fn encode_webp(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut out = Vec::new();
+    image_webp::WebPEncoder::new(&mut out)
+        .encode(rgba8, width, height, image_webp::ColorType::Rgba8)
+        .map_err(|e| CodecError::Encode(e.to_string()))?;
+    Ok(out)
+}
+
+/// The two pictures that keep transparency, for the exports that can go
+/// either way: everything about a region, a slice or a scale is the same
+/// up to the last step, and this is the last step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raster {
+    Png,
+    Webp,
+}
+
+impl Raster {
+    /// Encode 8-bit sRGB RGBA pixels as this kind of file.
+    pub fn encode(self, width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, CodecError> {
+        match self {
+            Raster::Png => encode_png(width, height, rgba8),
+            Raster::Webp => encode_webp(width, height, rgba8),
+        }
+    }
 }
 
 /// Encode as JPEG, compositing over white first.
@@ -247,6 +287,44 @@ mod tests {
             );
         }
         assert_eq!(tagged.rgba8[3], 255, "alpha preserved");
+    }
+
+    /// A WebP read back, for the tests: the engine never reads one.
+    pub(crate) fn decode_webp(bytes: &[u8]) -> SourceImage {
+        let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let (width, height) = d.dimensions();
+        assert!(d.has_alpha(), "the alpha was left out");
+        let mut rgba8 = vec![0; d.output_buffer_size().unwrap()];
+        d.read_image(&mut rgba8).unwrap();
+        SourceImage {
+            width,
+            height,
+            rgba8,
+        }
+    }
+
+    #[test]
+    fn a_webp_holds_every_pixel_a_png_does() {
+        // Lossless means lossless: every byte back, the half-covered
+        // ones and the clear ones too, which is what it is for.
+        let (w, h) = (37u32, 23u32);
+        let mut seed = 0x2545_f491u32;
+        let rgba8: Vec<u8> = (0..w * h * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed >> 24) as u8
+            })
+            .collect();
+        let webp = Raster::Webp.encode(w, h, &rgba8).unwrap();
+        assert_eq!(&webp[0..4], b"RIFF");
+        assert_eq!(&webp[8..12], b"WEBP");
+        let back = decode_webp(&webp);
+        assert_eq!((back.width, back.height), (w, h));
+        assert!(back.rgba8 == rgba8, "a lossless WebP changed pixels");
+        // And it is a different file from the PNG of the same pixels.
+        assert_eq!(&Raster::Png.encode(w, h, &rgba8).unwrap()[1..4], b"PNG");
     }
 
     #[test]

@@ -1130,7 +1130,7 @@ const pngB64 = await page.evaluate(() => {
   g.fillRect(0, 0, 4, 4);
   return c.toDataURL("image/png").split(",")[1];
 });
-await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
   name: "green.png",
   mimeType: "image/png",
   buffer: Buffer.from(pngB64, "base64"),
@@ -1150,6 +1150,56 @@ await page.screenshot({ path: join(OUT, "editor2.png") });
 await page.keyboard.press("Control+z");
 await page.waitForTimeout(150);
 assert((await page.locator(".panel ul li", { hasText: "green.png" }).count()) === 0, "undo removed placed image");
+
+// 8f2. A WebP is placed the same way: the engine reads PNG and JPEG
+// itself, and a picture of any other kind the browser can draw comes
+// over drawn — here a blue square with nothing in its right half.
+{
+  const webpB64 = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 8;
+    c.height = 8;
+    const g = c.getContext("2d");
+    g.fillStyle = "#0000ff";
+    g.fillRect(0, 0, 4, 8);
+    return c.toDataURL("image/webp", 1).split(",")[1];
+  });
+  assert(
+    Buffer.from(webpB64, "base64").subarray(8, 12).toString() === "WEBP",
+    "the browser made a WebP to place",
+  );
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+    name: "blue.webp",
+    mimeType: "image/webp",
+    buffer: Buffer.from(webpB64, "base64"),
+  });
+  await page.waitForTimeout(400);
+  assert(await page.isVisible("text=blue.webp"), "a WebP is placed as a picture layer");
+  // Wherever it landed and however far the view is zoomed, the blue on
+  // the canvas is the picture's left half: half as wide as it is tall,
+  // which says both that it is drawn and that the clear half is clear.
+  const blue = await page.evaluate(() => {
+    const c = document.getElementById("engine-canvas");
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let [x0, y0, x1, y1] = [Infinity, Infinity, -1, -1];
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 2] > 240 && d[i] < 20 && d[i + 1] < 20 && d[i + 3] > 240) {
+        const x = (i / 4) % c.width;
+        const y = Math.floor(i / 4 / c.width);
+        [x0, y0, x1, y1] = [Math.min(x0, x), Math.min(y0, y), Math.max(x1, x), Math.max(y1, y)];
+      }
+    }
+    return x1 < 0 ? null : [x1 - x0 + 1, y1 - y0 + 1];
+  });
+  assert(blue !== null, "its pixels are drawn");
+  assert(
+    Math.abs(blue[0] / blue[1] - 0.5) < 0.15,
+    `and its clear half is clear (${blue[0]} wide by ${blue[1]})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert((await page.locator(".panel ul li", { hasText: "blue.webp" }).count()) === 0, "and one undo takes it back");
+}
 
 // 8g. Wheel zoom shrinks/grows the on-screen canvas.
 const boxBefore = await page.locator("#engine-page").boundingBox();
@@ -4321,7 +4371,7 @@ assert(
   const mark = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <rect id="box" x="10" y="10" width="40" height="30" fill="#00aa00"/>
     <circle cx="80" cy="25" r="15" fill="#ff8800"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "mark.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(mark),
@@ -4348,7 +4398,7 @@ assert(
       <rect width="6" height="12" fill="#cc2020"/><rect x="6" width="6" height="12" fill="#2040cc"/>
     </pattern>
     <rect id="striped" x="12" y="12" width="60" height="40" fill="url(#p)"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "stripes.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(stripes),
@@ -4372,7 +4422,7 @@ assert(
     <linearGradient id="g"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></linearGradient>
     <mask id="m"><rect x="10" y="10" width="100" height="40" fill="url(#g)"/></mask>
     <g id="fading" mask="url(#m)"><rect x="10" y="10" width="100" height="40" fill="#20a040"/></g></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "faded.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(fadingSvg),
@@ -4394,7 +4444,7 @@ assert(
   const halfGroup = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <g id="half" opacity="0.5"><rect x="10" y="10" width="50" height="40" fill="#d02020"/>
     <rect x="35" y="25" width="50" height="40" fill="#2040d0"/></g></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "half.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(halfGroup),
@@ -4415,7 +4465,7 @@ assert(
   const multiplied = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <rect x="10" y="10" width="60" height="40" fill="#ffc040"/>
     <circle id="dim" cx="40" cy="30" r="15" fill="#8080ff" style="mix-blend-mode:multiply"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "multiplied.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(multiplied),
@@ -4434,7 +4484,7 @@ assert(
   const shadowed = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <filter id="f" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="6" stdDeviation="1" flood-color="#000000" flood-opacity="0.8"/></filter>
     <rect id="card" x="10" y="10" width="60" height="30" fill="#ffffff" filter="url(#f)"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "shadowed.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(shadowed),
@@ -4453,7 +4503,7 @@ assert(
     <defs><path id="g" d="M0,10 C10,0 20,20 30,1e30"/></defs>
     <text font-size="8"><textPath href="#g">Hello world</textPath></text></svg>`;
   lastDialog = "";
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "hostile.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(hostile),
@@ -4464,7 +4514,7 @@ assert(
       (await names()).join() === beforeSvg.join(),
     `a file past any drawing is refused, saying why, and places nothing (${lastDialog})`,
   );
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/svg+xml"]', {
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "shadowed.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(shadowed),
@@ -9226,7 +9276,7 @@ assert(
     return c.toDataURL("image/png").split(",")[1];
   });
   await page.setInputFiles(
-    'input[accept="image/png,image/jpeg,image/svg+xml"]',
+    'input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]',
     {
       name: "subject.png",
       mimeType: "image/png",
@@ -9983,7 +10033,7 @@ assert(
     return c.toDataURL("image/png").split(",")[1];
   });
   await page.setInputFiles(
-    'input[accept="image/png,image/jpeg,image/svg+xml"]',
+    'input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]',
     {
       name: "photograph.png",
       mimeType: "image/png",
@@ -11215,7 +11265,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
   assert(
     (await page.locator(".export-formats .preset").allTextContents()).join(",") ===
-      "PNG,JPEG,PDF,SVG,TIFF",
+      "PNG,JPEG,WebP,PDF,SVG,TIFF",
     "every format the engine can write is offered",
   );
   // The window opens on whatever it was last used for — which is the
@@ -11427,6 +11477,56 @@ assert(
     !(await page.isVisible('[role=dialog][aria-label="Export"]')),
     "the window closes once it has done what it was opened for",
   );
+
+  // A WebP is the PNG's picture, every pixel of it, in a file of its
+  // own kind — lossless, so smaller is the only difference there is.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("WebP")');
+  const oneWebp = await weight();
+  const webpShown = await previewShown();
+  assert(
+    webpShown.type === "image/webp" && webpShown.w === 640 && webpShown.h === 480,
+    `a WebP is shown as the WebP it will be (${webpShown.w}x${webpShown.h} ${webpShown.type})`,
+  );
+  assert(
+    (await page.textContent(".export-size span")).endsWith(".webp"),
+    "and is called one",
+  );
+  const [webpFile] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click(".modal-actions .primary"),
+  ]);
+  const webpBytes = await readFile(await webpFile.path());
+  assert(
+    webpBytes.subarray(0, 4).toString() === "RIFF" &&
+      webpBytes.subarray(8, 12).toString() === "WEBP",
+    "the file that lands is a WebP",
+  );
+  assert(
+    Math.abs(webpBytes.length / 1024 - oneWebp) < Math.max(2, oneWebp * 0.05),
+    `and weighs what the window said (${(webpBytes.length / 1024).toFixed(1)} vs ${oneWebp} kB)`,
+  );
+  const differ = await page.evaluate(async ([a, b]) => {
+    const pixels = async (b64, type) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const bmp = await createImageBitmap(new Blob([bytes], { type }), {
+        premultiplyAlpha: "none",
+      });
+      const c = document.createElement("canvas");
+      c.width = bmp.width;
+      c.height = bmp.height;
+      const g = c.getContext("2d");
+      g.drawImage(bmp, 0, 0);
+      return g.getImageData(0, 0, bmp.width, bmp.height).data;
+    };
+    const [p, w] = [await pixels(a, "image/png"), await pixels(b, "image/webp")];
+    if (p.length !== w.length) return -1;
+    let n = 0;
+    for (let i = 0; i < p.length; i++) if (p[i] !== w[i]) n++;
+    return n;
+  }, [wrote.toString("base64"), webpBytes.toString("base64")]);
+  assert(differ === 0, `and holds the PNG's pixels exactly (${differ} bytes differ)`);
 
   // The set an asset pipeline wants: one press, three files, at one,
   // two and three times the page, named for their multiple.

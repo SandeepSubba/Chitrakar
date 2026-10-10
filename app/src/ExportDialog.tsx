@@ -74,6 +74,15 @@ const FORMATS: Record<
     shows: true,
     note: "Lossy, and transparency flattens onto white.",
   },
+  webp: {
+    label: "WebP",
+    ext: "webp",
+    mime: "image/webp",
+    scales: true,
+    area: true,
+    shows: true,
+    note: "Lossless and keeps transparency, like a PNG — usually smaller.",
+  },
   pdf: {
     label: "PDF",
     ext: "pdf",
@@ -246,7 +255,11 @@ export function ExportDialog({
    * encode, not two that might differ. */
   const encodeAt = useCallback(
     (scale: number, slice: number | null = null): Uint8Array => {
-      if (slice !== null) return session.kept_region_png(slice, scale);
+      if (slice !== null) {
+        return format === "webp"
+          ? session.kept_region_webp(slice, scale)
+          : session.kept_region_png(slice, scale);
+      }
       return encodeOne(scale);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -278,22 +291,23 @@ export function ExportDialog({
           : session.export_jpeg_at(scale, 0, 0, 0, 0, prefs.jpegQuality);
       }
       default: {
+        // A PNG or a WebP: the same picture either way, and the same
+        // transparency, so the one question is which file to make.
+        const webp = format === "webp";
+        const at = (x: number, y: number, w: number, h: number) =>
+          webp
+            ? session.export_webp_at(scale, x, y, w, h)
+            : session.export_png_at(scale, x, y, w, h);
         if (area === "selection") {
           // A region goes out in the shape it was picked in; picked
           // layers go out as the box that holds them.
-          if (hasRegion) return session.selection_png(scale);
-          const box = selectionBounds();
-          if (box) {
-            return session.export_png_at(
-              scale,
-              box[0],
-              box[1],
-              box[2] - box[0],
-              box[3] - box[1],
-            );
+          if (hasRegion) {
+            return webp ? session.selection_webp(scale) : session.selection_png(scale);
           }
+          const box = selectionBounds();
+          if (box) return at(box[0], box[1], box[2] - box[0], box[3] - box[1]);
         }
-        return session.export_png_at(scale, 0, 0, 0, 0);
+        return at(0, 0, 0, 0);
       }
     }
   }, [
@@ -359,7 +373,7 @@ export function ExportDialog({
               : bytes.length,
         );
         setFailed(null);
-        // The browser shows a PNG, a JPEG or an SVG as it is; a PDF or
+        // The browser shows a PNG, a JPEG, a WebP or an SVG as it is; a PDF or
         // a TIFF it cannot, so the page stands in, drawn as the engine
         // draws it.
         const shown = spec.shows

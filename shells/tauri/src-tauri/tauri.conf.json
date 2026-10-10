@@ -74,6 +74,15 @@
       },
       {
         "ext": [
+          "webp"
+        ],
+        "name": "WebP image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/webp"
+      },
+      {
+        "ext": [
           "svg"
         ],
         "name": "SVG drawing",

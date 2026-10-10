@@ -43,6 +43,7 @@ import {
   type CommandId,
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
+import { enginePicture } from "./picture";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
   Adjustment,
@@ -6441,27 +6442,31 @@ export function App() {
       if (!session) return;
       // An SVG comes in as shapes, anything else as pixels.
       const vector = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
-      file.arrayBuffer().then((buf) => {
-        try {
-          const bytes = new Uint8Array(buf);
-          const was = [session.width, session.height];
-          const id = vector
-            ? session.place_svg(bytes, file.name || "Pasted drawing")
-            : session.place_image(bytes, file.name || "Pasted image");
-          setSelected(id);
-          setMultiSel([]);
-          refresh(session);
-          // A picture that took the page's size with it was a picture
-          // being opened, and the view was framed for the page that is
-          // gone: without this a photograph opens showing a corner of
-          // itself, which is the thing this was supposed to stop.
-          if (session.width !== was[0] || session.height !== was[1]) {
-            fitView();
+      file
+        .arrayBuffer()
+        .then((buf) =>
+          vector ? new Uint8Array(buf) : enginePicture(new Uint8Array(buf), file.type),
+        )
+        .then((bytes) => {
+          try {
+            const was = [session.width, session.height];
+            const id = vector
+              ? session.place_svg(bytes, file.name || "Pasted drawing")
+              : session.place_image(bytes, file.name || "Pasted image");
+            setSelected(id);
+            setMultiSel([]);
+            refresh(session);
+            // A picture that took the page's size with it was a picture
+            // being opened, and the view was framed for the page that is
+            // gone: without this a photograph opens showing a corner of
+            // itself, which is the thing this was supposed to stop.
+            if (session.width !== was[0] || session.height !== was[1]) {
+              fitView();
+            }
+          } catch (err) {
+            alert(`Could not place image: ${err}`);
           }
-        } catch (err) {
-          alert(`Could not place image: ${err}`);
-        }
-      });
+        });
     },
     [session, refresh, fitView],
   );
@@ -7527,7 +7532,7 @@ export function App() {
         <input
           ref={placeInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/svg+xml"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"
           onChange={placeImage}
           hidden
         />

@@ -80,6 +80,7 @@ const UNIT_NAMES: Record<Units, string> = {
 const FORMAT_NAMES: Record<ExportFormat, string> = {
   png: "PNG",
   jpeg: "JPEG",
+  webp: "WebP",
   pdf: "PDF",
   svg: "SVG",
   tiff: "TIFF (CMYK)",
