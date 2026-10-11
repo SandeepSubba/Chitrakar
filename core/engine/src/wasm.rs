@@ -538,6 +538,17 @@ impl WasmSession {
     /// Combine shape layers into one compound path. `op` is one of
     /// "union", "intersect", "subtract" or "exclude". Returns the new
     /// layer's id.
+    /// Say a path's outline in as few anchors as stay within
+    /// `tolerance` page pixels of it; `[before, after]`, the anchors
+    /// there were and are.
+    pub fn simplify_path(&mut self, id: f64, tolerance: f32) -> Result<Vec<f64>, JsError> {
+        let (before, after) = self
+            .inner
+            .simplify_path(NodeId(id as u64), tolerance)
+            .map_err(to_js)?;
+        Ok(vec![before as f64, after as f64])
+    }
+
     /// A copy of a shape with its outline moved `by` outward (inward
     /// below zero), put just above it; the new layer's id.
     pub fn offset_path(&mut self, id: f64, by: f32) -> Result<f64, JsError> {

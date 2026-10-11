@@ -4957,6 +4957,26 @@ export function App() {
     }
   };
 
+  /** Say the picked path in as few anchors as stay within a distance
+   * of it — the step after outlining, offsetting or combining, which
+   * leave hundreds of short steps nobody can reshape by hand. */
+  const simplifyPath = () => {
+    if (!session || selected === null) return;
+    const answer = window.prompt(
+      "How far may the simpler outline stray from this one, in pixels?",
+      "0.5",
+    );
+    if (answer === null) return;
+    const tolerance = Number(answer);
+    if (!Number.isFinite(tolerance) || tolerance <= 0) return;
+    try {
+      session.simplify_path(selected, tolerance);
+      refresh(session);
+    } catch (err) {
+      alert(`Simplify path: ${err}`);
+    }
+  };
+
   const BOOLEAN_BUTTONS: [string, IconName, string][] = [
     ["union", "union", "Unite shapes"],
     ["subtract", "subtract", "Subtract the shapes above"],
@@ -7026,6 +7046,7 @@ export function App() {
         ),
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         item("offset-path", "shapes", "Offset path…", offsetPath),
+        item("simplify-path", "node", "Simplify path…", simplifyPath),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

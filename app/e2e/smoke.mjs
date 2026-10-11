@@ -6975,6 +6975,68 @@ assert(
   promptAnswer = "";
 }
 
+// 9o6. Simplify path: what outlining a line leaves is hundreds of short
+// steps; simplified, it is a handful of anchors with handles, drawing
+// the same picture.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#aa3355");
+  await pickTool("Ellipse");
+  await page.mouse.move(...at(100, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 240), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Ellipse" }).first().click();
+  await page.waitForTimeout(200);
+  // Moved out by a little, the ellipse becomes a traced path.
+  promptAnswer = "6";
+  await menuClick("Layer", "Offset path…");
+  await page.waitForTimeout(300);
+  promptAnswer = "";
+  const spots = [
+    [200, 150],
+    [96, 150],
+    [92, 150],
+    [200, 56],
+    [200, 50],
+  ];
+  const look = () => Promise.all(spots.map(([x, y]) => canvasPixel(x, y)));
+  const before = await look();
+  await pickTool("Node");
+  await page.waitForTimeout(200);
+  const many = await page.locator(".anchor").count();
+  assert(many > 40, `the offset outline is many short steps (${many} anchors)`);
+  await pickTool("Move");
+  promptAnswer = "0.5";
+  await menuClick("Layer", "Simplify path…");
+  await page.waitForTimeout(300);
+  promptAnswer = "";
+  await pickTool("Node");
+  await page.waitForTimeout(200);
+  const few = await page.locator(".anchor").count();
+  assert(few > 0 && few <= 12, `simplified, it is a handful of anchors (${many} -> ${few})`);
+  await pickTool("Move");
+  const after = await look();
+  assert(
+    after.every((p, i) => p.every((v, c) => Math.abs(v - before[i][c]) <= 6)),
+    `and draws the same picture (${after.join(" / ")} against ${before.join(" / ")})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  await pickTool("Node");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".anchor").count()) === many,
+    "one undo puts the steps back",
+  );
+  await pickTool("Move");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

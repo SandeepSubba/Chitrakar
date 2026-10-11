@@ -16,6 +16,7 @@
 
 pub mod blur;
 pub mod boolean;
+pub mod fit;
 pub mod text;
 pub mod tiles;
 
@@ -5237,7 +5238,7 @@ impl SampleGrid {
 /// A closed ring with the points that lie within `tolerance` of the
 /// straight run past them taken out (Douglas and Peucker's, once round
 /// a ring: split at the two points furthest apart, then each half).
-fn straightened(ring: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
+pub fn straightened(ring: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
     let n = ring.len();
     if n < 4 {
         return ring.to_vec();

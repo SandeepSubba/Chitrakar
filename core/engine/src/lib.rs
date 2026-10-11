@@ -1087,6 +1087,86 @@ impl Session {
     /// ones above cut out of it. The result keeps the bottom-most layer's
     /// fill and stroke, because that is the shape the eye reads as the one
     /// being operated on.
+    /// Say a path's outline again in as few anchors as stay within
+    /// `tolerance` page pixels of it: straight where it runs straight,
+    /// curves with handles where it bends, corners kept as corners
+    /// (`chitrakar_render::fit::fit_curves`). What outlining a stroke,
+    /// offsetting or combining leaves is hundreds of short steps, which
+    /// draw well and cannot be reshaped by hand; this is the step after.
+    ///
+    /// The holes of a compound path are straight-sided by what a path
+    /// is, so they are straightened rather than curved. A line that
+    /// swells along its anchors is refused: its widths belong to the
+    /// anchors it has. One step in the history; the answer is how many
+    /// anchors there were and how many there are.
+    pub fn simplify_path(
+        &mut self,
+        id: NodeId,
+        tolerance: f32,
+    ) -> Result<(usize, usize), EngineError> {
+        let node = self.doc.node(id)?;
+        let NodeKind::Vector {
+            shape:
+                shape @ chitrakar_doc::VectorShape::Path {
+                    points,
+                    closed,
+                    subpaths,
+                    ..
+                },
+            stroke,
+            ..
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand(
+                "only a path has anchors to spare".into(),
+            ));
+        };
+        if stroke.as_ref().is_some_and(|s| !s.widths.is_empty()) {
+            return Err(EngineError::BadCommand(
+                "this line swells along its anchors, and would lose its swell".into(),
+            ));
+        }
+        let before = points.len() + subpaths.iter().map(Vec::len).sum::<usize>();
+        let tolerance = if tolerance.is_finite() {
+            tolerance.clamp(0.01, 100.0)
+        } else {
+            0.5
+        };
+        let rings = chitrakar_render::shape_rings(shape);
+        let Some(main) = rings.first() else {
+            return Err(EngineError::BadCommand("this path has no outline".into()));
+        };
+        let (anchors, handles) = chitrakar_render::fit::fit_curves(main, *closed, tolerance);
+        let holes: Vec<Vec<[f32; 2]>> = rings[1..]
+            .iter()
+            .map(|r| chitrakar_render::straightened(r, tolerance))
+            .collect();
+        let after = anchors.len() + holes.iter().map(Vec::len).sum::<usize>();
+        if after >= before {
+            return Err(EngineError::BadCommand(
+                "this outline has no anchors to spare".into(),
+            ));
+        }
+        let mut kind = node.kind.clone();
+        if let NodeKind::Vector { shape, .. } = &mut kind {
+            *shape = chitrakar_doc::VectorShape::Path {
+                points: anchors,
+                closed: *closed,
+                smooth: false,
+                handles,
+                subpaths: holes,
+            };
+        }
+        self.apply_labeled(
+            Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            },
+            Some("Simplify the path".into()),
+        )?;
+        Ok((before, after))
+    }
+
     /// A copy of a shape with its outline moved `by` outward — inward
     /// where `by` is below zero — put just above it: Illustrator's
     /// Offset Path, the way a sticker's border or a keyline round a
@@ -11072,6 +11152,129 @@ mod tests {
             session.document().node(inn).is_err(),
             "one undo takes the copy away"
         );
+    }
+
+    #[test]
+    fn a_path_simplified_draws_what_it_drew_in_fewer_anchors() {
+        let mut session = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let add = |session: &mut Session, node: chitrakar_doc::Node| {
+            let id = session.document().peek_next_id();
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            id
+        };
+        let path = |points: Vec<[f32; 2]>, closed: bool| VectorShape::Path {
+            points,
+            closed,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        // A disc said in three hundred steps.
+        let mut disc = chitrakar_doc::Node::vector(
+            "disc",
+            path(
+                (0..300)
+                    .map(|i| {
+                        let a = i as f32 / 300.0 * std::f32::consts::TAU;
+                        [40.0 + 30.0 * a.cos(), 40.0 + 30.0 * a.sin()]
+                    })
+                    .collect(),
+                true,
+            ),
+        );
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.4,
+                b: 0.8,
+                a: 1.0,
+            });
+        }
+        let disc = add(&mut session, disc);
+        // And a dashed line, outlined into steps of its own.
+        let mut zig = chitrakar_doc::Node::vector(
+            "zig",
+            path(vec![[80.0, 100.0], [110.0, 40.0], [150.0, 90.0]], false),
+        );
+        if let NodeKind::Vector { stroke, fill, .. } = &mut zig.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.8,
+                    g: 0.2,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                width: 7.0,
+                widths: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Round,
+                join: chitrakar_doc::StrokeJoin::Round,
+                dash: vec![16.0, 9.0],
+                dash_offset: 0.0,
+                align: None,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            });
+        }
+        let zig = add(&mut session, zig);
+        let zig = session.outline_stroke(zig).unwrap();
+
+        let page = |s: &Session| chitrakar_render::render(s.document()).unwrap();
+        let before = page(&session);
+        let (was, now) = session.simplify_path(disc, 0.3).unwrap();
+        assert_eq!(was, 300);
+        assert!(now <= 8, "the disc in {now} anchors");
+        let (was, now) = session.simplify_path(zig, 0.3).unwrap();
+        assert!(
+            now * 3 < was,
+            "the outlined dashes in {now} anchors, from {was}"
+        );
+        let after = page(&session);
+        let (mut sum, mut far) = (0.0f32, 0usize);
+        for (p, q) in before.pixels.iter().zip(&after.pixels) {
+            let d = (p.r - q.r)
+                .abs()
+                .max((p.g - q.g).abs())
+                .max((p.b - q.b).abs())
+                .max((p.a - q.a).abs());
+            sum += d;
+            if d > 0.5 {
+                far += 1;
+            }
+        }
+        let mean = sum / before.pixels.len() as f32;
+        assert!(
+            mean < 0.003 && far == 0,
+            "the page is the page it was: mean {mean}, {far} far off"
+        );
+
+        // Twice is no simpler than once, and a rect has nothing to spare.
+        assert!(session.simplify_path(disc, 0.3).is_err());
+        let square = add(
+            &mut session,
+            chitrakar_doc::Node::vector(
+                "square",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+            ),
+        );
+        assert!(session.simplify_path(square, 0.3).is_err());
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session.undo().unwrap();
+        let back = page(&session);
+        assert!(back.pixels == before.pixels, "and undo puts the steps back");
     }
 
     #[test]

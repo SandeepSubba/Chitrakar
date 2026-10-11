@@ -1108,6 +1108,24 @@ without reading anything else.*
   that outlines a stroke (`SampleGrid`, shared with `stroke_outline`),
   judged against distance to the outline on 40 random paths
   (`an_offset_outline_is_the_shape_moved_by_a_distance`, smoke 9o5).
+- **Simplify path.** Layer › Simplify path… says a path's outline
+  again in as few anchors as stay within a distance of it — straight
+  where it runs straight, cubic curves with handles where it bends,
+  corners kept as corners — which is the step after outlining a
+  stroke, offsetting or combining: those leave hundreds of short
+  steps that draw well and cannot be reshaped by hand (an ellipse
+  offset by six: 103 anchors, then 6). Corners are found first (a
+  turn sharper than about fifty degrees at one point) and each
+  stretch between them fitted by Schneider's method — least squares
+  for the handle lengths, Newton for the parameters, split at the
+  worst point — with a stretch along its own chord kept straight, so
+  a polygon stays a polygon (`chitrakar_render::fit`,
+  `Session::simplify_path`). Holes stay straight-sided, as a path's
+  holes are; a line that swells along its anchors is refused. Finding
+  corners up front was pinned only after breaking it passed every
+  test: splitting at the worst point finds them anyway, but starts
+  the curve off each along the wrong tangent — a D in four anchors
+  becomes seven (smoke 9o6).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
