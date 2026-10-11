@@ -4918,6 +4918,22 @@ export function App() {
     }
   };
 
+  /** Turn the picked shape's stroke into a shape of its own — the line
+   * filled in its colour, which can then be given a gradient, combined
+   * or reshaped. One step in the history; the layer that took its place
+   * is picked after it. */
+  const outlineStroke = () => {
+    if (!session || selected === null) return;
+    try {
+      const id = session.outline_stroke(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Outline the stroke: ${err}`);
+    }
+  };
+
   const BOOLEAN_BUTTONS: [string, IconName, string][] = [
     ["union", "union", "Unite shapes"],
     ["subtract", "subtract", "Subtract the shapes above"],
@@ -6985,6 +7001,7 @@ export function App() {
             item(`combine-${op}`, icon, label, () => combineSelection(op)),
           ),
         ),
+        item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

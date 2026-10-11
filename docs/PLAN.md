@@ -1073,6 +1073,28 @@ without reading anything else.*
   makes it worth having: a colour given from the palette or the recent
   row now goes to *every* picked shape and text, as one step in the
   history, where it went to the first picked one alone (smoke 9o3).
+- **Outline the stroke.** Layer › Outline the stroke turns a shape's
+  line into a shape of its own, filled in the line's colour, so it can
+  take a gradient, be combined or be reshaped (Illustrator's Outline
+  Stroke). The page does not change: a shape with no fill becomes the
+  outline; one with a fill becomes a group of the fill and the outline,
+  the group carrying blend, mask, effects and place and each of the two
+  the fade, since a layer fades its fill and its line each as it lays
+  them (`Session::outline_stroke`). The region is the renderer's own:
+  a plain rect's or ellipse's band is two exact rims, and anything else
+  — caps, joins, dashes, markers, swelling widths — is its stroke pieces
+  sampled eight to the pixel, traced, relaxed (no corner moved more than
+  half a cell) and straightened, within a quarter of a pixel of what is
+  painted (`chitrakar_render::stroke_outline`). It went through the
+  shape booleans first and they could not trace a third of 300 random
+  strokes: a dash folding back over itself lays pieces along the same
+  lines, which an edge-classifying boolean cannot be sure of. Sampling
+  cannot fail to close; the same 300 now outline with nothing wrong
+  (`a_stroke_nobody_chose_outlines_to_what_it_paints` keeps 80 of them,
+  smoke 9o4). Before building this, a grow/shrink for regions was
+  written and thrown away — `Session::grow_selection` already existed,
+  exact and traced; the toolbar's Grow box is its door. Look for the
+  engine function before the menu row.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

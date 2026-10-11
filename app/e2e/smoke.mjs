@@ -6835,6 +6835,89 @@ assert(
   assert((await picked()) === 3, `every shape that can be clicked (${await picked()})`);
 }
 
+// 9o4. Outline the stroke: a line becomes a shape of its own, and the
+// page does not change. A shape with a fill becomes the fill and the
+// outline as a group; a line with nothing under it becomes the outline.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const drag = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#3366cc");
+  await pickTool("Rect");
+  await drag(100, 80, 300, 200);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.waitForTimeout(200);
+  await page.check('input[aria-label="Stroke enabled"]');
+  await page.waitForTimeout(150);
+  await setSlider("Stroke width", 12);
+  await page.waitForTimeout(250);
+  await pickTool("Line");
+  await drag(80, 250, 320, 250);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Line" }).first().click();
+  await page.waitForTimeout(200);
+  const spots = [
+    [200, 140],
+    [104, 140],
+    [200, 84],
+    [200, 250],
+    [90, 250],
+    [60, 140],
+  ];
+  const look = () => Promise.all(spots.map(([x, y]) => canvasPixel(x, y)));
+  const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 4);
+  const before = await look();
+  assert(
+    !near(before[0], before[1]) && !near(before[3], before[5]),
+    `a rectangle with a border and a line to outline (${before[0]} / ${before[1]} / ${before[3]})`,
+  );
+
+  // The line, picked as it was drawn: the outline takes its place.
+  await menuClick("Layer", "Outline the stroke");
+  await page.waitForTimeout(300);
+  let after = await look();
+  assert(
+    after.every((p, i) => near(p, before[i])),
+    `the line outlined draws the page it drew (${after[3]} against ${before[3]})`,
+  );
+  assert(
+    !(await page.isChecked('input[aria-label="Stroke enabled"]')),
+    "and is a filled shape now, with no stroke of its own",
+  );
+
+  // The rectangle: a group of its fill and its outlined border.
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.waitForTimeout(200);
+  await menuClick("Layer", "Outline the stroke");
+  await page.waitForTimeout(300);
+  after = await look();
+  assert(
+    after.every((p, i) => near(p, before[i])),
+    `the bordered rectangle outlined draws the page it drew (${after[1]} against ${before[1]})`,
+  );
+  assert(
+    (await page.locator('input[aria-label="Stroke enabled"]').count()) === 0,
+    "and what is picked is the group that holds the two",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.waitForTimeout(200);
+  assert(
+    await page.isChecked('input[aria-label="Stroke enabled"]'),
+    "one undo gives the rectangle its border back",
+  );
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

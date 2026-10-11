@@ -4917,6 +4917,235 @@ pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec
     out
 }
 
+/// The region a shape's stroke covers, as rings read even-odd, in the
+/// shape's own space — what "outline the stroke" turns a stroke into, so
+/// the line becomes a shape of its own that can be filled, combined or
+/// reshaped.
+///
+/// The same region the renderer paints, read from the same two places:
+/// a plain rect's or ellipse's stroke is a band between two rims (a rect
+/// grown and shrunk by the band's two edges, an ellipse likewise — see
+/// [`stroke_covers`]), so those are the rings, exactly; anything else is
+/// the union of its [`stroke_pieces`]. `None` when there is no stroke to
+/// outline, or the pieces could not be combined.
+pub fn stroke_outline(
+    shape: &VectorShape,
+    stroke: &chitrakar_doc::Stroke,
+) -> Option<Vec<Vec<[f32; 2]>>> {
+    if !(stroke.width > 0.0 && stroke.width.is_finite()) {
+        return None;
+    }
+    let pieces = stroke_pieces(shape, stroke);
+    if pieces.is_empty() {
+        let (lo, hi) = match stroke_align(shape, stroke) {
+            StrokeAlign::Inside => (-stroke.width, 0.0),
+            StrokeAlign::Centre => (-stroke.width / 2.0, stroke.width / 2.0),
+            StrokeAlign::Outside => (0.0, stroke.width),
+        };
+        let rim = |t: f32| -> Option<Vec<[f32; 2]>> {
+            match *shape {
+                VectorShape::Rect {
+                    width,
+                    height,
+                    radius,
+                } => {
+                    // The rect's distance field at `t`: grown, the corners
+                    // round by as much again; shrunk, they sharpen and stay
+                    // sharp once the radius is used up.
+                    let (w, h) = (width + 2.0 * t, height + 2.0 * t);
+                    if w <= 0.0 || h <= 0.0 {
+                        return None;
+                    }
+                    let r = (corner_radius(width, height, radius) + t)
+                        .max(0.0)
+                        .min(w / 2.0)
+                        .min(h / 2.0);
+                    Some(rounded_rect_ring(-t, -t, w, h, r))
+                }
+                VectorShape::Ellipse { rx, ry } => {
+                    let (a, b) = (rx + t, ry + t);
+                    if a <= 0.0 || b <= 0.0 {
+                        return None;
+                    }
+                    let n = arc_steps(a.max(b), std::f32::consts::TAU);
+                    Some(
+                        (0..n)
+                            .map(|i| {
+                                let th = i as f32 / n as f32 * std::f32::consts::TAU;
+                                [rx + a * th.cos(), ry + b * th.sin()]
+                            })
+                            .collect(),
+                    )
+                }
+                VectorShape::Path { .. } => None,
+            }
+        };
+        let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+        rings.extend(rim(hi));
+        rings.extend(rim(lo));
+        return (!rings.is_empty()).then_some(rings);
+    }
+    // Everything else is a union of pieces, and the union is found by
+    // sampling rather than by intersecting outlines: a dash folding back
+    // over itself or a path retracing its own steps lays pieces along
+    // the same lines, and outlines that run along each other are the one
+    // thing an intersection cannot be sure of. A grid of samples cannot
+    // fail to close. So the pieces are laid on a grid up to eight to the
+    // pixel, the grid traced, and the staircase it traces straightened
+    // back into runs, to within a cell — an eighth of a pixel.
+    let [x0, y0, x1, y1] = pieces_bounds(&pieces)?;
+    let (w, h) = (x1 - x0, y1 - y0);
+    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+        return None;
+    }
+    // Eight samples a pixel where that fits in four million of them, and
+    // fewer on a stroke so long it would not.
+    let k = (4.0e6 / (w * h)).sqrt().min(8.0);
+    let (gw, gh) = ((w * k).ceil() as u32 + 2, (h * k).ceil() as u32 + 2);
+    let mut inside = vec![false; (gw * gh) as usize];
+    // Each piece laid over its own box only.
+    for piece in &pieces {
+        let [bx0, by0, bx1, by1] = piece.bounds();
+        let cx0 = (((bx0 - x0) * k).floor() as i64).max(0) as u32;
+        let cy0 = (((by0 - y0) * k).floor() as i64).max(0) as u32;
+        let cx1 = (((bx1 - x0) * k).ceil() as u32 + 1).min(gw - 1);
+        let cy1 = (((by1 - y0) * k).ceil() as u32 + 1).min(gh - 1);
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                let at = (cy * gw + cx) as usize;
+                if inside[at] {
+                    continue;
+                }
+                // Cell `c` spans from c - 1 to c in grid units, the one
+                // empty cell round the edge keeping every ring closed.
+                let (sx, sy) = (x0 + (cx as f32 - 0.5) / k, y0 + (cy as f32 - 0.5) / k);
+                if piece.covers(sx, sy) {
+                    inside[at] = true;
+                }
+            }
+        }
+    }
+    let rings: Vec<Vec<[f32; 2]>> = trace_pixels(&inside, gw, gh)
+        .into_iter()
+        .map(|ring| {
+            // The staircase's corners stand either side of the edge it
+            // was traced from, never more than a cell off it; the
+            // straightening keeps the ones a run cannot do without.
+            let mut placed: Vec<[f32; 2]> = ring
+                .iter()
+                .map(|p| [x0 + (p[0] - 1.0) / k, y0 + (p[1] - 1.0) / k])
+                .collect();
+            // A slope traced on a grid is a staircase whose corners stand
+            // a cell either side of it, which no straightening within a
+            // cell can take out: every step is a cell off the run. Each
+            // corner is drawn halfway to the middle of its two
+            // neighbours, twice, which puts a staircase's corners on its
+            // slope — but no corner is moved further than half a cell,
+            // since the tracing runs straight stretches together and a
+            // sharp tip's neighbours can be far down its sides.
+            let traced = placed.clone();
+            for _ in 0..2 {
+                let n = placed.len();
+                placed = (0..n)
+                    .map(|i| {
+                        let (a, p, b) = (placed[(i + n - 1) % n], placed[i], placed[(i + 1) % n]);
+                        [
+                            (a[0] + 2.0 * p[0] + b[0]) / 4.0,
+                            (a[1] + 2.0 * p[1] + b[1]) / 4.0,
+                        ]
+                    })
+                    .collect();
+            }
+            let most = 0.5 / k;
+            for (p, t) in placed.iter_mut().zip(&traced) {
+                let (dx, dy) = (p[0] - t[0], p[1] - t[1]);
+                let d = dx.hypot(dy);
+                if d > most {
+                    *p = [t[0] + dx * most / d, t[1] + dy * most / d];
+                }
+            }
+            straightened(&placed, 0.4 / k)
+        })
+        .filter(|ring| ring.len() >= 3)
+        .collect();
+    (!rings.is_empty()).then_some(rings)
+}
+
+/// A closed ring with the points that lie within `tolerance` of the
+/// straight run past them taken out (Douglas and Peucker's, once round
+/// a ring: split at the two points furthest apart, then each half).
+fn straightened(ring: &[[f32; 2]], tolerance: f32) -> Vec<[f32; 2]> {
+    let n = ring.len();
+    if n < 4 {
+        return ring.to_vec();
+    }
+    let far = (1..n)
+        .max_by(|&i, &j| {
+            let d = |k: usize| (ring[k][0] - ring[0][0]).hypot(ring[k][1] - ring[0][1]);
+            d(i).total_cmp(&d(j))
+        })
+        .unwrap_or(n / 2);
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[far] = true;
+    let mut stack = vec![(0usize, far), (far, n)];
+    while let Some((a, b)) = stack.pop() {
+        if b <= a + 1 {
+            continue;
+        }
+        let (p, q) = (ring[a], ring[b % n]);
+        let (mut worst, mut at) = (0.0f32, a);
+        for (i, r) in ring.iter().enumerate().take(b).skip(a + 1) {
+            let d = segment_distance(r[0], r[1], p, q);
+            if d > worst {
+                worst = d;
+                at = i;
+            }
+        }
+        if worst > tolerance {
+            keep[at] = true;
+            stack.push((a, at));
+            stack.push((at, b));
+        }
+    }
+    ring.iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
+}
+
+/// How many straight steps follow an arc of radius `r` through `sweep`
+/// radians to within a twentieth of a pixel.
+fn arc_steps(r: f32, sweep: f32) -> usize {
+    let r = r.max(0.05);
+    let step = 2.0 * (1.0 - (0.05 / r).min(1.0)).acos();
+    ((sweep / step.max(1e-3)).ceil() as usize).clamp(4, 512)
+}
+
+/// A rounded rectangle's outline from (`x`, `y`), `w` by `h`, corners of
+/// radius `r`, clockwise in a y-down space.
+fn rounded_rect_ring(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
+    if r <= 0.0 {
+        return vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    }
+    let n = arc_steps(r, std::f32::consts::FRAC_PI_2);
+    let mut out = Vec::with_capacity(4 * (n + 1));
+    // Each corner's centre, and the angle its quarter starts at.
+    let corners = [
+        ([x + w - r, y + r], -std::f32::consts::FRAC_PI_2),
+        ([x + w - r, y + h - r], 0.0),
+        ([x + r, y + h - r], std::f32::consts::FRAC_PI_2),
+        ([x + r, y + r], std::f32::consts::PI),
+    ];
+    for (c, start) in corners {
+        for i in 0..=n {
+            let th = start + i as f32 / n as f32 * std::f32::consts::FRAC_PI_2;
+            out.push([c[0] + r * th.cos(), c[1] + r * th.sin()]);
+        }
+    }
+    out
+}
+
 /// What a line carries at its ends, if anything and if it has ends.
 ///
 /// Added to whatever the stroke itself covers, so a head is painted in
@@ -14506,6 +14735,261 @@ mod tests {
             "and without it the picture lifts: {:?}",
             (lr, lg, lb)
         );
+    }
+
+    /// A stroke outlined is the region the renderer paints for it: inside
+    /// the rings exactly where the stroke covers, more than a quarter of
+    /// a pixel from the edge — the outline is traced from samples eight
+    /// to the pixel and straightened to within three quarters of one of
+    /// them — for every kind of shape and every way a stroke is put
+    /// together.
+    #[test]
+    fn an_outlined_stroke_covers_what_the_stroke_painted() {
+        use chitrakar_doc::{StrokeCap as Cap, StrokeJoin as Join};
+        let stroke =
+            |width: f32, align: Option<StrokeAlign>, cap: Cap, join: Join| chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width,
+                widths: Vec::new(),
+                cap,
+                join,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                align,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+            };
+        let path = |points: Vec<[f32; 2]>, closed: bool, smooth: bool| VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let zigzag = vec![[10.0, 60.0], [40.0, 15.0], [70.0, 60.0], [100.0, 20.0]];
+        let mut cases: Vec<(&str, VectorShape, chitrakar_doc::Stroke)> = vec![
+            (
+                "a square rect, centred",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                stroke(8.0, Some(StrokeAlign::Centre), Cap::Butt, Join::Miter),
+            ),
+            (
+                "a rounded rect, inside",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 6.0,
+                },
+                stroke(9.0, None, Cap::Butt, Join::Miter),
+            ),
+            (
+                "a rounded rect, outside",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 40.0,
+                    radius: 6.0,
+                },
+                stroke(5.0, Some(StrokeAlign::Outside), Cap::Butt, Join::Miter),
+            ),
+            (
+                "an ellipse",
+                VectorShape::Ellipse { rx: 40.0, ry: 22.0 },
+                stroke(6.0, Some(StrokeAlign::Centre), Cap::Butt, Join::Miter),
+            ),
+            (
+                "a zigzag, mitred and butt-ended",
+                path(zigzag.clone(), false, false),
+                stroke(7.0, None, Cap::Butt, Join::Miter),
+            ),
+            (
+                "a zigzag, round",
+                path(zigzag.clone(), false, false),
+                stroke(7.0, None, Cap::Round, Join::Round),
+            ),
+            (
+                "a zigzag, bevelled and squared",
+                path(zigzag.clone(), false, false),
+                stroke(7.0, None, Cap::Square, Join::Bevel),
+            ),
+            (
+                "a smooth closed path",
+                path(
+                    vec![[20.0, 20.0], [90.0, 30.0], [80.0, 70.0], [30.0, 80.0]],
+                    true,
+                    true,
+                ),
+                stroke(6.0, None, Cap::Butt, Join::Round),
+            ),
+        ];
+        let mut dashed = stroke(5.0, None, Cap::Round, Join::Round);
+        dashed.dash = vec![12.0, 6.0];
+        cases.push((
+            "a dashed zigzag",
+            path(zigzag.clone(), false, false),
+            dashed,
+        ));
+        let mut swelling = stroke(10.0, None, Cap::Round, Join::Round);
+        swelling.widths = vec![0.2, 1.0, 0.4, 0.9];
+        cases.push((
+            "a swelling line",
+            path(zigzag.clone(), false, false),
+            swelling,
+        ));
+        let mut arrowed = stroke(4.0, None, Cap::Butt, Join::Miter);
+        arrowed.end_marker = chitrakar_doc::Marker::Arrow;
+        cases.push(("an arrow", path(zigzag, false, false), arrowed));
+
+        let inside = |rings: &[Vec<[f32; 2]>], x: f32, y: f32| {
+            let mut odd = false;
+            for ring in rings {
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    if (a[1] > y) != (b[1] > y)
+                        && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+                    {
+                        odd = !odd;
+                    }
+                }
+            }
+            odd
+        };
+        let near_edge = |rings: &[Vec<[f32; 2]>], x: f32, y: f32| {
+            rings.iter().any(|ring| {
+                (0..ring.len())
+                    .any(|i| segment_distance(x, y, ring[i], ring[(i + 1) % ring.len()]) < 0.25)
+            })
+        };
+        for (what, shape, s) in &cases {
+            let rings = stroke_outline(shape, s).unwrap_or_else(|| panic!("{what}: no outline"));
+            let pieces = stroke_pieces(shape, s);
+            let align = stroke_align(shape, s);
+            let (mut wrong, mut asked, mut covered) = (0, 0, 0);
+            for j in 0..110 {
+                for i in 0..120 {
+                    let (x, y) = (-15.0 + i as f32 * 1.1, -15.0 + j as f32 * 1.1);
+                    if near_edge(&rings, x, y) {
+                        continue;
+                    }
+                    asked += 1;
+                    let painted = stroke_covers(shape, s.width, align, &pieces, x, y);
+                    covered += painted as usize;
+                    if painted != inside(&rings, x, y) {
+                        wrong += 1;
+                    }
+                }
+            }
+            assert!(
+                covered > 200,
+                "{what}: the stroke covered too little to ask about"
+            );
+            assert_eq!(wrong, 0, "{what}: {wrong} of {asked} points disagree");
+        }
+        // Nothing to outline is nothing.
+        let mut none = stroke(0.0, None, Cap::Butt, Join::Miter);
+        assert!(stroke_outline(&VectorShape::Ellipse { rx: 5.0, ry: 5.0 }, &none).is_none());
+        none.width = f32::NAN;
+        assert!(stroke_outline(&VectorShape::Ellipse { rx: 5.0, ry: 5.0 }, &none).is_none());
+    }
+
+    /// The same of strokes nobody chose: random lines, open and closed,
+    /// straight and smooth, of every cap, join and pattern, some swelling
+    /// and some carrying an arrow. Every one outlines, and every outline
+    /// is the region painted, away from its edge. Outlining once went
+    /// through the shape booleans, which could not trace a third of
+    /// these — a dash folding back over itself lays pieces along the same
+    /// lines, which is what intersecting outlines cannot be sure of.
+    #[test]
+    fn a_stroke_nobody_chose_outlines_to_what_it_paints() {
+        use chitrakar_doc::{StrokeCap as Cap, StrokeJoin as Join};
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (1u64 << 31) as f32
+        };
+        for case in 0..80 {
+            let n = 2 + (rnd() * 6.0) as usize;
+            let points: Vec<[f32; 2]> = (0..n).map(|_| [rnd() * 100.0, rnd() * 100.0]).collect();
+            let (closed, smooth) = (rnd() < 0.3, rnd() < 0.3);
+            let s = chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 1.0 + rnd() * 12.0,
+                widths: if rnd() < 0.2 {
+                    (0..n).map(|_| 0.2 + rnd() * 0.8).collect()
+                } else {
+                    Vec::new()
+                },
+                cap: [Cap::Butt, Cap::Round, Cap::Square][(rnd() * 3.0) as usize % 3],
+                join: [Join::Miter, Join::Round, Join::Bevel][(rnd() * 3.0) as usize % 3],
+                dash: if rnd() < 0.3 {
+                    vec![2.0 + rnd() * 15.0, 2.0 + rnd() * 10.0]
+                } else {
+                    Vec::new()
+                },
+                dash_offset: rnd() * 5.0,
+                align: None,
+                start_marker: Default::default(),
+                end_marker: if rnd() < 0.1 {
+                    chitrakar_doc::Marker::Arrow
+                } else {
+                    Default::default()
+                },
+            };
+            let shape = VectorShape::Path {
+                points,
+                closed,
+                smooth,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            };
+            let rings = stroke_outline(&shape, &s)
+                .unwrap_or_else(|| panic!("case {case} did not outline: {shape:?}"));
+            let pieces = stroke_pieces(&shape, &s);
+            let align = stroke_align(&shape, &s);
+            for j in 0..30 {
+                for i in 0..30 {
+                    let (x, y) = (-10.0 + i as f32 * 4.0 + 0.37, -10.0 + j as f32 * 4.0 + 0.71);
+                    let near = rings.iter().any(|r| {
+                        (0..r.len())
+                            .any(|k| segment_distance(x, y, r[k], r[(k + 1) % r.len()]) < 0.25)
+                    });
+                    if near {
+                        continue;
+                    }
+                    let mut odd = false;
+                    for r in &rings {
+                        for k in 0..r.len() {
+                            let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                            if (a[1] > y) != (b[1] > y)
+                                && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+                            {
+                                odd = !odd;
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        stroke_covers(&shape, s.width, align, &pieces, x, y),
+                        odd,
+                        "case {case} at ({x}, {y}): {shape:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A posterize holds a channel to evenly spaced steps as the eye

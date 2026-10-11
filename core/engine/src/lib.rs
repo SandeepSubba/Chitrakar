@@ -1087,6 +1087,135 @@ impl Session {
     /// ones above cut out of it. The result keeps the bottom-most layer's
     /// fill and stroke, because that is the shape the eye reads as the one
     /// being operated on.
+    /// Turn a shape's stroke into a shape of its own: the region the
+    /// line covers, filled in the line's colour — Illustrator's Outline
+    /// Stroke, Figma's Outline stroke. After it, the line can be given a
+    /// gradient, combined with other shapes, or reshaped anchor by
+    /// anchor, none of which a stroke can be.
+    ///
+    /// The outline is the region the renderer paints for the stroke,
+    /// caps, joins, dashes, markers and all (`stroke_outline`), so the
+    /// page looks the same afterwards. A shape with no fill becomes the
+    /// outline. A shape with a fill becomes a group of two — the shape
+    /// without its stroke, and the outline over it — the group carrying
+    /// what the layer said about itself (blend, mask, effects, place)
+    /// and each of the two its fade, so a faded shape with a shadow
+    /// still looks and casts as it did. Where a line runs over its fill
+    /// under a blend other than normal, the group blends the two as one
+    /// picture where the layer blended each in turn; that overlap is the
+    /// one place the page can differ. One step in the history; the
+    /// answer is the layer that took its place.
+    pub fn outline_stroke(&mut self, id: NodeId) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(id)?.clone();
+        let NodeKind::Vector {
+            shape,
+            fill,
+            stroke: Some(stroke),
+            gradient,
+        } = &node.kind
+        else {
+            return Err(EngineError::BadCommand(
+                "only a shape with a stroke has a stroke to outline".into(),
+            ));
+        };
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root has no stroke".into()))?;
+        let rings = chitrakar_render::stroke_outline(shape, stroke).ok_or_else(|| {
+            EngineError::BadCommand("this stroke covers nothing to outline".into())
+        })?;
+        // Anchors are stored relative to the layer's own origin, like every
+        // other path's, so the outline's corner becomes its origin and the
+        // transform carries it there.
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+        }
+        let shift = |ring: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ring.iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+        };
+        let outline_kind = NodeKind::Vector {
+            shape: chitrakar_doc::VectorShape::Path {
+                points: shift(&rings[0]),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rings[1..].iter().map(shift).collect(),
+            },
+            fill: Some(stroke.color.clone()),
+            stroke: None,
+            gradient: None,
+        };
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .unwrap_or(0);
+        let new_id = self.doc.peek_next_id();
+        let mut cmds = Vec::new();
+        if fill.is_none() && gradient.is_none() {
+            // Nothing under the line: the layer is the line, now a shape.
+            let mut outline = node.clone();
+            outline.kind = outline_kind;
+            outline.transform = node.transform.compose(Transform::translation(x0, y0));
+            cmds.push(Command::AddNode {
+                parent,
+                index,
+                node: Box::new(outline),
+            });
+        } else {
+            // The group is the layer — where it is, how it blends, casts
+            // and is masked — and the two inside it are plain but for
+            // the fade. A layer fades its fill and its stroke each as it
+            // lays them, so where the line runs over the fill the fade
+            // is taken twice and some of the fill shows through; a group
+            // fades what it holds once, as one picture, and none would.
+            // So each of the two fades as the layer did, and the group
+            // casts its shadow from the same picture the layer did.
+            let mut group = node.clone();
+            group.kind = NodeKind::Group;
+            group.opacity = 1.0;
+            let mut plain = node.clone();
+            plain.transform = Transform::default();
+            plain.blend = Default::default();
+            plain.mask = None;
+            plain.effects = Vec::new();
+            plain.locked = false;
+            plain.clipped = false;
+            plain.visible = true;
+            let mut filled = plain.clone();
+            filled.name = format!("{} fill", node.name);
+            if let NodeKind::Vector { stroke, .. } = &mut filled.kind {
+                *stroke = None;
+            }
+            let mut outline = plain;
+            outline.name = format!("{} stroke", node.name);
+            outline.kind = outline_kind;
+            outline.transform = Transform::translation(x0, y0);
+            cmds.push(Command::AddNode {
+                parent,
+                index,
+                node: Box::new(group),
+            });
+            cmds.push(Command::AddNode {
+                parent: new_id,
+                index: 0,
+                node: Box::new(filled),
+            });
+            cmds.push(Command::AddNode {
+                parent: new_id,
+                index: 1,
+                node: Box::new(outline),
+            });
+        }
+        cmds.push(Command::RemoveNode { id });
+        self.apply_labeled(Command::Batch(cmds), Some("Outline the stroke".into()))?;
+        Ok(new_id)
+    }
+
     pub fn boolean_nodes(&mut self, ids: &[NodeId], op: &str) -> Result<NodeId, EngineError> {
         let op = chitrakar_render::boolean::BoolOp::from_name(op)
             .ok_or_else(|| EngineError::BadCommand(format!("unknown operation {op:?}")))?;
@@ -10626,6 +10755,155 @@ mod tests {
         assert!(session.alike(words.0, "stroke").unwrap().is_empty());
         assert!(session.alike(a.0, "shape").is_err());
         assert!(session.alike(9999, "fill").is_err());
+    }
+
+    #[test]
+    fn a_stroke_outlined_draws_the_page_it_drew() {
+        let srgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let line = |color: AuthoredColor, width: f32| chitrakar_doc::Stroke {
+            color,
+            width,
+            widths: Vec::new(),
+            cap: chitrakar_doc::StrokeCap::Round,
+            join: chitrakar_doc::StrokeJoin::Miter,
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            align: None,
+            start_marker: Default::default(),
+            end_marker: Default::default(),
+        };
+        let mut session = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let add = |session: &mut Session, node: chitrakar_doc::Node| {
+            let id = session.document().peek_next_id();
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            id
+        };
+        let mut ground = chitrakar_doc::Node::vector(
+            "ground",
+            VectorShape::Rect {
+                width: 160.0,
+                height: 120.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+            *fill = Some(srgb(0.95, 0.9, 0.8));
+        }
+        add(&mut session, ground);
+        // A dashed zigzag, faded, with nothing under the line.
+        let mut zig = chitrakar_doc::Node::vector(
+            "zig",
+            VectorShape::Path {
+                points: vec![[0.0, 40.0], [30.0, 0.0], [60.0, 40.0], [90.0, 5.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        zig.transform = Transform::translation(10.0, 8.0);
+        zig.opacity = 0.5;
+        if let NodeKind::Vector { stroke, fill, .. } = &mut zig.kind {
+            *fill = None;
+            let mut s = line(srgb(0.1, 0.2, 0.7), 6.0);
+            s.dash = vec![14.0, 12.0];
+            *stroke = Some(s);
+        }
+        let zig = add(&mut session, zig);
+        // A filled, faded, shadowed rect whose line straddles its edge.
+        let mut card = chitrakar_doc::Node::vector(
+            "card",
+            VectorShape::Rect {
+                width: 70.0,
+                height: 40.0,
+                radius: 8.0,
+            },
+        );
+        card.transform = Transform::translation(60.0, 66.0);
+        card.opacity = 0.6;
+        card.effects = vec![chitrakar_doc::Effect::DropShadow {
+            dx: 4.0,
+            dy: 5.0,
+            blur: 3.0,
+            color: srgb(0.0, 0.0, 0.0),
+            opacity: 0.5,
+        }];
+        if let NodeKind::Vector { stroke, fill, .. } = &mut card.kind {
+            *fill = Some(srgb(0.9, 0.3, 0.2));
+            let mut s = line(srgb(0.1, 0.5, 0.2), 8.0);
+            s.align = Some(chitrakar_doc::StrokeAlign::Centre);
+            *stroke = Some(s);
+        }
+        let card = add(&mut session, card);
+
+        let page = |s: &Session| chitrakar_render::render(s.document()).unwrap();
+        let before = page(&session);
+        let differs = |a: &Surface, b: &Surface| {
+            let (mut sum, mut far) = (0.0f32, 0usize);
+            for (p, q) in a.pixels.iter().zip(&b.pixels) {
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs());
+                sum += d;
+                if d > 0.25 {
+                    far += 1;
+                }
+            }
+            (sum / a.pixels.len() as f32, far)
+        };
+
+        let history = session.history_labels().0.len();
+        let outlined = session.outline_stroke(zig).unwrap();
+        let (mean, far) = differs(&before, &page(&session));
+        assert!(
+            mean < 0.002 && far == 0,
+            "the dashed line, outlined, is the page it was: mean {mean}, {far} pixels far off"
+        );
+        let node = session.document().node(outlined).unwrap();
+        assert!(
+            matches!(
+                &node.kind,
+                NodeKind::Vector { fill: Some(_), stroke: None, shape: VectorShape::Path { subpaths, .. }, .. }
+                    if subpaths.len() >= 4
+            ),
+            "a filled shape with a ring for each dash: {:?}",
+            node.kind
+        );
+        assert_eq!(node.opacity, 0.5, "and still faded");
+
+        let group = session.outline_stroke(card).unwrap();
+        let (mean, far) = differs(&before, &page(&session));
+        assert!(
+            mean < 0.002 && far == 0,
+            "the faded, shadowed card, outlined, is the page it was: mean {mean}, {far} pixels far off"
+        );
+        let kids = session.document().children_of(group).unwrap().to_vec();
+        let names: Vec<String> = kids
+            .iter()
+            .map(|k| session.document().node(*k).unwrap().name.clone())
+            .collect();
+        assert_eq!(names, ["card fill", "card stroke"]);
+        assert_eq!(session.history_labels().0.len(), history + 2, "a step each");
+
+        // Each takes one undo, and the page is exactly what it was.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        let (mean, _) = differs(&before, &page(&session));
+        assert_eq!(mean, 0.0);
+
+        // Only a shape with a line has a line to outline.
+        let ground_id = session.document().children_of(root).unwrap()[0];
+        assert!(session.outline_stroke(ground_id).is_err());
+        assert!(session.outline_stroke(root).is_err());
     }
 
     #[test]
