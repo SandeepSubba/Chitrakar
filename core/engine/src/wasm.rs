@@ -155,6 +155,19 @@ impl WasmSession {
         serde_json::to_string(&self.inner.layers()).unwrap_or_else(|_| "[]".into())
     }
 
+    /// The layers sharing a fill colour, a stroke colour or a kind with
+    /// `id` (`what` is "fill", "stroke" or "kind"), topmost first, left
+    /// out where they could not be clicked.
+    pub fn alike(&self, id: f64, what: &str) -> Result<Vec<f64>, JsError> {
+        Ok(self
+            .inner
+            .alike(id as u64, what)
+            .map_err(to_js)?
+            .into_iter()
+            .map(|i| i as f64)
+            .collect())
+    }
+
     /// History labels as JSON `{past: [...oldest first], future: [...next
     /// redo first]}`.
     pub fn history_json(&self) -> String {

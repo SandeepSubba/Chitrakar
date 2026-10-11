@@ -5896,6 +5896,115 @@ impl Session {
         }
     }
 
+    /// The layers that share something with `id` — its fill colour, its
+    /// stroke colour, or its kind (`what` is "fill", "stroke" or "kind")
+    /// — for picking them all at once: every button drawn in the brand's
+    /// red, every hairline, every caption. In the panel's order, so the
+    /// first is the topmost.
+    ///
+    /// A layer that could not be clicked is left out — hidden, locked,
+    /// or inside a group that is — since picking is for doing something
+    /// to what is picked. The layer asked about is in the answer when it
+    /// can be clicked itself. A colour is the same colour when it looks
+    /// the same, to half a step of eight bits: a palette colour and the
+    /// same colour typed in are one colour here, since what is being
+    /// asked is what the page shows. A layer that paints with a gradient
+    /// has no one fill to share.
+    pub fn alike(&self, id: u64, what: &str) -> Result<Vec<u64>, EngineError> {
+        fn fill_of(kind: &NodeKind) -> Option<&chitrakar_color::AuthoredColor> {
+            match kind {
+                NodeKind::Vector {
+                    fill,
+                    gradient: None,
+                    ..
+                } => fill.as_ref(),
+                NodeKind::Text(spec) => Some(&spec.fill),
+                _ => None,
+            }
+        }
+        fn stroke_of(kind: &NodeKind) -> Option<&chitrakar_color::AuthoredColor> {
+            match kind {
+                NodeKind::Vector {
+                    stroke: Some(s), ..
+                } => Some(&s.color),
+                _ => None,
+            }
+        }
+        fn same(a: &chitrakar_color::AuthoredColor, b: &chitrakar_color::AuthoredColor) -> bool {
+            use chitrakar_color::AuthoredColor as C;
+            let near =
+                |x: &[f32], y: &[f32]| x.iter().zip(y).all(|(p, q)| (p - q).abs() <= 1.0 / 510.0);
+            match (a.flat(), b.flat()) {
+                (
+                    C::Srgb { r, g, b, a },
+                    C::Srgb {
+                        r: r2,
+                        g: g2,
+                        b: b2,
+                        a: a2,
+                    },
+                ) => near(&[*r, *g, *b, *a], &[*r2, *g2, *b2, *a2]),
+                (
+                    C::Cmyk { c, m, y, k, a },
+                    C::Cmyk {
+                        c: c2,
+                        m: m2,
+                        y: y2,
+                        k: k2,
+                        a: a2,
+                    },
+                ) => near(&[*c, *m, *y, *k, *a], &[*c2, *m2, *y2, *k2, *a2]),
+                _ => false,
+            }
+        }
+        let asked = self.doc.node(NodeId(id))?;
+        let layers = self.layers();
+        let kind_of = |n: u64| layers.iter().find(|l| l.id == n).map(|l| l.kind);
+        enum Want<'a> {
+            Fill(&'a chitrakar_color::AuthoredColor),
+            Stroke(&'a chitrakar_color::AuthoredColor),
+            Kind(Option<&'static str>),
+        }
+        let want = match what {
+            "fill" => match fill_of(&asked.kind) {
+                Some(c) => Want::Fill(c),
+                None => return Ok(Vec::new()),
+            },
+            "stroke" => match stroke_of(&asked.kind) {
+                Some(c) => Want::Stroke(c),
+                None => return Ok(Vec::new()),
+            },
+            "kind" => Want::Kind(kind_of(id)),
+            other => {
+                return Err(EngineError::BadCommand(format!(
+                    "layers are not alike by {other:?}; fill, stroke or kind"
+                )))
+            }
+        };
+        let matches = |n: &Node, at: u64| match &want {
+            Want::Fill(c) => fill_of(&n.kind).is_some_and(|f| same(f, c)),
+            Want::Stroke(c) => stroke_of(&n.kind).is_some_and(|f| same(f, c)),
+            Want::Kind(k) => kind_of(at) == *k,
+        };
+        // Depth first, so a group is always met before what is in it and
+        // whether it can be clicked is already known.
+        let mut clickable: std::collections::HashMap<u64, bool> = Default::default();
+        let mut out = Vec::new();
+        for l in &layers {
+            let parent_ok = clickable.get(&l.parent).copied().unwrap_or(true);
+            let ok = parent_ok && l.visible && !l.locked;
+            clickable.insert(l.id, ok);
+            if !ok {
+                continue;
+            }
+            let node = self.doc.node(NodeId(l.id))?;
+            if matches(node, l.id) {
+                out.push(l.id);
+            }
+        }
+        Ok(out)
+    }
+
     /// Decode image bytes, pool them as a resource, and add a raster object
     /// referencing them at the top of the root group (one undo step).
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
@@ -10371,6 +10480,154 @@ mod tests {
     /// picture hidden, the page differed from the picture deleted by an
     /// eighth of a channel somewhere else entirely, where the levels had
     /// landed on whatever was under the picture.
+    #[test]
+    fn layers_alike_by_fill_stroke_or_kind_are_found_where_they_can_be_clicked() {
+        let red = || AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.1,
+            b: 0.1,
+            a: 1.0,
+        };
+        let stroked = |color: AuthoredColor| chitrakar_doc::Stroke {
+            color,
+            width: 2.0,
+            widths: Vec::new(),
+            cap: Default::default(),
+            join: Default::default(),
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            align: None,
+            start_marker: Default::default(),
+            end_marker: Default::default(),
+        };
+        let blue = AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.2,
+            b: 0.9,
+            a: 1.0,
+        };
+        let shape = |name: &str, fill: Option<AuthoredColor>, stroke: Option<AuthoredColor>| {
+            let mut n = chitrakar_doc::Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector {
+                fill: f, stroke: s, ..
+            } = &mut n.kind
+            {
+                *f = fill;
+                *s = stroke.map(stroked);
+            }
+            n
+        };
+        let mut session = Session::new(100, 100, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let mut add = |parent: NodeId, node: chitrakar_doc::Node| {
+            let id = session.document().peek_next_id();
+            let index = session.document().children_of(parent).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            id
+        };
+        let a = add(root, shape("a", Some(red()), Some(blue.clone())));
+        let group = add(root, chitrakar_doc::Node::group("group"));
+        // The same red reached for by name, a hair off what was typed —
+        // the same colour on the page, so the same colour here.
+        let named = add(
+            group,
+            shape(
+                "named",
+                Some(AuthoredColor::Named {
+                    name: "Brand red".into(),
+                    means: Box::new(AuthoredColor::Srgb {
+                        r: 0.9 + 0.0005,
+                        g: 0.1,
+                        b: 0.1,
+                        a: 1.0,
+                    }),
+                }),
+                None,
+            ),
+        );
+        let mut hidden = shape("hidden", Some(red()), None);
+        hidden.visible = false;
+        add(root, hidden);
+        let mut locked = shape("locked", Some(red()), None);
+        locked.locked = true;
+        add(root, locked);
+        let mut shut = chitrakar_doc::Node::group("shut");
+        shut.visible = false;
+        let shut = add(root, shut);
+        add(shut, shape("inside a hidden group", Some(red()), None));
+        let words = add(
+            root,
+            chitrakar_doc::Node::text("words", chitrakar_doc::TextSpec::new("hi", 12.0, red())),
+        );
+        let green = add(
+            root,
+            shape(
+                "green",
+                Some(AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.8,
+                    b: 0.2,
+                    a: 1.0,
+                }),
+                Some(blue.clone()),
+            ),
+        );
+        let mut ramp = shape("ramp", Some(red()), None);
+        if let NodeKind::Vector { gradient, .. } = &mut ramp.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.0],
+                to: [1.0, 0.0],
+                stops: Vec::new(),
+                spread: Default::default(),
+            });
+        }
+        let ramp = add(root, ramp);
+
+        let set = |v: Vec<u64>| -> std::collections::BTreeSet<u64> { v.into_iter().collect() };
+        let ids =
+            |v: &[NodeId]| -> std::collections::BTreeSet<u64> { v.iter().map(|i| i.0).collect() };
+        assert_eq!(
+            set(session.alike(a.0, "fill").unwrap()),
+            ids(&[a, named, words]),
+            "the same red, typed, named or on words — and nothing that cannot be clicked"
+        );
+        assert_eq!(set(session.alike(a.0, "stroke").unwrap()), ids(&[a, green]));
+        assert_eq!(
+            set(session.alike(a.0, "kind").unwrap()),
+            ids(&[a, named, green, ramp]),
+            "every shape that can be clicked"
+        );
+        // In the panel's order: topmost first.
+        let order: Vec<u64> = session.layers().iter().map(|l| l.id).collect();
+        let found = session.alike(a.0, "fill").unwrap();
+        let mut sorted = found.clone();
+        sorted.sort_by_key(|i| order.iter().position(|o| o == i));
+        assert_eq!(found, sorted);
+        // A layer with nothing of the kind asked has nothing alike, and a
+        // way of being alike that is not one says so.
+        assert!(session.alike(group.0, "fill").unwrap().is_empty());
+        assert!(
+            session.alike(ramp.0, "fill").unwrap().is_empty(),
+            "a gradient is no one colour"
+        );
+        assert!(session.alike(words.0, "stroke").unwrap().is_empty());
+        assert!(session.alike(a.0, "shape").is_err());
+        assert!(session.alike(9999, "fill").is_err());
+    }
+
     #[test]
     fn a_kept_region_comes_out_as_its_own_picture() {
         let mut session = Session::new(60, 40, chitrakar_color::ColorMode::Rgb);

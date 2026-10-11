@@ -1701,6 +1701,22 @@ export function App() {
       alert(`Forget: ${err}`);
     }
   };
+  /** Pick every layer that shares the picked one's fill colour, stroke
+   * colour or kind — what Illustrator's Select › Same does. The engine
+   * leaves out what could not be clicked; the picked layer stays the
+   * one the panel speaks for when it is among them. */
+  const selectAlike = (what: "fill" | "stroke" | "kind") => {
+    if (!session || selected === null) return;
+    try {
+      const found = Array.from(session.alike(selected, what)) as NodeId[];
+      if (found.length === 0) return;
+      setSelected(found.includes(selected) ? selected : found[0]);
+      setMultiSel(found);
+    } catch (err) {
+      alert(`Select: ${err}`);
+    }
+  };
+
   const pickFromLayer = () => {
     if (!session || selected === null) return;
     try {
@@ -5718,16 +5734,28 @@ export function App() {
     const colour: AuthoredColor = named
       ? { Named: { name: named, means: flat } }
       : flat;
-    if (selectedKind && typeof selectedKind === "object") {
-      if ("Vector" in selectedKind) {
-        setKind(
-          { Vector: { ...selectedKind.Vector, fill: colour, gradient: null } },
-          false,
-        );
-      } else if ("Text" in selectedKind) {
-        setKind({ Text: { ...selectedKind.Text, fill: colour } }, false);
+    // Every picked layer that holds a fill takes it, as one step in the
+    // history — picking every layer in one colour and giving them
+    // another is what "select the same fill" is for. A layer with no
+    // fill to take (a picture, an adjustment) is passed over.
+    if (!session) return;
+    const ids = [...new Set([...(selected !== null ? [selected] : []), ...multiSel])];
+    const cmds: Command[] = ids.flatMap((id): Command[] => {
+      const kind =
+        id === selected && selectedKind
+          ? selectedKind
+          : (JSON.parse(session.kind_json(id)) as NodeKind);
+      if (!kind || typeof kind !== "object") return [];
+      if ("Vector" in kind) {
+        return [{ SetKind: { id, kind: { Vector: { ...kind.Vector, fill: colour, gradient: null } } } }];
       }
-    }
+      if ("Text" in kind) {
+        return [{ SetKind: { id, kind: { Text: { ...kind.Text, fill: colour } } } }];
+      }
+      return [];
+    });
+    if (cmds.length === 1) run(cmds[0]);
+    else if (cmds.length > 1) run({ Batch: cmds });
   };
 
   /** Replace the selected layer's effect list. Slider drags preview, so a
@@ -6900,6 +6928,9 @@ export function App() {
         // the same kind of thing as cut and paste. They are not.
         item("select-all", "selectAll", "Select all layers", selectAll, hint("select-all")),
         item("deselect", "check", "Deselect", deselect, "Esc"),
+        item("same-fill", "fill", "Select the same fill colour", () => selectAlike("fill")),
+        item("same-stroke", "line", "Select the same stroke colour", () => selectAlike("stroke")),
+        item("same-kind", "layers", "Select the same kind of layer", () => selectAlike("kind")),
         SEP,
         item("pick-page", "marquee", "Pick out the whole page", pickWholePage),
         item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, hint("pick-inverse")),

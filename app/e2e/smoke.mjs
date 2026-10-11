@@ -6770,6 +6770,71 @@ assert(
   );
 }
 
+// 9o3. Select the same: every layer in the picked one's fill colour,
+// stroke colour or kind, picked at once — and then recoloured at once,
+// which is what picking them was for. A locked layer is left out, as a
+// click would leave it.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("#dd2222", 20, 20, 100, 100);
+  await paint("#2244dd", 120, 20, 200, 100);
+  await paint("#dd2222", 220, 20, 300, 100);
+  await paint("#dd2222", 20, 160, 100, 240);
+  await pickTool("Move");
+  const rows = page.locator(".panel ul li");
+  const names = await rows.allTextContents();
+  assert(names.length === 4, `four rectangles (${names})`);
+  // The last one drawn is locked.
+  await rows.first().locator('button[aria-label="Lock layer"]').click();
+  await page.waitForTimeout(200);
+  const picked = () => page.locator(".panel ul li.selected, .panel ul li.multi").count();
+
+  await rows.last().click();
+  await page.waitForTimeout(150);
+  await menuClick("Select", "Select the same fill colour");
+  assert((await picked()) === 2, `the other red is picked with it, the locked one not (${await picked()})`);
+  // Given a colour from the palette, every picked shape takes it.
+  await setColor("Fill colour", "#22aa44");
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(200);
+  await page.locator('[aria-label="Palette"] .swatch:not(.add)').first().click();
+  await page.waitForTimeout(300);
+  const [one, two, three, four] = await Promise.all([
+    canvasPixel(60, 60),
+    canvasPixel(160, 60),
+    canvasPixel(260, 60),
+    canvasPixel(60, 200),
+  ]);
+  assert(
+    one[1] > 150 && one[0] < 80 && three[1] > 150 && three[0] < 80,
+    `and both take the new colour together (${one}, ${three})`,
+  );
+  assert(two[2] > 180 && four[0] > 180, `while the blue and the locked red keep theirs (${two}, ${four})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(60, 60))[0] > 180 && (await canvasPixel(260, 60))[0] > 180,
+    "one undo puts both back",
+  );
+
+  await rows.last().click();
+  await page.waitForTimeout(150);
+  await menuClick("Select", "Select the same kind of layer");
+  assert((await picked()) === 3, `every shape that can be clicked (${await picked()})`);
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

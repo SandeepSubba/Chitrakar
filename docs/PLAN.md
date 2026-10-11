@@ -1063,6 +1063,16 @@ without reading anything else.*
   when asked for one there is not — which it did not before: a kind
   left out of `engine.ts` passed it (`a_picture_is_held_to_steps_or_to_two`,
   the GPU's adjustment list, smoke 9o2).
+- **Select the same.** Select › Select the same fill colour, stroke
+  colour, or kind of layer picks every layer that shares it with the
+  picked one — Illustrator's Select › Same — leaving out what a click
+  could not reach (hidden, locked, or in a group that is). A colour is
+  the same when it looks the same, to half an eight-bit step, so a
+  palette colour and the same colour typed in are one; a gradient fill
+  is no one colour (`Session::alike`). It came with the change that
+  makes it worth having: a colour given from the palette or the recent
+  row now goes to *every* picked shape and text, as one step in the
+  history, where it went to the first picked one alone (smoke 9o3).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
