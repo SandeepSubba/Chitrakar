@@ -12049,6 +12049,45 @@ mod tests {
             spelt >= 36,
             "the unions were read for too little: {spelt} spellings"
         );
+
+        // ---- the adjustments and the filters: every kind, both ways ----
+        //
+        // A kind the panel does not know is a layer it cannot show; a kind
+        // the panel names that this crate does not is a layer it cannot
+        // make. Serde says what the kinds are: asked for one there is not,
+        // it names all of the ones there are.
+        fn kinds_of<T: serde::de::DeserializeOwned + std::fmt::Debug>() -> Vec<String> {
+            let err = serde_json::from_str::<T>(r#"{"NoSuchKind": {}}"#).unwrap_err();
+            let msg = err.to_string();
+            let listed = msg
+                .split_once("expected one of ")
+                .unwrap_or_else(|| panic!("serde no longer lists the kinds: {msg}"))
+                .1;
+            listed
+                .split(',')
+                .map(|k| k.trim().trim_matches('`').to_string())
+                .map(|k| k.split('`').next().unwrap_or("").to_string())
+                .filter(|k| !k.is_empty())
+                .collect()
+        }
+        for (name, crate_kinds) in [
+            ("Adjustment", kinds_of::<chitrakar_doc::Adjustment>()),
+            ("Filter", kinds_of::<chitrakar_doc::Filter>()),
+        ] {
+            let ui: std::collections::BTreeSet<String> = arms(&block(&ts, name))
+                .iter()
+                .filter_map(|arm| {
+                    let t = arm.trim_start_matches('{').trim();
+                    t.split(':').next().map(|k| k.trim().to_string())
+                })
+                .collect();
+            let ours: std::collections::BTreeSet<String> = crate_kinds.into_iter().collect();
+            assert!(ours.len() > 5, "{name} was read as {ours:?}");
+            assert_eq!(
+                ui, ours,
+                "the UI's {name} names the kinds on the left, this crate the ones on the right"
+            );
+        }
     }
 
     /// Lowercase identifiers followed by `:` or `?:`, with the `?` kept as

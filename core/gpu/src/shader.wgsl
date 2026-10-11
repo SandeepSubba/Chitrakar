@@ -767,6 +767,24 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
             }
             return c * (want / l);
         }
+        // Posterize: each channel held to `p.y` steps above black, even
+        // as a device shows them. The steps are worked out on the CPU, so
+        // both renderers hold a picture to the same number of them.
+        case 20: {
+            let inside = clamp(c, vec3f(0.0), vec3f(1.0));
+            let s = vec3f(to_shown(inside.r), to_shown(inside.g), to_shown(inside.b));
+            // floor of a half up, as the CPU rounds: WGSL rounds a half to even.
+            let q = floor(s * p.y + vec3f(0.5)) / p.y;
+            return vec3f(to_light(q.r), to_light(q.g), to_light(q.b));
+        }
+        // Threshold: white or black by the brightness the pixel shows at.
+        case 21: {
+            let l = clamp(dot(vec3f(0.2126, 0.7152, 0.0722), c), 0.0, 1.0);
+            if to_shown(l) >= p.y {
+                return vec3f(1.0);
+            }
+            return vec3f(0.0);
+        }
         default: {
             return c;
         }
@@ -945,14 +963,17 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
         return was;
     }
     let kind = i32(in.mode);
-    if kind >= 14 {
+    // Ten to thirteen read a table, fourteen to nineteen are the filters
+    // of one pixel, and the rest are numbers again — the adjustments that
+    // came after the filters had taken the next numbers.
+    if kind >= 14 && kind < 20 {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
     // adjustments are stated.
     let straight = was.rgb / was.a;
     var out = adjusted(kind, in.params, in.grad, straight);
-    if kind >= 10 {
+    if kind >= 10 && kind < 14 {
         out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
     }
     return vec4f(mix(was.rgb, out * was.a, weight), was.a);

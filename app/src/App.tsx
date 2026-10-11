@@ -4231,6 +4231,14 @@ export function App() {
       name: "Invert",
       kind: { Adjustment: { Invert: { amount: 1 } } },
     },
+    posterize: {
+      name: "Posterize",
+      kind: { Adjustment: { Posterize: { levels: 4 } } },
+    },
+    threshold: {
+      name: "Threshold",
+      kind: { Adjustment: { Threshold: { level: 0.5 } } },
+    },
     levels: {
       name: "Levels",
       kind: {
@@ -11944,6 +11952,19 @@ function KindProps({
     if ("Invert" in adj) {
       return slider("Amount", adj.Invert.amount, 0, 1, 0.01, (v) =>
         wrap({ Invert: { amount: v } }),
+      );
+    }
+    if ("Posterize" in adj) {
+      // Whole steps: the engine reads the number whole anyway, and a
+      // slider that moved in hundredths would sit still for ninety-nine
+      // of every hundred of them.
+      return slider("Levels", adj.Posterize.levels, 2, 32, 1, (v) =>
+        wrap({ Posterize: { levels: v } }),
+      );
+    }
+    if ("Threshold" in adj) {
+      return slider("Level", adj.Threshold.level, 0, 1, 0.01, (v) =>
+        wrap({ Threshold: { level: v } }),
       );
     }
     if ("Curves" in adj) {

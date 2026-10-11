@@ -4633,6 +4633,14 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
         A::Vibrance { amount } => plain([6.0, *amount, 0.0, 0.0], [0.0; 4]),
         A::BlackAndWhite { red, green, blue } => plain([7.0, *red, *green, *blue], [0.0; 4]),
         A::Invert { amount } => plain([8.0, *amount, 0.0, 0.0], [0.0; 4]),
+        A::Posterize { levels } => plain(
+            [20.0, chitrakar_render::posterize_steps(*levels), 0.0, 0.0],
+            [0.0; 4],
+        ),
+        A::Threshold { level } => plain(
+            [21.0, chitrakar_render::threshold_level(*level), 0.0, 0.0],
+            [0.0; 4],
+        ),
         A::ShadowsHighlights {
             shadows,
             highlights,
@@ -9006,6 +9014,8 @@ mod tests {
                 shadows: 0.6,
                 highlights: 0.5,
             },
+            A::Posterize { levels: 4.0 },
+            A::Threshold { level: 0.5 },
         ];
         for adj in known {
             let mut doc = Document::new(60, 40, ColorMode::Rgb);

@@ -2298,13 +2298,25 @@ impl Rng {
                             })
                             .collect(),
                     },
-                    _ => {
-                        if self.chance(2) {
-                            Adjustment::ShadowsHighlights {
-                                shadows: self.between(-0.8, 0.8),
-                                highlights: self.between(-0.8, 0.8),
-                            }
-                        } else {
+                    // The last of the twelve is shared four ways, so the
+                    // later kinds come in without moving what the earlier
+                    // eleven draw on every page that already has them.
+                    _ => match self.upto(4) {
+                        0 => Adjustment::ShadowsHighlights {
+                            shadows: self.between(-0.8, 0.8),
+                            highlights: self.between(-0.8, 0.8),
+                        },
+                        // A step function: the one adjustment here with
+                        // an edge in it, which an audit that compares two
+                        // renderers has to allow for at the step and no
+                        // wider.
+                        1 => Adjustment::Posterize {
+                            levels: self.between(2.0, 8.0),
+                        },
+                        2 => Adjustment::Threshold {
+                            level: self.between(0.2, 0.8),
+                        },
+                        _ => {
                             let mut three = || {
                                 [
                                     self.between(-0.6, 0.6),
@@ -2319,7 +2331,7 @@ impl Rng {
                                 preserve_luminosity: self.chance(2),
                             }
                         }
-                    }
+                    },
                 },
             )),
             // All six filters rather than two. The four that were

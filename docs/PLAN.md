@@ -41,7 +41,7 @@ without reading anything else.*
   began, a shape resized about its own middle — which is how a circle is
   put on a target rather than beside one, and the two modifiers combine — turn with a rotation knob, flip a selection about its
   own box; adjustment layers (exposure, brightness/contrast, hue/sat,
-  white balance, vibrance, levels,
+  white balance, vibrance, posterize, threshold, levels,
   curves drawn on a graph in the panel — a master curve and one per
   channel run after it, which is what a colour grade is made of, with
   the channels not in hand drawn faintly behind the one that is; the
@@ -1047,6 +1047,22 @@ without reading anything else.*
   A lossy WebP is not offered: the encoder has only the lossless half,
   and the JPEG is the lossy picture. The desktop shell opens `.webp`
   files as it opens PNGs (smoke 8f2 and 9bh).
+- **Posterize and threshold.** Two adjustment layers the classic set
+  had and this did not. A posterize holds each channel to a few steps
+  (`levels`, read whole and held to 2..=255), evenly spaced *as shown*
+  — even in light they would crowd every band but one into the
+  shadows; a threshold makes each pixel white or black by the
+  brightness it shows at, so pure blue, bright to a sensor, is black.
+  Both renderers draw them (GPU kinds 20 and 21; the step counts and
+  the level are worked out once on the CPU side and handed over, and
+  the shader rounds a half up as Rust does, since WGSL's `round` goes to
+  even), and the random pages now hold them, sharing the twelfth slot
+  of the adjustment choice four ways so the other eleven draw as they
+  did. The mirror test now holds the UI's `Adjustment` and `Filter`
+  unions to this crate's kinds both ways — serde names every variant
+  when asked for one there is not — which it did not before: a kind
+  left out of `engine.ts` passed it (`a_picture_is_held_to_steps_or_to_two`,
+  the GPU's adjustment list, smoke 9o2).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

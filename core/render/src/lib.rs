@@ -8629,6 +8629,28 @@ pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
         .collect()
 }
 
+/// How many steps above black a posterize takes each channel through:
+/// its levels, read whole and held to 2..=255, less the black one. A
+/// number that is no number is the most levels there are, which is the
+/// nearest thing to leaving the picture alone.
+pub fn posterize_steps(levels: f32) -> f32 {
+    if levels.is_finite() {
+        levels.round().clamp(2.0, 255.0) - 1.0
+    } else {
+        254.0
+    }
+}
+
+/// The brightness a threshold turns white at, held to 0..=1; a number
+/// that is no number is the middle.
+pub fn threshold_level(level: f32) -> f32 {
+    if level.is_finite() {
+        level.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
 /// Read a tabulated curve at `x`, between its entries.
 fn curve_at(lut: &[f32], x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0) * 256.0;
@@ -8941,6 +8963,27 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k) + over * (1.0 - k)
             };
             (f(r), f(g), f(b))
+        }
+        Adjustment::Posterize { levels } => {
+            // Evenly spaced as a device shows them: steps even in light
+            // would crowd all but one band into the shadows.
+            let steps = posterize_steps(*levels);
+            let f = |v: f32| {
+                let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
+                chitrakar_color::srgb_to_linear((s * steps).round() / steps)
+            };
+            (f(r), f(g), f(b))
+        }
+        Adjustment::Threshold { level } => {
+            // The brightness the pixel shows at, against the level: the
+            // weights are light's, and the comparison is the eye's.
+            let l = (chitrakar_doc::LUMA[0] * r
+                + chitrakar_doc::LUMA[1] * g
+                + chitrakar_doc::LUMA[2] * b)
+                .clamp(0.0, 1.0);
+            let on = chitrakar_color::linear_to_srgb(l) >= threshold_level(*level);
+            let v = if on { 1.0 } else { 0.0 };
+            (v, v, v)
         }
         Adjustment::Curves { .. } => {
             let table;
@@ -14463,6 +14506,87 @@ mod tests {
             "and without it the picture lifts: {:?}",
             (lr, lg, lb)
         );
+    }
+
+    /// A posterize holds a channel to evenly spaced steps as the eye
+    /// sees them, and a threshold makes every pixel white or black by
+    /// the brightness it shows at.
+    #[test]
+    fn a_picture_is_held_to_steps_or_to_two() {
+        let srgb = |r: f32, g: f32, b: f32| to_working(&AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let shown = |p: LinearRgba| [p.r, p.g, p.b].map(chitrakar_color::linear_to_srgb);
+        let four = Adjustment::Posterize { levels: 4.0 };
+        // Steps a third apart as shown: 0.3 is nearer a third, 0.9 is
+        // nearer full, 0.1 is nearer black, each channel on its own.
+        let got = shown(apply_adjustment(&four, None, srgb(0.3, 0.9, 0.1)));
+        for (v, want) in got.iter().zip([1.0 / 3.0, 1.0, 0.0]) {
+            assert!((v - want).abs() < 0.002, "{got:?} is not on the steps");
+        }
+        // Evenly spaced as shown, not in light: a middling grey stays
+        // near the middle step. In light, the middle step of three would
+        // be linear 0.5, which shows as 0.735.
+        let three = Adjustment::Posterize { levels: 3.0 };
+        let mid = shown(apply_adjustment(&three, None, srgb(0.55, 0.55, 0.55)))[0];
+        assert!((mid - 0.5).abs() < 0.002, "the middle step shows at {mid}");
+        // Read whole and held to 2..=255, and a number that is no
+        // number leaves a picture all but alone.
+        let two = shown(apply_adjustment(
+            &Adjustment::Posterize { levels: 0.4 },
+            None,
+            srgb(0.6, 0.4, 0.2),
+        ));
+        assert_eq!(two.map(|v| v.round()), [1.0, 0.0, 0.0], "{two:?}");
+        let most = shown(apply_adjustment(
+            &Adjustment::Posterize { levels: f32::NAN },
+            None,
+            srgb(0.6, 0.4, 0.2),
+        ));
+        assert!((most[0] - 0.6).abs() < 0.003 && (most[2] - 0.2).abs() < 0.003);
+
+        // A threshold: by brightness as shown, so a middling grey and a
+        // colour of the same brightness fall on the same side, and the
+        // answer is grey either way.
+        let half = Adjustment::Threshold { level: 0.5 };
+        assert_eq!(
+            shown(apply_adjustment(&half, None, srgb(0.55, 0.55, 0.55))),
+            [1.0; 3]
+        );
+        assert_eq!(
+            shown(apply_adjustment(&half, None, srgb(0.45, 0.45, 0.45))),
+            [0.0; 3]
+        );
+        // Pure blue is bright to a sensor and dark to an eye: it is black.
+        assert_eq!(
+            shown(apply_adjustment(&half, None, srgb(0.0, 0.0, 1.0))),
+            [0.0; 3]
+        );
+        // At nothing everything is white; at all of it only white is.
+        let none = Adjustment::Threshold { level: 0.0 };
+        assert_eq!(
+            shown(apply_adjustment(&none, None, srgb(0.0, 0.0, 0.0))),
+            [1.0; 3]
+        );
+        let all = Adjustment::Threshold { level: 1.0 };
+        assert_eq!(
+            shown(apply_adjustment(&all, None, srgb(0.99, 0.99, 0.99))),
+            [0.0; 3]
+        );
+        assert_eq!(
+            shown(apply_adjustment(&all, None, srgb(1.0, 1.0, 1.0))),
+            [1.0; 3]
+        );
+        // The cover a pixel has is kept.
+        let faint = apply_adjustment(
+            &half,
+            None,
+            to_working(&AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.9,
+                b: 0.9,
+                a: 0.5,
+            }),
+        );
+        assert!((faint.a - 0.5).abs() < 1e-6 && (faint.r - 0.5).abs() < 1e-6);
     }
 
     /// A negative is taken on the values a device shows, so a middling

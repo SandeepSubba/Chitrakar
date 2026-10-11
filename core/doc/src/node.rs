@@ -604,6 +604,23 @@ pub enum Adjustment {
         #[serde(default)]
         preserve_luminosity: bool,
     },
+    /// Each channel held to a few steps: `levels` of them from black to
+    /// full, evenly spaced as a device shows them, so a picture comes
+    /// out as the flat bands of a screen print. Two is every channel on
+    /// or off; it is read whole and held to 2..=255.
+    ///
+    /// On the shown values for the reason a tone curve is drawn over
+    /// them: steps even in light would crowd every band but one into the
+    /// shadows.
+    Posterize {
+        levels: f32,
+    },
+    /// Every pixel white or black by whether its brightness, as a device
+    /// shows it, is at `level` (0..=1) or above — the picture as a stamp
+    /// or a stencil would print it.
+    Threshold {
+        level: f32,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709
@@ -1217,7 +1234,7 @@ pub struct Mask {
 impl Adjustment {
     /// Every colour written inside an adjustment.
     ///
-    /// Twelve of the thirteen are read as numbers. The gradient map is
+    /// Fourteen of the fifteen are read as numbers. The gradient map is
     /// not: it *is* a ramp of colours, and one of them can stand for a
     /// palette entry like any other. Matched kind by kind rather than
     /// with a catch-all, so that a new adjustment holding a colour does
@@ -1241,7 +1258,9 @@ impl Adjustment {
             | Adjustment::Invert { .. }
             | Adjustment::SelectiveHsl { .. }
             | Adjustment::ShadowsHighlights { .. }
-            | Adjustment::ColorBalance { .. } => {}
+            | Adjustment::ColorBalance { .. }
+            | Adjustment::Posterize { .. }
+            | Adjustment::Threshold { .. } => {}
         }
     }
 }

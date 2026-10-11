@@ -6689,6 +6689,77 @@ assert(
   );
 }
 
+// 9o2. Posterize and threshold: a picture held to a few flat steps, or
+// to two. The steps are even as the screen shows them, and a threshold
+// is read from brightness as the eye has it — pure blue, bright to a
+// sensor, is dark.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await paint("#303030", 20, 20, 100, 120);
+  await paint("#707070", 110, 20, 190, 120);
+  await paint("#c8c8c8", 200, 20, 280, 120);
+  await paint("#0000ff", 290, 20, 370, 120);
+  const tones = async () =>
+    Promise.all([60, 150, 240, 330].map((x) => canvasPixel(x, 70)));
+  const near = (a, b) => Math.abs(a - b) <= 2;
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "posterize");
+  await page.waitForTimeout(300);
+  let [a, c, d, e] = await tones();
+  // Four levels are three steps: 0, 85, 170 and 255 as shown.
+  assert(
+    near(a[0], 85) && near(c[0], 85) && near(d[0], 170) && near(e[2], 255) && near(e[0], 0),
+    `four levels hold each channel to thirds of the way up the screen (${a[0]}, ${c[0]}, ${d[0]}, ${e})`,
+  );
+  await page.locator(".panel ul li", { hasText: "Posterize" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Levels", 2);
+  await page.waitForTimeout(300);
+  [a, c, d] = await tones();
+  assert(
+    near(a[0], 0) && near(c[0], 0) && near(d[0], 255),
+    `two is every channel on or off (${a[0]}, ${c[0]}, ${d[0]})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  [a] = await tones();
+  assert(near(a[0], 0x30), `undo takes the slider and the layer (${a[0]})`);
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "threshold");
+  await page.waitForTimeout(300);
+  [a, c, d, e] = await tones();
+  assert(
+    a[0] === 0 && c[0] === 0 && d[0] === 255 && d[2] === 255,
+    `at the middle, the darker greys go black and the light one white (${a[0]}, ${c[0]}, ${d[0]})`,
+  );
+  assert(
+    e[0] === 0 && e[1] === 0 && e[2] === 0,
+    `and pure blue is dark to the eye, so it is black (${e})`,
+  );
+  await page.locator(".panel ul li", { hasText: "Threshold" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Level", 0.4);
+  await page.waitForTimeout(300);
+  [a, c] = await tones();
+  assert(
+    a[0] === 0 && c[0] === 255,
+    `lowered, the middling grey crosses over and the dark one does not (${a[0]}, ${c[0]})`,
+  );
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

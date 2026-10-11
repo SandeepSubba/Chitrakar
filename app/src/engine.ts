@@ -102,6 +102,12 @@ export type Adjustment =
   | { GradientMap: { stops: GradientStop[] } }
   /** Turned inside out, on the values a device shows. */
   | { Invert: { amount: number } }
+  /** Each channel held to `levels` steps (read whole, 2..=255), evenly
+   * spaced as a device shows them. */
+  | { Posterize: { levels: number } }
+  /** White or black by the brightness a pixel shows at, against
+   * `level` (0..=1). */
+  | { Threshold: { level: number } }
   /** Hue, saturation and lightness asked of one band of colour at a
    * time — six triples in red, yellow, green, cyan, blue, magenta
    * order, each a hue shift, a saturation change and a lightness
