@@ -538,6 +538,15 @@ impl WasmSession {
     /// Combine shape layers into one compound path. `op` is one of
     /// "union", "intersect", "subtract" or "exclude". Returns the new
     /// layer's id.
+    /// A copy of a shape with its outline moved `by` outward (inward
+    /// below zero), put just above it; the new layer's id.
+    pub fn offset_path(&mut self, id: f64, by: f32) -> Result<f64, JsError> {
+        self.inner
+            .offset_path(NodeId(id as u64), by)
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).

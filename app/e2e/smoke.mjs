@@ -6918,6 +6918,63 @@ assert(
   );
 }
 
+// 9o5. Offset path: a copy of a shape with its outline moved out by a
+// distance, just above it, the shape left as it was — and moved in by a
+// negative one.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#22aa66");
+  await pickTool("Rect");
+  await page.mouse.move(...at(120, 80));
+  await page.mouse.down();
+  await page.mouse.move(...at(280, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(112, 140))[3] === 0, "nothing beside the rectangle yet");
+
+  promptAnswer = "12";
+  await menuClick("Layer", "Offset path…");
+  await page.waitForTimeout(300);
+  const out = await canvasPixel(112, 140);
+  assert(out[1] > 140 && out[3] === 255, `moved out by twelve, the copy reaches beside it (${out})`);
+  assert(
+    (await canvasPixel(110, 70))[3] === 0,
+    "and its corner is round, as a distance from a corner is",
+  );
+  const names = await page.locator(".panel ul li").allTextContents();
+  assert(
+    names.length === 2 && names[0].includes("offset"),
+    `the copy is a layer of its own, above the shape (${names})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(112, 140))[3] === 0 &&
+      (await page.locator(".panel ul li").count()) === 1,
+    "one undo takes the copy away",
+  );
+
+  // Moved in, the copy sits inside the shape: hidden under it, it is
+  // seen by hiding the shape.
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  promptAnswer = "-20";
+  await menuClick("Layer", "Offset path…");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li").nth(1).locator("button[title^='Hide layer']").click();
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(130, 140))[3] === 0 && (await canvasPixel(150, 140))[3] === 255,
+    "moved in by twenty, the copy starts twenty inside the shape's edge",
+  );
+  promptAnswer = "";
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

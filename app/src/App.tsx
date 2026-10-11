@@ -4934,6 +4934,29 @@ export function App() {
     }
   };
 
+  /** A copy of the picked shape with its outline moved out (or in, for
+   * a negative distance), put just above it — a sticker's border, a
+   * keyline round a logo. Asked for in page pixels; the copy is picked
+   * after it. */
+  const offsetPath = () => {
+    if (!session || selected === null) return;
+    const answer = window.prompt(
+      "Move the outline out by how many pixels? (A negative number moves it in.)",
+      "8",
+    );
+    if (answer === null) return;
+    const by = Number(answer);
+    if (!Number.isFinite(by) || by === 0) return;
+    try {
+      const id = session.offset_path(selected, by);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Offset path: ${err}`);
+    }
+  };
+
   const BOOLEAN_BUTTONS: [string, IconName, string][] = [
     ["union", "union", "Unite shapes"],
     ["subtract", "subtract", "Subtract the shapes above"],
@@ -7002,6 +7025,7 @@ export function App() {
           ),
         ),
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
+        item("offset-path", "shapes", "Offset path…", offsetPath),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

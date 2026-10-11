@@ -1095,6 +1095,19 @@ without reading anything else.*
   written and thrown away — `Session::grow_selection` already existed,
   exact and traced; the toolbar's Grow box is its door. Look for the
   engine function before the menu row.
+- **Offset path.** Layer › Offset path… puts a copy of the picked
+  shape just above it with its outline moved out by a distance, or in
+  by a negative one — a sticker's border, a keyline round a logo
+  (Illustrator's Offset Path). The shape is left as it was and the copy
+  wears its look. A distance, not a scaling: a corner moved out grows
+  round, one moved in stays sharp (`Session::offset_path`,
+  `chitrakar_render::offset_outline`). A rect's is exact, an ellipse's
+  moves both radii as its stroke does, and a path's is the shape plus
+  or minus a band of that half-width along its outline — holes and the
+  edge an open path is filled across included — laid on the same grid
+  that outlines a stroke (`SampleGrid`, shared with `stroke_outline`),
+  judged against distance to the outline on 40 random paths
+  (`an_offset_outline_is_the_shape_moved_by_a_distance`, smoke 9o5).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

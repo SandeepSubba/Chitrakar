@@ -4942,44 +4942,7 @@ pub fn stroke_outline(
             StrokeAlign::Centre => (-stroke.width / 2.0, stroke.width / 2.0),
             StrokeAlign::Outside => (0.0, stroke.width),
         };
-        let rim = |t: f32| -> Option<Vec<[f32; 2]>> {
-            match *shape {
-                VectorShape::Rect {
-                    width,
-                    height,
-                    radius,
-                } => {
-                    // The rect's distance field at `t`: grown, the corners
-                    // round by as much again; shrunk, they sharpen and stay
-                    // sharp once the radius is used up.
-                    let (w, h) = (width + 2.0 * t, height + 2.0 * t);
-                    if w <= 0.0 || h <= 0.0 {
-                        return None;
-                    }
-                    let r = (corner_radius(width, height, radius) + t)
-                        .max(0.0)
-                        .min(w / 2.0)
-                        .min(h / 2.0);
-                    Some(rounded_rect_ring(-t, -t, w, h, r))
-                }
-                VectorShape::Ellipse { rx, ry } => {
-                    let (a, b) = (rx + t, ry + t);
-                    if a <= 0.0 || b <= 0.0 {
-                        return None;
-                    }
-                    let n = arc_steps(a.max(b), std::f32::consts::TAU);
-                    Some(
-                        (0..n)
-                            .map(|i| {
-                                let th = i as f32 / n as f32 * std::f32::consts::TAU;
-                                [rx + a * th.cos(), ry + b * th.sin()]
-                            })
-                            .collect(),
-                    )
-                }
-                VectorShape::Path { .. } => None,
-            }
-        };
+        let rim = |t: f32| rim_ring(shape, t);
         let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
         rings.extend(rim(hi));
         rings.extend(rim(lo));
@@ -4993,82 +4956,282 @@ pub fn stroke_outline(
     // fail to close. So the pieces are laid on a grid up to eight to the
     // pixel, the grid traced, and the staircase it traces straightened
     // back into runs, to within a cell — an eighth of a pixel.
-    let [x0, y0, x1, y1] = pieces_bounds(&pieces)?;
-    let (w, h) = (x1 - x0, y1 - y0);
-    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+    let mut grid = SampleGrid::over(pieces_bounds(&pieces)?)?;
+    let mut inside = grid.blank();
+    for piece in &pieces {
+        grid.lay(piece, &mut inside);
+    }
+    grid.inside = inside;
+    grid.rings()
+}
+
+/// The outline of a shape moved `by` outward — or inward, where `by` is
+/// below zero — as rings read even-odd in the shape's own space:
+/// Illustrator's Offset Path. Every point within `by` of the shape, or
+/// every point of the shape at least that far inside it, so a corner
+/// grows round and an inset corner stays sharp, which is what a
+/// distance does. `None` when nothing is left, or there was no outline.
+///
+/// A rect's is exact — a rect grown is a rect with its corners rounded
+/// by as much again — and an ellipse's is the ellipse with both radii
+/// moved, which is how its stroke is drawn too. A path's is the shape
+/// and a band `by` either side of its outline, sampled and traced the
+/// way [`stroke_outline`] traces a stroke, within a quarter of a pixel.
+pub fn offset_outline(shape: &VectorShape, by: f32) -> Option<Vec<Vec<[f32; 2]>>> {
+    if !by.is_finite() || by == 0.0 {
         return None;
     }
-    // Eight samples a pixel where that fits in four million of them, and
-    // fewer on a stroke so long it would not.
-    let k = (4.0e6 / (w * h)).sqrt().min(8.0);
-    let (gw, gh) = ((w * k).ceil() as u32 + 2, (h * k).ceil() as u32 + 2);
-    let mut inside = vec![false; (gw * gh) as usize];
-    // Each piece laid over its own box only.
+    if !matches!(shape, VectorShape::Path { .. }) {
+        return rim_ring(shape, by).map(|r| vec![r]);
+    }
+    let d = by.abs();
+    // Within `d` of the outline is under a line `2d` wide along it, round
+    // where it turns and round where it ends.
+    let band = chitrakar_doc::Stroke {
+        color: chitrakar_color::AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+        width: 2.0 * d,
+        widths: Vec::new(),
+        cap: chitrakar_doc::StrokeCap::Round,
+        join: chitrakar_doc::StrokeJoin::Round,
+        dash: Vec::new(),
+        dash_offset: 0.0,
+        align: Some(StrokeAlign::Centre),
+        start_marker: chitrakar_doc::Marker::None,
+        end_marker: chitrakar_doc::Marker::None,
+    };
+    // An open path is filled as though a straight edge closed it, and
+    // that edge is as much the region's outline as the drawn ones.
+    // Flattened first: a smooth path's curve near its ends depends on
+    // whether it is closed, and the curve wanted is the one drawn.
+    let closed = match flatten_shape(shape).into_owned() {
+        VectorShape::Path {
+            points, subpaths, ..
+        } => VectorShape::Path {
+            points,
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths,
+        },
+        other => other,
+    };
+    let pieces = stroke_pieces(&closed, &band);
+    let rings = shape_rings(shape);
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in rings.iter().flatten() {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let reach = if by > 0.0 { d } else { 0.0 };
+    let mut grid = SampleGrid::over([x0 - reach, y0 - reach, x1 + reach, y1 + reach])?;
+    let filled = grid.filled(&rings);
+    let mut near = grid.blank();
     for piece in &pieces {
+        grid.lay(piece, &mut near);
+    }
+    grid.inside = filled
+        .iter()
+        .zip(&near)
+        .map(|(&f, &n)| if by > 0.0 { f || n } else { f && !n })
+        .collect();
+    grid.rings()
+}
+
+/// The rim a rect's or an ellipse's outline makes moved `t` outward (or
+/// inward, below zero): the level set of its distance that its stroke is
+/// drawn between. `None` for a path, or when nothing is left.
+fn rim_ring(shape: &VectorShape, t: f32) -> Option<Vec<[f32; 2]>> {
+    match *shape {
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        } => {
+            // The rect's distance field at `t`: grown, the corners
+            // round by as much again; shrunk, they sharpen and stay
+            // sharp once the radius is used up.
+            let (w, h) = (width + 2.0 * t, height + 2.0 * t);
+            if w <= 0.0 || h <= 0.0 {
+                return None;
+            }
+            let r = (corner_radius(width, height, radius) + t)
+                .max(0.0)
+                .min(w / 2.0)
+                .min(h / 2.0);
+            Some(rounded_rect_ring(-t, -t, w, h, r))
+        }
+        VectorShape::Ellipse { rx, ry } => {
+            let (a, b) = (rx + t, ry + t);
+            if a <= 0.0 || b <= 0.0 {
+                return None;
+            }
+            let n = arc_steps(a.max(b), std::f32::consts::TAU);
+            Some(
+                (0..n)
+                    .map(|i| {
+                        let th = i as f32 / n as f32 * std::f32::consts::TAU;
+                        [rx + a * th.cos(), ry + b * th.sin()]
+                    })
+                    .collect(),
+            )
+        }
+        VectorShape::Path { .. } => None,
+    }
+}
+
+/// A grid of samples over a box, up to eight to the pixel, that a region
+/// is laid on and traced back off — how a union of pieces, or a shape
+/// and a band round it, becomes an outline without intersecting
+/// outlines that may run along each other.
+struct SampleGrid {
+    x0: f32,
+    y0: f32,
+    k: f32,
+    gw: u32,
+    gh: u32,
+    inside: Vec<bool>,
+}
+
+impl SampleGrid {
+    /// Eight samples a pixel where that fits in four million of them,
+    /// and fewer over a box so big it would not; a cell of margin all
+    /// round, so every ring traced off it closes.
+    fn over([x0, y0, x1, y1]: [f32; 4]) -> Option<SampleGrid> {
+        let (w, h) = (x1 - x0, y1 - y0);
+        if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+            return None;
+        }
+        let k = (4.0e6 / (w * h)).sqrt().min(8.0);
+        let (gw, gh) = ((w * k).ceil() as u32 + 2, (h * k).ceil() as u32 + 2);
+        Some(SampleGrid {
+            x0,
+            y0,
+            k,
+            gw,
+            gh,
+            inside: vec![false; (gw * gh) as usize],
+        })
+    }
+
+    fn blank(&self) -> Vec<bool> {
+        vec![false; (self.gw * self.gh) as usize]
+    }
+
+    /// Where cell (`cx`, `cy`) is sampled. Cell `c` spans from c - 1 to c
+    /// in grid units, the margin being cell 0.
+    fn at(&self, cx: u32, cy: u32) -> (f32, f32) {
+        (
+            self.x0 + (cx as f32 - 0.5) / self.k,
+            self.y0 + (cy as f32 - 0.5) / self.k,
+        )
+    }
+
+    /// One stroke piece laid into `into`, over its own box only.
+    fn lay(&self, piece: &StrokePiece, into: &mut [bool]) {
         let [bx0, by0, bx1, by1] = piece.bounds();
-        let cx0 = (((bx0 - x0) * k).floor() as i64).max(0) as u32;
-        let cy0 = (((by0 - y0) * k).floor() as i64).max(0) as u32;
-        let cx1 = (((bx1 - x0) * k).ceil() as u32 + 1).min(gw - 1);
-        let cy1 = (((by1 - y0) * k).ceil() as u32 + 1).min(gh - 1);
+        let k = self.k;
+        let cx0 = (((bx0 - self.x0) * k).floor() as i64).max(0) as u32;
+        let cy0 = (((by0 - self.y0) * k).floor() as i64).max(0) as u32;
+        let cx1 = (((bx1 - self.x0) * k).ceil().max(0.0) as u32 + 1).min(self.gw - 1);
+        let cy1 = (((by1 - self.y0) * k).ceil().max(0.0) as u32 + 1).min(self.gh - 1);
         for cy in cy0..=cy1 {
             for cx in cx0..=cx1 {
-                let at = (cy * gw + cx) as usize;
-                if inside[at] {
-                    continue;
-                }
-                // Cell `c` spans from c - 1 to c in grid units, the one
-                // empty cell round the edge keeping every ring closed.
-                let (sx, sy) = (x0 + (cx as f32 - 0.5) / k, y0 + (cy as f32 - 0.5) / k);
-                if piece.covers(sx, sy) {
-                    inside[at] = true;
+                let i = (cy * self.gw + cx) as usize;
+                if !into[i] {
+                    let (sx, sy) = self.at(cx, cy);
+                    into[i] = piece.covers(sx, sy);
                 }
             }
         }
     }
-    let rings: Vec<Vec<[f32; 2]>> = trace_pixels(&inside, gw, gh)
-        .into_iter()
-        .map(|ring| {
-            // The staircase's corners stand either side of the edge it
-            // was traced from, never more than a cell off it; the
-            // straightening keeps the ones a run cannot do without.
-            let mut placed: Vec<[f32; 2]> = ring
-                .iter()
-                .map(|p| [x0 + (p[0] - 1.0) / k, y0 + (p[1] - 1.0) / k])
-                .collect();
-            // A slope traced on a grid is a staircase whose corners stand
-            // a cell either side of it, which no straightening within a
-            // cell can take out: every step is a cell off the run. Each
-            // corner is drawn halfway to the middle of its two
-            // neighbours, twice, which puts a staircase's corners on its
-            // slope — but no corner is moved further than half a cell,
-            // since the tracing runs straight stretches together and a
-            // sharp tip's neighbours can be far down its sides.
-            let traced = placed.clone();
-            for _ in 0..2 {
-                let n = placed.len();
-                placed = (0..n)
-                    .map(|i| {
-                        let (a, p, b) = (placed[(i + n - 1) % n], placed[i], placed[(i + 1) % n]);
-                        [
-                            (a[0] + 2.0 * p[0] + b[0]) / 4.0,
-                            (a[1] + 2.0 * p[1] + b[1]) / 4.0,
-                        ]
-                    })
-                    .collect();
-            }
-            let most = 0.5 / k;
-            for (p, t) in placed.iter_mut().zip(&traced) {
-                let (dx, dy) = (p[0] - t[0], p[1] - t[1]);
-                let d = dx.hypot(dy);
-                if d > most {
-                    *p = [t[0] + dx * most / d, t[1] + dy * most / d];
+
+    /// What rings read even-odd cover, a row at a time: where the row
+    /// crosses the edges, and the spans between every other crossing.
+    fn filled(&self, rings: &[Vec<[f32; 2]>]) -> Vec<bool> {
+        let mut out = self.blank();
+        let mut xs: Vec<f32> = Vec::new();
+        for cy in 0..self.gh {
+            let (_, y) = self.at(0, cy);
+            xs.clear();
+            for ring in rings {
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    if (a[1] > y) != (b[1] > y) {
+                        xs.push(a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]));
+                    }
                 }
             }
-            straightened(&placed, 0.4 / k)
-        })
-        .filter(|ring| ring.len() >= 3)
-        .collect();
-    (!rings.is_empty()).then_some(rings)
+            xs.sort_by(f32::total_cmp);
+            for span in xs.chunks_exact(2) {
+                // The cells whose samples fall in [span[0], span[1]).
+                let first = ((span[0] - self.x0) * self.k + 0.5).ceil().max(0.0) as u32;
+                let last =
+                    (((span[1] - self.x0) * self.k + 0.5).ceil().max(0.0) as u32).min(self.gw);
+                for cx in first.min(self.gw)..last {
+                    out[(cy * self.gw + cx) as usize] = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// The region traced, its staircase relaxed and straightened back
+    /// into runs, to within a cell — an eighth of a pixel.
+    fn rings(self) -> Option<Vec<Vec<[f32; 2]>>> {
+        let SampleGrid {
+            x0, y0, k, gw, gh, ..
+        } = self;
+        let rings: Vec<Vec<[f32; 2]>> = trace_pixels(&self.inside, gw, gh)
+            .into_iter()
+            .map(|ring| {
+                let mut placed: Vec<[f32; 2]> = ring
+                    .iter()
+                    .map(|p| [x0 + (p[0] - 1.0) / k, y0 + (p[1] - 1.0) / k])
+                    .collect();
+                // A slope traced on a grid is a staircase whose corners
+                // stand a cell either side of it, which no straightening
+                // within a cell can take out: every step is a cell off
+                // the run. Each corner is drawn halfway to the middle of
+                // its two neighbours, twice, which puts a staircase's
+                // corners on its slope — but no corner is moved further
+                // than half a cell, since the tracing runs straight
+                // stretches together and a sharp tip's neighbours can be
+                // far down its sides.
+                let traced = placed.clone();
+                for _ in 0..2 {
+                    let n = placed.len();
+                    placed = (0..n)
+                        .map(|i| {
+                            let (a, p, b) =
+                                (placed[(i + n - 1) % n], placed[i], placed[(i + 1) % n]);
+                            [
+                                (a[0] + 2.0 * p[0] + b[0]) / 4.0,
+                                (a[1] + 2.0 * p[1] + b[1]) / 4.0,
+                            ]
+                        })
+                        .collect();
+                }
+                let most = 0.5 / k;
+                for (p, t) in placed.iter_mut().zip(&traced) {
+                    let (dx, dy) = (p[0] - t[0], p[1] - t[1]);
+                    let d = dx.hypot(dy);
+                    if d > most {
+                        *p = [t[0] + dx * most / d, t[1] + dy * most / d];
+                    }
+                }
+                straightened(&placed, 0.4 / k)
+            })
+            .filter(|ring| ring.len() >= 3)
+            .collect();
+        (!rings.is_empty()).then_some(rings)
+    }
 }
 
 /// A closed ring with the points that lie within `tolerance` of the
@@ -14987,6 +15150,113 @@ mod tests {
                         odd,
                         "case {case} at ({x}, {y}): {shape:?}"
                     );
+                }
+            }
+        }
+    }
+
+    /// A shape's outline moved out holds every point within that
+    /// distance of the shape; moved in, every point of the shape at
+    /// least that far inside it — judged by distance to the outline
+    /// itself, on rects, ellipses and random paths, open and closed,
+    /// straight and smooth.
+    #[test]
+    fn an_offset_outline_is_the_shape_moved_by_a_distance() {
+        let inside = |rings: &[Vec<[f32; 2]>], x: f32, y: f32| {
+            let mut odd = false;
+            for r in rings {
+                for k in 0..r.len() {
+                    let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                    if (a[1] > y) != (b[1] > y)
+                        && x < a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+                    {
+                        odd = !odd;
+                    }
+                }
+            }
+            odd
+        };
+        // A rect grown is a rect with its corners rounded by as much
+        // again; shrunk, a smaller rect with sharp corners.
+        let rect = VectorShape::Rect {
+            width: 60.0,
+            height: 40.0,
+            radius: 0.0,
+        };
+        let out = offset_outline(&rect, 5.0).unwrap();
+        assert!(inside(&out, -4.0, 20.0) && !inside(&out, -6.0, 20.0));
+        assert!(!inside(&out, -4.5, -4.5), "a grown corner is round");
+        let inn = offset_outline(&rect, -5.0).unwrap();
+        assert!(
+            inside(&inn, 5.5, 5.5) && !inside(&inn, 4.5, 20.0),
+            "and a shrunk one sharp"
+        );
+        assert!(
+            offset_outline(&rect, -25.0).is_none(),
+            "nothing is left of it"
+        );
+        assert!(offset_outline(&rect, 0.0).is_none());
+        assert!(offset_outline(&rect, f32::NAN).is_none());
+
+        // A hole is outline too: grown, the shape closes in on it.
+        let holed = VectorShape::Path {
+            points: vec![[0.0, 0.0], [60.0, 0.0], [60.0, 60.0], [0.0, 60.0]],
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: vec![vec![[20.0, 20.0], [40.0, 20.0], [40.0, 40.0], [20.0, 40.0]]],
+        };
+        let grown = offset_outline(&holed, 5.0).unwrap();
+        assert!(inside(&grown, 23.0, 30.0) && !inside(&grown, 30.0, 30.0));
+        let shrunk = offset_outline(&holed, -5.0).unwrap();
+        assert!(!inside(&shrunk, 17.0, 30.0) && inside(&shrunk, 13.0, 30.0));
+
+        let mut seed = 777u64;
+        let mut rnd = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32) / (1u64 << 31) as f32
+        };
+        for case in 0..40 {
+            let n = 3 + (rnd() * 5.0) as usize;
+            let shape = VectorShape::Path {
+                points: (0..n).map(|_| [rnd() * 100.0, rnd() * 100.0]).collect(),
+                closed: rnd() < 0.7,
+                smooth: rnd() < 0.4,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            };
+            let by = (rnd() - 0.5) * 16.0;
+            if by.abs() < 0.5 {
+                continue;
+            }
+            let outline = shape_rings(&shape);
+            let to_edge = |x: f32, y: f32| {
+                outline
+                    .iter()
+                    .flat_map(|r| (0..r.len()).map(move |k| (r[k], r[(k + 1) % r.len()])))
+                    .map(|(a, b)| segment_distance(x, y, a, b))
+                    .fold(f32::MAX, f32::min)
+            };
+            let got = offset_outline(&shape, by);
+            for j in 0..28 {
+                for i in 0..28 {
+                    let (x, y) = (-15.0 + i as f32 * 4.7 + 0.31, -15.0 + j as f32 * 4.7 + 0.53);
+                    let d = to_edge(x, y);
+                    if (d - by.abs()).abs() < 0.3 {
+                        continue;
+                    }
+                    // As the renderer asks it: of the shape with its curves
+                    // already flattened.
+                    let filled = shape_covers(&flatten_shape(&shape), x, y);
+                    let want = if by > 0.0 {
+                        filled || d < by
+                    } else {
+                        filled && d > -by
+                    };
+                    let has = got.as_ref().is_some_and(|r| inside(r, x, y));
+                    assert_eq!(has, want, "case {case}, by {by}, at ({x}, {y}): {shape:?}");
                 }
             }
         }

@@ -1087,6 +1087,76 @@ impl Session {
     /// ones above cut out of it. The result keeps the bottom-most layer's
     /// fill and stroke, because that is the shape the eye reads as the one
     /// being operated on.
+    /// A copy of a shape with its outline moved `by` outward — inward
+    /// where `by` is below zero — put just above it: Illustrator's
+    /// Offset Path, the way a sticker's border or a keyline round a
+    /// logo is made. The original is left as it was, and the copy
+    /// looks like it (fill, line, effects, fade) on its new outline.
+    ///
+    /// A distance rather than a scaling: every side moves by the same
+    /// amount, a corner grows round and a corner moved in stays sharp
+    /// (`chitrakar_render::offset_outline`). One step in the history;
+    /// the answer is the new layer.
+    pub fn offset_path(&mut self, id: NodeId, by: f32) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(id)?.clone();
+        let NodeKind::Vector { shape, .. } = &node.kind else {
+            return Err(EngineError::BadCommand(
+                "only a shape has an outline to move".into(),
+            ));
+        };
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root has no outline".into()))?;
+        let rings = chitrakar_render::offset_outline(shape, by).ok_or_else(|| {
+            EngineError::BadCommand(if by < 0.0 {
+                "moved in that far, nothing of the shape is left".into()
+            } else {
+                "there is no distance to move the outline by".into()
+            })
+        })?;
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+        }
+        let shift = |ring: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+            ring.iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+        };
+        let mut moved = node.clone();
+        moved.name = format!("{} offset", node.name);
+        if let NodeKind::Vector { shape, .. } = &mut moved.kind {
+            *shape = chitrakar_doc::VectorShape::Path {
+                points: shift(&rings[0]),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rings[1..].iter().map(shift).collect(),
+            };
+        }
+        moved.transform = node.transform.compose(Transform::translation(x0, y0));
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .map_or(0, |i| i + 1);
+        let new_id = self.doc.peek_next_id();
+        self.apply_labeled(
+            Command::AddNode {
+                parent,
+                index,
+                node: Box::new(moved),
+            },
+            Some(format!(
+                "Move the outline {} by {} px",
+                if by > 0.0 { "out" } else { "in" },
+                by.abs()
+            )),
+        )?;
+        Ok(new_id)
+    }
+
     /// Turn a shape's stroke into a shape of its own: the region the
     /// line covers, filled in the line's colour — Illustrator's Outline
     /// Stroke, Figma's Outline stroke. After it, the line can be given a
@@ -10904,6 +10974,104 @@ mod tests {
         let ground_id = session.document().children_of(root).unwrap()[0];
         assert!(session.outline_stroke(ground_id).is_err());
         assert!(session.outline_stroke(root).is_err());
+    }
+
+    #[test]
+    fn an_offset_path_is_a_copy_with_its_outline_moved() {
+        let mut session = Session::new(100, 80, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let mut card = chitrakar_doc::Node::vector(
+            "card",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 30.0,
+                radius: 0.0,
+            },
+        );
+        card.transform = Transform::translation(30.0, 25.0);
+        if let NodeKind::Vector { fill, .. } = &mut card.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.8,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            });
+        }
+        let id = session.document().peek_next_id();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(card.clone()),
+            })
+            .unwrap();
+        // The extent of a layer's outline in the page: its anchors carried
+        // by its place.
+        let extent = |s: &Session, n: NodeId| {
+            let node = s.document().node(n).unwrap();
+            let NodeKind::Vector { shape, .. } = &node.kind else {
+                panic!("not a shape")
+            };
+            let t = node.transform;
+            let pts = chitrakar_render::shape_rings(shape);
+            let xs: Vec<f32> = pts
+                .iter()
+                .flatten()
+                .map(|p| t.a * p[0] + t.c * p[1] + t.e)
+                .collect();
+            let ys: Vec<f32> = pts
+                .iter()
+                .flatten()
+                .map(|p| t.b * p[0] + t.d * p[1] + t.f)
+                .collect();
+            [
+                xs.iter().copied().fold(f32::MAX, f32::min),
+                ys.iter().copied().fold(f32::MAX, f32::min),
+                xs.iter().copied().fold(f32::MIN, f32::max),
+                ys.iter().copied().fold(f32::MIN, f32::max),
+            ]
+        };
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(&b).all(|(p, q)| (p - q).abs() < 0.3);
+
+        let out = session.offset_path(id, 6.0).unwrap();
+        assert!(
+            near(extent(&session, out), [24.0, 19.0, 76.0, 61.0]),
+            "{:?}",
+            extent(&session, out)
+        );
+        assert_eq!(session.document().node(out).unwrap().name, "card offset");
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(kids, vec![id, out], "the copy goes just above the shape");
+        assert_eq!(
+            format!("{:?}", session.document().node(id).unwrap().kind),
+            format!("{:?}", card.kind),
+            "and the shape is left as it was"
+        );
+        // It looks like the shape: the same fill, on the page where the
+        // shape did not reach.
+        let page = chitrakar_render::render(session.document()).unwrap();
+        let px = page.get(27, 40);
+        assert!(px.a > 0.99 && px.r > px.g * 3.0, "{px:?}");
+
+        let inn = session.offset_path(id, -6.0).unwrap();
+        assert!(
+            near(extent(&session, inn), [36.0, 31.0, 64.0, 49.0]),
+            "{:?}",
+            extent(&session, inn)
+        );
+        assert!(
+            session.offset_path(id, -20.0).is_err(),
+            "nothing would be left"
+        );
+        assert!(session.offset_path(root, 5.0).is_err());
+
+        let history = session.history_labels().0.len();
+        session.undo().unwrap();
+        assert_eq!(session.history_labels().0.len(), history - 1);
+        assert!(
+            session.document().node(inn).is_err(),
+            "one undo takes the copy away"
+        );
     }
 
     #[test]
