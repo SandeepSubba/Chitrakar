@@ -1168,13 +1168,23 @@ assert((await page.locator(".panel ul li", { hasText: "green.png" }).count()) ==
     Buffer.from(webpB64, "base64").subarray(8, 12).toString() === "WEBP",
     "the browser made a WebP to place",
   );
+  lastDialog = "";
   await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
     name: "blue.webp",
     mimeType: "image/webp",
     buffer: Buffer.from(webpB64, "base64"),
   });
-  await page.waitForTimeout(400);
-  assert(await page.isVisible("text=blue.webp"), "a WebP is placed as a picture layer");
+  // The browser decodes it before the engine sees it, which is a round
+  // trip of its own — slower on a loaded machine than a fixed wait
+  // allows — so this waits for the layer rather than for a time.
+  const landed = await page
+    .waitForSelector("text=blue.webp", { timeout: 10000 })
+    .then(() => true, () => false);
+  assert(
+    landed,
+    `a WebP is placed as a picture layer${lastDialog ? ` (the app said: ${lastDialog})` : ""}`,
+  );
+  await page.waitForTimeout(200);
   // Wherever it landed and however far the view is zoomed, the blue on
   // the canvas is the picture's left half: half as wide as it is tall,
   // which says both that it is drawn and that the clear half is clear.
