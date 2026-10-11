@@ -1,0 +1,252 @@
+/** The tools, and how the rail is laid out from them.
+ *
+ * These lived at the top of App.tsx as five tables that had to agree
+ * with each other by hand. They are one module now because three things
+ * read them: the rail, the keyboard handler, and the preferences window
+ * — which lets a person put away the tools they never reach for, and
+ * has to know what there is to put away. A tool the rail does not show
+ * is not gone: its key still works, and it sits in a slot at the end of
+ * the rail with the others that were put away, the way Photoshop keeps
+ * hidden tools behind its own "…". Nothing is lost; the rail is just
+ * shorter.
+ */
+
+import type { IconName } from "./icons";
+
+export const TOOLS = [
+  "Move",
+  "Select",
+  "Select ellipse",
+  "Lasso",
+  "Wand",
+  "Frame",
+  "Rect",
+  "Ellipse",
+  "Line",
+  "Polygon",
+  "Star",
+  "Shape",
+  "Pen",
+  "Node",
+  "Brush",
+  "Paint",
+  "Eraser",
+  "Clone",
+  "Heal",
+  "Gradient",
+  "Fill",
+  "Text",
+  "Crop",
+  "Eyedropper",
+  "Hand",
+  "Zoom",
+] as const;
+
+export type Tool = (typeof TOOLS)[number];
+
+/** The tools that draw a shape, which share one slot in the rail: the
+ * one last used sits in it and the rest are a press away, the way a
+ * rail with more tools than room has always done it. */
+export const SHAPE_TOOLS = ["Rect", "Ellipse", "Line", "Polygon", "Star", "Shape"] as const;
+/** The tools that pick a region out of the page rather than draw
+ * anything, sharing one slot the way the shapes do. What they make is a
+ * selection: not a layer, not artwork — a region to hand to a layer as
+ * the part of it that shows. */
+export const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as const;
+
+/** The rail, top to bottom, as sections with a line between them. The
+ * order is the one every editor shares, near enough: what picks and
+ * moves, then what makes things, then what paints on them, then what
+ * changes the picture, then what only looks at it. `Select` stands for
+ * the region tools' shared slot and `Rect` for the shapes', which is
+ * where the slot sits rather than which tool is in it. */
+export const RAIL: readonly (readonly Tool[])[] = [
+  ["Move", "Select"],
+  ["Frame", "Rect", "Pen", "Node", "Text"],
+  ["Brush", "Paint", "Eraser", "Clone", "Heal", "Gradient", "Fill"],
+  ["Crop", "Eyedropper"],
+  ["Hand", "Zoom"],
+];
+
+/** Tools that share a key: with shift, the key walks the family from
+ * whichever of them is in hand — shift+M the region tools, shift+G the
+ * gradient and the bucket — Photoshop's convention, which keeps the
+ * plain key meaning one tool, always. */
+export const KEY_FAMILIES: readonly (readonly Tool[])[] = [
+  SELECT_TOOLS,
+  ["Paint", "Eraser"],
+  ["Clone", "Heal"],
+  ["Gradient", "Fill"],
+];
+
+/** The one tool that cannot be put away: with nothing to move things by,
+ * there is no editor. */
+export const ALWAYS_SHOWN: Tool = "Move";
+
+/** One letter per tool, the convention every editor shares. `v` for Move
+ * because that is where the muscle memory is. These are the *defaults*:
+ * a person's own rebindings sit over them in `prefs.toolKeys`, and
+ * `boundKeys` is what everything reads at run time. */
+export const TOOL_KEYS: Record<string, Tool> = {
+  v: "Move",
+  // `m` for the marquee, which is where that muscle memory is; Move
+  // keeps `v`, which is where its own is.
+  m: "Select",
+  f: "Frame",
+  r: "Rect",
+  e: "Ellipse",
+  l: "Line",
+  y: "Polygon",
+  k: "Star",
+  u: "Shape",
+  p: "Pen",
+  a: "Node",
+  b: "Brush",
+  n: "Paint",
+  s: "Clone",
+  g: "Gradient",
+  t: "Text",
+  c: "Crop",
+  i: "Eyedropper",
+  h: "Hand",
+  z: "Zoom",
+};
+
+/** The tools that hold a key of their own. A family's key is held by
+ * its first member and the rest are a shift away, so only the first can
+ * be rebound — and rebinding it moves the whole family. */
+export const KEYED_TOOLS: ReadonlySet<Tool> = new Set(Object.values(TOOL_KEYS));
+
+/** A person's rebindings: the key each named tool answers to instead of
+ * its default. Only tools in `KEYED_TOOLS`, one character each. */
+export type ToolKeys = Partial<Record<Tool, string>>;
+
+/** The keys as they stand with the rebindings over the defaults: which
+ * tool each key picks, and what each tool's key is called (a family
+ * member's is its family's; a tool whose default key a rebinding took
+ * has none, and says so with an empty hint). A rebinding always wins
+ * the key it asks for. */
+export function boundKeys(rebound: ToolKeys): {
+  byKey: Record<string, Tool>;
+  hint: Record<Tool, string>;
+} {
+  const held = new Map<Tool, string>();
+  for (const [k, t] of Object.entries(TOOL_KEYS)) held.set(t, k);
+  for (const [t, k] of Object.entries(rebound)) {
+    if (isTool(t) && KEYED_TOOLS.has(t) && k) held.set(t, k.toLowerCase());
+  }
+  // Defaults first and rebindings after, so a rebinding takes its key
+  // from whoever held it.
+  const order = [...held.keys()].sort(
+    (a, b) => Number(a in rebound) - Number(b in rebound),
+  );
+  const byKey: Record<string, Tool> = {};
+  const hint: Partial<Record<Tool, string>> = {};
+  for (const t of order) {
+    const k = held.get(t)!;
+    const loser = byKey[k];
+    if (loser) hint[loser] = "";
+    byKey[k] = t;
+    hint[t] = k.toUpperCase();
+  }
+  for (const t of TOOLS) {
+    if (t in hint) continue;
+    const family = KEY_FAMILIES.find((f) => f.includes(t));
+    hint[t] = family ? (hint[family[0]] ?? "") : "";
+  }
+  return { byKey, hint: hint as Record<Tool, string> };
+}
+
+/** What each tool's key is called with nothing rebound. */
+export const TOOL_HINT: Record<Tool, string> = {
+  Move: "V",
+  Select: "M",
+  "Select ellipse": "M",
+  Lasso: "M",
+  Wand: "M",
+  Frame: "F",
+  Rect: "R",
+  Ellipse: "E",
+  Line: "L",
+  Polygon: "Y",
+  Star: "K",
+  Shape: "U",
+  Pen: "P",
+  Node: "A",
+  Brush: "B",
+  Paint: "N",
+  Eraser: "N",
+  Clone: "S",
+  Heal: "S",
+  Gradient: "G",
+  Fill: "G",
+  Text: "T",
+  Crop: "C",
+  Eyedropper: "I",
+  Hand: "H",
+  Zoom: "Z",
+};
+
+export const TOOL_ICONS: Record<Tool, IconName> = {
+  Move: "move",
+  Select: "marquee",
+  "Select ellipse": "marqueeEllipse",
+  Lasso: "lasso",
+  Wand: "wand",
+  Frame: "frame",
+  Rect: "rect",
+  Ellipse: "ellipse",
+  Line: "line",
+  Polygon: "polygon",
+  Star: "star",
+  Shape: "shapes",
+  Pen: "pen",
+  Node: "node",
+  Brush: "brush",
+  Paint: "paint",
+  Eraser: "eraser",
+  Clone: "clone",
+  Heal: "heal",
+  Gradient: "gradient",
+  Fill: "fill",
+  Text: "text",
+  Crop: "crop",
+  Eyedropper: "eyedropper",
+  Hand: "hand",
+  Zoom: "zoom",
+};
+
+/** A word on what each does, for the window that offers to put it away:
+ * a name on its own is enough for a tool in hand, and not for one being
+ * decided about. */
+export const TOOL_ABOUT: Record<Tool, string> = {
+  Move: "pick, move, resize and turn layers",
+  Select: "pick a rectangle out of the page",
+  "Select ellipse": "pick an ellipse out of the page",
+  Lasso: "pick a drawn outline out of the page",
+  Wand: "pick out what is one colour",
+  Frame: "an artboard: a page within the page",
+  Rect: "a rectangle, square-cornered or round",
+  Ellipse: "an ellipse or a circle",
+  Line: "a straight line",
+  Polygon: "a regular polygon",
+  Star: "a star",
+  Shape: "one of the library's shapes — an arrow, a callout, a heart — as a path",
+  Pen: "a path, straight or smooth, one point at a time",
+  Node: "take hold of a shape's anchors; press its outline to add one, alt-press one to take it off",
+  Brush: "a freehand stroke that lands as a path",
+  Paint: "a brush that lays pixels",
+  Eraser: "rub paint out; on any other layer, take a piece out of it",
+  Clone: "paint with what is already there, as it is",
+  Heal: "paint with what is already there, in the colour of where it lands",
+  Gradient: "drag a gradient across a shape; alt for a radial one",
+  Fill: "give the layer under a press the ink in hand; alt for its stroke",
+  Text: "a block of live text",
+  Crop: "cut the page down",
+  Eyedropper: "take the colour under the cursor",
+  Hand: "drag the view about",
+  Zoom: "click to look nearer, alt-click to step back",
+};
+
+export const isTool = (name: unknown): name is Tool =>
+  typeof name === "string" && (TOOLS as readonly string[]).includes(name);

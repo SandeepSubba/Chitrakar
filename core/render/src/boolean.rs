@@ -1,0 +1,670 @@
+//! Boolean operations on filled shapes.
+//!
+//! Both operands are reduced to rings of straight segments — curves are
+//! flattened first, so a boolean result is an approximation of curved input
+//! the way it is in every editor that offers one — and then combined by
+//! classifying edges rather than by walking a winding number:
+//!
+//! 1. every edge is split at each crossing with the other shape,
+//! 2. each fragment is asked whether its midpoint lies inside the other
+//!    shape, which is a plain even-odd test,
+//! 3. the operation says which answers to keep, and
+//! 4. the kept fragments are chained back into closed rings.
+//!
+//! It is the least clever of the standard methods and the easiest to be
+//! sure of, which is what matters when the result becomes a document the
+//! user then edits. Where it cannot be sure — a chain that will not close,
+//! usually because the two outlines share an edge exactly — it says so
+//! rather than returning something plausible.
+
+/// Which combination to take. Named as the buttons are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolOp {
+    /// Everything either shape covers.
+    Union,
+    /// Only what both cover.
+    Intersect,
+    /// The first shape with the second taken out of it.
+    Subtract,
+    /// Everything exactly one of them covers.
+    Exclude,
+}
+
+impl BoolOp {
+    pub fn from_name(name: &str) -> Option<BoolOp> {
+        match name {
+            "union" => Some(BoolOp::Union),
+            "intersect" => Some(BoolOp::Intersect),
+            "subtract" => Some(BoolOp::Subtract),
+            "exclude" => Some(BoolOp::Exclude),
+            _ => None,
+        }
+    }
+}
+
+type Point = [f32; 2];
+type Ring = Vec<Point>;
+
+/// How close two coordinates must be to count as the same point when
+/// fragments are chained back together. Coordinates are document pixels,
+/// so this is far below anything visible and far above the error of the
+/// intersection arithmetic.
+const WELD: f32 = 1e-3;
+
+/// Even-odd containment against a set of rings.
+fn covers(rings: &[Ring], p: Point) -> bool {
+    let mut inside = false;
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        for i in 0..ring.len() {
+            let a = ring[i];
+            let b = ring[(i + 1) % ring.len()];
+            if (a[1] > p[1]) != (b[1] > p[1]) {
+                let t = (p[1] - a[1]) / (b[1] - a[1]);
+                if p[0] < a[0] + t * (b[0] - a[0]) {
+                    inside = !inside;
+                }
+            }
+        }
+    }
+    inside
+}
+
+/// Where two segments cross, as the parameter along each. Parallel or
+/// touching-at-an-endpoint pairs report nothing: an endpoint crossing is
+/// already a vertex, and splitting there would only make a zero-length
+/// fragment.
+fn crossing(a0: Point, a1: Point, b0: Point, b1: Point) -> Option<(f32, f32)> {
+    let (rx, ry) = (a1[0] - a0[0], a1[1] - a0[1]);
+    let (sx, sy) = (b1[0] - b0[0], b1[1] - b0[1]);
+    let denom = rx * sy - ry * sx;
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let (qpx, qpy) = (b0[0] - a0[0], b0[1] - a0[1]);
+    let t = (qpx * sy - qpy * sx) / denom;
+    let u = (qpx * ry - qpy * rx) / denom;
+    const EPS: f32 = 1e-6;
+    if (EPS..=1.0 - EPS).contains(&t) && (EPS..=1.0 - EPS).contains(&u) {
+        Some((t, u))
+    } else {
+        None
+    }
+}
+
+/// One ring's edges, each split at every crossing with `other`.
+fn split_ring(ring: &Ring, other: &[Ring]) -> Vec<(Point, Point)> {
+    let mut out = Vec::new();
+    for i in 0..ring.len() {
+        let (a0, a1) = (ring[i], ring[(i + 1) % ring.len()]);
+        let mut cuts: Vec<f32> = Vec::new();
+        for o in other {
+            for j in 0..o.len() {
+                let (b0, b1) = (o[j], o[(j + 1) % o.len()]);
+                if let Some((t, _)) = crossing(a0, a1, b0, b1) {
+                    cuts.push(t);
+                }
+            }
+        }
+        cuts.push(0.0);
+        cuts.push(1.0);
+        cuts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        let at = |t: f32| [a0[0] + (a1[0] - a0[0]) * t, a0[1] + (a1[1] - a0[1]) * t];
+        for w in cuts.windows(2) {
+            if w[1] - w[0] < 1e-6 {
+                continue;
+            }
+            out.push((at(w[0]), at(w[1])));
+        }
+    }
+    out
+}
+
+/// Chain directed fragments into closed rings, following each fragment to
+/// whichever unused one starts where it ended. `None` when a chain runs out
+/// of continuations before closing, which means the fragment set was not a
+/// set of closed loops and no honest ring can be built from it.
+fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
+    // Ends meet when they are within a weld of each other — a distance,
+    // looked up through a grid of that size and the cells round it. Keyed
+    // by the cell alone, two ends a ten-thousandth apart either side of
+    // a cell's edge were strangers: the one crossing worked out from
+    // each of the two edges that make it landed at 0.5175 and at
+    // 0.51750004, which round to different cells, and an outline that
+    // crossed itself there could not be closed.
+    let key = |p: Point| ((p[0] / WELD).round() as i64, (p[1] / WELD).round() as i64);
+    let near = |a: Point, b: Point| (a[0] - b[0]).abs() <= WELD && (a[1] - b[1]).abs() <= WELD;
+    let mut starts: std::collections::HashMap<(i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, f) in fragments.iter().enumerate() {
+        starts.entry(key(f.0)).or_default().push(i);
+    }
+    let mut used = vec![false; fragments.len()];
+    let following = |end: Point, used: &[bool]| -> Option<usize> {
+        let (kx, ky) = key(end);
+        let mut best: Option<(f32, usize)> = None;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                for &i in starts.get(&(kx + dx, ky + dy)).into_iter().flatten() {
+                    let s = fragments[i].0;
+                    if used[i] || !near(s, end) {
+                        continue;
+                    }
+                    let d = (s[0] - end[0]).powi(2) + (s[1] - end[1]).powi(2);
+                    if best.is_none_or(|(b, _)| d < b) {
+                        best = Some((d, i));
+                    }
+                }
+            }
+        }
+        best.map(|(_, i)| i)
+    };
+    let mut rings = Vec::new();
+    for seed in 0..fragments.len() {
+        if used[seed] {
+            continue;
+        }
+        let mut ring: Ring = vec![fragments[seed].0];
+        let mut at = seed;
+        used[at] = true;
+        loop {
+            let end = fragments[at].1;
+            if near(end, ring[0]) {
+                break;
+            }
+            ring.push(end);
+            let next = following(end, &used)?;
+            used[next] = true;
+            at = next;
+            // A ring longer than the whole fragment set is a cycle that is
+            // eating its own tail; give up rather than spin.
+            if ring.len() > fragments.len() + 1 {
+                return None;
+            }
+        }
+        if ring.len() >= 3 {
+            rings.push(ring);
+        }
+    }
+    (!rings.is_empty()).then_some(rings)
+}
+
+/// Combine two sets of rings, asking again with the second nudged where
+/// the first answer is that they cannot be. `Some` of no rings is an
+/// answer with nothing in it — two that do not meet, or only touch,
+/// intersected; all of the first taken away — and `None` is only an
+/// answer that cannot be traced. Both used to be `None`, and every
+/// caller read it as the second.
+///
+/// [`combine`] declines outlines whose edges overlap exactly rather than
+/// guessing what was meant, which is the honest answer to an ambiguous
+/// question. It is also the answer to a question people ask constantly
+/// and do not think is ambiguous: two rectangles snapped edge to edge
+/// and united. Snapping is *for* landing edges exactly on each other, so
+/// the editor spends its time arranging the one case the arithmetic
+/// refuses.
+///
+/// So on that answer, and only that one, ask again with the second set
+/// moved a five-hundredth of a pixel. Shapes here are sampled on a grid
+/// four to the pixel, so that is a hundred-and-twenty-eighth of the
+/// distance between samples: it can move one sample in sixteen, on the
+/// pixels an edge actually crosses. What it cannot do is turn a union
+/// into an error message.
+///
+/// The nudge leaves a mark of its own where the answer runs along the
+/// edge the two shared: a ring a five-hundredth of a pixel thick, which
+/// is the nudge and not the shapes. Those are dropped, and an answer that
+/// was nothing *but* them is nothing — `Some` of no rings. A box snapped
+/// to a selection's edge and covering the whole of it, taken away, used
+/// to leave a selection of one such sliver: invisible, and every brush
+/// confined to it painted nowhere.
+pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
+    if let Some(rings) = combine(a, b, op) {
+        return Some(rings);
+    }
+    const NUDGE: f32 = 1.0 / 512.0;
+    let moved: Vec<Ring> = b
+        .iter()
+        .map(|ring| ring.iter().map(|p| [p[0] + NUDGE, p[1] + NUDGE]).collect())
+        .collect();
+    let Some(rings) = combine(a, &moved, op) else {
+        // Two that only touched, moved apart: an intersection of nothing,
+        // or all of the first taken away. Said as what it is.
+        return leaves_nothing(a, &moved, op).then(Vec::new);
+    };
+    // Thinner on average than two nudges: area against perimeter is half
+    // the thickness of a long thin ring.
+    let thick = |ring: &Ring| {
+        let n = ring.len();
+        let (mut twice, mut around) = (0.0f32, 0.0f32);
+        for i in 0..n {
+            let (p, q) = (ring[i], ring[(i + 1) % n]);
+            twice += p[0] * q[1] - q[0] * p[1];
+            around += ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+        }
+        twice.abs() / 2.0 >= NUDGE * around
+    };
+    Some(rings.into_iter().filter(thick).collect())
+}
+
+/// Combine two sets of rings. Returns the result as rings, or `None` when
+/// the outlines are degenerate enough that no closed result can be traced —
+/// shapes that only touch, or share an edge exactly.
+pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    if op == BoolOp::Exclude {
+        // Exclude is the one operation whose answer is not a selection of
+        // edges: it is everything either shape covers minus everything
+        // both do, which even-odd already means. So keep both outlines
+        // whole, and do none of the work below.
+        let mut rings: Vec<Ring> = a.to_vec();
+        rings.extend(b.iter().cloned());
+        return Some(rings);
+    }
+    let fragments = fragments(a, b, op);
+    if fragments.is_empty() {
+        return None;
+    }
+    chain(fragments)
+}
+
+/// The pieces of both outlines that bound what `op` answers, before they
+/// are chained into rings.
+fn fragments(a: &[Ring], b: &[Ring], op: BoolOp) -> Vec<(Point, Point)> {
+    // Which side of the other shape each operand contributes, and whether
+    // that contribution runs backwards. Reversing is what turns the inside
+    // of the subtracted shape into the wall of the hole it leaves.
+    let (keep_a_inside, keep_b_inside, flip_b) = match op {
+        BoolOp::Union => (false, false, false),
+        BoolOp::Intersect => (true, true, false),
+        BoolOp::Subtract => (false, true, true),
+        // Never asked: `combine` answers it without pieces. Taken as a
+        // union here, which has the same pieces and is empty only when
+        // both are.
+        BoolOp::Exclude => (false, false, false),
+    };
+    let mut fragments = Vec::new();
+    let mid = |f: &(Point, Point)| [(f.0[0] + f.1[0]) / 2.0, (f.0[1] + f.1[1]) / 2.0];
+    for f in split_ring_all(a, b) {
+        if covers(b, mid(&f)) == keep_a_inside {
+            fragments.push(f);
+        }
+    }
+    for f in split_ring_all(b, a) {
+        if covers(a, mid(&f)) == keep_b_inside {
+            fragments.push(if flip_b { (f.1, f.0) } else { f });
+        }
+    }
+    fragments
+}
+
+/// Whether `op` on these outlines comes to nothing at all: an
+/// intersection of two that do not meet, a subtraction of something
+/// that covers the whole of the first.
+///
+/// [`combine`] gives `None` for an empty answer as well as for one it
+/// cannot trace, and the two mean opposite things — nothing is there, or
+/// what is there is not known — which [`combine_or_nudge`] tells apart by
+/// asking this.
+fn leaves_nothing(a: &[Ring], b: &[Ring], op: BoolOp) -> bool {
+    match op {
+        BoolOp::Union | BoolOp::Exclude => a.is_empty() && b.is_empty(),
+        BoolOp::Intersect => a.is_empty() || b.is_empty() || fragments(a, b, op).is_empty(),
+        BoolOp::Subtract => a.is_empty() || (!b.is_empty() && fragments(a, b, op).is_empty()),
+    }
+}
+
+/// How many times the rings wind round `p`, counted the way the nonzero
+/// rule counts: up through the point's row one way is one more, the
+/// other way one fewer.
+fn winding(rings: &[Ring], p: Point) -> i32 {
+    let mut w = 0;
+    for ring in rings {
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let side = (b[0] - a[0]) * (p[1] - a[1]) - (p[0] - a[0]) * (b[1] - a[1]);
+            if a[1] <= p[1] && b[1] > p[1] && side > 0.0 {
+                w += 1;
+            } else if b[1] <= p[1] && a[1] > p[1] && side < 0.0 {
+                w -= 1;
+            }
+        }
+    }
+    w
+}
+
+/// Rings filled by the nonzero rule, said as rings the even-odd rule
+/// fills the same — or `None` where the two rules already agree, or
+/// where the answer cannot be traced.
+///
+/// The rules part company only where the outline winds round a point
+/// twice or more: a star's middle, a loop of a path crossing itself, an
+/// outline inside another wound the same way. Nonzero fills there and
+/// even-odd leaves a hole. So the outline is cut wherever it crosses
+/// itself, and each piece asked which of its two sides is filled: a
+/// piece with the filled region on one side is part of the region's
+/// edge, kept and turned so the region is on its left; a piece with it
+/// on both is inside the region and goes. What is kept chains into the
+/// region's own edge, which says the same thing under either rule. Where
+/// no piece has the region on both sides there is nothing a hole could
+/// have appeared in, and the rings are left as they are.
+pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
+    const SIDE: f32 = 1e-3;
+    let mut keep = Vec::new();
+    let mut inside_twice = false;
+    for (a, b) in split_ring_all(rings, rings) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let normal = [-dy / len * SIDE, dx / len * SIDE];
+        let left = winding(rings, [mid[0] + normal[0], mid[1] + normal[1]]) != 0;
+        let right = winding(rings, [mid[0] - normal[0], mid[1] - normal[1]]) != 0;
+        match (left, right) {
+            (true, false) => keep.push((a, b)),
+            (false, true) => keep.push((b, a)),
+            (true, true) => inside_twice = true,
+            (false, false) => {}
+        }
+    }
+    if !inside_twice || keep.is_empty() {
+        return None;
+    }
+    chain(keep)
+}
+
+fn split_ring_all(rings: &[Ring], other: &[Ring]) -> Vec<(Point, Point)> {
+    rings.iter().flat_map(|r| split_ring(r, other)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(x: f32, y: f32, s: f32) -> Ring {
+        vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]]
+    }
+
+    /// How much the rings actually cover, measured the way the renderer
+    /// reads them: even-odd, sampled on a fine grid. A signed or unsigned
+    /// shoelace sum would not do — with even-odd rings, one inside another
+    /// cancels rather than adds, and that cancelling is the answer.
+    fn covered_area(rings: &[Ring]) -> f32 {
+        const STEP: f32 = 0.25;
+        let mut n = 0;
+        let mut y = -5.0;
+        while y < 30.0 {
+            let mut x = -5.0;
+            while x < 30.0 {
+                if covers(rings, [x, y]) {
+                    n += 1;
+                }
+                x += STEP;
+            }
+            y += STEP;
+        }
+        n as f32 * STEP * STEP
+    }
+
+    /// Two ends a hair apart meet, even where they round to two cells.
+    #[test]
+    fn ends_within_a_weld_meet_across_a_cells_edge() {
+        // Half a weld up rounds one way and a hair under it the other.
+        let fragments = vec![
+            ([0.0, 0.0], [1.0, 0.0005]),
+            ([1.0, 0.000_499], [1.0, 1.0]),
+            ([1.0, 1.0], [0.0, 0.0]),
+        ];
+        let rings = chain(fragments).expect("the three close");
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 3, "{rings:?}");
+    }
+
+    /// What the nonzero rule fills, said for the even-odd rule: a star's
+    /// middle stays filled, a loop crossing itself stays solid, and an
+    /// outline whose rules already agree is left alone.
+    #[test]
+    fn a_winding_fill_is_said_as_an_even_odd_one() {
+        // A pentagram: its middle is wound round twice.
+        let star: Ring = (0..5)
+            .map(|k| {
+                let t = std::f32::consts::PI * 2.0 * (k as f32 * 2.0) / 5.0;
+                [10.0 + 8.0 * t.sin(), 10.0 - 8.0 * t.cos()]
+            })
+            .collect();
+        assert!(
+            !covers(std::slice::from_ref(&star), [10.0, 10.0]),
+            "even-odd leaves the middle out"
+        );
+        let out = nonzero_as_even_odd(std::slice::from_ref(&star)).expect("a correction");
+        assert!(covers(&out, [10.0, 10.0]), "and now it is in");
+        assert!(
+            covers(&out, [10.0, 3.5]),
+            "and a point of the star still is"
+        );
+        assert!(!covers(&out, [2.0, 18.0]), "and outside is out");
+        // A square with a hole wound the other way already agrees.
+        let ring = square(0.0, 0.0, 10.0);
+        let hole: Ring = square(3.0, 3.0, 4.0).into_iter().rev().collect();
+        assert!(
+            nonzero_as_even_odd(&[ring.clone(), hole]).is_none(),
+            "a hole is a hole"
+        );
+        // The same square inside, wound the same way, is no hole at all.
+        let out = nonzero_as_even_odd(&[ring, square(3.0, 3.0, 4.0)]).expect("a correction");
+        assert!(covers(&out, [5.0, 5.0]), "wound twice is inside");
+        assert!(
+            nonzero_as_even_odd(&[square(0.0, 0.0, 5.0)]).is_none(),
+            "nothing to do"
+        );
+    }
+
+    /// Taking away a box that shares an edge with a shape and covers all
+    /// of it leaves nothing, not the sliver the nudge left along the
+    /// shared edge; and a box sharing an edge that covers only part of it
+    /// still leaves the rest.
+    #[test]
+    fn a_nudge_leaves_no_sliver_of_its_own() {
+        let a = vec![square(10.0, 10.0, 20.0)];
+        let over = vec![square(5.0, 10.0, 40.0)];
+        assert!(
+            combine(&a, &over, BoolOp::Subtract).is_none(),
+            "shared edge"
+        );
+        let left = combine_or_nudge(&a, &over, BoolOp::Subtract).expect("an answer");
+        assert!(left.is_empty(), "and it is nothing: {left:?}");
+        // Touching along an edge, or apart, they have nothing in common.
+        for b in [
+            square(30.0, 10.0, 20.0),
+            square(-10.0, 10.0, 20.0),
+            square(50.0, 50.0, 5.0),
+        ] {
+            let both = combine_or_nudge(&a, std::slice::from_ref(&b), BoolOp::Intersect);
+            assert_eq!(both, Some(Vec::new()), "nothing in common with {b:?}");
+        }
+        let half = vec![vec![[10.0, 10.0], [20.0, 10.0], [20.0, 30.0], [10.0, 30.0]]];
+        let rest = combine_or_nudge(&a, &half, BoolOp::Subtract).expect("an answer");
+        assert!(
+            (covered_area(&rest) - 200.0).abs() < 5.0,
+            "the other half: {}",
+            covered_area(&rest)
+        );
+    }
+
+    /// An operation that comes to nothing says so, and one that comes to
+    /// something does not.
+    #[test]
+    fn leaves_nothing_says_when_an_operation_comes_to_nothing() {
+        use BoolOp::*;
+        let a = vec![square(0.0, 0.0, 10.0)];
+        let apart = vec![square(12.0, 0.0, 5.0)];
+        let inside = vec![square(2.0, 2.0, 3.0)];
+        let over = vec![square(-1.0, -1.0, 12.0)];
+        assert!(
+            leaves_nothing(&a, &apart, Intersect),
+            "apart, nothing in common"
+        );
+        assert!(
+            !leaves_nothing(&a, &inside, Intersect),
+            "one inside the other"
+        );
+        assert!(!leaves_nothing(&inside, &a, Intersect), "either way round");
+        assert!(
+            !leaves_nothing(&a, &[square(5.0, 5.0, 10.0)], Intersect),
+            "overlapping"
+        );
+        // A plus: neither has a corner inside the other, and they cross.
+        let tall = vec![vec![[4.0, -2.0], [6.0, -2.0], [6.0, 12.0], [4.0, 12.0]]];
+        let wide = vec![vec![[-2.0, 4.0], [12.0, 4.0], [12.0, 6.0], [-2.0, 6.0]]];
+        assert!(!leaves_nothing(&tall, &wide, Intersect), "crossing");
+        assert!(
+            leaves_nothing(&a, &over, Subtract),
+            "taken away by what covers it"
+        );
+        assert!(
+            !leaves_nothing(&a, &inside, Subtract),
+            "a hole is something left"
+        );
+        assert!(!leaves_nothing(&a, &apart, Subtract), "nothing taken");
+        assert!(!leaves_nothing(&a, &apart, Union), "a union of something");
+        assert!(
+            combine(&a, &apart, Intersect).is_none() && combine(&a, &over, Subtract).is_none(),
+            "and each is the None this tells apart from one that cannot be traced"
+        );
+    }
+
+    #[test]
+    fn overlapping_squares_combine_by_area() {
+        // Two 10x10 squares overlapping in a 5x5 corner: the arithmetic of
+        // the four operations is what the areas have to say.
+        let a = vec![square(0.0, 0.0, 10.0)];
+        let b = vec![square(5.0, 5.0, 10.0)];
+        let got = |op| covered_area(&combine(&a, &b, op).expect("combines"));
+        assert!(
+            (got(BoolOp::Union) - 175.0).abs() < 0.5,
+            "{}",
+            got(BoolOp::Union)
+        );
+        assert!(
+            (got(BoolOp::Intersect) - 25.0).abs() < 0.5,
+            "{}",
+            got(BoolOp::Intersect)
+        );
+        assert!(
+            (got(BoolOp::Subtract) - 75.0).abs() < 0.5,
+            "{}",
+            got(BoolOp::Subtract)
+        );
+        assert!(
+            (got(BoolOp::Exclude) - 150.0).abs() < 0.5,
+            "{}",
+            got(BoolOp::Exclude)
+        );
+    }
+
+    /// Two corners a hundredth of a pixel apart are two corners.
+    ///
+    /// Fragments are chained back together by rounding each end onto a
+    /// grid of [`WELD`] and matching the keys, which is what lets the
+    /// intersection arithmetic land one shared corner at two very
+    /// slightly different places and still be understood as one. How
+    /// coarse that grid is decides which corners count as the same, and
+    /// it had nothing watching it at all: a weld five thousand times
+    /// looser passed every test in this crate.
+    ///
+    /// It resisted an obvious test for a good reason, worth stating so
+    /// the next person does not repeat it. Welding only matches ends; the
+    /// coordinates themselves are kept. So with two convex outlines there
+    /// are two crossings, the pairing is unambiguous whatever the
+    /// tolerance, and the answer comes out right however coarse the grid
+    /// — a sliver three hundredths of a pixel wide survives a weld a
+    /// hundred times too coarse. What it takes is an outline that crosses
+    /// *itself*, so one small neighbourhood holds several fragment ends
+    /// and the chain has a choice about which to join to which.
+    ///
+    /// This one is such a case, found by running four hundred random
+    /// self-crossing pairs through all three operations at two
+    /// tolerances and diffing the answers. At a weld ten times looser its
+    /// intersection loses a piece — the area drops and a vertex with it —
+    /// while the union and the difference keep their area and lose
+    /// vertices, which is the chain taking a short cut across a corner it
+    /// no longer believes in.
+    #[test]
+    fn a_self_crossing_outline_keeps_its_corners_apart() {
+        // A six-point ring that crosses itself twice, and a quad laid
+        // over it. The numbers are what they are: this is a found case,
+        // and rounding them moves the crossings apart again.
+        let a: Ring = vec![
+            [16.147861, 14.831324],
+            [9.027339, 17.533096],
+            [8.482729, 11.186256],
+            [15.499235, 14.831325],
+            [8.658344, 18.172215],
+            [7.9206634, 10.212734],
+        ];
+        let b: Ring = vec![
+            [17.038256, 13.831324],
+            [11.587209, 19.914165],
+            [4.8880835, 13.831323],
+            [11.587209, 8.517552],
+        ];
+        let got = combine(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b),
+            BoolOp::Intersect,
+        )
+        .expect("the two do overlap");
+        let area = covered_area(&got);
+        assert!(
+            (area - 7.812).abs() < 0.03,
+            "the overlap keeps the piece a coarse weld loses: {area}"
+        );
+        // And the shape of it, since an area can be right for the wrong
+        // reasons: the chain found every corner it should have.
+        let verts: usize = got.iter().map(|r| r.len()).sum();
+        assert_eq!(verts, 9, "nine corners, one of which a coarse weld eats");
+        // The other two operations lose vertices rather than area, which
+        // is the same fault seen from the other side.
+        let sub = combine(
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b),
+            BoolOp::Subtract,
+        )
+        .expect("and differ");
+        assert_eq!(sub.len(), 3, "the difference is three islands");
+    }
+
+    #[test]
+    fn subtracting_an_enclosed_square_leaves_a_hole() {
+        // Nothing crosses, so there is nothing to chain: the answer is both
+        // outlines, which even-odd already reads as a shape with a hole.
+        let a = vec![square(0.0, 0.0, 20.0)];
+        let b = vec![square(5.0, 5.0, 5.0)];
+        let out = combine(&a, &b, BoolOp::Subtract).expect("combines");
+        assert_eq!(out.len(), 2, "the outline and the hole");
+        assert!(
+            (covered_area(&out) - 375.0).abs() < 2.0,
+            "{}",
+            covered_area(&out)
+        );
+        assert!(covers(&out, [1.0, 1.0]), "inside the shape");
+        assert!(!covers(&out, [7.0, 7.0]), "and out again inside the hole");
+    }
+
+    #[test]
+    fn disjoint_shapes_union_into_two_islands() {
+        let a = vec![square(0.0, 0.0, 5.0)];
+        let b = vec![square(20.0, 20.0, 5.0)];
+        let out = combine(&a, &b, BoolOp::Union).expect("combines");
+        assert!(covers(&out, [2.0, 2.0]) && covers(&out, [22.0, 22.0]));
+        assert!(!covers(&out, [12.0, 12.0]), "and nothing between them");
+        // Intersecting them covers nothing, which is not a shape.
+        assert!(combine(&a, &b, BoolOp::Intersect).is_none());
+    }
+}
