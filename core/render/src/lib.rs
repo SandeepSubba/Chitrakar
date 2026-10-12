@@ -5087,6 +5087,144 @@ fn rim_ring(shape: &VectorShape, t: f32) -> Option<Vec<[f32; 2]>> {
     }
 }
 
+/// One letter of a block of text as a shape: what it stands for, the
+/// colour it is set in, and its outline as rings read even-odd, in the
+/// block's own space.
+pub struct OutlinedLetter {
+    pub text: String,
+    pub fill: chitrakar_color::AuthoredColor,
+    pub rings: Vec<Vec<[f32; 2]>>,
+}
+
+/// A block of text as shapes: each letter's outline as it is drawn —
+/// the face, the size, the lean, the line it is set along and the bold a
+/// face could not supply — and the underline and strike-through bands
+/// with their colours, all in the block's own space.
+///
+/// The outlines are the face's own curves, placed the way the PDF
+/// exporter places them, flattened finely enough that no step strays a
+/// twentieth of a pixel at the size set. Fonts fill by the nonzero rule
+/// and a path here by even-odd, which part company only where a
+/// letter's contours overlap, so such a letter is said again in rings
+/// even-odd fills the same. A bold no face could supply is the outline
+/// swept along the baseline, as the page draws it: copies an eighth of a
+/// pixel apart, filled by the nonzero rule on a grid and traced, within
+/// a quarter of a pixel.
+pub fn text_outlines(
+    spec: &chitrakar_doc::TextSpec,
+) -> (
+    Vec<OutlinedLetter>,
+    Vec<([f32; 4], chitrakar_color::AuthoredColor)>,
+) {
+    use text::GlyphCurve;
+    let placed = text::placed(spec);
+    let mut letters = Vec::new();
+    for run in &placed.runs {
+        let k = run.em / run.face.units_per_em;
+        for g in &run.glyphs {
+            let curves = run.face.outline(g.id);
+            if curves.is_empty() {
+                continue;
+            }
+            let (sin, cos) = g.angle.sin_cos();
+            let place = |p: [f32; 2]| {
+                let (x, y) = (k * (p[0] + run.lean * p[1]), -k * p[1]);
+                [g.x + x * cos - y * sin, g.y + x * sin + y * cos]
+            };
+            // Steps enough that a curve's chord strays under a twentieth
+            // of a pixel at this size: the error falls as the square of
+            // the steps, and a glyph's curves span at most an em.
+            let steps = ((run.em / 0.4).sqrt().ceil() as usize).clamp(4, 64);
+            let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+            let mut last: Option<[f32; 2]> = None;
+            for c in &curves {
+                let (from, to) = match *c {
+                    GlyphCurve::Line(a, b) => (a, b),
+                    GlyphCurve::Quad(a, _, b) => (a, b),
+                    GlyphCurve::Cubic(a, _, _, b) => (a, b),
+                };
+                if last != Some(from) || rings.is_empty() {
+                    rings.push(vec![place(from)]);
+                }
+                let ring = rings.last_mut().unwrap();
+                match *c {
+                    GlyphCurve::Line(_, b) => ring.push(place(b)),
+                    GlyphCurve::Quad(a, q, b) => {
+                        for s in 1..=steps {
+                            let t = s as f32 / steps as f32;
+                            let u = 1.0 - t;
+                            ring.push(place([
+                                u * u * a[0] + 2.0 * u * t * q[0] + t * t * b[0],
+                                u * u * a[1] + 2.0 * u * t * q[1] + t * t * b[1],
+                            ]));
+                        }
+                    }
+                    GlyphCurve::Cubic(a, p, q, b) => {
+                        for s in 1..=steps {
+                            let t = s as f32 / steps as f32;
+                            let u = 1.0 - t;
+                            let (w0, w1, w2, w3) =
+                                (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                            ring.push(place([
+                                w0 * a[0] + w1 * p[0] + w2 * q[0] + w3 * b[0],
+                                w0 * a[1] + w1 * p[1] + w2 * q[1] + w3 * b[1],
+                            ]));
+                        }
+                    }
+                }
+                last = Some(to);
+            }
+            // A contour ends where it began; the ring closes itself.
+            for ring in &mut rings {
+                if ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+            }
+            rings.retain(|r| r.len() >= 3);
+            if rings.is_empty() {
+                continue;
+            }
+            let rings = if run.thicken > 0.0 {
+                let d = [run.thicken * cos, run.thicken * sin];
+                let n = ((run.thicken * 8.0).ceil() as usize).clamp(1, 256);
+                let copies: Vec<Vec<[f32; 2]>> = (0..=n)
+                    .flat_map(|i| {
+                        let t = i as f32 / n as f32;
+                        rings.iter().map(move |r| {
+                            r.iter()
+                                .map(|p| [p[0] + d[0] * t, p[1] + d[1] * t])
+                                .collect()
+                        })
+                    })
+                    .collect();
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for p in copies.iter().flatten() {
+                    x0 = x0.min(p[0]);
+                    y0 = y0.min(p[1]);
+                    x1 = x1.max(p[0]);
+                    y1 = y1.max(p[1]);
+                }
+                let Some(mut grid) = SampleGrid::over([x0, y0, x1, y1]) else {
+                    continue;
+                };
+                grid.inside = grid.filled_nonzero(&copies);
+                match grid.rings() {
+                    Some(r) => r,
+                    None => continue,
+                }
+            } else {
+                boolean::nonzero_as_even_odd(&rings).unwrap_or(rings)
+            };
+            letters.push(OutlinedLetter {
+                text: g.text.clone(),
+                fill: run.fill.clone(),
+                rings,
+            });
+        }
+    }
+    (letters, placed.decorations)
+}
+
 /// A grid of samples over a box, up to eight to the pixel, that a region
 /// is laid on and traced back off — how a union of pieces, or a shape
 /// and a band round it, becomes an outline without intersecting
@@ -5177,6 +5315,41 @@ impl SampleGrid {
                     (((span[1] - self.x0) * self.k + 0.5).ceil().max(0.0) as u32).min(self.gw);
                 for cx in first.min(self.gw)..last {
                     out[(cy * self.gw + cx) as usize] = true;
+                }
+            }
+        }
+        out
+    }
+
+    /// What rings read by the nonzero rule cover, a row at a time:
+    /// where the row crosses the edges, which way each crosses it, and
+    /// the spans where the count is not zero.
+    fn filled_nonzero(&self, rings: &[Vec<[f32; 2]>]) -> Vec<bool> {
+        let mut out = self.blank();
+        let mut xs: Vec<(f32, i32)> = Vec::new();
+        for cy in 0..self.gh {
+            let (_, y) = self.at(0, cy);
+            xs.clear();
+            for ring in rings {
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    if (a[1] > y) != (b[1] > y) {
+                        let x = a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                        xs.push((x, if b[1] > a[1] { 1 } else { -1 }));
+                    }
+                }
+            }
+            xs.sort_by(|p, q| p.0.total_cmp(&q.0));
+            let mut count = 0;
+            for w in 0..xs.len() {
+                count += xs[w].1;
+                if count != 0 && w + 1 < xs.len() {
+                    let first = ((xs[w].0 - self.x0) * self.k + 0.5).ceil().max(0.0) as u32;
+                    let last = (((xs[w + 1].0 - self.x0) * self.k + 0.5).ceil().max(0.0) as u32)
+                        .min(self.gw);
+                    for cx in first.min(self.gw)..last {
+                        out[(cy * self.gw + cx) as usize] = true;
+                    }
                 }
             }
         }

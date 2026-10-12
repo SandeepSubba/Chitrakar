@@ -4977,6 +4977,21 @@ export function App() {
     }
   };
 
+  /** Turn the picked text into shapes, a letter each, grouped where the
+   * text was — what a print shop asks for, and what lets a letter be
+   * reshaped. The group is picked after it. */
+  const textToShapes = () => {
+    if (!session || selected === null) return;
+    try {
+      const id = session.text_to_outlines(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Turn the text into shapes: ${err}`);
+    }
+  };
+
   const BOOLEAN_BUTTONS: [string, IconName, string][] = [
     ["union", "union", "Unite shapes"],
     ["subtract", "subtract", "Subtract the shapes above"],
@@ -7047,6 +7062,7 @@ export function App() {
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         item("offset-path", "shapes", "Offset path…", offsetPath),
         item("simplify-path", "node", "Simplify path…", simplifyPath),
+        item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

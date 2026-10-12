@@ -1087,6 +1087,111 @@ impl Session {
     /// ones above cut out of it. The result keeps the bottom-most layer's
     /// fill and stroke, because that is the shape the eye reads as the one
     /// being operated on.
+    /// Turn a text layer into shapes: a group, where the text was, of
+    /// one shape per letter in the letter's colour, and a band for each
+    /// underline and strike-through — what a print shop asks for, so the
+    /// page no longer needs the face, and what lets a letter be reshaped,
+    /// filled with a gradient or combined with another shape
+    /// (`chitrakar_render::text_outlines`).
+    ///
+    /// The group is the text layer as it was — where it is, how it
+    /// fades, blends and casts, its mask — and each letter is plain, as
+    /// the letters of a block are drawn as one picture and faded once.
+    /// The text itself is gone: a shape cannot be typed into. One step
+    /// in the history; the answer is the group.
+    pub fn text_to_outlines(&mut self, id: NodeId) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(id)?.clone();
+        let NodeKind::Text(spec) = &node.kind else {
+            return Err(EngineError::BadCommand(
+                "only text has letters to outline".into(),
+            ));
+        };
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root is not text".into()))?;
+        let (letters, bands) = chitrakar_render::text_outlines(spec);
+        if letters.is_empty() && bands.is_empty() {
+            return Err(EngineError::BadCommand(
+                "this text has no letters to outline".into(),
+            ));
+        }
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .unwrap_or(0);
+        let group_id = self.doc.peek_next_id();
+        let mut group = node.clone();
+        group.kind = NodeKind::Group;
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index,
+            node: Box::new(group),
+        }];
+        // A shape at the corner of what it covers, as every path is kept.
+        let shape_of =
+            |name: &str, rings: &[Vec<[f32; 2]>], fill: &chitrakar_color::AuthoredColor| {
+                let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+                for p in rings.iter().flatten() {
+                    x0 = x0.min(p[0]);
+                    y0 = y0.min(p[1]);
+                }
+                let shift = |ring: &Vec<[f32; 2]>| -> Vec<[f32; 2]> {
+                    ring.iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+                };
+                let mut n = Node::vector(
+                    name,
+                    chitrakar_doc::VectorShape::Path {
+                        points: shift(&rings[0]),
+                        closed: true,
+                        smooth: false,
+                        handles: Vec::new(),
+                        subpaths: rings[1..].iter().map(shift).collect(),
+                    },
+                );
+                if let NodeKind::Vector {
+                    fill: f, stroke, ..
+                } = &mut n.kind
+                {
+                    *f = Some(fill.clone());
+                    *stroke = None;
+                }
+                n.transform = Transform::translation(x0, y0);
+                n
+            };
+        let mut at = 0;
+        for letter in &letters {
+            let name = if letter.text.trim().is_empty() {
+                "letter".to_string()
+            } else {
+                letter.text.clone()
+            };
+            cmds.push(Command::AddNode {
+                parent: group_id,
+                index: at,
+                node: Box::new(shape_of(&name, &letter.rings, &letter.fill)),
+            });
+            at += 1;
+        }
+        for ([x0, y0, x1, y1], colour) in &bands {
+            let ring = vec![[*x0, *y0], [*x1, *y0], [*x1, *y1], [*x0, *y1]];
+            cmds.push(Command::AddNode {
+                parent: group_id,
+                index: at,
+                node: Box::new(shape_of("line", &[ring], colour)),
+            });
+            at += 1;
+        }
+        cmds.push(Command::RemoveNode { id });
+        self.apply_labeled(
+            Command::Batch(cmds),
+            Some("Turn the text into shapes".into()),
+        )?;
+        Ok(group_id)
+    }
+
     /// Say a path's outline again in as few anchors as stay within
     /// `tolerance` page pixels of it: straight where it runs straight,
     /// curves with handles where it bends, corners kept as corners
@@ -11275,6 +11380,106 @@ mod tests {
         session.undo().unwrap();
         let back = page(&session);
         assert!(back.pixels == before.pixels, "and undo puts the steps back");
+    }
+
+    #[test]
+    fn text_turned_into_shapes_draws_the_page_it_drew() {
+        let srgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut session = Session::new(320, 220, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let add = |session: &mut Session, node: chitrakar_doc::Node| {
+            let id = session.document().peek_next_id();
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            id
+        };
+        // Faded, in two colours, one word bold and leaning and underlined.
+        let mut spec = chitrakar_doc::TextSpec::new("Hello, gō! Wave", 34.0, srgb(0.8, 0.1, 0.2));
+        spec.runs = vec![chitrakar_doc::StyleRun {
+            start: 11,
+            end: 16,
+            fill: Some(srgb(0.1, 0.3, 0.8)),
+            bold: Some(true),
+            italic: Some(true),
+            underline: Some(true),
+            strike: None,
+            font: None,
+        }];
+        let mut words = chitrakar_doc::Node::text("words", spec);
+        words.transform = Transform::translation(14.0, 20.0);
+        words.opacity = 0.75;
+        let words = add(&mut session, words);
+        // And a line set along a curve, turning as it goes.
+        let mut curved = chitrakar_doc::TextSpec::new("round the bend", 22.0, srgb(0.1, 0.5, 0.2));
+        curved.along = Some(VectorShape::Path {
+            points: vec![[0.0, 60.0], [80.0, 0.0], [200.0, 50.0]],
+            closed: false,
+            smooth: true,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        });
+        let mut bent = chitrakar_doc::Node::text("bent", curved);
+        bent.transform = Transform::translation(40.0, 110.0);
+        let bent = add(&mut session, bent);
+
+        let page = |s: &Session| chitrakar_render::render(s.document()).unwrap();
+        let before = page(&session);
+        let compare = |a: &Surface, b: &Surface| {
+            let (mut sum, mut far, mut inked) = (0.0f32, 0usize, 0usize);
+            for (p, q) in a.pixels.iter().zip(&b.pixels) {
+                let d = (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs());
+                sum += d;
+                if d > 0.35 {
+                    far += 1;
+                }
+                if p.a > 0.01 {
+                    inked += 1;
+                }
+            }
+            (sum / a.pixels.len() as f32, far, inked)
+        };
+        let group = session.text_to_outlines(words).unwrap();
+        session.text_to_outlines(bent).unwrap();
+        let after = page(&session);
+        let (mean, far, inked) = compare(&before, &after);
+        assert!(
+            mean < 0.004 && far * 100 < inked,
+            "the shapes draw the page the text drew: mean {mean}, {far} of {inked} far off"
+        );
+        // A shape a letter, named for it, in its colour; the underline a
+        // band of its own.
+        let kids = session.document().children_of(group).unwrap().to_vec();
+        let names: Vec<String> = kids
+            .iter()
+            .map(|k| session.document().node(*k).unwrap().name.clone())
+            .collect();
+        assert!(
+            names.starts_with(&["H".into(), "e".into(), "l".into()]),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "line"),
+            "the underline is a shape: {names:?}"
+        );
+        assert_eq!(session.document().node(group).unwrap().opacity, 0.75);
+        // A shape cannot be typed into, and was never text twice.
+        assert!(session.text_to_outlines(group).is_err());
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(
+            page(&session).pixels == before.pixels,
+            "and undo puts the text back"
+        );
     }
 
     #[test]

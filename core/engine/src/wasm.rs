@@ -538,6 +538,15 @@ impl WasmSession {
     /// Combine shape layers into one compound path. `op` is one of
     /// "union", "intersect", "subtract" or "exclude". Returns the new
     /// layer's id.
+    /// Turn a text layer into a group of shapes, one per letter; the
+    /// group's id.
+    pub fn text_to_outlines(&mut self, id: f64) -> Result<f64, JsError> {
+        self.inner
+            .text_to_outlines(NodeId(id as u64))
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Say a path's outline in as few anchors as stay within
     /// `tolerance` page pixels of it; `[before, after]`, the anchors
     /// there were and are.

@@ -7037,6 +7037,48 @@ assert(
   await pickTool("Move");
 }
 
+// 9o7. Turn the text into shapes: the letters become a group of shapes
+// that draw the same ink, and one undo brings the text back.
+{
+  await newDocument(400, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 200) * b.height];
+  // How many pixels of the canvas hold any ink at all.
+  const inked = () =>
+    page.evaluate(() => {
+      const el = document.getElementById("engine-canvas");
+      const img = el.getContext("2d").getImageData(0, 0, el.width, el.height).data;
+      let n = 0;
+      for (let i = 3; i < img.length; i += 4) if (img[i] > 0) n++;
+      return n;
+    });
+  await page.keyboard.press("Escape");
+  await pickTool("Text");
+  await page.mouse.click(...at(40, 60));
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "Text" }).first().click();
+  await page.waitForTimeout(200);
+  const ink = await inked();
+  assert(ink > 50, `the text has ink (${ink} px)`);
+  await menuClick("Layer", "Turn the text into shapes");
+  await page.waitForTimeout(400);
+  const shaped = await inked();
+  assert(
+    Math.abs(shaped - ink) <= Math.max(6, ink * 0.03),
+    `the shapes put down the ink the text did (${shaped} against ${ink})`,
+  );
+  const rows = await page.locator(".panel ul li").allTextContents();
+  assert(rows.length >= 2, `a group of letters where the text was (${rows.slice(0, 6)})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li").count()) === 1 &&
+      (await inked()) === ink,
+    "one undo brings the text back",
+  );
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

@@ -1126,6 +1126,23 @@ without reading anything else.*
   test: splitting at the worst point finds them anyway, but starts
   the curve off each along the wrong tangent — a D in four anchors
   becomes seven (smoke 9o6).
+- **Turn the text into shapes.** Layer › Turn the text into shapes
+  replaces a text layer with a group of shapes, one per letter, named
+  for it and in its colour, and a band for each underline and
+  strike-through — what a print shop asks for, and what lets a letter
+  be reshaped, filled with a gradient or combined
+  (`Session::text_to_outlines`, `chitrakar_render::text_outlines`). The
+  outlines are the face's own curves placed the way the PDF exporter
+  places them (size, lean, the line a block is set along), flattened
+  under a twentieth of a pixel; contours a font overlaps under its
+  nonzero rule are said again for a path's even-odd one; a bold no face
+  supplies is the outline swept along the baseline as the page draws
+  it, copies an eighth of a pixel apart filled by the nonzero rule on
+  the sampling grid. The group is the layer as it was (place, fade,
+  blend, mask, effects). Rendered before and after on faded two-colour
+  text with a bold leaning underlined word and on a line set along a
+  curve: a mean difference of 0.0007 and no pixel far off; leaving the
+  sweep or the lean out each fails it (smoke 9o7).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
