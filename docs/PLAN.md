@@ -1165,6 +1165,16 @@ without reading anything else.*
   wrapped round to almost nothing — a region render padded by a few
   pixels where it needed all of them, or a panic in a debug build. It
   saturates now (`two_filters_past_any_reach_reach_as_far_as_there_is`).
+- **Trim to the artwork.** Page › Trim to the artwork takes the page in
+  to what is drawn on it, Photoshop's Trim choosing between its two
+  usual answers by the page's own top-left corner: where that is clear,
+  the clear pixels are the edge (a logo on nothing comes out the size of
+  the logo); where it is painted, pixels of its colour are (a drawing on
+  a white ground comes out the size of the drawing). Read off the page
+  as drawn, to the eight-bit step, so a shadow is artwork as far as it
+  reaches; the crop is the same `ResizeCanvas` the region crop uses,
+  one step in the history (`Session::trim_page`, smoke 9o9 — whose first
+  draft drew a shape the page's own proportions and so proved nothing).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

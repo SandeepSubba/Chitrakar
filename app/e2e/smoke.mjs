@@ -7128,6 +7128,45 @@ assert(
   assert((await canvasPixel(59, 99))[0] > 240, "undo takes the filter away and the speck is back");
 }
 
+// 9o9. Trim to the artwork: on a white ground, the page comes in to the
+// shape drawn on it, and one undo gives the page back its size.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("#ffffff", 0, 0, 400, 300);
+  await paint("#2255cc", 100, 80, 260, 170);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await menuClick("Page", "Trim to the artwork");
+  await page.waitForTimeout(400);
+  const after = await page.locator("#engine-page").boundingBox();
+  const ratio = after.width / after.height;
+  assert(
+    Math.abs(ratio - 160 / 90) < 0.05,
+    `the page is the shape's own shape now (${after.width.toFixed(0)}x${after.height.toFixed(0)}, ${ratio.toFixed(3)})`,
+  );
+  const corner = await canvasPixel(1, 1);
+  assert(corner[2] > 180 && corner[0] < 60, `and its corner is the shape's colour (${corner})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  const back = await page.locator("#engine-page").boundingBox();
+  assert(
+    Math.abs(back.width / back.height - 400 / 300) < 0.02,
+    `one undo gives the page its size back (${back.width.toFixed(0)}x${back.height.toFixed(0)})`,
+  );
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

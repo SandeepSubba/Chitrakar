@@ -7151,6 +7151,19 @@ export function App() {
         // this is the same design at another size — Photoshop's Image
         // Size, Canva's Resize — and the two are asked for differently.
         item("scale-page", "fit", "Scale the page…", () => setScalePageOpen(true)),
+        // Cut away the edge round the artwork: clear pixels where the
+        // corner is clear, the corner's colour where it is painted.
+        item("trim-page", "crop", "Trim to the artwork", () => {
+          if (!session) return;
+          try {
+            if (session.trim_page()) {
+              refresh(session);
+              fitView();
+            }
+          } catch (err) {
+            alert(`Trim: ${err}`);
+          }
+        }),
         SEP,
         item("turn-right", "turnRight", "Turn right", () => turnPage(1)),
         item("turn-left", "turnLeft", "Turn left", () => turnPage(3)),

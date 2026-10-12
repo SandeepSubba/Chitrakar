@@ -5044,6 +5044,67 @@ impl Session {
         )
     }
 
+    /// Take the page in to the artwork on it: everything round the edge
+    /// that is only edge cut away. What counts as edge is read off the
+    /// page's own top-left corner — where that is clear, the clear pixels
+    /// (a logo on nothing comes out the size of the logo); where it is
+    /// painted, pixels of that colour (a drawing on a white ground comes
+    /// out the size of the drawing). Photoshop's Trim, choosing for
+    /// itself between its two usual answers.
+    ///
+    /// Read off the page as drawn, so a shadow or a soft edge counts as
+    /// artwork as far as it reaches, to the eight-bit step. One step in
+    /// the history; false when the artwork already reaches every edge.
+    pub fn trim_page(&mut self) -> Result<bool, EngineError> {
+        let surface = self.render()?;
+        let (w, h) = (surface.width as usize, surface.height as usize);
+        if w == 0 || h == 0 {
+            return Ok(false);
+        }
+        let px = surface.to_srgb8();
+        let at = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            [px[i], px[i + 1], px[i + 2], px[i + 3]]
+        };
+        let corner = at(0, 0);
+        let edge = |p: [u8; 4]| {
+            if corner[3] == 0 {
+                p[3] == 0
+            } else {
+                p.iter().zip(&corner).all(|(a, b)| a.abs_diff(*b) <= 1)
+            }
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                if !edge(at(x, y)) {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        if x0 == usize::MAX {
+            return Err(EngineError::BadCommand(
+                "there is nothing on the page to trim to".into(),
+            ));
+        }
+        if (x0, y0, x1, y1) == (0, 0, w, h) {
+            return Ok(false);
+        }
+        self.apply_labeled(
+            Command::ResizeCanvas {
+                width: (x1 - x0) as u32,
+                height: (y1 - y0) as u32,
+                dx: -(x0 as f32),
+                dy: -(y0 as f32),
+            },
+            Some("Trim to the artwork".into()),
+        )?;
+        Ok(true)
+    }
+
     /// What is picked out, as a wash over what is not: a page-sized
     /// PNG, clear where the region is and tinted where it is not.
     ///
@@ -11480,6 +11541,81 @@ mod tests {
             page(&session).pixels == before.pixels,
             "and undo puts the text back"
         );
+    }
+
+    #[test]
+    fn trimming_takes_the_page_in_to_its_artwork() {
+        let srgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let rect = |name: &str, x: f32, y: f32, w: f32, h: f32, c: AuthoredColor| {
+            let mut n = chitrakar_doc::Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            n.transform = Transform::translation(x, y);
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(c);
+            }
+            n
+        };
+        let add = |s: &mut Session, node: chitrakar_doc::Node| {
+            let root = s.document().root();
+            let index = s.document().children_of(root).unwrap().len();
+            s.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+        };
+        let size = |s: &Session| (s.document().meta.width, s.document().meta.height);
+
+        // On a clear page: to the shape and as far as its shadow reaches.
+        let mut s = Session::new(100, 80, chitrakar_color::ColorMode::Rgb);
+        assert!(
+            s.trim_page().is_err(),
+            "a clear page has nothing to trim to"
+        );
+        let mut card = rect("card", 20.0, 10.0, 30.0, 25.0, srgb(0.8, 0.2, 0.2));
+        card.effects = vec![chitrakar_doc::Effect::DropShadow {
+            dx: 6.0,
+            dy: 6.0,
+            blur: 0.0,
+            color: srgb(0.0, 0.0, 0.0),
+            opacity: 0.5,
+        }];
+        add(&mut s, card);
+        assert!(s.trim_page().unwrap());
+        assert_eq!(size(&s), (36, 31), "the card and its shadow");
+        let page = s.render().unwrap();
+        let corner = page.get(0, 0);
+        assert!(
+            corner.a > 0.99 && corner.r > 0.5,
+            "the card is at the corner now: {corner:?}"
+        );
+        assert!(!s.trim_page().unwrap(), "and there is nothing more to trim");
+        s.undo().unwrap();
+        assert_eq!(size(&s), (100, 80), "one undo puts the page back");
+
+        // On a white ground: to what is not the ground.
+        let mut s = Session::new(100, 80, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut s,
+            rect("ground", 0.0, 0.0, 100.0, 80.0, srgb(1.0, 1.0, 1.0)),
+        );
+        assert!(
+            s.trim_page().is_err(),
+            "a page of nothing but ground has nothing to trim to"
+        );
+        add(
+            &mut s,
+            rect("mark", 40.0, 30.0, 10.0, 12.0, srgb(0.1, 0.2, 0.9)),
+        );
+        assert!(s.trim_page().unwrap());
+        assert_eq!(size(&s), (10, 12));
     }
 
     #[test]

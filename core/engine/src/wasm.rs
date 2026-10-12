@@ -872,6 +872,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Take the page in to the artwork on it, the edge read off the
+    /// page's top-left corner; false when there was nothing to trim.
+    pub fn trim_page(&mut self) -> Result<bool, JsError> {
+        self.inner.trim_page().map_err(to_js)
+    }
+
     /// Take the page in to what is picked out.
     pub fn crop_to_selection(&mut self) -> Result<(), JsError> {
         self.inner.crop_to_selection().map_err(to_js)
