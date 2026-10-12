@@ -577,6 +577,16 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Draw the picked layers into one picture that takes their place;
+    /// the picture's id.
+    pub fn merge_layers(&mut self, ids: Vec<f64>) -> Result<f64, JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        self.inner
+            .merge_layers(&ids)
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     pub fn boolean_nodes(&mut self, ids: Vec<f64>, op: &str) -> Result<f64, JsError> {
         let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
         self.inner

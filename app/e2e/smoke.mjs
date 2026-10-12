@@ -7167,6 +7167,45 @@ assert(
   );
 }
 
+// 9o10. Merge into a picture: two shapes picked become one picture layer
+// that draws what they drew; one undo gives the shapes back.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  const paint = async (tool, hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool(tool);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("Rect", "#3366cc", 40, 40, 180, 140);
+  await paint("Ellipse", "#cc3344", 120, 70, 260, 180);
+  await pickTool("Move");
+  const spots = [[60, 60], [150, 100], [240, 160], [20, 20]];
+  const look = () => Promise.all(spots.map(([x, y]) => canvasPixel(x, y)));
+  const before = await look();
+  await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
+  await page.locator(".panel ul li", { hasText: "Ellipse" }).first().click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(200);
+  await menuClick("Layer", "Merge into a picture");
+  await page.waitForTimeout(400);
+  const rows = await page.locator(".panel ul li").allTextContents();
+  assert(rows.length === 1 && rows[0].includes("Merged"), `one picture where the two shapes were (${rows})`);
+  const after = await look();
+  assert(
+    after.every((p, i) => p.every((v, c) => Math.abs(v - before[i][c]) <= 3)),
+    `and it draws what they drew (${after.join(" / ")} against ${before.join(" / ")})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await page.locator(".panel ul li").count()) === 2, "one undo gives the shapes back");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

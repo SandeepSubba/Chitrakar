@@ -4996,6 +4996,21 @@ export function App() {
     }
   };
 
+  /** Draw the picked layers into one picture that takes their place —
+   * merging, and with one layer picked, turning it into pixels that can
+   * be painted on. The picture is picked after it. */
+  const mergeLayers = () => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      const id = session.merge_layers(new Float64Array(selectionSet));
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Merge: ${err}`);
+    }
+  };
+
   const BOOLEAN_BUTTONS: [string, IconName, string][] = [
     ["union", "union", "Unite shapes"],
     ["subtract", "subtract", "Subtract the shapes above"],
@@ -7067,6 +7082,7 @@ export function App() {
         item("offset-path", "shapes", "Offset path…", offsetPath),
         item("simplify-path", "node", "Simplify path…", simplifyPath),
         item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
+        item("merge-layers", "image", "Merge into a picture", mergeLayers),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

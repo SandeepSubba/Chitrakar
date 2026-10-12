@@ -1080,6 +1080,163 @@ impl Session {
         Ok(group_id)
     }
 
+    /// Draw the picked layers into one picture that takes their place —
+    /// Photoshop's Merge Layers, and with one layer picked its
+    /// Rasterize: a shape, a text or a group becomes pixels that can be
+    /// painted on, cloned from and healed like a photograph's.
+    ///
+    /// What the picture holds is what the layers draw together and
+    /// nothing else: gathered into a group of their own first, so they
+    /// clip to and blend with one another as they did, and an
+    /// adjustment among them reaches the ones under it and not the page
+    /// beneath them all — what merging an adjustment always means. The
+    /// layers' own fades, blends, masks and effects are in the picture;
+    /// so is everything their effects reach. It is drawn at a pixel a
+    /// page pixel, wherever the layers sit, and placed back where they
+    /// were. A picked layer that is hidden is not drawn and is left as it
+    /// was. One step in the history; the answer is the picture.
+    pub fn merge_layers(&mut self, ids: &[NodeId]) -> Result<NodeId, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing is picked".into()));
+        }
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("the root cannot be merged".into()))?;
+        let siblings = self.doc.children_of(parent)?.to_vec();
+        let ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "merged layers must share a parent".into(),
+            ));
+        }
+        let showing: Vec<NodeId> = ordered
+            .iter()
+            .copied()
+            .filter(|id| self.doc.node(*id).is_ok_and(|n| n.visible))
+            .collect();
+        let Some(&top) = showing.last() else {
+            return Err(EngineError::BadCommand(
+                "nothing picked is showing to merge".into(),
+            ));
+        };
+        // A scratch copy of the page with the layers gathered as Group
+        // gathers them: their own group is what draws them together.
+        let mut scratch = self.doc.clone();
+        let gathered = scratch.peek_next_id();
+        let top_index = siblings.iter().position(|s| *s == top).unwrap_or(0);
+        let mut gather = vec![Command::AddNode {
+            parent,
+            index: top_index + 1,
+            node: Box::new(Node::group("merged")),
+        }];
+        gather.extend(showing.iter().enumerate().map(|(i, id)| Command::MoveNode {
+            id: *id,
+            parent: gathered,
+            index: i,
+        }));
+        scratch.apply(Command::Batch(gather))?;
+        // What the layers that draw something reach. An adjustment or a
+        // filter among them says "everything", meaning everything under
+        // it — which, gathered, is only the layers with it — so it adds
+        // nothing but the distance a filter can carry a picture.
+        let mut reach: Option<[f32; 4]> = None;
+        for id in &showing {
+            if let Bounds::Rect(a, b, c, d) =
+                chitrakar_render::bounds_in_parent_space(&scratch, *id)?
+            {
+                reach = Some(match reach {
+                    Some([p, q, r, t]) => [p.min(a), q.min(b), r.max(c), t.max(d)],
+                    None => [a, b, c, d],
+                });
+            }
+        }
+        let Some([x0, y0, x1, y1]) = reach else {
+            return Err(EngineError::BadCommand(
+                "what is picked draws nothing of its own to merge".into(),
+            ));
+        };
+        // A pixel a page pixel, in whatever space the layers sit in.
+        let space = chitrakar_render::ancestor_space(&scratch, gathered);
+        let k = space
+            .a
+            .hypot(space.b)
+            .max(space.c.hypot(space.d))
+            .clamp(0.05, 16.0);
+        // The reach is in page pixels; the box is in the layers' space.
+        let spread = (chitrakar_render::filter_reach(&scratch) as f32)
+            .min(self.doc.meta.width.max(self.doc.meta.height) as f32)
+            / k;
+        let (x0, y0, x1, y1) = (x0 - spread, y0 - spread, x1 + spread, y1 + spread);
+        // On whole pixels of that grid, so the picture's pixels are the
+        // ones that were drawn rather than those resampled half a pixel
+        // over.
+        let (x0, y0) = ((x0 * k).floor() / k, (y0 * k).floor() / k);
+        let (w, h) = (
+            ((x1 - x0) * k).ceil().max(1.0) as u32,
+            ((y1 - y0) * k).ceil().max(1.0) as u32,
+        );
+        if !chitrakar_doc::canvas_fits(w, h) {
+            return Err(EngineError::BadCommand(format!(
+                "a picture of {w}x{h} is larger than can be made"
+            )));
+        }
+        let mut surface = Surface::new(w, h);
+        chitrakar_render::draw_alone(
+            &scratch,
+            gathered,
+            &mut surface,
+            Transform {
+                a: k,
+                d: k,
+                e: -x0 * k,
+                f: -y0 * k,
+                ..Default::default()
+            },
+        )?;
+        let resource_id = self.doc.add_resource(w, h, surface.to_srgb8());
+        let name = if showing.len() == 1 {
+            self.doc.node(top)?.name.clone()
+        } else {
+            "Merged".to_string()
+        };
+        let mut picture = Node::raster(
+            &name,
+            chitrakar_doc::RasterRef {
+                resource_id,
+                width: w,
+                height: h,
+            },
+        );
+        picture.transform = Transform {
+            a: 1.0 / k,
+            d: 1.0 / k,
+            e: x0,
+            f: y0,
+            ..Default::default()
+        };
+        let new_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index: top_index + 1,
+            node: Box::new(picture),
+        }];
+        cmds.extend(showing.iter().map(|id| Command::RemoveNode { id: *id }));
+        self.apply_labeled(
+            Command::Batch(cmds),
+            Some(if showing.len() == 1 {
+                format!("Turn {name} into a picture")
+            } else {
+                format!("Merge {} layers into a picture", showing.len())
+            }),
+        )?;
+        Ok(new_id)
+    }
+
     /// Combine two or more shape layers into one compound path.
     ///
     /// Operands are taken bottom-to-top in the stack, which is what makes
@@ -11616,6 +11773,159 @@ mod tests {
         );
         assert!(s.trim_page().unwrap());
         assert_eq!(size(&s), (10, 12));
+    }
+
+    #[test]
+    fn layers_merged_into_a_picture_draw_the_page_they_drew() {
+        let srgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let shape = |name: &str, s: VectorShape, x: f32, y: f32, c: AuthoredColor| {
+            let mut n = chitrakar_doc::Node::vector(name, s);
+            n.transform = Transform::translation(x, y);
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(c);
+            }
+            n
+        };
+        let mut session = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        let root = session.document().root();
+        let add = |s: &mut Session, node: chitrakar_doc::Node| {
+            let id = s.document().peek_next_id();
+            let index = s.document().children_of(root).unwrap().len();
+            s.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            id
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 4.0,
+        };
+        add(
+            &mut session,
+            shape("ground", rect(160.0, 120.0), 0.0, 0.0, srgb(0.9, 0.85, 0.7)),
+        );
+        let card = add(
+            &mut session,
+            shape("card", rect(70.0, 50.0), 20.5, 15.25, srgb(0.2, 0.4, 0.8)),
+        );
+        let mut disc = shape(
+            "disc",
+            VectorShape::Ellipse { rx: 18.0, ry: 14.0 },
+            50.0,
+            30.0,
+            srgb(0.9, 0.2, 0.3),
+        );
+        disc.opacity = 0.7;
+        disc.effects = vec![chitrakar_doc::Effect::DropShadow {
+            dx: 5.0,
+            dy: 4.0,
+            blur: 2.0,
+            color: srgb(0.0, 0.0, 0.0),
+            opacity: 0.6,
+        }];
+        let disc = add(&mut session, disc);
+        let words = add(
+            &mut session,
+            chitrakar_doc::Node::text(
+                "words",
+                chitrakar_doc::TextSpec::new("Hi", 20.0, srgb(0.1, 0.1, 0.1)),
+            ),
+        );
+        let page = |s: &Session| chitrakar_render::render(s.document()).unwrap();
+        let before = page(&session);
+        let picture = session.merge_layers(&[card, disc, words]).unwrap();
+        let after = page(&session);
+        let (mut sum, mut worst) = (0.0f32, 0.0f32);
+        for (p, q) in before.pixels.iter().zip(&after.pixels) {
+            let d = (p.r - q.r)
+                .abs()
+                .max((p.g - q.g).abs())
+                .max((p.b - q.b).abs())
+                .max((p.a - q.a).abs());
+            sum += d;
+            worst = worst.max(d);
+        }
+        let mean = sum / before.pixels.len() as f32;
+        assert!(
+            mean < 0.002 && worst < 0.02,
+            "the picture is the page they drew: mean {mean}, worst {worst}"
+        );
+        let kids = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(kids.len(), 2, "the ground and the picture");
+        assert!(matches!(
+            session.document().node(picture).unwrap().kind,
+            NodeKind::Raster(_)
+        ));
+        session.undo().unwrap();
+        assert!(
+            page(&session).pixels == before.pixels,
+            "one undo gives the layers back"
+        );
+
+        // An adjustment merged reaches only what it was merged with: the
+        // ground under them all is no longer inverted, the card still is.
+        let invert = add(
+            &mut session,
+            chitrakar_doc::Node::adjustment(
+                "negative",
+                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+            ),
+        );
+        let card_before = page(&session).get(30, 25);
+        let ground_inverted = page(&session).get(150, 110);
+        session.merge_layers(&[card, invert]).unwrap();
+        let now = page(&session);
+        let near = |a: chitrakar_color::LinearRgba, b: chitrakar_color::LinearRgba| {
+            (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
+        };
+        assert!(
+            near(now.get(30, 25), card_before),
+            "the card is still inverted"
+        );
+        assert!(
+            !near(now.get(150, 110), ground_inverted),
+            "and the ground is not, any more"
+        );
+
+        // A blur merged with a shape keeps the soft edge it spread past
+        // the shape, rather than being cut where the shape ended.
+        let mut s2 = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        let sharp = add(
+            &mut s2,
+            shape("sharp", rect(40.0, 30.0), 60.0, 45.0, srgb(0.1, 0.1, 0.1)),
+        );
+        let soft = add(
+            &mut s2,
+            chitrakar_doc::Node::filter("soft", chitrakar_doc::Filter::GaussianBlur { sigma: 4.0 }),
+        );
+        let blurred = s2.merge_layers(&[sharp, soft]).unwrap();
+        let NodeKind::Raster(r) = &s2.document().node(blurred).unwrap().kind else {
+            panic!("not a picture")
+        };
+        assert!(
+            r.width >= 40 + 2 * 8,
+            "the halo is in the picture: {} wide",
+            r.width
+        );
+        let halo = page(&s2).get(56, 60);
+        assert!(
+            halo.a > 0.05,
+            "four pixels outside the shape, still its blur: {halo:?}"
+        );
+
+        // Nothing showing is nothing to merge; layers of two parents are
+        // not one picture.
+        let hidden = add(&mut session, {
+            let mut n = shape("hidden", rect(5.0, 5.0), 1.0, 1.0, srgb(0.0, 1.0, 0.0));
+            n.visible = false;
+            n
+        });
+        assert!(session.merge_layers(&[hidden]).is_err());
+        assert!(session.merge_layers(&[]).is_err());
     }
 
     #[test]

@@ -7876,6 +7876,23 @@ pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>
     Ok(Some(rgba8))
 }
 
+/// One layer drawn alone onto `dst`, as a thumbnail draws it but at any
+/// transform: `parent` takes the layer's parent space to the surface.
+/// Its own fade, blend, mask and effects come with it; nothing else on
+/// the page does.
+pub fn draw_alone(
+    doc: &Document,
+    id: NodeId,
+    dst: &mut Surface,
+    parent: Transform,
+) -> Result<(), DocError> {
+    let clip = dst.full_clip();
+    if !clone_alone(doc, id, dst, clip, parent)? {
+        render_layer(doc, id, dst, clip, parent, false)?;
+    }
+    Ok(())
+}
+
 /// Paint a clone layer: each stroke lays down what the page already
 /// shows at its own offset, so the picture it puts there is whatever is
 /// there *now* — retouch the source and the clone follows.

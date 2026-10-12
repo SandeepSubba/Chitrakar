@@ -1175,6 +1175,21 @@ without reading anything else.*
   reaches; the crop is the same `ResizeCanvas` the region crop uses,
   one step in the history (`Session::trim_page`, smoke 9o9 — whose first
   draft drew a shape the page's own proportions and so proved nothing).
+- **Merge into a picture.** Layer › Merge into a picture draws the
+  picked layers into one picture layer that takes their place —
+  Photoshop's Merge Layers, and with one layer its Rasterize, so a shape
+  or a text becomes pixels a brush, a clone or a heal can work on
+  (`Session::merge_layers`, `chitrakar_render::draw_alone`). The layers
+  are gathered into a group of their own in a scratch copy of the page,
+  so they clip to and blend with one another as they did and an
+  adjustment among them reaches only them — what merging an adjustment
+  means, and the one way the page can change: the ground under them is
+  no longer adjusted (tested both ways). Drawn at a pixel a page pixel
+  on whole pixels, so the picture's pixels are the drawn ones rather
+  than resampled; the box is what the members reach with their effects,
+  widened by how far a filter among them spreads (leaving that out cuts
+  a merged blur at the shape's edge, which the test catches). A hidden
+  picked layer is left as it was (smoke 9o10).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
