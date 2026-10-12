@@ -2369,12 +2369,24 @@ impl Rng {
                         radius: self.between(0.1, 0.8),
                         softness: self.between(0.1, 1.0),
                     },
-                    _ => Filter::Noise {
-                        amount: self.between(0.05, 0.4),
-                        grain: self.between(0.8, 3.0),
-                        mono: self.chance(2),
-                        seed: self.upto(1 << 16) as u32,
-                    },
+                    // The last slot shared, so the five before it draw as
+                    // they did; a median is one page in four of these.
+                    // It is the CPU's alone, so the pages that hold one
+                    // ask the second renderer to decline them.
+                    _ => {
+                        if self.chance(4) {
+                            Filter::Median {
+                                radius: self.between(0.5, 3.0),
+                            }
+                        } else {
+                            Filter::Noise {
+                                amount: self.between(0.05, 0.4),
+                                grain: self.between(0.8, 3.0),
+                                mono: self.chance(2),
+                                seed: self.upto(1 << 16) as u32,
+                            }
+                        }
+                    }
                 },
             )),
             6 => {

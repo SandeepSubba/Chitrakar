@@ -689,6 +689,13 @@ pub enum Filter {
         radius: f32,
         softness: f32,
     },
+    /// Noise taken out: every channel the middle value of what is around
+    /// it, within `radius` document pixels each way. A median, not an
+    /// average — a speck brighter or darker than everything near it is
+    /// outvoted and goes, where a blur would only spread it, and an edge
+    /// between two flat colours stays an edge, since the middle value
+    /// either side of it is that side's own.
+    Median { radius: f32 },
 }
 
 /// A straight line the user placed to lay work out against. Not artwork —
@@ -1275,6 +1282,7 @@ impl Filter {
             | Filter::Sharpen { .. }
             | Filter::MotionBlur { .. }
             | Filter::Pixelate { .. }
+            | Filter::Median { .. }
             | Filter::Noise { .. }
             | Filter::Vignette { .. } => {}
         }

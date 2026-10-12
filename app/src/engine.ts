@@ -195,7 +195,10 @@ export type Filter =
   | { Noise: { amount: number; grain: number; mono: boolean; seed: number } }
   /** The corners taken down (or brought up), measured from the middle of
    * the page in document units so it sits on the picture. */
-  | { Vignette: { amount: number; radius: number; softness: number } };
+  | { Vignette: { amount: number; radius: number; softness: number } }
+  /** Noise taken out: every channel the middle value within `radius`
+   * document pixels each way, so a speck goes and an edge stays. */
+  | { Median: { radius: number } };
 
 export type MaskKind =
   | { Vector: { shape: VectorShape; transform: Transform } }

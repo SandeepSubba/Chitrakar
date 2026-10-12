@@ -4787,6 +4787,9 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
         Filtering::Pointwise(params, back, [from[0], from[1], third])
     };
     Some(match filter {
+        // A median is a vote over a window, which no pass of quads can
+        // hold: a page with one is the CPU's.
+        F::Median { .. } => return None,
         F::Vignette {
             amount,
             radius,

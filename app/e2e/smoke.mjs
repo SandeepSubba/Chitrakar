@@ -7079,6 +7079,55 @@ assert(
   );
 }
 
+// 9o8. Reduce noise: a median takes a speck out of a flat colour and
+// leaves the edge between two colours where it was, which is what a
+// blur cannot do.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("#303030", 0, 0, 150, 200);
+  await paint("#c0c0c0", 150, 0, 300, 200);
+  await paint("#ffffff", 58, 98, 61, 101);
+  await paint("#000000", 218, 98, 221, 101);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  const speckLight = await canvasPixel(59, 99);
+  const speckDark = await canvasPixel(219, 99);
+  assert(speckLight[0] > 240 && speckDark[0] < 15, `two specks to take out (${speckLight} / ${speckDark})`);
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "median");
+  await page.waitForTimeout(300);
+  await page.locator(".panel ul li", { hasText: "Reduce noise" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Radius", 3);
+  await page.waitForTimeout(400);
+  const [l, d] = [await canvasPixel(59, 99), await canvasPixel(219, 99)];
+  assert(
+    Math.abs(l[0] - 0x30) <= 2 && Math.abs(d[0] - 0xc0) <= 2,
+    `the specks are outvoted by what is round them (${l} / ${d})`,
+  );
+  const [left, right] = [await canvasPixel(147, 60), await canvasPixel(152, 60)];
+  assert(
+    Math.abs(left[0] - 0x30) <= 2 && Math.abs(right[0] - 0xc0) <= 2,
+    `and the edge between the two greys is still an edge (${left} / ${right})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert((await canvasPixel(59, 99))[0] > 240, "undo takes the filter away and the speck is back");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

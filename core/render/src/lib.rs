@@ -17,6 +17,7 @@
 pub mod blur;
 pub mod boolean;
 pub mod fit;
+pub mod median;
 pub mod text;
 pub mod tiles;
 
@@ -749,6 +750,11 @@ pub fn filter_reach(doc: &Document) -> u32 {
             NodeKind::Filter(Filter::Pixelate { size }) => {
                 ((size * max_scale(ancestor_space(doc, *id))).ceil() as u32).saturating_add(1)
             }
+            // The window reaches its radius each way.
+            NodeKind::Filter(Filter::Median { radius }) => {
+                (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
+                    .saturating_add(1)
+            }
             // Half the line each way, since it is centred on the pixel.
             NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -767,7 +773,10 @@ pub fn filter_reach(doc: &Document) -> u32 {
             }
             _ => 0,
         })
-        .sum()
+        // Each reach already stops at the most there is; two that both
+        // did, added plainly, wrapped round to almost nothing — a reach
+        // too short by four billion pixels, or a panic in a debug build.
+        .fold(0u32, u32::saturating_add)
 }
 
 /// Render a document to a new full-size surface.
@@ -7340,6 +7349,19 @@ fn apply_filter(
                 });
             }
         }
+        Filter::Median { radius } => {
+            let r = median_radius(*radius, scale);
+            if r == 0 {
+                return;
+            }
+            let original = blur::snapshot(dst, clip);
+            let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
+            let middles = median::median(&original, w, h, r);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                lerp(o, middles[at], opacity * coverage_at(doc, mask, x, y))
+            });
+        }
         Filter::MotionBlur { distance, degrees } => {
             let original = blur::snapshot(dst, clip);
             let smear = smeared(&original, clip, *distance, *degrees, view);
@@ -7464,6 +7486,18 @@ fn apply_filter(
                 }
             });
         }
+    }
+}
+
+/// How many surface pixels a median reaches each way: its radius in
+/// document pixels at the scale it is drawn, held to 64 — past that a
+/// window is a quarter of a screen and nothing is a speck any more.
+fn median_radius(radius: f32, scale: f32) -> usize {
+    let r = radius * scale;
+    if r.is_finite() {
+        r.round().clamp(0.0, 64.0) as usize
+    } else {
+        0
     }
 }
 
@@ -15436,6 +15470,32 @@ mod tests {
         }
     }
 
+    /// Two filters that each reach as far as there is reach together
+    /// as far as there is — not round past it to almost nothing.
+    #[test]
+    fn two_filters_past_any_reach_reach_as_far_as_there_is() {
+        let mut doc = Document::new(40, 30, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, f) in [
+            Filter::GaussianBlur { sigma: 1e30 },
+            Filter::Sharpen {
+                sigma: 1e30,
+                amount: 1.0,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(Node::filter("far", f)),
+            })
+            .unwrap();
+        }
+        assert_eq!(filter_reach(&doc), u32::MAX);
+    }
+
     /// A posterize holds a channel to evenly spaced steps as the eye
     /// sees them, and a threshold makes every pixel white or black by
     /// the brightness it shows at.
@@ -17252,6 +17312,7 @@ mod tests {
                 },
             ),
             ("blocks one pixel across", Filter::Pixelate { size: 1.0 }),
+            ("a median of no radius", Filter::Median { radius: 0.0 }),
             (
                 "a smear of no distance",
                 Filter::MotionBlur {
@@ -17338,7 +17399,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 22, "everything with a neutral was asked");
+        assert_eq!(checked, 23, "everything with a neutral was asked");
 
         // A gradient map is the one that has to be asked of a grey
         // picture. It replaces every tone by the colour at that tone's
@@ -18565,6 +18626,7 @@ mod tests {
                 },
             ),
             ("a pixelate", Filter::Pixelate { size: 7.0 }),
+            ("a median", Filter::Median { radius: 2.0 }),
             (
                 "a smear",
                 Filter::MotionBlur {

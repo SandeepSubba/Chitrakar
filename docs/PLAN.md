@@ -1143,6 +1143,28 @@ without reading anything else.*
   text with a bold leaning underlined word and on a line set along a
   curve: a mean difference of 0.0007 and no pixel far off; leaving the
   sweep or the lean out each fails it (smoke 9o7).
+- **Reduce noise.** A median filter layer (`Filter::Median`, Filter ›
+  Reduce noise): every channel the middle value within a radius, so a
+  speck is outvoted and goes where a blur would spread it, and an edge
+  between two flat colours stays exactly where it was. Huang's sliding
+  window (`chitrakar_render::median`): a histogram per channel moved a
+  column at a time with a running median, so a radius doubled costs
+  twice rather than four times — the reason it was set aside once, a
+  window scaled with the zoom being a square of the zoom otherwise.
+  Binned in 256 steps of the display encoding by a search among the
+  edges between steps rather than by encoding each value, which is
+  what made it a third of a second for three megapixels at radius 1.
+  Equal to sorting every window on random pictures; its reach is
+  guarded by the region-render audit (breaking it fails there), its
+  zero radius by the neutral-settings audit; the GPU declines a page
+  with one, and the random pages hold it one filter page in four of
+  the last slot (smoke 9o8). Putting it there reshuffled the random
+  pages, and the hostile-number audit found an older defect on a new
+  one: every filter's reach stops at the most there is, but the sum of
+  them was a plain `sum`, so two filters that both reached that far
+  wrapped round to almost nothing — a region render padded by a few
+  pixels where it needed all of them, or a panic in a debug build. It
+  saturates now (`two_filters_past_any_reach_reach_as_far_as_there_is`).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -7835,15 +7857,18 @@ chitrakar/
   stroke-aware bounds — drawn with the pen tool ✅ (click anchors, click the
   first anchor to close as a filled shape, Enter finishes an open stroked
   path, Escape abandons, dashed live preview). Bezier segments and anchor
-  editing pending; gradient fills pending.
+  editing ✅ (the node tool; handles per anchor); gradient fills ✅ — both
+  said "pending" here long after they landed, found by the October 2026
+  audit.
 - Raster: place PNG/JPEG as RasterObject ✅ (content-addressed resource pool,
   pixels embedded as PNGs in .chitra, undoable placement, move + hit test);
-  scale/rotate pending.
+  scale/rotate ✅ (the same handles and rotation knob every layer has).
 - Layer panel: hide ✅, select ✅, delete ✅, reorder ✅ (MoveNode command:
   reorder + reparent with subtree-cycle protection), opacity slider ✅,
-  blend-mode picker ✅; grouping UI pending.
+  blend-mode picker ✅; grouping UI ✅ (Layer › Group and Ungroup, and
+  their keys).
 - Selection ✅ (hit test + move tool with live preview); corner resize
-  handles ✅ (anchored scaling); rotation handles pending.
+  handles ✅ (anchored scaling); rotation handles ✅ (the rotation knob).
 
 ### Phase 2 — Non-destructive power
 - Adjustment layers: brightness/contrast ✅, exposure ✅, hue/saturation ✅

@@ -4293,6 +4293,10 @@ export function App() {
       name: "Pixelate",
       kind: { Filter: { Pixelate: { size: 12 } } },
     },
+    median: {
+      name: "Reduce noise",
+      kind: { Filter: { Median: { radius: 1 } } },
+    },
     motion: {
       name: "Motion Blur",
       kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
@@ -12169,6 +12173,12 @@ function KindProps({
     if ("Pixelate" in filter) {
       return slider("Block size", filter.Pixelate.size, 2, 100, 1, (v) => ({
         Filter: { Pixelate: { size: v } },
+      }));
+    }
+    if ("Median" in filter) {
+      // Whole pixels each way: a window is so many pixels across.
+      return slider("Radius", filter.Median.radius, 1, 20, 1, (v) => ({
+        Filter: { Median: { radius: v } },
       }));
     }
     if ("Noise" in filter) {
