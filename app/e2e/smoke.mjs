@@ -6229,7 +6229,7 @@ assert(
   // The handles are the move tool's own: with a shape tool up, a drag
   // from the picked layer's corner draws rather than resizes it.
   assert(
-    (await page.locator("[data-handle]").count()) === 5,
+    (await page.locator("[data-handle]:not(.side)").count()) === 5,
     "the move tool offers four corners and a knob to turn by",
   );
   await pickTool("Rect");
@@ -7293,6 +7293,136 @@ assert(
   await page.waitForTimeout(400);
   [r, bl] = await tones();
   assert(near(r, [255, 0, 0]) && near(bl, [0, 0, 255]), `undone, the picture is itself (${r}, ${bl})`);
+}
+
+// 9o12. Sides and skew: the middle of a side stretches one way only,
+// and held with Ctrl it slides along itself, leaning the layer. The lean
+// is a number in the panel too, kept apart from the angle.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const k = b.width / 400;
+  const at = (x, y) => [b.x + x * k, b.y + y * k];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#d02020");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const field = async (label) =>
+    Number(await page.locator(`input[aria-label="${label}"]`).inputValue());
+  const box = async () =>
+    Promise.all(["X position", "Y position", "W size", "H size"].map(field));
+  const near = (a, b, tol = 1.5) => Math.abs(a - b) <= tol;
+  assert((await page.locator(".handle.side").count()) === 4, "a handle in the middle of each side");
+  const drag = async (side, dx, dy, mod) => {
+    const h = await page.locator(`.handle.side.${side}`).boundingBox();
+    const [x, y] = [h.x + h.width / 2, h.y + h.height / 2];
+    if (mod) await page.keyboard.down(mod);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx * k, y + dy * k, { steps: 8 });
+    await page.mouse.up();
+    if (mod) await page.keyboard.up(mod);
+    await page.waitForTimeout(300);
+  };
+
+  // The east side out by fifty, and only the width moves — even pulled
+  // off its line diagonally.
+  await drag("e", 50, 30);
+  let [x, y, w, h] = await box();
+  assert(
+    near(x, 100) && near(y, 100) && near(w, 250) && near(h, 100),
+    `the east side stretches the width alone (${x}, ${y}, ${w}, ${h})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  // The north side up: the height, from the bottom.
+  await drag("n", -20, -50);
+  [x, y, w, h] = await box();
+  assert(
+    near(x, 100) && near(y, 50) && near(w, 200) && near(h, 150),
+    `the north side stretches the height, the bottom holding (${x}, ${y}, ${w}, ${h})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // Held with Ctrl, the top slides fifty to the right: the bottom holds,
+  // the box widens by the slide, and the lean is atan(50 / 100).
+  await drag("n", 50, 0, "Control");
+  [x, y, w, h] = await box();
+  const lean = await field("Skew");
+  assert(
+    near(x, 100) && near(y, 100) && near(w, 250) && near(h, 100),
+    `skewed, the top has moved over and the bottom has not (${x}, ${y}, ${w}, ${h})`,
+  );
+  assert(near(lean, 26.6, 0.3) && near(await field("Angle"), 0, 0.05), `a lean of 26.6°, and no turn (${lean})`);
+  const [inLeft, inRight] = await Promise.all([canvasPixel(110, 110), canvasPixel(330, 110)]);
+  assert(
+    inLeft[0] !== 0xd0 && near(inRight[0], 0xd0, 3) && near(inRight[1], 0x20, 3),
+    `the picture leans with the box (${inLeft}, ${inRight})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(near(await field("Skew"), 0, 0.05), "one undo takes the whole drag");
+
+  // Typed: twenty degrees about the box's own middle, and the turn is
+  // kept apart from it — a turn after a lean leaves the lean as it was.
+  const typeInto = async (label, v) => {
+    const input = page.locator(`input[aria-label="${label}"]`);
+    await input.fill(String(v));
+    await input.press("Enter");
+    await page.waitForTimeout(300);
+  };
+  await typeInto("Skew", 20);
+  [x, y, w, h] = await box();
+  assert(
+    near(await field("Skew"), 20, 0.05) && near(x + w / 2, 200) && near(y, 100) && near(h, 100),
+    `twenty degrees, the middle where it was (${x}, ${y}, ${w}, ${h})`,
+  );
+  const lean20 = Math.tan((20 * Math.PI) / 180) * 100;
+  assert(near(w, 200 + lean20), `the box wider by the lean (${w} vs ${200 + lean20})`);
+  await typeInto("Angle", 30);
+  assert(
+    near(await field("Angle"), 30, 0.05) && near(await field("Skew"), 20, 0.05),
+    `turned thirty, the lean is still twenty (${await field("Skew")})`,
+  );
+  await typeInto("Skew", 0);
+  assert(near(await field("Skew"), 0, 0.05) && near(await field("Angle"), 30, 0.05), "and straightened, still turned");
+
+  // Several picked: the box round them stretches them all, each by the
+  // same change. 50..300 wide becomes 50..350, so both double in step:
+  // the first ends at 170, the second runs 230 to 350.
+  await newDocument(400, 300, "rgb");
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#2050d0", 50, 50, 150, 100);
+  await rect("#20a040", 200, 150, 300, 250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").nth(0).click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(200);
+  await drag("e", 50, 0);
+  const [a1, a2, gap, b1, b2] = await Promise.all(
+    [[165, 75], [45, 75], [190, 75], [235, 200], [345, 200]].map(([px, py]) => canvasPixel(px, py)),
+  );
+  assert(
+    near(a1[2], 0xd0, 3) && a2[3] === 0 && gap[3] === 0 && near(b1[1], 0xa0, 3) && near(b2[1], 0xa0, 3),
+    `both stretched by the one box (${a1} | ${a2} | ${gap} | ${b1} | ${b2})`,
+  );
 }
 
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged

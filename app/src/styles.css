@@ -1365,6 +1365,21 @@ body {
   cursor: nwse-resize;
 }
 
+/* The sides' middles: slimmer than a corner, lying along their side. */
+.handle.side.n,
+.handle.side.s {
+  width: 14px;
+  height: 7px;
+  cursor: ns-resize;
+}
+
+.handle.side.e,
+.handle.side.w {
+  width: 7px;
+  height: 14px;
+  cursor: ew-resize;
+}
+
 .workspace {
   display: flex;
   flex: 1;
@@ -2337,6 +2352,15 @@ button.fold:hover {
   .mask-move,
   .grad-handle,
   .grad-stop {
+    width: 22px;
+    height: 22px;
+  }
+
+  /* The sides' slimmer grips too, which out-rank the rule above. */
+  .handle.side.n,
+  .handle.side.s,
+  .handle.side.e,
+  .handle.side.w {
     width: 22px;
     height: 22px;
   }

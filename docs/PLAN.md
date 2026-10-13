@@ -1263,6 +1263,34 @@ without reading anything else.*
     blue one magenta); each output channel keeps its own row and a dot
     marks the changed one; 150% says so; monochrome hides the channel
     picker; undo.
+- **Sides and skew.** The selection box has handles in the middle of
+  each side, not only at its corners. A side stretches the layer along
+  one axis, and only that one, even when dragged off its line; Alt holds
+  the middle, as at a corner.
+  - **Skew.** With Ctrl (⌘) held, a side slides along itself instead,
+    leaning the layer, and the far side stays put. That is Photoshop's
+    free-transform skew, and it never snaps, since a lean has no line to
+    catch. The drag is measured from where it was picked up, so a side
+    taken anywhere along its grip does not jump.
+  - **Several layers.** A box round several picked layers stretches and
+    leans the lot, by the same document-space change put back into each
+    layer's own space.
+  - **Not on frames.** A frame's sides resize it, as its corners do; a
+    frame is not leaned.
+  - **The Skew field** in the geometry row says the lean as a number,
+    positive with the top to the right, as italic leans. A transform is
+    read as a turn, then a lean, then a scale. The lean is what is left
+    of the second axis once the turn is taken out, so typing an angle
+    leaves the lean alone and typing a lean leaves the angle alone.
+    Typing either keeps the middle of the layer's own box where it was,
+    and the lean is held to ±85°.
+  - **Smaller boxes.** A box too small to hold side handles apart from
+    its corners, under 36 screen pixels along a side, shows none.
+  - **Smoke 9o12** covers: a side stretches one axis (the old rule, where
+    a side kept the proportions, fails it); north from the bottom; a
+    Ctrl-drag leans 26.6° with the bottom held and the picture leaning
+    with it; one undo; a typed lean about the middle; a turn keeping the
+    lean; two picked layers stretched by the one box.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

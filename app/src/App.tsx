@@ -530,7 +530,18 @@ function onEighths(
 const HANDLES = ["nw", "ne", "sw", "se"] as const;
 /** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
 const HANDLE_CORNER = [0, 1, 3, 2];
-type Handle = (typeof HANDLES)[number];
+/** The middles of the four sides: each stretches the layer along one
+ * axis, and with Ctrl (⌘ on a Mac) held slides that side along itself
+ * instead, which is a skew. Each sits between the two quad corners named
+ * beside it. */
+const SIDES = ["n", "e", "s", "w"] as const;
+const SIDE_CORNERS: readonly [number, number][] = [
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 0],
+];
+type Handle = (typeof HANDLES)[number] | (typeof SIDES)[number];
 
 /** Default canvas for a new document; any size can be chosen, and an
  * opened file brings its own. */
@@ -774,6 +785,10 @@ interface HandleDrag {
    * space its transform is written in so a document-space scale can be
    * put back into it. */
   many?: { id: NodeId; t0: Transform; p: Transform; pinv: Transform }[];
+  /** Where the drag began, in the space the box is written in: a skew
+   * slides a side by how far the cursor has come from here, so a side
+   * picked up anywhere along its handle does not jump. */
+  start?: [number, number];
 }
 
 /** The same region, carried `dx, dy` across the page — or null for one
@@ -4024,6 +4039,8 @@ export function App() {
         snapY,
         many,
       };
+      handleDragRef.current.start =
+        boxPoint(handleDragRef.current, e) ?? undefined;
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
@@ -4044,13 +4061,38 @@ export function App() {
           ? { background: kind.Artboard.background }
           : undefined,
     };
+    handleDragRef.current.start =
+      boxPoint(handleDragRef.current, e) ?? undefined;
     (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  /** A pointer, in the space a handle drag's box is written in: the
+   * layer's own, or — several picked — the document's. */
+  const boxPoint = (
+    drag: HandleDrag,
+    e: { clientX: number; clientY: number },
+    snapped?: [number, number],
+  ): [number, number] | null => {
+    const [px, py] = snapped ?? docPoint(e);
+    const [dx, dy] = drag.many
+      ? [px, py]
+      : layerPoint({ clientX: px, clientY: py }, drag.id, true);
+    if (drag.many) return [dx, dy];
+    const t = drag.t0;
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return null;
+    const [ux, uy] = [dx - t.e, dy - t.f];
+    return [(t.d * ux - t.c * uy) / det, (t.a * uy - t.b * ux) / det];
   };
 
   const onHandlePointerMove = (e: React.PointerEvent) => {
     const drag = handleDragRef.current;
     if (!drag || !session) return;
     if (e.buttons === 0) return;
+    const side = (SIDES as readonly string[]).includes(drag.corner);
+    // A side held with Ctrl slides along itself: a skew, which has no
+    // line to catch on, so it is the one handle drag that never snaps.
+    const skew = side && (e.ctrlKey || e.metaKey);
     // The corner follows the cursor, so snapping the cursor snaps the
     // corner — done in document space, where the lines are, and before
     // the point is carried into the layer's own space.
@@ -4077,19 +4119,15 @@ export function App() {
     // document space would stretch a rotated layer along the wrong axes.
     // Several picked, and the box is the document's own: the point is
     // already in the space the box is written in.
-    const [dx, dy] = drag.many
-      ? [px, py]
-      : layerPoint({ clientX: px, clientY: py }, drag.id, true);
+    const at = boxPoint(drag, e, [px, py]);
+    if (!at) return;
+    const [lx, ly] = at;
     const t = drag.t0;
-    const det = t.a * t.d - t.b * t.c;
-    if (Math.abs(det) < 1e-9) return;
-    const [ux, uy] = [dx - t.e, dy - t.f];
-    const lx = (t.d * ux - t.c * uy) / det;
-    const ly = (t.a * uy - t.b * ux) / det;
 
     const [x0, y0, x1, y1] = drag.b0;
-    const west = drag.corner === "nw" || drag.corner === "sw";
-    const north = drag.corner === "nw" || drag.corner === "ne";
+    const c = drag.corner;
+    const west = c === "nw" || c === "sw" || c === "w";
+    const north = c === "nw" || c === "ne" || c === "n";
     // What stays put: the far corner, or — with alt — the box's own
     // middle, so a thing keeps its place while it changes size.
     const [fx, fy] = e.altKey
@@ -4121,8 +4159,12 @@ export function App() {
             : (Math.abs(cx - fx) * w0 + Math.abs(cy - fy) * h0) /
               (w0 * w0 + h0 * h0),
       );
-    const free = e.shiftKey;
-    if (drag.frame) {
+    // A side moves one axis and leaves the other be, the way a side
+    // handle does everywhere; only a corner keeps the proportions.
+    const free = e.shiftKey || side;
+    const across = c === "e" || c === "w";
+    const along = c === "n" || c === "s";
+    if (drag.frame && !skew) {
       // The frame becomes the dragged rectangle instead of being scaled
       // into it, and the engine moves what is inside by how each layer is
       // pinned. Its own box always starts at (0, 0), so pulling the west
@@ -4130,48 +4172,59 @@ export function App() {
       // in the frame's transform.
       const s = free ? 0 : locked(lx, ly);
       const grip = e.altKey ? 2.0 : 1.0;
-      const [w, h] = free
+      let [w, h] = free
         ? [span(lx, fx) * grip, span(ly, fy) * grip]
         : [w0 * s * grip, h0 * s * grip];
-      const [ox, oy] = e.altKey
+      if (along) w = x1 - x0;
+      if (across) h = y1 - y0;
+      let [ox, oy] = e.altKey
         ? [fx - w / 2, fy - h / 2]
         : [west ? fx - w : fx, north ? fy - h : fy];
+      if (along) ox = x0;
+      if (across) oy = y0;
       resizeFrame(drag.id, w, h, ox, oy, true);
       return;
     }
-    const s = free ? 0 : locked(lx, ly);
-    const sx = free ? span(lx, fx) / w0 : s;
-    const sy = free ? span(ly, fy) / h0 : s;
+    if (drag.frame) return;
 
-    // T' = T0 . scale(sx, sy) about (fx, fy), composed in local space.
-    const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
+    /** The change, written in the space the box is in. */
+    let M: Transform;
+    if (skew) {
+      // The dragged side slides along itself by however far the cursor
+      // has come; the far side, or the middle with alt, stays.
+      const [sx0, sy0] = drag.start ?? [lx, ly];
+      if (along) {
+        const k = (lx - sx0) / ((north ? y0 : y1) - fy || 1);
+        M = { a: 1, b: 0, c: k, d: 1, e: -k * fy, f: 0 };
+      } else {
+        const k = (ly - sy0) / ((west ? x0 : x1) - fx || 1);
+        M = { a: 1, b: k, c: 0, d: 1, e: 0, f: -k * fx };
+      }
+    } else {
+      const s = free ? 0 : locked(lx, ly);
+      const sx = along ? 1 : free ? span(lx, fx) / w0 : s;
+      const sy = across ? 1 : free ? span(ly, fy) / h0 : s;
+      // A scale (sx, sy) about (fx, fy).
+      M = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * fx, f: (1 - sy) * fy };
+    }
+
     if (drag.many) {
-      // One scale, written in the document, put back into each layer's
-      // own space: T' = P⁻¹ . S . P . T0. That is what carries a scale
+      // One change, written in the document, put back into each layer's
+      // own space: T' = P⁻¹ . M . P . T0. That is what carries a scale
       // of the box round everything into a layer that is turned, or
       // sits inside a group that is.
-      const S: Transform = { a: sx, b: 0, c: 0, d: sy, e: tx, f: ty };
       const cmds = drag.many.map((m) => ({
         SetTransform: {
           id: m.id,
-          transform: composeT(m.pinv, composeT(S, composeT(m.p, m.t0))),
+          transform: composeT(m.pinv, composeT(M, composeT(m.p, m.t0))),
         },
       }));
       preview(cmds.length === 1 ? cmds[0] : { Batch: cmds });
       return;
     }
+    // T' = T0 . M, composed in the layer's own space.
     preview({
-      SetTransform: {
-        id: drag.id,
-        transform: {
-          a: t.a * sx,
-          b: t.b * sx,
-          c: t.c * sy,
-          d: t.d * sy,
-          e: t.a * tx + t.c * ty + t.e,
-          f: t.b * tx + t.d * ty + t.f,
-        },
-      },
+      SetTransform: { id: drag.id, transform: composeT(t, M) },
     });
   };
 
@@ -5435,6 +5488,53 @@ export function App() {
         },
       },
     });
+  };
+
+  /** How far the picked layer's sides lean off its own upright, in
+   * degrees — positive with the top to the right, the way italic
+   * leans. A transform is a turn, then a lean, then a scale — the angle
+   * above is the turn — and the lean is what is left of the second axis
+   * once the turn is taken out: how far it runs along the first,
+   * against how far it runs across it. */
+  const selSkew = (): number => {
+    if (!session || selected === null) return 0;
+    const t = toTransform(session.transform_of(selected));
+    const th = Math.atan2(t.b, t.a);
+    const [cos, sin] = [Math.cos(th), Math.sin(th)];
+    const along = cos * t.c + sin * t.d;
+    const across = -sin * t.c + cos * t.d;
+    if (Math.abs(across) < 1e-9) return 0;
+    // Down the page is +y, so a top that leans right runs back along x.
+    return (Math.atan(-along / across) * 180) / Math.PI;
+  };
+
+  /** Lean the picked layer's sides to an angle, keeping its turn, its
+   * scale and the middle of its box where they are. */
+  const setSkew = (degrees: number) => {
+    if (!session || selected === null) return;
+    const lb = session.local_bounds_of(selected);
+    if (lb.length !== 4) return;
+    const d = Math.max(-85, Math.min(85, degrees));
+    const t = toTransform(session.transform_of(selected));
+    const th = Math.atan2(t.b, t.a);
+    const [cos, sin] = [Math.cos(th), Math.sin(th)];
+    const across = -sin * t.c + cos * t.d;
+    if (Math.abs(across) < 1e-9) return;
+    const along = -across * Math.tan((d * Math.PI) / 180);
+    const next: Transform = {
+      a: t.a,
+      b: t.b,
+      c: cos * along - sin * across,
+      d: sin * along + cos * across,
+      e: 0,
+      f: 0,
+    };
+    if (Math.abs(next.c - t.c) < 1e-9 && Math.abs(next.d - t.d) < 1e-9) return;
+    // The middle of its own box stays where it is on the page.
+    const [mx, my] = [(lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2];
+    next.e = t.a * mx + t.c * my + t.e - (next.a * mx + next.c * my);
+    next.f = t.b * mx + t.d * my + t.f - (next.b * mx + next.d * my);
+    run({ SetTransform: { id: selected, transform: next } });
   };
 
   /** Gradient geometry on the canvas: the ends of a linear ramp, the centre
@@ -9446,6 +9546,26 @@ export function App() {
                     onPointerUp={onHandlePointerUp}
                   />
                 ))}
+              {/* The sides' middles: one axis at a time, or with Ctrl a
+                  skew. Left off a box too small to hold them apart from
+                  its corners, where they would only be in the way. */}
+              {grabbable &&
+                SIDES.map((side, i) => {
+                  const [p, q] = SIDE_CORNERS[i].map((k) => selQuad![k]);
+                  if (Math.hypot(q[0] - p[0], q[1] - p[1]) < 36) return null;
+                  return (
+                    <div
+                      key={side}
+                      className={`handle side ${side}`}
+                      data-handle={side}
+                      title="Stretch (hold Ctrl to skew)"
+                      style={{ left: (p[0] + q[0]) / 2, top: (p[1] + q[1]) / 2 }}
+                      onPointerDown={(e) => onHandlePointerDown(e, side)}
+                      onPointerMove={onHandlePointerMove}
+                      onPointerUp={onHandlePointerUp}
+                    />
+                  );
+                })}
             </>
           )}
         </main>
@@ -9777,6 +9897,28 @@ export function App() {
                       }}
                       aria-label="Angle"
                       title="Degrees clockwise"
+                    />
+                  </label>
+                  {/* The lean, said as a number: how far the layer's
+                      sides lean off its own upright, which a side held
+                      with Ctrl drags by eye. */}
+                  <label key="skew">
+                    Sk
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`k${Math.round(selSkew() * 10)}`}
+                      defaultValue={Math.round(selSkew() * 10) / 10}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      onBlur={(e) => {
+                        const v = Number(e.currentTarget.value);
+                        if (Number.isFinite(v)) setSkew(v);
+                      }}
+                      aria-label="Skew"
+                      title="Degrees the sides lean, from -85 to 85"
                     />
                   </label>
                 </div>
