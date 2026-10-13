@@ -682,7 +682,7 @@ fn fs_blend(in: ImageOut) -> @location(0) vec4f {
 // linear light and some on the values a device shows, and which is which
 // is a decision that belongs to the adjustment rather than to the
 // renderer drawing it.
-fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
+fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
     switch kind {
         // Exposure: stops, which is a gain.
         case 1: {
@@ -784,6 +784,16 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, c: vec3f) -> vec3f {
                 return vec3f(1.0);
             }
             return vec3f(0.0);
+        }
+        // Channel mixer: each channel made again from all three, in light,
+        // by the rows the CPU folded and held (`channel_mix`). Nine
+        // numbers, row by row across `p.yzw`, `q` and `e.xy`; one with a
+        // constant to add has no room left here and stays the CPU's.
+        case 22: {
+            let r = dot(vec3f(p.y, p.z, p.w), c);
+            let g = dot(vec3f(q.x, q.y, q.z), c);
+            let b = dot(vec3f(q.w, e.x, e.y), c);
+            return max(vec3f(r, g, b), vec3f(0.0));
         }
         default: {
             return c;
@@ -972,7 +982,7 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // Straight alpha in, premultiplied out, which is where the
     // adjustments are stated.
     let straight = was.rgb / was.a;
-    var out = adjusted(kind, in.params, in.grad, straight);
+    var out = adjusted(kind, in.params, in.grad, in.extra, straight);
     if kind >= 10 && kind < 14 {
         out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
     }

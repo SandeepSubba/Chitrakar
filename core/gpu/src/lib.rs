@@ -4647,6 +4647,27 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             [21.0, chitrakar_render::threshold_level(*level), 0.0, 0.0],
             [0.0; 4],
         ),
+        A::ChannelMixer {
+            red,
+            green,
+            blue,
+            constant,
+            monochrome,
+        } => {
+            let (m, k) = chitrakar_render::channel_mix(*red, *green, *blue, *constant, *monochrome);
+            // Nine numbers fill the quad; a constant would be a tenth to
+            // twelfth, and is left to the CPU rather than rounded into a
+            // table.
+            if k != [0.0; 3] {
+                return None;
+            }
+            Adjusting {
+                params: [22.0, m[0][0], m[0][1], m[0][2]],
+                grad: [m[1][0], m[1][1], m[1][2], m[2][0]],
+                extra: [m[2][1], m[2][2], 0.0],
+                table: None,
+            }
+        }
         A::ShadowsHighlights {
             shadows,
             highlights,
@@ -9025,6 +9046,20 @@ mod tests {
             },
             A::Posterize { levels: 4.0 },
             A::Threshold { level: 0.5 },
+            A::ChannelMixer {
+                red: [0.4, 0.8, -0.2],
+                green: [0.1, 0.7, 0.2],
+                blue: [0.0, -0.3, 1.3],
+                constant: [0.0; 3],
+                monochrome: false,
+            },
+            A::ChannelMixer {
+                red: [0.3, 0.9, -0.2],
+                green: [1.0; 3],
+                blue: [1.0; 3],
+                constant: [0.0; 3],
+                monochrome: true,
+            },
         ];
         for adj in known {
             let mut doc = Document::new(60, 40, ColorMode::Rgb);
@@ -9101,6 +9136,28 @@ mod tests {
                 moved(30, 30)
             );
         }
+
+        // A channel mixer with a constant to add has no room left on the
+        // quad: it is handed back rather than drawn short of it.
+        let mut mixed = Document::new(20, 20, ColorMode::Rgb);
+        let root = mixed.root();
+        mixed
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "mix",
+                    A::ChannelMixer {
+                        red: [1.0, 0.0, 0.0],
+                        green: [0.0, 1.0, 0.0],
+                        blue: [0.0, 0.0, 1.0],
+                        constant: [0.0, 0.1, 0.0],
+                        monochrome: false,
+                    },
+                )),
+            })
+            .unwrap();
+        assert!(!GpuRenderer::can_render(&mixed), "a mixer with a constant");
 
         // An invert over a page that is above white in places. What is
         // past the end of the scale a device shows cannot be turned inside

@@ -7206,6 +7206,95 @@ assert(
   assert((await page.locator(".panel ul li").count()) === 2, "one undo gives the shapes back");
 }
 
+// 9o11. Channel mixer: each channel made again from all three. Red
+// taken from the blue instead turns a red patch black and a blue one
+// magenta; a row that adds to more than a hundred says so; monochrome
+// is one grey channel, mixed by the red row, in all three.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await paint("#ff0000", 20, 20, 100, 120);
+  await paint("#0000ff", 110, 20, 190, 120);
+  await paint("#808080", 200, 20, 280, 120);
+  const tones = async () => Promise.all([60, 150, 240].map((x) => canvasPixel(x, 70)));
+  const near = (p, want) => p.slice(0, 3).every((v, i) => Math.abs(v - want[i]) <= 2);
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "channel-mixer");
+  await page.waitForTimeout(300);
+  let [r, bl, g] = await tones();
+  assert(
+    near(r, [255, 0, 0]) && near(bl, [0, 0, 255]) && near(g, [128, 128, 128]),
+    `a new mixer is the identity (${r}, ${bl}, ${g})`,
+  );
+  await page.locator(".panel ul li", { hasText: "Channel mixer" }).click();
+  await page.waitForTimeout(200);
+  const total = () => page.locator('[aria-label="Row total"]');
+  assert(
+    (await total().textContent()).includes("100%") &&
+      !(await total().getAttribute("class")).includes("off"),
+    "each row adds to a hundred, and says so quietly",
+  );
+  await setSlider("From red", 0);
+  await setSlider("From blue", 1);
+  await page.waitForTimeout(300);
+  [r, bl, g] = await tones();
+  assert(
+    near(r, [0, 0, 0]) && near(bl, [255, 0, 255]) && near(g, [128, 128, 128]),
+    `red made from the blue: the red patch goes black, the blue one magenta, grey stays grey (${r}, ${bl}, ${g})`,
+  );
+  // The green channel's own row, untouched by what was done to red's.
+  await page.locator('[aria-label="Green out"]').click();
+  await page.waitForTimeout(150);
+  assert(
+    Number(await page.locator('input[aria-label="From green"]').inputValue()) === 1 &&
+      Number(await page.locator('input[aria-label="From red"]').inputValue()) === 0,
+    "each output channel has its own row",
+  );
+  assert(
+    (await page.locator('[aria-label="Red out"]').textContent()).includes("•") &&
+      !(await page.locator('[aria-label="Green out"]').textContent()).includes("•"),
+    "a dot on the channel that has been changed",
+  );
+  await setSlider("From green", 1.5);
+  await page.waitForTimeout(200);
+  assert(
+    (await total().textContent()).includes("150%") &&
+      (await total().getAttribute("class")).includes("off"),
+    `a row past a hundred brightens its channel, and says so (${await total().textContent()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+
+  // Monochrome: the red row — nothing of the red, all of the blue —
+  // in every channel.
+  await page.locator('input[aria-label="Monochrome"]').check();
+  await page.waitForTimeout(300);
+  [r, bl, g] = await tones();
+  assert(
+    near(r, [0, 0, 0]) && near(bl, [255, 255, 255]) && near(g, [128, 128, 128]),
+    `monochrome is the red row's mix, grey in all three (${r}, ${bl}, ${g})`,
+  );
+  assert(
+    (await page.locator('[aria-label="Output channel"]').count()) === 0,
+    "with one grey channel there is no channel to pick",
+  );
+  for (let i = 0; i < 4; i++) await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  [r, bl] = await tones();
+  assert(near(r, [255, 0, 0]) && near(bl, [0, 0, 255]), `undone, the picture is itself (${r}, ${bl})`);
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

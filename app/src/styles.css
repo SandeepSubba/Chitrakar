@@ -2150,6 +2150,16 @@ button.fold:hover {
   border-color: currentColor;
   background: color-mix(in srgb, currentColor 14%, transparent);
 }
+/* What a channel mixer's row adds to: muted at the picture's own
+   brightness, in the note colour when the channel is brighter or darker. */
+.mixer-total {
+  margin: 2px 0 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.mixer-total.off {
+  color: var(--note);
+}
 /* The channels not being drawn on, behind the one that is. */
 .curve-editor .line.ghost {
   opacity: 0.35;

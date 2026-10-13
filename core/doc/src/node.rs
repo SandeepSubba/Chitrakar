@@ -621,6 +621,33 @@ pub enum Adjustment {
     Threshold {
         level: f32,
     },
+    /// Each channel made again from all three: the red that comes out is
+    /// `red[0]` of the red that went in, `red[1]` of the green and
+    /// `red[2]` of the blue, and so for the other two, with `constant`
+    /// added to each after. The identity is each channel taking all of
+    /// itself and none of the others. A channel swapped for another, a
+    /// cast taken out by borrowing from the channel that has too much,
+    /// an infrared look from a green that comes out as red: all of them
+    /// are this one adjustment, which is why it is Photoshop's oldest.
+    ///
+    /// In light, like the black-and-white mix it is the general case of:
+    /// that is where a channel is an amount of something that can be
+    /// shared out. The weights are *not* normalized here, unlike that
+    /// mix: a row that adds to more than one brightens on purpose, and
+    /// the panel says what each row adds to.
+    ///
+    /// `monochrome` makes all three channels the red row's answer — one
+    /// grey channel mixed by hand, with a constant the black-and-white
+    /// mix does not have.
+    ChannelMixer {
+        red: [f32; 3],
+        green: [f32; 3],
+        blue: [f32; 3],
+        #[serde(default)]
+        constant: [f32; 3],
+        #[serde(default)]
+        monochrome: bool,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709
@@ -1241,7 +1268,7 @@ pub struct Mask {
 impl Adjustment {
     /// Every colour written inside an adjustment.
     ///
-    /// Fourteen of the fifteen are read as numbers. The gradient map is
+    /// Fifteen of the sixteen are read as numbers. The gradient map is
     /// not: it *is* a ramp of colours, and one of them can stand for a
     /// palette entry like any other. Matched kind by kind rather than
     /// with a catch-all, so that a new adjustment holding a colour does
@@ -1267,7 +1294,8 @@ impl Adjustment {
             | Adjustment::ShadowsHighlights { .. }
             | Adjustment::ColorBalance { .. }
             | Adjustment::Posterize { .. }
-            | Adjustment::Threshold { .. } => {}
+            | Adjustment::Threshold { .. }
+            | Adjustment::ChannelMixer { .. } => {}
         }
     }
 }

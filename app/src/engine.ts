@@ -108,6 +108,19 @@ export type Adjustment =
   /** White or black by the brightness a pixel shows at, against
    * `level` (0..=1). */
   | { Threshold: { level: number } }
+  /** Each channel made again from all three, in light: `red` is how
+   * much of the red, green and blue that went in makes the red that
+   * comes out (each -2..=2, not normalized), with `constant` added
+   * after (-1..=1). Monochrome makes every channel the red row's. */
+  | {
+      ChannelMixer: {
+        red: [number, number, number];
+        green: [number, number, number];
+        blue: [number, number, number];
+        constant: [number, number, number];
+        monochrome: boolean;
+      };
+    }
   /** Hue, saturation and lightness asked of one band of colour at a
    * time — six triples in red, yellow, green, cyan, blue, magenta
    * order, each a hue shift, a saturation change and a lightness

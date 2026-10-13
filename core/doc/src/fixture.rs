@@ -2301,7 +2301,7 @@ impl Rng {
                     // The last of the twelve is shared four ways, so the
                     // later kinds come in without moving what the earlier
                     // eleven draw on every page that already has them.
-                    _ => match self.upto(4) {
+                    _ => match self.upto(5) {
                         0 => Adjustment::ShadowsHighlights {
                             shadows: self.between(-0.8, 0.8),
                             highlights: self.between(-0.8, 0.8),
@@ -2316,6 +2316,36 @@ impl Rng {
                         2 => Adjustment::Threshold {
                             level: self.between(0.2, 0.8),
                         },
+                        // Near the identity, every weight moved: a mix
+                        // that reaches across channels both ways, and now
+                        // and then a constant, which the GPU hands back.
+                        3 => {
+                            let mut row = |own: usize| {
+                                let mut r = [0.0f32; 3];
+                                for (j, w) in r.iter_mut().enumerate() {
+                                    let base = if j == own { 1.0 } else { 0.0 };
+                                    *w = base + self.between(-0.5, 0.5);
+                                }
+                                r
+                            };
+                            let (red, green, blue) = (row(0), row(1), row(2));
+                            let constant = if self.chance(3) {
+                                [
+                                    self.between(-0.2, 0.2),
+                                    self.between(-0.2, 0.2),
+                                    self.between(-0.2, 0.2),
+                                ]
+                            } else {
+                                [0.0; 3]
+                            };
+                            Adjustment::ChannelMixer {
+                                red,
+                                green,
+                                blue,
+                                constant,
+                                monochrome: self.chance(4),
+                            }
+                        }
                         _ => {
                             let mut three = || {
                                 [

@@ -4291,6 +4291,20 @@ export function App() {
         },
       },
     },
+    "channel-mixer": {
+      name: "Channel mixer",
+      kind: {
+        Adjustment: {
+          ChannelMixer: {
+            red: [1, 0, 0],
+            green: [0, 1, 0],
+            blue: [0, 0, 1],
+            constant: [0, 0, 0],
+            monochrome: false,
+          },
+        },
+      },
+    },
     invert: {
       name: "Invert",
       kind: { Adjustment: { Invert: { amount: 1 } } },
@@ -11874,6 +11888,8 @@ function KindProps({
   const [band, setBand] = useState(0);
   // And which range of tone, when the panel is showing one of those.
   const [range, setRange] = useState(1);
+  // And which channel comes out, in a channel mixer.
+  const [output, setOutput] = useState(0);
   if (typeof kind !== "object") return null;
 
   const slider = (
@@ -12063,6 +12079,72 @@ function KindProps({
               aria-label="Keep brightness"
             />
             Keep brightness
+          </label>
+        </>
+      );
+    }
+    if ("ChannelMixer" in adj) {
+      const p = adj.ChannelMixer;
+      // Monochrome is one grey channel, mixed by the red row, so there
+      // is nothing to pick between.
+      const out = p.monochrome ? 0 : output;
+      const keys = ["red", "green", "blue"] as const;
+      const row = p[keys[out]] ?? [0, 0, 0];
+      const constant = p.constant ?? [0, 0, 0];
+      const setRow = (k: number, v: number): NodeKind => {
+        const next: [number, number, number] = [...row];
+        next[k] = v;
+        return wrap({ ChannelMixer: { ...p, [keys[out]]: next } });
+      };
+      const setConstant = (v: number): NodeKind => {
+        const next: [number, number, number] = [...constant];
+        next[out] = v;
+        return wrap({ ChannelMixer: { ...p, constant: next } });
+      };
+      const own = (i: number) => {
+        const r = p[keys[i]] ?? [0, 0, 0];
+        return r.some((v, j) => Math.abs(v - (j === i ? 1 : 0)) > 1e-6) ||
+          Math.abs(constant[i] ?? 0) > 1e-6;
+      };
+      // Not normalized, so what a row adds to is what it does to the
+      // brightness of its channel: a hundred is the picture's own.
+      const total = Math.round((row[0] + row[1] + row[2]) * 100);
+      return (
+        <>
+          {!p.monochrome && (
+            <div className="curve-channels" role="group" aria-label="Output channel">
+              {(["Red", "Green", "Blue"] as const).map((name, i) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={i === out ? "active" : ""}
+                  aria-pressed={i === out}
+                  aria-label={`${name} out`}
+                  onClick={() => setOutput(i)}
+                >
+                  {name}
+                  {own(i) ? "•" : ""}
+                </button>
+              ))}
+            </div>
+          )}
+          {slider("From red", row[0], -2, 2, 0.01, (v) => setRow(0, v))}
+          {slider("From green", row[1], -2, 2, 0.01, (v) => setRow(1, v))}
+          {slider("From blue", row[2], -2, 2, 0.01, (v) => setRow(2, v))}
+          {slider("Constant", constant[out] ?? 0, -1, 1, 0.01, (v) => setConstant(v))}
+          <p className={`mixer-total${total === 100 ? "" : " off"}`} aria-label="Row total">
+            Adds to {total}%
+          </p>
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.monochrome}
+              onChange={(e) =>
+                onEdit(wrap({ ChannelMixer: { ...p, monochrome: e.target.checked } }), false)
+              }
+              aria-label="Monochrome"
+            />
+            Monochrome
           </label>
         </>
       );

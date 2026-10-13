@@ -1241,6 +1241,28 @@ without reading anything else.*
   - **Why it is off by default.** It stays off until it has been timed
     in a real shell on a real card. This container has neither, and
     the IPC copy of a frame is the cost nobody has measured.
+- **Channel mixer.** Layer › Add adjustment › Channel mixer makes each
+  channel again from all three: the red that comes out is so much of the
+  red, the green and the blue that went in, plus a constant
+  (`Adjustment::ChannelMixer`, `chitrakar_render::channel_mix`).
+  - **In light**, like the black-and-white mix it generalizes, and *not*
+    normalized: a row that adds to more than a hundred brightens its
+    channel on purpose. The panel says what the row adds to, in the
+    note colour when that is not a hundred. Weights are held to ±200%
+    and constants to ±100%, as Photoshop holds them.
+  - **Monochrome** is one grey channel mixed by the red row, constant
+    included. It is folded into the matrix (every row the red one), so
+    both renderers mix by the same nine numbers.
+  - **The GPU** draws it as kind 22, with nine numbers across the quad's
+    ten free slots. A mixer with a constant would need twelve, so it is
+    handed back to the processor rather than rounded through an f16
+    table (tested).
+  - **Tests.** The random pages hold it near the identity, with every
+    weight moved, sometimes monochrome and sometimes with a constant.
+    Smoke 9o11 covers: red made from the blue (a red patch goes black, a
+    blue one magenta); each output channel keeps its own row and a dot
+    marks the changed one; 150% says so; monochrome hides the channel
+    picker; undo.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

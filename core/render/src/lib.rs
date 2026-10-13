@@ -9258,6 +9258,50 @@ pub fn posterize_steps(levels: f32) -> f32 {
     }
 }
 
+/// A channel mixer as the rows it is applied by, and what is added
+/// after: monochrome folded in (every row the red one), each weight held
+/// to -2..=2 and each constant to -1..=1 — Photoshop's ±200% and ±100%
+/// — and a number that is no number read as what the identity has
+/// there. Both renderers mix by this, so they mix by the same numbers.
+pub fn channel_mix(
+    red: [f32; 3],
+    green: [f32; 3],
+    blue: [f32; 3],
+    constant: [f32; 3],
+    monochrome: bool,
+) -> ([[f32; 3]; 3], [f32; 3]) {
+    let rows = if monochrome {
+        [red, red, red]
+    } else {
+        [red, green, blue]
+    };
+    let mut m = [[0.0; 3]; 3];
+    for (i, row) in rows.iter().enumerate() {
+        for (j, w) in row.iter().enumerate() {
+            let same = if monochrome { 0 } else { i };
+            let identity = if j == same { 1.0 } else { 0.0 };
+            m[i][j] = if w.is_finite() {
+                w.clamp(-2.0, 2.0)
+            } else {
+                identity
+            };
+        }
+    }
+    let k = if monochrome {
+        [constant[0]; 3]
+    } else {
+        constant
+    };
+    let k = k.map(|c| {
+        if c.is_finite() {
+            c.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    });
+    (m, k)
+}
+
 /// The brightness a threshold turns white at, held to 0..=1; a number
 /// that is no number is the middle.
 pub fn threshold_level(level: f32) -> f32 {
@@ -9590,6 +9634,19 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 chitrakar_color::srgb_to_linear((s * steps).round() / steps)
             };
             (f(r), f(g), f(b))
+        }
+        Adjustment::ChannelMixer {
+            red,
+            green,
+            blue,
+            constant,
+            monochrome,
+        } => {
+            // In light, where a channel is an amount that can be shared
+            // out; nothing comes out below black.
+            let (m, k) = channel_mix(*red, *green, *blue, *constant, *monochrome);
+            let f = |row: [f32; 3], c: f32| (row[0] * r + row[1] * g + row[2] * b + c).max(0.0);
+            (f(m[0], k[0]), f(m[1], k[1]), f(m[2], k[2]))
         }
         Adjustment::Threshold { level } => {
             // The brightness the pixel shows at, against the level: the
@@ -15511,6 +15568,94 @@ mod tests {
             .unwrap();
         }
         assert_eq!(filter_reach(&doc), u32::MAX);
+    }
+
+    /// A channel mixer makes each channel again from all three, in
+    /// light: the identity leaves a colour alone, a swap swaps, a row
+    /// that adds to more than one brightens, monochrome is the red row's
+    /// answer in all three, and what is out of range is held.
+    #[test]
+    fn a_channel_mixer_makes_each_channel_from_all_three() {
+        let px = |r: f32, g: f32, b: f32| LinearRgba { r, g, b, a: 1.0 };
+        let mix = |red: [f32; 3], green: [f32; 3], blue: [f32; 3], k: [f32; 3], mono: bool| {
+            Adjustment::ChannelMixer {
+                red,
+                green,
+                blue,
+                constant: k,
+                monochrome: mono,
+            }
+        };
+        let of = |adj: &Adjustment, p: LinearRgba| {
+            let o = apply_adjustment(adj, None, p);
+            [o.r, o.g, o.b]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        let c = px(0.6, 0.25, 0.1);
+        let identity = mix(
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0; 3],
+            false,
+        );
+        assert!(near(of(&identity, c), [0.6, 0.25, 0.1]));
+        // Red and blue traded.
+        let swap = mix(
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0; 3],
+            false,
+        );
+        assert!(near(of(&swap, c), [0.1, 0.25, 0.6]), "{:?}", of(&swap, c));
+        // In light: half the red and half the green of these is 0.425,
+        // not what halving the shown values would come to.
+        let half = mix(
+            [0.5, 0.5, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0; 3],
+            false,
+        );
+        assert!((of(&half, c)[0] - 0.425).abs() < 1e-5);
+        // Not normalized: a row that adds to two doubles.
+        let double = mix(
+            [2.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0; 3],
+            false,
+        );
+        assert!((of(&double, c)[0] - 1.2).abs() < 1e-5);
+        // A constant is added after, and nothing comes out below black.
+        let lifted = mix(
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.1, -0.5, 0.0],
+            false,
+        );
+        assert!(
+            near(of(&lifted, c), [0.7, 0.0, 0.1]),
+            "{:?}",
+            of(&lifted, c)
+        );
+        // Monochrome: the red row's answer, constant and all, in every
+        // channel — whatever the other two rows say.
+        let mono = mix([0.2, 0.7, 0.1], [9.0; 3], [-9.0; 3], [0.05, 0.9, 0.9], true);
+        let g = 0.2 * 0.6 + 0.7 * 0.25 + 0.1 * 0.1 + 0.05;
+        assert!(near(of(&mono, c), [g, g, g]), "{:?}", of(&mono, c));
+        // Held to ±2 and ±1, and a number that is no number reads as
+        // the identity's.
+        let wild = mix(
+            [50.0, f32::NAN, 0.0],
+            [0.0, f32::INFINITY, 0.0],
+            [0.0, 0.0, 1.0],
+            [f32::NAN, 0.0, 9.0],
+            false,
+        );
+        assert!(near(of(&wild, c), [1.2, 0.25, 1.1]), "{:?}", of(&wild, c));
     }
 
     /// A posterize holds a channel to evenly spaced steps as the eye
