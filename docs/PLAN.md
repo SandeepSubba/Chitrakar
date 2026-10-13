@@ -1004,6 +1004,15 @@ without reading anything else.*
   door is exercised too: none fatal
   (`a_number_past_any_drawing_is_refused_before_the_reader_sees_it`,
   `a_drawing_scaled_past_reason_comes_in_without_stopping_anything`).
+- **usvg 0.48, taken (October 2026).** The call below was made: the
+  reader is 0.48.1 (resvg, a test dependency, with it). Nothing in the
+  engine changed to take it — `Place::text` had already made the
+  importer right under both — and every SVG test held, the 400-page
+  round trip and the hostile-number sweep among them. The WebAssembly
+  measured 2.37 MB compressed before and 2.77 MB after (+403 KB, as
+  first measured); `past_reason` stays at the door, since a reader's
+  fixes are no reason to hand it numbers past any drawing. The record of
+  the first trial, as it was written:
 - **usvg 0.48, tried and measured, not taken (yet).** It mends several
   of the reader's own crashes at the source (bounding boxes past the
   integer range, non-finite values, `feComposite`), fixes text advances

@@ -21,7 +21,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tiff = "0.9"
 # SVG import. Default features pull in system font discovery, which
 # wasm32 has no filesystem for; text needs only the bundled face.
-usvg = { version = "0.45", default-features = false, features = ["text"] }
+usvg = { version = "0.48", default-features = false, features = ["text"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
@@ -30,4 +30,4 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 # where it is added rather than where it is missed.
 chitrakar-doc = { workspace = true, features = ["fixture"] }
 ab_glyph = "0.2"
-resvg = { version = "0.45", default-features = false, features = ["raster-images", "text"] }
+resvg = { version = "0.48", default-features = false, features = ["raster-images", "text"] }
