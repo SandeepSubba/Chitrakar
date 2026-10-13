@@ -1210,6 +1210,7 @@ impl Session {
                 resource_id,
                 width: w,
                 height: h,
+                corners: None,
             },
         );
         picture.transform = Transform {
@@ -2467,6 +2468,49 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// A picture's four corners in its own space — top left, top right,
+    /// bottom right, bottom left — and whether any of them has been
+    /// moved off its rectangle. `None` for a layer that is not a picture.
+    pub fn raster_corners(&self, id: NodeId) -> Option<([[f32; 2]; 4], bool)> {
+        match &self.doc.node(id).ok()?.kind {
+            NodeKind::Raster(r) => Some((r.quad(), r.projective().is_some())),
+            _ => None,
+        }
+    }
+
+    /// The one command that puts a picture's corners where `corners`
+    /// says — or, given `None`, back on its rectangle — as JSON, so a
+    /// corner dragged on the canvas can preview it every move and let go
+    /// of it as one entry. Four points that make no convex quad are
+    /// refused: there is no straight-lined way to lay a picture on them,
+    /// and a drag that crosses one is held at the last quad that was.
+    pub fn corners_command(
+        &self,
+        id: NodeId,
+        corners: Option<[[f32; 2]; 4]>,
+    ) -> Result<String, EngineError> {
+        let NodeKind::Raster(r) = &self.doc.node(id)?.kind else {
+            return Err(EngineError::BadCommand(
+                "that layer is not a picture".into(),
+            ));
+        };
+        if let Some(q) = corners {
+            if !chitrakar_doc::convex(q) {
+                return Err(EngineError::BadCommand(
+                    "those corners do not make a quad a picture can lie on".into(),
+                ));
+            }
+        }
+        let cmd = Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Raster(chitrakar_doc::RasterRef {
+                corners,
+                ..r.clone()
+            })),
+        };
+        serde_json::to_string(&cmd).map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
     /// The one command that gives a frame a new size and moves what is
@@ -6623,6 +6667,7 @@ impl Session {
                 resource_id,
                 width,
                 height,
+                corners: None,
             },
         );
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
@@ -11783,6 +11828,71 @@ mod tests {
         assert_eq!(size(&s), (10, 12));
     }
 
+    /// A picture's corners are read whole, moved by one command that
+    /// undoes in one step, refused where they would cross, and put back
+    /// on the rectangle by the same command given nothing.
+    #[test]
+    fn a_picture_s_corners_move_by_one_command() {
+        let mut session = Session::new(80, 60, chitrakar_color::ColorMode::Rgb);
+        // Something on the page first: a picture placed on an empty one
+        // brings the page to its own size.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::vector(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 4.0,
+                        height: 4.0,
+                        radius: 0.0,
+                    },
+                )),
+            })
+            .unwrap();
+        let png = chitrakar_codecs::encode_png(20, 10, &[40u8, 90, 200, 255].repeat(200)).unwrap();
+        let id = session.place_image(&png, "sign").unwrap();
+        // Placed at the page's top left, so its own space is the page's.
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::default(),
+            })
+            .unwrap();
+        let (quad, moved) = session.raster_corners(id).unwrap();
+        assert_eq!(quad, [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]]);
+        assert!(!moved);
+        let trapezoid = [[0.0, 0.0], [40.0, 0.0], [30.0, 20.0], [10.0, 20.0]];
+        let cmd: Command =
+            serde_json::from_str(&session.corners_command(id, Some(trapezoid)).unwrap()).unwrap();
+        session.apply(cmd).unwrap();
+        assert_eq!(session.raster_corners(id).unwrap(), (trapezoid, true));
+        assert_eq!(
+            chitrakar_render::node_bounds(session.document(), id).unwrap(),
+            chitrakar_render::Bounds::Rect(0.0, 0.0, 40.0, 20.0)
+        );
+        // Drawn through them: the far corner of the trapezoid is the
+        // picture's, where the rectangle had nothing.
+        let frame = chitrakar_render::render(session.document()).unwrap();
+        assert!(frame.get(35, 2).a > 0.9 && frame.get(2, 18).a < 1e-6);
+        session.undo().unwrap();
+        assert!(!session.raster_corners(id).unwrap().1);
+        session.redo().unwrap();
+        // A bow tie is refused, and so is a layer that is not a picture.
+        let crossed = [[0.0, 0.0], [40.0, 0.0], [10.0, 20.0], [30.0, 20.0]];
+        assert!(session.corners_command(id, Some(crossed)).is_err());
+        assert!(session
+            .corners_command(session.document().root(), None)
+            .is_err());
+        assert!(session.raster_corners(session.document().root()).is_none());
+        // Nothing puts them back.
+        let cmd: Command =
+            serde_json::from_str(&session.corners_command(id, None).unwrap()).unwrap();
+        session.apply(cmd).unwrap();
+        assert_eq!(session.raster_corners(id).unwrap(), (quad, false));
+    }
+
     #[test]
     fn layers_merged_into_a_picture_draw_the_page_they_drew() {
         let srgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
@@ -14487,6 +14597,7 @@ mod tests {
                 resource_id,
                 width: iw,
                 height: ih,
+                corners: None,
             },
         );
         let photo = session.doc.peek_next_id();
@@ -14579,6 +14690,7 @@ mod tests {
                         resource_id,
                         width: iw,
                         height: ih,
+                        corners: None,
                     },
                 )),
             })

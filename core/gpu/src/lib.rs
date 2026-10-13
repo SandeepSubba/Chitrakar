@@ -3186,6 +3186,12 @@ fn one(
             if res.width > MAX_TEXTURE || res.height > MAX_TEXTURE {
                 return None;
             }
+            // A picture with its corners moved is drawn through a
+            // projective map, which the quads here do not carry: the
+            // CPU's.
+            if raster.projective().is_some() {
+                return None;
+            }
             // Shrinking is where the two renderers part: the CPU box-
             // filters the texels a pixel covers, and bilinear sampling
             // would alias. Hand the page over rather than draw it
@@ -7200,6 +7206,7 @@ mod tests {
                     resource_id: id.clone(),
                     width: 2,
                     height: 2,
+                    corners: None,
                 },
             )),
         })
@@ -7251,6 +7258,7 @@ mod tests {
                     resource_id: id,
                     width: 2,
                     height: 2,
+                    corners: None,
                 },
             )),
         })
@@ -8233,6 +8241,7 @@ mod tests {
                     resource_id: id,
                     width: MAX_TEXTURE + 1,
                     height: 1,
+                    corners: None,
                 },
             )),
         })
@@ -12096,6 +12105,7 @@ mod tests {
                                 resource_id: id,
                                 width: 10,
                                 height: 8,
+                                corners: None,
                             },
                         ))
                     }
@@ -12283,6 +12293,7 @@ mod tests {
                             resource_id: id,
                             width: 20,
                             height: 16,
+                            corners: None,
                         },
                     ))
                 }
@@ -12407,6 +12418,7 @@ mod tests {
                     resource_id: id,
                     width: 2,
                     height: 2,
+                    corners: None,
                 },
             )),
             Transform {

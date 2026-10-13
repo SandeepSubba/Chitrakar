@@ -561,6 +561,7 @@ pub fn everything() -> Fixture {
                 resource_id: resource_id.clone(),
                 width: 8,
                 height: 8,
+                corners: None,
             },
         )),
     })
@@ -1593,6 +1594,7 @@ pub fn everything() -> Fixture {
                 resource_id: resource_id.clone(),
                 width: 8,
                 height: 8,
+                corners: None,
             },
         )),
     })
@@ -2198,12 +2200,33 @@ impl Rng {
                     ]);
                 }
                 let id = doc.add_resource(2, 2, bytes);
+                let (width, height) = (6 + self.upto(14) as u32, 6 + self.upto(12) as u32);
+                // Now and then its corners moved, each a little way from
+                // the rectangle's, which keeps the quad convex: a picture
+                // in perspective is the CPU's alone, and its box and its
+                // repaints are the quad's. Drawn from a stream of its own
+                // forked off this one rather than from this one, so every
+                // page that was here before is the page it was, but for
+                // the corners — and what an audit finds on it is about
+                // them.
+                let mut side = Rng((self.0 ^ 0x9e37_79b9_7f4a_7c15) | 1);
+                let corners = side.chance(5).then(|| {
+                    let (w, h) = (width as f32, height as f32);
+                    let mut nudge = |x: f32, y: f32| {
+                        [
+                            x + side.between(-0.2, 0.2) * w,
+                            y + side.between(-0.2, 0.2) * h,
+                        ]
+                    };
+                    [nudge(0.0, 0.0), nudge(w, 0.0), nudge(w, h), nudge(0.0, h)]
+                });
                 Box::new(Node::raster(
                     &name,
                     RasterRef {
                         resource_id: id,
-                        width: 6 + self.upto(14) as u32,
-                        height: 6 + self.upto(12) as u32,
+                        width,
+                        height,
+                        corners,
                     },
                 ))
             }
@@ -2919,6 +2942,25 @@ pub fn opaque_page(seed: u64) -> Document {
         if let NodeKind::Paint { strokes } | NodeKind::Clone { strokes } = &mut m.kind {
             for s in strokes {
                 s.softness = 0.0;
+            }
+        }
+        // A picture's own see-through texels are translucent paint as
+        // much as a colour's alpha is. Two by two they never made a flat
+        // stretch for the audits to read, but laid across a quad by its
+        // corners they do, and there a reader mixing in sRGB and the
+        // engine mixing in light part by fifty levels. Its own resource,
+        // made opaque — a resource is never changed, only pointed away
+        // from.
+        if let NodeKind::Raster(r) = &mut m.kind {
+            if let Some(res) = doc.resource(&r.resource_id) {
+                if res.rgba8.chunks_exact(4).any(|p| p[3] != 255) {
+                    let (w, h) = (res.width, res.height);
+                    let mut bytes = res.rgba8.clone();
+                    for p in bytes.chunks_exact_mut(4) {
+                        p[3] = 255;
+                    }
+                    r.resource_id = doc.add_resource(w, h, bytes);
+                }
             }
         }
         if let NodeKind::Text(t) = &mut m.kind {

@@ -749,6 +749,25 @@ fn write_node(
                     }
                 }
             }
+            // A picture with its corners moved is no rectangle an affine
+            // transform can carry, which is all SVG has: it travels as
+            // the pixels it covers, drawn through its corners, placed
+            // where they sit — as a soft brush layer does below.
+            NodeKind::Raster(raster) if raster.projective().is_some() => {
+                if let Ok(Some(warped)) = chitrakar_render::warped_pixels(doc, child) {
+                    let (w, h) = (warped.width, warped.height);
+                    let [x, y] = warped.origin;
+                    if let Ok(png) = crate::encode_png(w, h, &warped.rgba8) {
+                        let _ = writeln!(out, "{pad}<g{common}>");
+                        let _ = writeln!(
+                            out,
+                            r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                            base64(&png)
+                        );
+                        let _ = writeln!(out, "{pad}</g>");
+                    }
+                }
+            }
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
@@ -1804,6 +1823,37 @@ mod tests {
         a: 1.0,
     };
 
+    /// A picture with its corners moved goes out as the pixels it covers
+    /// through them, the size of its quad and placed where the quad is:
+    /// an SVG `<image>` has only an affine transform, which would have
+    /// put it back in its rectangle.
+    #[test]
+    fn a_picture_in_perspective_goes_as_what_it_covers() {
+        let mut doc = Document::new(60, 40, ColorMode::Rgb);
+        let rid = doc.add_resource(20, 20, [255u8, 0, 0, 255].repeat(400));
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "sign",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: 20,
+                    height: 20,
+                    corners: Some([[0.0, 0.0], [40.0, 0.0], [30.0, 20.0], [10.0, 20.0]]),
+                },
+            )),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"<image width="40" height="20" transform="translate(0 0)""#),
+            "{svg}"
+        );
+        assert!(!svg.contains(r#"width="20" height="20""#), "{svg}");
+    }
+
     fn filled(doc: &mut Document, name: &str, w: f32, h: f32) -> NodeId {
         let root = doc.root();
         let index = doc.children_of(root).unwrap().len();
@@ -2316,6 +2366,7 @@ mod tests {
                     resource_id: res,
                     width: 1,
                     height: 1,
+                    corners: None,
                 },
             )),
         })
@@ -3274,6 +3325,7 @@ mod tests {
                     resource_id: res,
                     width: 2,
                     height: 1,
+                    corners: None,
                 },
             ),
             [0.0, 0.0],

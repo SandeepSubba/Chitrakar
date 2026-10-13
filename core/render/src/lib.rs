@@ -594,11 +594,23 @@ fn bounds_in_parent_space_inner(
             Ok(None) => Bounds::None,
             Err(_) => Bounds::None,
         },
+        NodeKind::Raster(r) if r.projective().is_some() => {
+            let [x0, y0, x1, y1] = quad_box(r.quad());
+            transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+        }
         kind => {
             let (w, h) = local_size(kind).unwrap();
             transformed_bounds(node.transform, w, h)
         }
     }))
+}
+
+/// The upright box round a picture's four corners.
+fn quad_box(q: [[f32; 2]; 4]) -> [f32; 4] {
+    q.iter().fold(
+        [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+        |[x0, y0, x1, y1], p| [x0.min(p[0]), y0.min(p[1]), x1.max(p[0]), y1.max(p[1])],
+    )
 }
 
 /// A node's bounds in its *own* space, before its transform — the box a
@@ -662,6 +674,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
         }
         NodeKind::Text(spec) => Some(text::bounds(spec)),
+        NodeKind::Raster(r) if r.projective().is_some() => Some(quad_box(r.quad())),
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => painted_bounds(strokes),
         // A copy's own box is the original's own box: the original's
         // placement is not part of what travels. Where the copy stands in
@@ -3163,7 +3176,20 @@ fn render_child(
             NodeKind::Raster(raster) => {
                 if let Some(res) = doc.resource(&raster.resource_id) {
                     if !res.rgba8.is_empty() {
-                        draw_raster(dst, doc, res, t, node.opacity, blend, clip, mask);
+                        match raster.projective_of(res.width, res.height) {
+                            Some(warp) => draw_raster_warped(
+                                dst,
+                                doc,
+                                res,
+                                warp,
+                                t,
+                                node.opacity,
+                                blend,
+                                clip,
+                                mask,
+                            ),
+                            None => draw_raster(dst, doc, res, t, node.opacity, blend, clip, mask),
+                        }
                     }
                 }
             }
@@ -6885,6 +6911,209 @@ fn draw_raster(
     }
 }
 
+/// A picture whose corners have been moved: carried onto its quad by the
+/// projective map `warp` (its own pixels to the layer's space), then by
+/// `t` to the device.
+///
+/// The same texels, the same bilinear tap and the same averaging of a
+/// shrunk picture as [`draw_raster`], except that how much a picture is
+/// shrunk now changes across it — the far end of a road in perspective
+/// is shrunk more than the near — so the footprint is read at each pixel
+/// from how far the map moves between it and its neighbours. Its edge
+/// is the quad's, and a pixel on it is covered by the exact area of it
+/// the quad takes, as a filled shape's is.
+#[allow(clippy::too_many_arguments)]
+fn draw_raster_warped(
+    dst: &mut Surface,
+    doc: &Document,
+    res: &chitrakar_doc::Resource,
+    warp: chitrakar_doc::Projective,
+    t: Transform,
+    opacity: f32,
+    mode: BlendMode,
+    clip: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    let whole = warp.then(t);
+    let Some(back) = whole.inverse() else {
+        return;
+    };
+    // The quad on the device, and the box round it.
+    let (w, h) = (res.width as f64, res.height as f64);
+    let mut quad = [(0.0f64, 0.0f64); 4];
+    for (q, (u, v)) in quad
+        .iter_mut()
+        .zip([(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
+    {
+        let Some(p) = whole.apply(u, v) else {
+            return;
+        };
+        *q = p;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for &(x, y) in &quad {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let fit = |v: f64, hi: u32| v.clamp(0.0, hi as f64) as u32;
+    let bbox = ClipRect {
+        x0: fit(x0.floor(), dst.width).max(clip.x0),
+        y0: fit(y0.floor(), dst.height).max(clip.y0),
+        x1: fit(x1.ceil(), dst.width).min(clip.x1),
+        y1: fit(y1.ceil(), dst.height).min(clip.y1),
+    };
+    if bbox.is_empty() {
+        return;
+    }
+    // Inside every edge, the same way round as the quad turns.
+    let turn = {
+        let (a, b, c) = (quad[0], quad[1], quad[2]);
+        ((b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0)).signum()
+    };
+    let inside = |x: f64, y: f64| {
+        (0..4).all(|i| {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            ((b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0)) * turn >= 0.0
+        })
+    };
+    // The part of a pixel's square the quad covers: the square clipped
+    // to each edge in turn, and its area.
+    let covered = |px: f64, py: f64| -> f32 {
+        let mut poly: Vec<(f64, f64)> = vec![
+            (px, py),
+            (px + 1.0, py),
+            (px + 1.0, py + 1.0),
+            (px, py + 1.0),
+        ];
+        for i in 0..4 {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            let side =
+                |p: (f64, f64)| ((b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)) * turn;
+            let mut next = Vec::with_capacity(poly.len() + 2);
+            for j in 0..poly.len() {
+                let (p, q) = (poly[j], poly[(j + 1) % poly.len()]);
+                let (sp, sq) = (side(p), side(q));
+                if sp >= 0.0 {
+                    next.push(p);
+                }
+                if (sp >= 0.0) != (sq >= 0.0) {
+                    let k = sp / (sp - sq);
+                    next.push((p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k));
+                }
+            }
+            poly = next;
+            if poly.is_empty() {
+                return 0.0;
+            }
+        }
+        let mut area = 0.0;
+        for j in 0..poly.len() {
+            let (p, q) = (poly[j], poly[(j + 1) % poly.len()]);
+            area += p.0 * q.1 - q.0 * p.1;
+        }
+        (area.abs() * 0.5).min(1.0) as f32
+    };
+
+    let mut lut = [0f32; 256];
+    let mut alpha_of = [0f32; 256];
+    for (v, out) in lut.iter_mut().enumerate() {
+        *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
+        alpha_of[v] = v as f32 / 255.0;
+    }
+    let texel = |x: u32, y: u32| -> LinearRgba {
+        let s = ((y * res.width + x) * 4) as usize;
+        let a = alpha_of[res.rgba8[s + 3] as usize];
+        LinearRgba {
+            r: lut[res.rgba8[s] as usize] * a,
+            g: lut[res.rgba8[s + 1] as usize] * a,
+            b: lut[res.rgba8[s + 2] as usize] * a,
+            a,
+        }
+    };
+    let (last_x, last_y) = (res.width as f32 - 1.0, res.height as f32 - 1.0);
+    let cx = |i: f32| i.clamp(0.0, last_x) as u32;
+    let cy = |i: f32| i.clamp(0.0, last_y) as u32;
+    let bilinear = |sx: f32, sy: f32| {
+        let (u, v) = (sx - 0.5, sy - 0.5);
+        let (u0, v0) = (u.floor(), v.floor());
+        let (fx, fy) = (u - u0, v - v0);
+        let (x0, x1) = (cx(u0), cx(u0 + 1.0));
+        let (y0, y1) = (cy(v0), cy(v0 + 1.0));
+        let top = lerp(texel(x0, y0), texel(x1, y0), fx);
+        let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
+        lerp(top, bottom, fy)
+    };
+
+    for py in bbox.y0..bbox.y1 {
+        for px in bbox.x0..bbox.x1 {
+            let (fx, fy) = (px as f64, py as f64);
+            let edge = if inside(fx, fy)
+                && inside(fx + 1.0, fy)
+                && inside(fx, fy + 1.0)
+                && inside(fx + 1.0, fy + 1.0)
+            {
+                1.0
+            } else {
+                covered(fx, fy)
+            };
+            if edge <= 0.0 {
+                continue;
+            }
+            let cov = coverage_at(doc, mask, px, py) * edge * opacity;
+            if cov <= 0.0 {
+                continue;
+            }
+            let Some((lx, ly)) = back.apply(fx + 0.5, fy + 0.5) else {
+                continue;
+            };
+            // How far a step of one pixel goes in the picture, here: the
+            // map's own slope, read off its neighbours.
+            let step = |dx: f64, dy: f64| {
+                back.apply(fx + 0.5 + dx, fy + 0.5 + dy)
+                    .map(|(x, y)| (x - lx, y - ly))
+                    .unwrap_or((1.0, 1.0))
+            };
+            let ((ax, ay), (bx, by)) = (step(1.0, 0.0), step(0.0, 1.0));
+            let foot_x = (ax.abs() + bx.abs()).max(1.0) as f32;
+            let foot_y = (ay.abs() + by.abs()).max(1.0) as f32;
+            // A tap a texel apart, not two as the upright path takes
+            // them: there the footprint is one figure for the whole
+            // picture and the taps are laid to suit it, but here it is
+            // whatever the perspective makes it at this pixel — 4.9
+            // texels, say — and three taps two apart over a fine
+            // pattern leave a third of it uncancelled. Taps a texel
+            // apart cancel it whatever the figure.
+            let taps_x = (foot_x.ceil() as u32).clamp(1, 8);
+            let taps_y = (foot_y.ceil() as u32).clamp(1, 8);
+            let (lx, ly) = (lx as f32, ly as f32);
+            let sampled = if taps_x > 1 || taps_y > 1 {
+                let mut acc = LinearRgba::TRANSPARENT;
+                for j in 0..taps_y {
+                    for i in 0..taps_x {
+                        let ox = (i as f32 + 0.5) / taps_x as f32 - 0.5;
+                        let oy = (j as f32 + 0.5) / taps_y as f32 - 0.5;
+                        let s = bilinear(lx + ox * foot_x, ly + oy * foot_y);
+                        acc = LinearRgba {
+                            r: acc.r + s.r,
+                            g: acc.g + s.g,
+                            b: acc.b + s.b,
+                            a: acc.a + s.a,
+                        };
+                    }
+                }
+                scale_alpha(acc, 1.0 / (taps_x * taps_y) as f32)
+            } else {
+                bilinear(lx, ly)
+            };
+            let src = scale_alpha(sampled, cov);
+            let i = (py * dst.width + px) as usize;
+            dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+        }
+    }
+}
+
 /// Mask coverage at a pixel center, in document space. 1.0 without a mask.
 /// A mask together with the space its transform is written in — its owner's
 /// parent space, since a mask is authored against the document as the layer
@@ -8922,6 +9151,67 @@ pub fn paint_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>,
     }))
 }
 
+/// A picture whose corners have been moved, drawn through them on its
+/// own at one pixel per unit of the layer's space, for an exporter whose
+/// format can place a picture only by an affine transform. `None` for a
+/// picture whose corners are its rectangle's, which such a format can
+/// place as it is.
+pub fn warped_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, DocError> {
+    let node = doc.node(id)?;
+    let NodeKind::Raster(raster) = &node.kind else {
+        return Ok(None);
+    };
+    let Some(res) = doc.resource(&raster.resource_id) else {
+        return Ok(None);
+    };
+    if res.rgba8.is_empty() {
+        return Ok(None);
+    }
+    let Some(warp) = raster.projective_of(res.width, res.height) else {
+        return Ok(None);
+    };
+    let [x0, y0, x1, y1] = quad_box(raster.quad());
+    let (x0, y0, x1, y1) = on_the_grid(
+        ancestor_space(doc, id).compose(node.transform),
+        (x0, y0, x1, y1),
+    );
+    let (w, h) = (
+        (x1 - x0).ceil().max(1.0) as u32,
+        (y1 - y0).ceil().max(1.0) as u32,
+    );
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    let mut surface = Surface::new(w, h);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    draw_raster_warped(
+        &mut surface,
+        doc,
+        res,
+        warp,
+        Transform::translation(-x0, -y0),
+        1.0,
+        BlendMode::Normal,
+        clip,
+        MaskRef::new(None, Transform::default()),
+    );
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for px in &surface.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some(PaintedPixels {
+        width: w,
+        height: h,
+        origin: [x0, y0],
+        rgba8,
+    }))
+}
+
 /// Paint a brush layer.
 ///
 /// Strokes go straight onto the destination when nothing about the
@@ -9893,6 +10183,16 @@ fn hit_child(
             }
             NodeKind::Raster(raster) => {
                 if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
+                    // Through the corners, where they have been moved: the
+                    // picture is where its quad is, not where its
+                    // rectangle was.
+                    let (lx, ly) = match raster.projective().and_then(|p| p.inverse()) {
+                        Some(back) => match back.apply(lx as f64, ly as f64) {
+                            Some((u, v)) => (u as f32, v as f32),
+                            None => (-1.0, -1.0),
+                        },
+                        None => (lx, ly),
+                    };
                     if lx >= 0.0
                         && ly >= 0.0
                         && lx < raster.width as f32
@@ -17182,6 +17482,7 @@ mod tests {
                     resource_id: id,
                     width: W,
                     height: H,
+                    corners: None,
                 },
             )),
         })
@@ -17355,6 +17656,7 @@ mod tests {
                     resource_id: id,
                     width: W,
                     height: H,
+                    corners: None,
                 },
             )),
         })
@@ -17592,6 +17894,7 @@ mod tests {
                         resource_id: id,
                         width: W,
                         height: H,
+                        corners: None,
                     },
                 )),
             })
@@ -18572,6 +18875,7 @@ mod tests {
                     resource_id: res,
                     width: W,
                     height: W,
+                    corners: None,
                 },
             )),
         })
@@ -19837,6 +20141,148 @@ mod tests {
         );
     }
 
+    /// A picture with its corners moved is drawn through them: where
+    /// the corners are the rectangle's it is the picture it was, a
+    /// trapezoid covers a trapezoid with its edges covered by area, the
+    /// far end of a perspective averages what it squeezes rather than
+    /// aliasing it, and its box and its hits are the quad's.
+    #[test]
+    fn a_picture_goes_where_its_corners_are_put() {
+        let picture = |doc: &mut Document, bytes: Vec<u8>, w: u32, h: u32, corners| {
+            let rid = doc.add_resource(w, h, bytes);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::raster(
+                    "img",
+                    chitrakar_doc::RasterRef {
+                        resource_id: rid,
+                        width: w,
+                        height: h,
+                        corners,
+                    },
+                )),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[0]
+        };
+        let varied: Vec<u8> = (0..20 * 20 * 4)
+            .map(|i| {
+                if i % 4 == 3 {
+                    255
+                } else {
+                    ((i as u64 * 53 + 7) % 251) as u8
+                }
+            })
+            .collect();
+
+        // The rectangle's own corners: the same picture, to the last bit
+        // that matters.
+        let mut plain = Document::new(30, 30, ColorMode::Rgb);
+        let pid = picture(&mut plain, varied.clone(), 20, 20, None);
+        let mut cornered = Document::new(30, 30, ColorMode::Rgb);
+        let cid = picture(
+            &mut cornered,
+            varied.clone(),
+            20,
+            20,
+            Some([[0.0, 0.0], [20.0, 0.0], [20.0, 20.0], [0.0, 20.0]]),
+        );
+        for doc_id in [(&mut plain, pid), (&mut cornered, cid)] {
+            doc_id
+                .0
+                .apply(Command::SetTransform {
+                    id: doc_id.1,
+                    transform: Transform::translation(5.0, 3.0),
+                })
+                .unwrap();
+        }
+        let (a, b) = (render(&plain).unwrap(), render(&cornered).unwrap());
+        for (p, q) in a.pixels.iter().zip(&b.pixels) {
+            assert!(
+                (p.r - q.r).abs() < 1e-5 && (p.a - q.a).abs() < 1e-5,
+                "{p:?} against {q:?}"
+            );
+        }
+
+        // A trapezoid of solid red: inside it is red, outside it is
+        // nothing, and a pixel its slanted edge crosses is covered by the
+        // part of it inside.
+        let red: Vec<u8> = [255u8, 0, 0, 255].repeat(20 * 20);
+        let mut doc = Document::new(40, 20, ColorMode::Rgb);
+        let id = picture(
+            &mut doc,
+            red,
+            20,
+            20,
+            Some([[0.0, 0.0], [40.0, 0.0], [30.0, 20.0], [10.0, 20.0]]),
+        );
+        let s = render(&doc).unwrap();
+        assert!(s.get(20, 10).a > 0.999 && s.get(38, 1).a > 0.95);
+        assert!(s.get(5, 15).a < 1e-6 && s.get(36, 17).a < 1e-6);
+        // The left edge runs x = y / 2: through row 15, from 7.5 to 8, so
+        // pixel 7 is a quarter covered.
+        let edge = s.get(7, 15).a;
+        assert!((edge - 0.25).abs() < 0.02, "an edge pixel covered {edge}");
+        // The box is the quad's, and a hit is inside the quad only.
+        assert_eq!(
+            node_bounds(&doc, id).unwrap(),
+            Bounds::Rect(0.0, 0.0, 40.0, 20.0)
+        );
+        assert_eq!(hit_test(&doc, 20.0, 10.0).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 25.0, 5.0).unwrap(), Some(id));
+        assert_eq!(hit_test(&doc, 3.0, 17.0).unwrap(), None);
+
+        // A fine checker squeezed into the far end of a perspective is
+        // its average there, not a moiré of whichever texels a pixel
+        // happens to land on.
+        let n = 64u32;
+        let checker: Vec<u8> = (0..n * n)
+            .flat_map(|i| {
+                let on = ((i % n) + (i / n)).is_multiple_of(2);
+                let v = if on { 255 } else { 0 };
+                [v, v, v, 255]
+            })
+            .collect();
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        picture(
+            &mut doc,
+            checker,
+            n,
+            n,
+            // Sixty-four texels into thirteen pixels: no pixel's middle
+            // lands on a texel edge, where one bilinear tap would be the
+            // average by luck.
+            Some([[25.0, 0.0], [38.0, 0.0], [64.0, 64.0], [0.0, 64.0]]),
+        );
+        let s = render(&doc).unwrap();
+        // Half white in light, the average a squeeze should come to.
+        for x in 26..37 {
+            let p = s.get(x, 2);
+            assert!(
+                (p.r - 0.5).abs() < 0.12,
+                "the far end at {x} is {} rather than the checker's average",
+                p.r
+            );
+        }
+
+        // A bow tie is not a quad, and the picture keeps its rectangle.
+        let mut doc = Document::new(30, 30, ColorMode::Rgb);
+        let id = picture(
+            &mut doc,
+            [0u8, 0, 255, 255].repeat(100),
+            10,
+            10,
+            Some([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]]),
+        );
+        assert_eq!(
+            node_bounds(&doc, id).unwrap(),
+            Bounds::Rect(0.0, 0.0, 10.0, 10.0)
+        );
+        assert!(render(&doc).unwrap().get(5, 5).a > 0.999);
+    }
+
     /// A picture at half its size is the average of each two texels by
     /// two, exactly.
     ///
@@ -19884,6 +20330,7 @@ mod tests {
                     resource_id: rid,
                     width: N,
                     height: N,
+                    corners: None,
                 },
             )),
         })
@@ -19974,6 +20421,7 @@ mod tests {
                     resource_id: id,
                     width: N,
                     height: N,
+                    corners: None,
                 },
             )),
         })
@@ -20025,6 +20473,7 @@ mod tests {
                     resource_id: id,
                     width: 2,
                     height: 1,
+                    corners: None,
                 },
             )),
         })
@@ -20098,6 +20547,7 @@ mod tests {
                     resource_id: rid,
                     width: w,
                     height: h,
+                    corners: None,
                 },
             )),
         })
@@ -20151,6 +20601,7 @@ mod tests {
                     resource_id: id,
                     width: 2,
                     height: 2,
+                    corners: None,
                 },
             )),
         })
@@ -20339,6 +20790,7 @@ mod tests {
             resource_id: id,
             width: 2,
             height: 2,
+            corners: None,
         };
         doc.apply(Command::AddNode {
             parent: root,

@@ -10,10 +10,11 @@ pub mod fixture;
 mod node;
 
 pub use node::{
-    focal_offset, focal_ramp, invert_axes, stroke_align, Adjustment, BlendMode, Effect, Filter,
-    Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke, Pin,
-    Pinning, RasterRef, Spread, Stroke, StrokeAlign, StrokeCap, StrokeJoin, StyleRun, TextAlign,
-    TextSpec, Transform, VectorShape, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT,
+    convex, focal_offset, focal_ramp, invert_axes, stroke_align, Adjustment, BlendMode, Effect,
+    Filter, Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke,
+    Pin, Pinning, Projective, RasterRef, Spread, Stroke, StrokeAlign, StrokeCap, StrokeJoin,
+    StyleRun, TextAlign, TextSpec, Transform, VectorShape, LUMA, MARKER_LENGTH, MARKER_REACH,
+    MITER_LIMIT,
 };
 
 use chitrakar_color::ColorMode;

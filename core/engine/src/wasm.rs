@@ -432,6 +432,35 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// A picture's corners as eight numbers, top left round to bottom
+    /// left, then 1 if any has been moved off its rectangle and 0 if
+    /// not; empty for a layer that is not a picture.
+    pub fn raster_corners(&self, id: f64) -> Vec<f32> {
+        match self.inner.raster_corners(NodeId(id as u64)) {
+            Some((q, moved)) => {
+                let mut out: Vec<f32> = q.iter().flatten().copied().collect();
+                out.push(if moved { 1.0 } else { 0.0 });
+                out
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// The command putting a picture's corners at `corners` (eight
+    /// numbers, top left round to bottom left), or back on its rectangle
+    /// when it is empty — refused for four points that make no convex
+    /// quad.
+    pub fn corners_command(&self, id: f64, corners: Vec<f32>) -> Result<String, JsError> {
+        let quad = match corners.as_slice() {
+            [] => None,
+            [a, b, c, d, e, f, g, h] => Some([[*a, *b], [*c, *d], [*e, *f], [*g, *h]]),
+            _ => return Err(JsError::new("a picture has four corners")),
+        };
+        self.inner
+            .corners_command(NodeId(id as u64), quad)
+            .map_err(to_js)
+    }
+
     /// A frame's contents as a PNG, at the size it shows on the page
     /// times `scale`.
     pub fn export_artboard_png(&self, id: f64, scale: f32) -> Result<Vec<u8>, JsError> {

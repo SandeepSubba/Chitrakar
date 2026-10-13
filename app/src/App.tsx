@@ -4010,10 +4010,73 @@ export function App() {
     });
   };
 
+  /** A picture's corner being dragged: which picture, which corner, the
+   * four as they were, and the transform that carries its own space. */
+  const warpDragRef = useRef<{
+    id: NodeId;
+    index: number;
+    quad: [number, number][];
+    t0: Transform;
+  } | null>(null);
+  const startWarp = (e: React.PointerEvent, index: number) => {
+    if (!session || selected === null || !selCorners) return;
+    e.stopPropagation();
+    warpDragRef.current = {
+      id: selected,
+      index,
+      quad: selCorners.quad,
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onWarpMove = (e: React.PointerEvent) => {
+    const drag = warpDragRef.current;
+    if (!drag || !session || e.buttons === 0) return;
+    const [px, py] = layerPoint(e, drag.id);
+    const inv = inverseOf(drag.t0);
+    const at = inv ? inv(px, py) : [px, py];
+    const quad = drag.quad.map((p, i) => (i === drag.index ? at : p));
+    try {
+      preview(JSON.parse(session.corners_command(drag.id, new Float32Array(quad.flat()))));
+    } catch {
+      // Four points that cross: the picture stays at the last quad it
+      // could lie on until the corner comes back.
+    }
+  };
+  const onWarpUp = () => {
+    warpDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+  /** The picked picture's corners back on its rectangle. */
+  const squareCorners = () => {
+    if (!session || selected === null || !selCorners?.moved) return;
+    run(JSON.parse(session.corners_command(selected, new Float32Array(0))));
+  };
+
   // Resize handles: drag scales the node, anchored at the opposite corner.
   const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
     if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
+    // A picture's corner held with Ctrl moves on its own: the picture is
+    // distorted, or put into perspective, rather than scaled. The corner
+    // that moves is the picture's own nearest this one of the box.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      !manyBox &&
+      selCorners &&
+      (HANDLES as readonly string[]).includes(corner)
+    ) {
+      const [x0, y0, x1, y1] = selLocal;
+      const [hx, hy] =
+        corner === "nw" ? [x0, y0] : corner === "ne" ? [x1, y0] : corner === "se" ? [x1, y1] : [x0, y1];
+      let index = 0;
+      selCorners.quad.forEach(([qx, qy], i) => {
+        const [bx, by] = selCorners!.quad[index];
+        if (Math.hypot(qx - hx, qy - hy) < Math.hypot(bx - hx, by - hy)) index = i;
+      });
+      startWarp(e, index);
+      return;
+    }
     // Several picked: the whole lot scales about the box round them, so
     // each layer's own transform and the space it is written in travel
     // with the drag. A frame among them scales like anything else —
@@ -4086,6 +4149,10 @@ export function App() {
   };
 
   const onHandlePointerMove = (e: React.PointerEvent) => {
+    if (warpDragRef.current) {
+      onWarpMove(e);
+      return;
+    }
     const drag = handleDragRef.current;
     if (!drag || !session) return;
     if (e.buttons === 0) return;
@@ -4253,6 +4320,10 @@ export function App() {
   };
 
   const onHandlePointerUp = () => {
+    if (warpDragRef.current) {
+      onWarpUp();
+      return;
+    }
     handleDragRef.current = null;
     setGuides({ x: [], y: [] });
     if (session?.commit_preview()) refresh(session);
@@ -5873,6 +5944,25 @@ export function App() {
       ];
     }
   }
+  /** The picked picture's four corners in its own space — top left round
+   * to bottom left — and whether any has been moved off its rectangle.
+   * Ctrl on a corner handle moves the nearest of them, and once one has
+   * moved each wears a pin of its own. */
+  let selCorners: { quad: [number, number][]; moved: boolean } | null = null;
+  if (session && selected !== null && selToScreen && selectedLayer?.kind === "raster") {
+    const c = session.raster_corners(selected);
+    if (c.length === 9) {
+      selCorners = {
+        quad: [
+          [c[0], c[1]],
+          [c[2], c[3]],
+          [c[4], c[5]],
+          [c[6], c[7]],
+        ],
+        moved: c[8] === 1,
+      };
+    }
+  }
   /** With more than one layer picked the handles sit on the box round
    * the lot instead, and resize all of it. Everything else about the
    * selection — the mask's grips, a gradient's, the geometry fields —
@@ -7245,6 +7335,7 @@ export function App() {
         item("simplify-path", "node", "Simplify path…", simplifyPath),
         item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
         item("merge-layers", "image", "Merge into a picture", mergeLayers),
+        item("square-corners", "image", "Put the picture's corners back", squareCorners),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
@@ -9546,6 +9637,35 @@ export function App() {
                     onPointerUp={onHandlePointerUp}
                   />
                 ))}
+              {/* A picture whose corners have moved: the quad it lies
+                  on, and a pin on each corner to move it by. */}
+              {grabbable &&
+                !manyBox &&
+                selCorners?.moved &&
+                selToScreen &&
+                (() => {
+                  const at = selCorners.quad.map(([x, y]) => selToScreen!(x, y));
+                  return (
+                    <>
+                      <svg className="sel-outline warp-outline" aria-hidden="true">
+                        <polygon points={at.map((p) => p.join(",")).join(" ")} />
+                      </svg>
+                      {at.map(([x, y], i) => (
+                        <div
+                          key={`pin${i}`}
+                          className="warp-pin"
+                          data-handle={`pin-${i}`}
+                          aria-label={`Picture corner ${i + 1}`}
+                          title="Move this corner of the picture"
+                          style={{ left: x, top: y }}
+                          onPointerDown={(e) => startWarp(e, i)}
+                          onPointerMove={onWarpMove}
+                          onPointerUp={onWarpUp}
+                        />
+                      ))}
+                    </>
+                  );
+                })()}
               {/* The sides' middles: one axis at a time, or with Ctrl a
                   skew. Left off a box too small to hold them apart from
                   its corners, where they would only be in the way. */}

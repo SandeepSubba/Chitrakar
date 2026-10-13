@@ -7425,6 +7425,101 @@ assert(
   );
 }
 
+// 9o13. A picture's corners: held with Ctrl, a corner of a picture moves
+// on its own and the picture is laid onto the quad its corners make —
+// a sign squared up, a screen put onto a photograph. Once one has moved
+// each wears a pin; a quad that would cross is not taken; one menu row
+// puts them back.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const k = b.width / 400;
+  // A speck in the corner first: a picture placed on an empty page
+  // brings the page to its own size, and this one is to sit in the
+  // middle of a larger page.
+  await setColor("Fill colour", "#808080");
+  await pickTool("Rect");
+  await page.mouse.move(b.x + 2 * k, b.y + 2 * k);
+  await page.mouse.down();
+  await page.mouse.move(b.x + 8 * k, b.y + 8 * k, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const png = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 200;
+    c.height = 100;
+    const g = c.getContext("2d");
+    g.fillStyle = "#1040e0";
+    g.fillRect(0, 0, 200, 100);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+    name: "sign.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(png, "base64"),
+  });
+  await page.waitForTimeout(400);
+  await pickTool("Move");
+  await page.locator(".panel ul li", { hasText: "sign.png" }).click();
+  await page.waitForTimeout(200);
+  const blue = async (x, y) => {
+    const p = await canvasPixel(x, y);
+    return p[2] > 200 && p[0] < 40 && p[3] > 200;
+  };
+  const width = async () => Number(await page.locator('input[aria-label="W size"]').inputValue());
+  assert((await blue(150, 150)) && !(await blue(330, 105)), "a picture in its rectangle");
+  assert((await page.locator(".warp-pin").count()) === 0, "no pins while its corners are its rectangle's");
+  const dragFrom = async (box, dx, dy, mod) => {
+    const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+    if (mod) await page.keyboard.down(mod);
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx * k, y + dy * k, { steps: 8 });
+    await page.mouse.up();
+    if (mod) await page.keyboard.up(mod);
+    await page.waitForTimeout(300);
+  };
+
+  // The top right corner out by sixty: the top edge is longer than the
+  // bottom now, and the picture fills the trapezoid.
+  await dragFrom(await page.locator(".handle.ne").boundingBox(), 60, 0, "Control");
+  assert(
+    (await blue(330, 105)) && (await blue(150, 150)) && !(await blue(330, 195)),
+    "the picture is laid onto the quad its corners make",
+  );
+  assert(Math.abs((await width()) - 260) < 1.5, `its box is the quad's (${await width()})`);
+  assert((await page.locator(".warp-pin").count()) === 4, "a pin on each of its corners now");
+
+  // The bottom left pin in by forty, with nothing held.
+  await dragFrom(await page.locator('[data-handle="pin-3"]').boundingBox(), 40, 0);
+  assert(!(await blue(110, 195)) && (await blue(170, 195)), "a pin moves its corner on its own");
+
+  // Pulled across the other side, the quad would fold: the corner stops
+  // at the last place it lay flat, and nothing goes wrong.
+  const before = await width();
+  await dragFrom(await page.locator('[data-handle="pin-1"]').boundingBox(), -320, 0);
+  assert(
+    (await page.locator(".warp-pin").count()) === 4 && (await width()) > 20,
+    `a fold is not taken (${before} then ${await width()})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+
+  // One undo a drag, and the menu puts the corners back in one step.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await blue(110, 195)) && (await blue(330, 105)), "undo takes back the pin");
+  await menuClick("Layer", "Put the picture's corners back");
+  await page.waitForTimeout(300);
+  assert(
+    !(await blue(330, 105)) && (await page.locator(".warp-pin").count()) === 0 && Math.abs((await width()) - 200) < 1.5,
+    "and the menu puts the picture back in its rectangle",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(await blue(330, 105), "which is one step too");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

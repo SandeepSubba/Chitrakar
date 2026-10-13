@@ -304,6 +304,7 @@ mod tests {
                     resource_id: id,
                     width: 2,
                     height: 2,
+                    corners: None,
                 },
             )),
         })
@@ -1539,6 +1540,7 @@ mod tests {
                     resource_id: id.clone(),
                     width: 4,
                     height: 2,
+                    corners: None,
                 },
             )),
         })

@@ -433,11 +433,208 @@ pub enum VectorShape {
 /// Reference to an immutable pixel resource embedded in the document
 /// (`resources/` in the .chitra container). Content-addressed so identical
 /// placements share bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RasterRef {
     pub resource_id: String,
     pub width: u32,
     pub height: u32,
+    /// Where the picture's four corners land in the layer's own space —
+    /// top left, top right, bottom right, bottom left — when they are
+    /// not where its rectangle puts them: a picture distorted, or put
+    /// into perspective, as a photograph of a sign is squared up or a
+    /// screen is laid onto a photograph of a laptop. `None` is the
+    /// rectangle `0..width × 0..height`, which is every picture until a
+    /// corner is moved, and every file written before one could be.
+    ///
+    /// The picture is carried across by the one projective map that
+    /// takes its rectangle to these four points ([`Projective`]), so
+    /// straight lines in it stay straight. A quad that is not convex
+    /// has no such map that keeps the picture whole, and is drawn as if
+    /// the corners were not there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corners: Option<[[f32; 2]; 4]>,
+}
+
+impl RasterRef {
+    /// The four corners in the layer's own space: the moved ones, or the
+    /// rectangle's.
+    pub fn quad(&self) -> [[f32; 2]; 4] {
+        let (w, h) = (self.width as f32, self.height as f32);
+        self.corners
+            .unwrap_or([[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]])
+    }
+
+    /// The map from the picture's own pixels to the layer's space, or
+    /// `None` where it is the rectangle — or where the corners make no
+    /// convex quad, which is drawn as the rectangle too.
+    pub fn projective(&self) -> Option<Projective> {
+        self.projective_of(self.width, self.height)
+    }
+
+    /// The same map from a picture `width × height` pixels — the
+    /// resource's own size, which is what a renderer samples, should a
+    /// file say one thing here and the resource another.
+    pub fn projective_of(&self, width: u32, height: u32) -> Option<Projective> {
+        let corners = self.corners?;
+        let p = Projective::onto(corners)?;
+        // From texel space: the unit square first.
+        Some(p.after_scale(1.0 / width.max(1) as f64, 1.0 / height.max(1) as f64))
+    }
+}
+
+/// A projective map of the plane: `(x, y)` goes to
+/// `((m0 x + m1 y + m2) / w, (m3 x + m4 y + m5) / w)` with
+/// `w = m6 x + m7 y + m8`. The one that takes a square to any convex
+/// quad; an affine transform is the case `m6 = m7 = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projective {
+    pub m: [f64; 9],
+}
+
+impl Projective {
+    /// The map taking the unit square — (0,0), (1,0), (1,1), (0,1) — to
+    /// the quad `q` in that order, or `None` when `q` is not strictly
+    /// convex (a fold, a bow tie, three corners on a line), where any
+    /// such map sends part of the square through infinity.
+    pub fn onto(q: [[f32; 2]; 4]) -> Option<Self> {
+        if !convex(q) {
+            return None;
+        }
+        let [x0, y0] = q[0].map(|v| v as f64);
+        let [x1, y1] = q[1].map(|v| v as f64);
+        let [x2, y2] = q[2].map(|v| v as f64);
+        let [x3, y3] = q[3].map(|v| v as f64);
+        let (sx, sy) = (x0 - x1 + x2 - x3, y0 - y1 + y2 - y3);
+        let (g, h) = if sx.abs() < 1e-12 && sy.abs() < 1e-12 {
+            (0.0, 0.0)
+        } else {
+            let (dx1, dx2, dy1, dy2) = (x1 - x2, x3 - x2, y1 - y2, y3 - y2);
+            let den = dx1 * dy2 - dx2 * dy1;
+            if den.abs() < 1e-12 {
+                return None;
+            }
+            ((sx * dy2 - dx2 * sy) / den, (dx1 * sy - sx * dy1) / den)
+        };
+        Some(Self {
+            m: [
+                x1 - x0 + g * x1,
+                x3 - x0 + h * x3,
+                x0,
+                y1 - y0 + g * y1,
+                y3 - y0 + h * y3,
+                y0,
+                g,
+                h,
+                1.0,
+            ],
+        })
+    }
+
+    /// This map, after `(x, y) -> (kx x, ky y)`.
+    pub fn after_scale(self, kx: f64, ky: f64) -> Self {
+        let m = self.m;
+        Self {
+            m: [
+                m[0] * kx,
+                m[1] * ky,
+                m[2],
+                m[3] * kx,
+                m[4] * ky,
+                m[5],
+                m[6] * kx,
+                m[7] * ky,
+                m[8],
+            ],
+        }
+    }
+
+    /// Where `(x, y)` goes, or `None` past the line the map sends to
+    /// infinity.
+    pub fn apply(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let m = &self.m;
+        let w = m[6] * x + m[7] * y + m[8];
+        if w.abs() < 1e-12 {
+            return None;
+        }
+        Some((
+            (m[0] * x + m[1] * y + m[2]) / w,
+            (m[3] * x + m[4] * y + m[5]) / w,
+        ))
+    }
+
+    /// The map back, or `None` for one that collapses the plane.
+    pub fn inverse(&self) -> Option<Self> {
+        let m = &self.m;
+        let c0 = m[4] * m[8] - m[5] * m[7];
+        let c1 = m[5] * m[6] - m[3] * m[8];
+        let c2 = m[3] * m[7] - m[4] * m[6];
+        let det = m[0] * c0 + m[1] * c1 + m[2] * c2;
+        if !det.is_finite() || det.abs() < 1e-18 {
+            return None;
+        }
+        let k = 1.0 / det;
+        Some(Self {
+            m: [
+                c0 * k,
+                (m[2] * m[7] - m[1] * m[8]) * k,
+                (m[1] * m[5] - m[2] * m[4]) * k,
+                c1 * k,
+                (m[0] * m[8] - m[2] * m[6]) * k,
+                (m[2] * m[3] - m[0] * m[5]) * k,
+                c2 * k,
+                (m[1] * m[6] - m[0] * m[7]) * k,
+                (m[0] * m[4] - m[1] * m[3]) * k,
+            ],
+        })
+    }
+
+    /// This map followed by the affine `t`.
+    pub fn then(&self, t: Transform) -> Self {
+        let m = &self.m;
+        let (a, b, c, d, e, f) = (
+            t.a as f64, t.b as f64, t.c as f64, t.d as f64, t.e as f64, t.f as f64,
+        );
+        Self {
+            m: [
+                a * m[0] + c * m[3] + e * m[6],
+                a * m[1] + c * m[4] + e * m[7],
+                a * m[2] + c * m[5] + e * m[8],
+                b * m[0] + d * m[3] + f * m[6],
+                b * m[1] + d * m[4] + f * m[7],
+                b * m[2] + d * m[5] + f * m[8],
+                m[6],
+                m[7],
+                m[8],
+            ],
+        }
+    }
+}
+
+/// Whether four points, in order, make a strictly convex quad: every turn
+/// the same way round, and none of them a straight line.
+pub fn convex(q: [[f32; 2]; 4]) -> bool {
+    if q.iter().flatten().any(|v| !v.is_finite()) {
+        return false;
+    }
+    let mut sign = 0.0f64;
+    for i in 0..4 {
+        let [ax, ay] = q[i].map(|v| v as f64);
+        let [bx, by] = q[(i + 1) % 4].map(|v| v as f64);
+        let [cx, cy] = q[(i + 2) % 4].map(|v| v as f64);
+        let cross = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+        // Relative to the sides' own lengths, so a tiny picture is not
+        // refused for being tiny.
+        let scale = ((bx - ax).hypot(by - ay) * (cx - bx).hypot(cy - by)).max(1e-30);
+        if cross.abs() / scale < 1e-6 {
+            return false;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return false;
+        }
+    }
+    true
 }
 
 /// Non-destructive adjustments; applied at render time to everything below
@@ -1909,5 +2106,64 @@ mod tests {
             spec.styling_under(None).italic,
             "no run is the block itself"
         );
+    }
+}
+
+#[cfg(test)]
+mod projective_tests {
+    use super::*;
+
+    /// The map lands each corner of the square on its own corner of the
+    /// quad, comes back by its inverse, and keeps a straight line
+    /// straight — and a quad that is not convex has no map at all.
+    #[test]
+    fn a_picture_s_corners_go_where_they_are_put() {
+        let q = [[10.0, 5.0], [90.0, 20.0], [80.0, 70.0], [15.0, 60.0]];
+        let p = Projective::onto(q).unwrap();
+        for (corner, (u, v)) in q
+            .iter()
+            .zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)])
+        {
+            let (x, y) = p.apply(u, v).unwrap();
+            assert!((x - corner[0] as f64).abs() < 1e-9 && (y - corner[1] as f64).abs() < 1e-9);
+        }
+        let back = p.inverse().unwrap();
+        for (u, v) in [(0.3, 0.7), (0.5, 0.5), (0.9, 0.1)] {
+            let (x, y) = p.apply(u, v).unwrap();
+            let (u2, v2) = back.apply(x, y).unwrap();
+            assert!((u - u2).abs() < 1e-9 && (v - v2).abs() < 1e-9);
+        }
+        // Three points along one line of the square stay on one line.
+        let pts: Vec<(f64, f64)> = [0.1, 0.5, 0.8]
+            .iter()
+            .map(|&t| p.apply(t, 0.25 + 0.5 * t).unwrap())
+            .collect();
+        let cross = (pts[1].0 - pts[0].0) * (pts[2].1 - pts[0].1)
+            - (pts[1].1 - pts[0].1) * (pts[2].0 - pts[0].0);
+        assert!(cross.abs() < 1e-9, "a line bent: {cross}");
+        // A parallelogram is affine: nothing is divided by anything.
+        let par = Projective::onto([[0.0, 0.0], [10.0, 0.0], [14.0, 5.0], [4.0, 5.0]]).unwrap();
+        assert_eq!((par.m[6], par.m[7]), (0.0, 0.0));
+        // A bow tie, a fold and three corners on a line: no map.
+        assert!(Projective::onto([[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0]]).is_none());
+        assert!(Projective::onto([[0.0, 0.0], [10.0, 0.0], [2.0, 2.0], [0.0, 10.0]]).is_none());
+        assert!(Projective::onto([[0.0, 0.0], [5.0, 0.0], [10.0, 0.0], [0.0, 10.0]]).is_none());
+        // Either way round is a quad.
+        assert!(Projective::onto([[0.0, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]]).is_some());
+        // From the picture's own pixels: its far corner is the quad's.
+        let r = RasterRef {
+            resource_id: "x".into(),
+            width: 40,
+            height: 20,
+            corners: Some(q),
+        };
+        let (x, y) = r.projective().unwrap().apply(40.0, 20.0).unwrap();
+        assert!((x - 80.0).abs() < 1e-6 && (y - 70.0).abs() < 1e-6);
+        // And a file from before corners reads as the rectangle.
+        let old: RasterRef =
+            serde_json::from_str(r#"{"resource_id":"x","width":4,"height":3}"#).unwrap();
+        assert_eq!(old.corners, None);
+        assert_eq!(old.quad()[2], [4.0, 3.0]);
+        assert!(!serde_json::to_string(&old).unwrap().contains("corners"));
     }
 }

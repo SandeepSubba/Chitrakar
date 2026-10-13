@@ -581,12 +581,14 @@ impl Page {
                     self.flush(&mut pending)?;
                     self.draw_node(child)?;
                 }
-                _ if node.blend == BlendMode::Normal => pending.push(child),
+                _ if landing_blend(&self.doc, child, &node) == BlendMode::Normal => {
+                    pending.push(child)
+                }
                 // A blend reads what is under it, so the layer is rendered
                 // by itself and lands with that blend.
                 _ => {
                     self.flush(&mut pending)?;
-                    self.place_rendered(&[child], node.blend)?;
+                    self.place_rendered(&[child], landing_blend(&self.doc, child, &node))?;
                 }
             }
         }
@@ -635,7 +637,11 @@ impl Page {
             // A gradient is a shading (`gradient_fill`) and a stroke whose
             // width varies is the outline it covers (`strokes`).
             NodeKind::Vector { .. } => true,
-            NodeKind::Raster(_) | NodeKind::Text(_) => true,
+            // A picture with its corners moved is no rectangle a PDF image
+            // can be placed as, so it is drawn as the rest of what is not
+            // live is.
+            NodeKind::Raster(r) => r.projective().is_none(),
+            NodeKind::Text(_) => true,
             // A copy is drawn by drawing the original again, so it is as
             // live as the original is — or, where it stands in for some
             // of the original's layers, as live as what it actually
@@ -2584,11 +2590,150 @@ fn path_ops(shape: &VectorShape) -> String {
     d
 }
 
+/// The blend a layer drawn as pixels lands with: its own, or — for a
+/// copy with none of its own — the blend of what it copies, which the
+/// engine brings the copy down by where it stands (`copies_a_blend`).
+/// Rendered by itself, the copy's picture has nothing under it for that
+/// blend to meet, so it is the landing that has to carry it: a copy of
+/// a blended picture in perspective, which goes as pixels, came down
+/// Normal.
+fn landing_blend(doc: &Document, id: NodeId, node: &chitrakar_doc::Node) -> BlendMode {
+    if node.blend == BlendMode::Normal && chitrakar_render::copies_a_blend(doc, id) {
+        if let NodeKind::Instance { of, .. } = &node.kind {
+            if let Ok(original) = doc.node(*of) {
+                return original.blend;
+            }
+        }
+    }
+    node.blend
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flate2::read::ZlibDecoder;
     use std::io::Read;
+
+    /// A copy of a blended layer that goes as pixels lands by the blend
+    /// it copies, as the engine brings it down where it stands. Drawn by
+    /// itself the copy's picture has nothing under it for that blend to
+    /// meet, so it came down Normal — a copy of a picture in perspective,
+    /// which goes as pixels, was its original's colours in the PDF and
+    /// their difference with the page on the engine's.
+    #[test]
+    fn a_copy_of_a_blended_picture_in_pixels_lands_by_its_blend() {
+        let mut doc = Document::new(60, 30, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        let mut ground = chitrakar_doc::Node::vector(
+            "ground",
+            chitrakar_doc::VectorShape::Rect {
+                width: 60.0,
+                height: 30.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.6,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(ground),
+        })
+        .unwrap();
+        let rid = doc.add_resource(2, 2, [200u8, 120, 40, 255].repeat(4));
+        let mut picture = chitrakar_doc::Node::raster(
+            "sign",
+            chitrakar_doc::RasterRef {
+                resource_id: rid,
+                width: 2,
+                height: 2,
+                corners: Some([[0.0, 0.0], [24.0, 2.0], [22.0, 24.0], [2.0, 22.0]]),
+            },
+        );
+        picture.blend = BlendMode::Exclusion;
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(picture),
+        })
+        .unwrap();
+        let original = doc.children_of(root).unwrap()[1];
+        let mut copy = chitrakar_doc::Node::instance("copy", original);
+        copy.transform = chitrakar_doc::Transform::translation(32.0, 2.0);
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(copy),
+        })
+        .unwrap();
+        assert_eq!(
+            landing_blend(
+                &doc,
+                doc.children_of(root).unwrap()[2],
+                doc.node(doc.children_of(root).unwrap()[2]).unwrap()
+            ),
+            BlendMode::Exclusion
+        );
+        let Some(theirs) = ghostscript_rgba(&doc) else {
+            return;
+        };
+        let ours = chitrakar_render::render(&doc).unwrap();
+        for (x, y) in [(10, 10), (44, 12)] {
+            let (a, b) = (ours.get(x, y).to_srgb8(), theirs[(y * 60 + x) as usize]);
+            assert!(
+                (0..3).all(|k| a[k].abs_diff(b[k]) <= 3),
+                "at ({x}, {y}) the engine {a:?}, ghostscript {b:?}"
+            );
+        }
+    }
+
+    /// A picture with its corners moved is no rectangle a PDF image can
+    /// be placed as, so it goes as the page draws it — rendered, not
+    /// placed as its own twenty pixels square.
+    #[test]
+    fn a_picture_in_perspective_is_drawn_as_the_page_draws_it() {
+        let mut doc = Document::new(60, 40, chitrakar_color::ColorMode::Rgb);
+        let rid = doc.add_resource(20, 20, [255u8, 0, 0, 255].repeat(400));
+        let root = doc.root();
+        let mut raster = chitrakar_doc::RasterRef {
+            resource_id: rid,
+            width: 20,
+            height: 20,
+            corners: None,
+        };
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(chitrakar_doc::Node::raster("sign", raster.clone())),
+        })
+        .unwrap();
+        let plain = String::from_utf8_lossy(&export_pdf_document(&doc).unwrap()).to_string();
+        assert!(plain.contains("/Width 20 /Height 20"), "placed as itself");
+        let id = doc.children_of(root).unwrap()[0];
+        raster.corners = Some([[0.0, 0.0], [40.0, 0.0], [30.0, 20.0], [10.0, 20.0]]);
+        doc.apply(chitrakar_doc::Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Raster(raster)),
+        })
+        .unwrap();
+        let warped = String::from_utf8_lossy(&export_pdf_document(&doc).unwrap()).to_string();
+        assert!(
+            !warped.contains("/Width 20 /Height 20"),
+            "not placed as its rectangle"
+        );
+        assert_eq!(
+            content_of(&export_pdf_document(&doc).unwrap())
+                .matches(" Do")
+                .count(),
+            1
+        );
+    }
 
     fn red_and_clear() -> Vec<LinearRgba> {
         vec![
@@ -3090,6 +3235,7 @@ mod tests {
                     resource_id: res,
                     width: 2,
                     height: 1,
+                    corners: None,
                 },
             ),
             [0.0, 0.0],

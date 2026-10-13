@@ -1328,6 +1328,7 @@ body {
    its corner, so its size is the stylesheet's business alone — which is
    what lets a finger have bigger ones than a mouse. */
 .handle,
+.warp-pin,
 .anchor,
 .curve-handle,
 .rot-handle,
@@ -1363,6 +1364,24 @@ body {
 
 .handle.se {
   cursor: nwse-resize;
+}
+
+/* A picture's own corner, once it has moved off its box: round, so it
+   is not taken for one of the box's square handles. */
+.warp-pin {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  pointer-events: auto;
+  touch-action: none;
+  cursor: move;
+}
+
+.warp-outline polygon {
+  stroke-dasharray: 3 3;
 }
 
 /* The sides' middles: slimmer than a corner, lying along their side. */

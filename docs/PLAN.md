@@ -1291,6 +1291,46 @@ without reading anything else.*
     Ctrl-drag leans 26.6° with the bottom held and the picture leaning
     with it; one undo; a typed lean about the middle; a turn keeping the
     lean; two picked layers stretched by the one box.
+- **A picture's corners: distort and perspective.** Ctrl (⌘) on a
+  picture's corner handle moves that corner of the picture on its own,
+  and the picture is laid onto the quad its four corners make. That is
+  Photoshop's Distort: a sign squared up, a screen put onto a photograph.
+  - **How it is stored.** `RasterRef::corners`, additive and absent from
+    every older file, holds where the four corners land in the layer's
+    own space. The picture is carried there by the one projective map
+    that takes its rectangle onto them (`chitrakar_doc::Projective`), so
+    straight lines in it stay straight. A quad that is not convex has no
+    such map and is drawn as the rectangle; a drag that would fold it
+    stops at the last quad that lay flat (`Session::corners_command`
+    refuses it). Once a corner has moved, each corner wears a round pin
+    to drag. Layer › Put the picture's corners back is one step.
+  - **The CPU** (`draw_raster_warped`) uses the same texels and bilinear
+    tap as an upright picture. The footprint is read at each pixel from
+    the map's own slope, since a perspective shrinks the far end more
+    than the near. Its taps sit a texel apart, not two: at 4.9 texels a
+    pixel, three taps two apart left a fine checker a third uncancelled
+    (the test squeezes 64 texels into 13 pixels so no pixel lands on a
+    texel edge by luck, and catches it). Edges are covered by exact area,
+    and the box, the dirty region and hit-testing are the quad's.
+  - **The GPU** hands a warped picture back to the CPU.
+  - **Export.** An SVG gets the pixels it covers (`warped_pixels`),
+    placed where the quad is; a PDF draws it as the page draws it.
+  - **Two audit finds on the way, both fixed.**
+    - `opaque_page` made every colour opaque but not a picture's own
+      see-through texels. Two by two they never made a flat stretch for
+      an audit to read; laid across a quad they do, and a reader mixing
+      in sRGB parts from the engine there.
+    - A copy of a blended layer that goes to a PDF as pixels landed
+      Normal, its original's blend lost; it lands by that blend now
+      (`landing_blend`, tested against ghostscript).
+  - **The random pages** give a fifth of their pictures corners, drawn
+    from a stream forked off the page's own so every older page is the
+    page it was. A first version drew from the shared stream, reshuffled
+    every page after it, and turned up older exporter differences that
+    had nothing to do with corners.
+  - **Tests.** Smoke 9o13: a Ctrl-drag lays the picture on a trapezoid;
+    pins appear; a pin moves a corner alone; a fold is refused; undo;
+    the menu row and its undo.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
