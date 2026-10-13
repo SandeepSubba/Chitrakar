@@ -3311,6 +3311,39 @@ mod tests {
             )),
         })
         .unwrap();
+        // And a photo filter whose glass is the same entry.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "a glass",
+                Adjustment::PhotoFilter {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.45,
+                        b: 0.8,
+                        a: 1.0,
+                    }
+                    .standing_for("ink"),
+                    density: 0.4,
+                    preserve_luminosity: true,
+                },
+            )),
+        })
+        .unwrap();
+        let glass = doc.children_of(root).unwrap()[1];
+        let glass_red = |doc: &Document| {
+            let NodeKind::Adjustment(Adjustment::PhotoFilter { color, .. }) =
+                &doc.node(glass).unwrap().kind
+            else {
+                panic!("the glass is a photo filter");
+            };
+            match *color.flat() {
+                chitrakar_color::AuthoredColor::Srgb { r, .. } => r,
+                _ => panic!("the glass is an sRGB colour"),
+            }
+        };
+        assert!((glass_red(&doc) - 0.2).abs() < 1e-6);
         let id = doc.children_of(root).unwrap()[0];
         let far = |doc: &Document| {
             let NodeKind::Adjustment(Adjustment::GradientMap { stops }) =
@@ -3347,6 +3380,10 @@ mod tests {
             (after[0] - 0.9).abs() < 1e-6 && (after[2] - 0.1).abs() < 1e-6,
             "a stop standing for the palette entry has to follow it when \
              it moves: {after:?}"
+        );
+        assert!(
+            (glass_red(&doc) - 0.9).abs() < 1e-6,
+            "and so does a photo filter's glass"
         );
     }
 

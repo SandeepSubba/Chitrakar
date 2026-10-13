@@ -795,6 +795,28 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             let b = dot(vec3f(q.w, e.x, e.y), c);
             return max(vec3f(r, g, b), vec3f(0.0));
         }
+        // Photo filter: the colour through a glass of `p.yzw`, mixed back
+        // in by `q.x` on the values a device shows (what is above white
+        // through it in light); with `q.y` set, the brightness it had,
+        // back, by a scale.
+        case 23: {
+            let inside = clamp(c, vec3f(0.0), vec3f(1.0));
+            let over = c - inside;
+            let s = vec3f(to_shown(inside.r), to_shown(inside.g), to_shown(inside.b));
+            let g = clamp(p.yzw, vec3f(0.0), vec3f(1.0));
+            let gs = vec3f(to_shown(g.r), to_shown(g.g), to_shown(g.b));
+            let m = s + (s * gs - s) * q.x;
+            let through = vec3f(to_light(m.r), to_light(m.g), to_light(m.b))
+                + over * (vec3f(1.0) + (p.yzw - vec3f(1.0)) * q.x);
+            if q.y > 0.5 {
+                let luma = vec3f(0.2126, 0.7152, 0.0722);
+                let now = dot(luma, through);
+                if now > 1e-6 {
+                    return through * (dot(luma, c) / now);
+                }
+            }
+            return through;
+        }
         default: {
             return c;
         }

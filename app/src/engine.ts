@@ -108,6 +108,16 @@ export type Adjustment =
   /** White or black by the brightness a pixel shows at, against
    * `level` (0..=1). */
   | { Threshold: { level: number } }
+  /** A coloured glass: every colour multiplied by `color` in light and
+   * mixed back in by `density` (0..=1); with `preserve_luminosity` each
+   * pixel keeps its brightness. */
+  | {
+      PhotoFilter: {
+        color: AuthoredColor;
+        density: number;
+        preserve_luminosity: boolean;
+      };
+    }
   /** Each channel made again from all three, in light: `red` is how
    * much of the red, green and blue that went in makes the red that
    * comes out (each -2..=2, not normalized), with `constant` added

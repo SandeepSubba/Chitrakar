@@ -9357,6 +9357,9 @@ pub struct CurveLuts {
 /// shape to it belongs here.
 pub enum Prepared {
     Curves(CurveLuts),
+    /// A photo filter's glass, resolved: its colour in light, straight,
+    /// and how strongly it is laid (`photo_filter_glass`).
+    Glass([f32; 3], f32),
     /// A gradient map's ramp, resolved, put in order and read off into a
     /// table. Resolving is also where a CMYK document's stops go through
     /// its press profile, which is the one place the document is still
@@ -9424,6 +9427,10 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
         Adjustment::Curves { .. } => Some(Prepared::Curves(curve_lut_of(adj))),
         Adjustment::GradientMap { stops } => {
             RampLut::of(&sorted_ramp(stops, |c| resolve_color(doc, c))).map(Prepared::Ramp)
+        }
+        Adjustment::PhotoFilter { color, density, .. } => {
+            let (glass, k) = photo_filter_glass(resolve_color(doc, color), *density);
+            Some(Prepared::Glass(glass, k))
         }
         _ => None,
     }
@@ -9590,6 +9597,22 @@ pub fn channel_mix(
         }
     });
     (m, k)
+}
+
+/// A photo filter's glass from its resolved colour and its density: the
+/// colour straight, in light, and how strongly it is laid — the density
+/// held to 0..=1 and thinned by the colour's own alpha. A number that is
+/// no number lays no glass. Both renderers lay it by this.
+pub fn photo_filter_glass(color: LinearRgba, density: f32) -> ([f32; 3], f32) {
+    let a = color.a.clamp(0.0, 1.0);
+    let straight = |v: f32| if a > 1e-6 { (v / a).max(0.0) } else { 1.0 };
+    let glass = [straight(color.r), straight(color.g), straight(color.b)];
+    let k = if density.is_finite() && glass.iter().all(|v| v.is_finite()) {
+        density.clamp(0.0, 1.0) * a
+    } else {
+        0.0
+    };
+    (glass, k)
 }
 
 /// The brightness a threshold turns white at, held to 0..=1; a number
@@ -9924,6 +9947,46 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 chitrakar_color::srgb_to_linear((s * steps).round() / steps)
             };
             (f(r), f(g), f(b))
+        }
+        Adjustment::PhotoFilter {
+            color,
+            density,
+            preserve_luminosity,
+        } => {
+            let (glass, k) = match ready {
+                Some(Prepared::Glass(glass, k)) => (*glass, *k),
+                _ => photo_filter_glass(to_working(color), *density),
+            };
+            // The colour through the glass, mixed back in by how strongly
+            // the glass is laid: on the values a device shows, where a
+            // density is judged, and what is above white through the
+            // glass in light.
+            let f = |v: f32, g: f32| {
+                let inside = v.clamp(0.0, 1.0);
+                let over = v - inside;
+                let s = chitrakar_color::linear_to_srgb(inside);
+                let gs = chitrakar_color::linear_to_srgb(g.clamp(0.0, 1.0));
+                chitrakar_color::srgb_to_linear(s + (s * gs - s) * k) + over * (1.0 + (g - 1.0) * k)
+            };
+            let (nr, ng, nb) = (f(r, glass[0]), f(g, glass[1]), f(b, glass[2]));
+            if !*preserve_luminosity {
+                (nr, ng, nb)
+            } else {
+                // The brightness it had, back: a scale, which keeps the
+                // colour the glass gave it.
+                let luma = |r: f32, g: f32, b: f32| {
+                    chitrakar_doc::LUMA[0] * r
+                        + chitrakar_doc::LUMA[1] * g
+                        + chitrakar_doc::LUMA[2] * b
+                };
+                let (was, now) = (luma(r, g, b), luma(nr, ng, nb));
+                if now > 1e-6 {
+                    let s = was / now;
+                    (nr * s, ng * s, nb * s)
+                } else {
+                    (nr, ng, nb)
+                }
+            }
         }
         Adjustment::ChannelMixer {
             red,
@@ -15868,6 +15931,84 @@ mod tests {
             .unwrap();
         }
         assert_eq!(filter_reach(&doc), u32::MAX);
+    }
+
+    /// A photo filter multiplies every colour by its glass, in light, and
+    /// mixes that back in by its density; keeping brightness scales the
+    /// result back to the brightness it had; the glass's alpha thins it;
+    /// and the glass resolved for a pass is the glass resolved here.
+    #[test]
+    fn a_photo_filter_lays_a_coloured_glass() {
+        let px = |r: f32, g: f32, b: f32| LinearRgba { r, g, b, a: 1.0 };
+        let amber = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 1.0,
+        };
+        let glass = |color: AuthoredColor, density: f32, keep: bool| Adjustment::PhotoFilter {
+            color,
+            density,
+            preserve_luminosity: keep,
+        };
+        let of = |adj: &Adjustment, p: LinearRgba| {
+            let o = apply_adjustment(adj, None, p);
+            [o.r, o.g, o.b]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        let half = chitrakar_color::srgb_to_linear(0.5);
+        // White through the whole glass is the glass.
+        assert!(near(
+            of(&glass(amber.clone(), 1.0, false), px(1.0, 1.0, 1.0)),
+            [1.0, half, 0.0]
+        ));
+        // Half the density is half way, as shown: a channel at a shown
+        // 0.8 through a shown half glass is a shown 0.6.
+        let c = px(0.6, 0.4, 0.2);
+        let shown = chitrakar_color::srgb_to_linear;
+        let got = of(
+            &glass(amber.clone(), 0.5, false),
+            px(shown(0.8), shown(0.8), shown(0.8)),
+        );
+        assert!(
+            (chitrakar_color::linear_to_srgb(got[1]) - 0.6).abs() < 1e-4,
+            "{got:?}"
+        );
+        assert!(
+            (got[0] - shown(0.8)).abs() < 1e-5
+                && (chitrakar_color::linear_to_srgb(got[2]) - 0.4).abs() < 1e-4
+        );
+        // None at all is the identity, and so is a number that is none.
+        assert!(near(
+            of(&glass(amber.clone(), 0.0, false), c),
+            [0.6, 0.4, 0.2]
+        ));
+        assert!(near(
+            of(&glass(amber.clone(), f32::NAN, false), c),
+            [0.6, 0.4, 0.2]
+        ));
+        // Kept, the brightness is what it was and the colour has moved.
+        let luma = |v: [f32; 3]| v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722;
+        let kept = of(&glass(amber.clone(), 0.8, true), c);
+        assert!((luma(kept) - luma([0.6, 0.4, 0.2])).abs() < 1e-5);
+        assert!(kept[0] / kept[2] > 0.6 / 0.2 * 1.5, "warmer: {kept:?}");
+        // A glass at half alpha is a glass at half the density.
+        let thin = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 0.5,
+        };
+        assert!(near(
+            of(&glass(thin, 1.0, false), c),
+            of(&glass(amber.clone(), 0.5, false), c)
+        ));
+        // What a pass prepares is what is worked out without one.
+        let doc = Document::new(4, 4, ColorMode::Rgb);
+        let adj = glass(amber, 0.7, true);
+        let ready = prepare(&doc, &adj);
+        let o = apply_adjustment(&adj, ready.as_ref(), c);
+        assert!(near([o.r, o.g, o.b], of(&adj, c)));
     }
 
     /// A channel mixer makes each channel again from all three, in

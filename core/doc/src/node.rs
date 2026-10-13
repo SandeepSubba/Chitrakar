@@ -845,6 +845,29 @@ pub enum Adjustment {
         #[serde(default)]
         monochrome: bool,
     },
+    /// A coloured glass held in front of the lens: every colour multiplied
+    /// by `color` and mixed back in by `density` (0..=1) — a warming
+    /// amber, a cooling blue, the green of an old print. With
+    /// `preserve_luminosity` each pixel keeps the brightness it had, so
+    /// the glass changes its colour and not its exposure; without, a
+    /// filter darkens as a real one does.
+    ///
+    /// The multiplying is on the values a device shows, where a density
+    /// is judged: in light a quarter of an amber glass over white comes
+    /// out all but white once its brightness is put back, because the
+    /// tint lands where light is spread thinnest on the eye. What is
+    /// above white goes through the glass in light. The brightness kept
+    /// is light's.
+    ///
+    /// The colour is a colour like any other on the page — it can stand
+    /// for a palette entry, and it goes through a CMYK document's press
+    /// profile — and its alpha thins the glass as density does.
+    PhotoFilter {
+        color: AuthoredColor,
+        density: f32,
+        #[serde(default)]
+        preserve_luminosity: bool,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709
@@ -1465,9 +1488,10 @@ pub struct Mask {
 impl Adjustment {
     /// Every colour written inside an adjustment.
     ///
-    /// Fifteen of the sixteen are read as numbers. The gradient map is
+    /// Fifteen of the seventeen are read as numbers. The gradient map is
     /// not: it *is* a ramp of colours, and one of them can stand for a
-    /// palette entry like any other. Matched kind by kind rather than
+    /// palette entry like any other. Nor is the photo filter, whose glass
+    /// is a colour. Matched kind by kind rather than
     /// with a catch-all, so that a new adjustment holding a colour does
     /// not compile until it says so — which is the promise
     /// `Node::each_color_mut` makes and did not keep.
@@ -1478,6 +1502,7 @@ impl Adjustment {
                     f(&mut stop.color);
                 }
             }
+            Adjustment::PhotoFilter { color, .. } => f(color),
             Adjustment::BrightnessContrast { .. }
             | Adjustment::Exposure { .. }
             | Adjustment::HueSaturation { .. }

@@ -1331,6 +1331,27 @@ without reading anything else.*
   - **Tests.** Smoke 9o13: a Ctrl-drag lays the picture on a trapezoid;
     pins appear; a pin moves a corner alone; a fold is refused; undo;
     the menu row and its undo.
+- **Photo filter.** Layer › Add adjustment › Photo filter is a coloured
+  glass in front of the lens (`Adjustment::PhotoFilter`): every colour
+  multiplied by the glass and mixed back in by a density, with "Keep
+  brightness" scaling each pixel back to the brightness it had, in light.
+  It opens as Photoshop's warming filter at 25%; Warming, Cooling, Sepia
+  and Green are a press away, and any other glass is the colour well's.
+  - **Shown values.** The multiply is on the values a device shows,
+    where a density is judged. The first version multiplied in light,
+    and a quarter of an amber glass over white came out (255, 251, 243)
+    once its brightness was put back: the tint landed where light is
+    spread thinnest on the eye. It is (255, 251, 213) now. What is above
+    white goes through the glass in light.
+  - **The glass is a colour like any other.** It can stand for a palette
+    entry and follows it (the walk's own test catches it left out), it
+    goes through a CMYK document's press profile (resolved in `prepare`,
+    as a gradient map's stops are), and its alpha thins it as density
+    does (`photo_filter_glass`, which both renderers lay by).
+  - **The GPU** draws it as kind 23.
+  - **Tests.** The random pages make half their channel mixers photo
+    filters, from a forked stream, so no other page moves. Smoke 9o14
+    covers it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

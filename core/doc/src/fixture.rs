@@ -2361,12 +2361,28 @@ impl Rng {
                             } else {
                                 [0.0; 3]
                             };
-                            Adjustment::ChannelMixer {
+                            let mixer = Adjustment::ChannelMixer {
                                 red,
                                 green,
                                 blue,
                                 constant,
                                 monochrome: self.chance(4),
+                            };
+                            // Half of them a photo filter instead, drawn
+                            // from a stream forked off this one, so no
+                            // other page moves: a glass of any colour,
+                            // sometimes see-through, either way about
+                            // brightness.
+                            let mut side = Rng((self.0 ^ 0x5851_f42d_4c95_7f2d) | 1);
+                            if side.chance(2) {
+                                let alpha = side.between(0.5, 1.0);
+                                Adjustment::PhotoFilter {
+                                    color: side.color(alpha),
+                                    density: side.between(0.1, 1.0),
+                                    preserve_luminosity: side.chance(2),
+                                }
+                            } else {
+                                mixer
                             }
                         }
                         _ => {

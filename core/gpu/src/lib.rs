@@ -4653,6 +4653,22 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             [21.0, chitrakar_render::threshold_level(*level), 0.0, 0.0],
             [0.0; 4],
         ),
+        A::PhotoFilter {
+            preserve_luminosity,
+            ..
+        } => {
+            // The glass is resolved where a CMYK document's press profile
+            // is to hand, as a gradient map's stops are.
+            let Some(chitrakar_render::Prepared::Glass(glass, k)) =
+                chitrakar_render::prepare(doc, adj)
+            else {
+                return None;
+            };
+            plain(
+                [23.0, glass[0], glass[1], glass[2]],
+                [k, if *preserve_luminosity { 1.0 } else { 0.0 }, 0.0, 0.0],
+            )
+        }
         A::ChannelMixer {
             red,
             green,
@@ -9068,6 +9084,26 @@ mod tests {
                 blue: [1.0; 3],
                 constant: [0.0; 3],
                 monochrome: true,
+            },
+            A::PhotoFilter {
+                color: AuthoredColor::Srgb {
+                    r: 0.93,
+                    g: 0.54,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                density: 0.6,
+                preserve_luminosity: false,
+            },
+            A::PhotoFilter {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.45,
+                    b: 0.9,
+                    a: 0.8,
+                },
+                density: 0.5,
+                preserve_luminosity: true,
             },
         ];
         for adj in known {

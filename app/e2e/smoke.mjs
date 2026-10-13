@@ -7520,6 +7520,49 @@ assert(
   assert(await blue(330, 105), "which is one step too");
 }
 
+// 9o14. Photo filter: a coloured glass. It opens as the warming filter,
+// keeping the brightness; taken to full density without keeping it,
+// white through the glass is the glass; a press picks another.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#ffffff");
+  await pickTool("Rect");
+  await page.mouse.move(...at(20, 20));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const white = () => canvasPixel(100, 100);
+  const near = (p, want, tol = 3) => p.slice(0, 3).every((v, i) => Math.abs(v - want[i]) <= tol);
+  assert(near(await white(), [255, 255, 255]), "a white patch to look through");
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "photo-filter");
+  await page.waitForTimeout(300);
+  let p = await white();
+  assert(p[0] > p[2] + 40, `the warming filter warms white (${p})`);
+  await page.locator(".panel ul li", { hasText: "Photo filter" }).click();
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator('.curve-channels button.active', { hasText: "Warming" }).count()) === 1,
+    "and says which glass it is",
+  );
+  await page.locator('input[aria-label="Keep brightness"]').uncheck();
+  await setSlider("Density", 1);
+  await page.waitForTimeout(300);
+  p = await white();
+  assert(near(p, [0xec, 0x8a, 0x00]), `white through the whole glass is the glass (${p})`);
+  await page.locator(".curve-channels button", { hasText: "Cooling" }).click();
+  await page.waitForTimeout(300);
+  p = await white();
+  assert(near(p, [0x00, 0x6d, 0xff]), `and through another, that one (${p})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(near(await white(), [0xec, 0x8a, 0x00]), "undo puts the warming glass back");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

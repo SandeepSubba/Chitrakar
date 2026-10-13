@@ -4415,6 +4415,20 @@ export function App() {
         },
       },
     },
+    "photo-filter": {
+      name: "Photo filter",
+      kind: {
+        Adjustment: {
+          PhotoFilter: {
+            // Photoshop's warming filter (85), at the strength it opens
+            // at, keeping the exposure where it was.
+            color: { Srgb: { r: 0.925, g: 0.541, b: 0, a: 1 } },
+            density: 0.25,
+            preserve_luminosity: true,
+          },
+        },
+      },
+    },
     "channel-mixer": {
       name: "Channel mixer",
       kind: {
@@ -12335,6 +12349,64 @@ function KindProps({
                   wrap({
                     ColorBalance: { ...p, preserve_luminosity: e.target.checked },
                   }),
+                  false,
+                )
+              }
+              aria-label="Keep brightness"
+            />
+            Keep brightness
+          </label>
+        </>
+      );
+    }
+    if ("PhotoFilter" in adj) {
+      const p = adj.PhotoFilter;
+      // The usual glasses, a press away; any other is the colour well's.
+      const glasses: [string, string][] = [
+        ["Warming", "#ec8a00"],
+        ["Cooling", "#006dff"],
+        ["Sepia", "#ac7a33"],
+        ["Green", "#19c919"],
+      ];
+      const authoredOf = (hex: string) => (cmyk ? hexToCmykColor(hex) : hexColor(hex));
+      return (
+        <>
+          <label className="row">
+            Glass
+            <input
+              type="color"
+              value={colorToHex(p.color)}
+              onChange={(e) =>
+                onEdit(wrap({ PhotoFilter: { ...p, color: authoredOf(e.target.value) } }), true)
+              }
+              onBlur={onGestureEnd}
+              aria-label="Filter colour"
+            />
+          </label>
+          <div className="curve-channels" role="group" aria-label="Filters">
+            {glasses.map(([name, hex]) => (
+              <button
+                key={name}
+                type="button"
+                className={colorToHex(p.color) === hex ? "active" : ""}
+                onClick={() =>
+                  onEdit(wrap({ PhotoFilter: { ...p, color: authoredOf(hex) } }), false)
+                }
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {slider("Density", p.density, 0, 1, 0.01, (v) =>
+            wrap({ PhotoFilter: { ...p, density: v } }),
+          )}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.preserve_luminosity}
+              onChange={(e) =>
+                onEdit(
+                  wrap({ PhotoFilter: { ...p, preserve_luminosity: e.target.checked } }),
                   false,
                 )
               }
