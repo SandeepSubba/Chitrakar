@@ -726,6 +726,27 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
     })
 }
 
+/// How far, in document units, any layer's effects reach past the layer
+/// — the furthest a shadow, an outline or an inner shadow is drawn from
+/// what casts it. A window onto the page drawn without that much room
+/// past its own edge cuts what lies beyond it out of the effects inside
+/// it: a shadow at the window's edge that came and went as the window
+/// was panned.
+pub fn effects_reach(doc: &Document) -> f32 {
+    doc.nodes()
+        .filter(|(_, node)| node.visible && !node.effects.is_empty())
+        .map(|(id, node)| {
+            let reach = node
+                .effects
+                .iter()
+                .map(Effect::reach)
+                .fold(0.0f32, f32::max);
+            reach * max_scale(ancestor_space(doc, *id))
+        })
+        .filter(|r| r.is_finite())
+        .fold(0.0f32, f32::max)
+}
+
 /// How far, in pixels, the document's filter stack can carry a change:
 /// the summed sample reach of every filter layer (sequential filters
 /// compound). A region render whose clip is padded by this much computes

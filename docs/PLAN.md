@@ -1352,6 +1352,42 @@ without reading anything else.*
   - **Tests.** The random pages make half their channel mixers photo
     filters, from a forked stream, so no other page moves. Smoke 9o14
     covers it.
+- **A window shows the page's own pixels, effects and all.** Zoomed in,
+  a shadow, an outline or a blur at the edge of the window came and went
+  as the window was panned across it. The window was drawn only to its
+  own edge, and a layer's surface for its effects stops at the
+  destination's edge, so whatever lay past the window was cut out of
+  every effect inside it (the test finds the outline 0.39 covered on the
+  page and nothing in the window).
+  - **The fix.** `render_cached` now draws a margin past the window: the
+    filters' reach, as before, and twice the furthest any visible effect
+    is drawn from what casts it (`chitrakar_render::effects_reach`),
+    never more than 1024 px. It goes into a scratch surface moved over by
+    the margin, and only the window is kept. The page's own edge still
+    stops what is drawn. Twice the reach, because a cut at the reach
+    itself meets the last of a blur's tail.
+  - **Tested** (`a_window_shows_the_effects_of_what_is_past_its_edge`):
+    at 1× and 2×, a window panned so a bar with a shadow and an outline
+    runs off its edge equals the page there. Without the margin it does
+    not.
+  - **Tried first, and backed out: casting from past the page's own
+    edge.** That would let a shape running off the page throw its shadow
+    back across it, as an SVG reader draws it; the SVG coverage audit
+    found that on pages a fixture change had reshuffled. Done for a
+    single layer's surface it works (a shape alone matches the same
+    scene on a larger page, cut back). But a group, a copy or a masked
+    layer is drawn through more than one surface, and every one would
+    have to reach past the edge together. Wrapping a layer in a group
+    and unwrapping it then moved the page by up to 0.009, and the wrap
+    audit caught it.
+  - **Still open.**
+    - That audit's configuration is not alone: a plain shadowed shape in
+      a group, wrapped and unwrapped near the page's edge, already
+      differs by 0.009 with the old rule. The page's edge is the world's
+      edge for effects today, consistently or not quite.
+    - Making every surface reach past it together, and an SVG export
+      that clips an effected layer to the page so readers agree in the
+      meantime, is the follow-up.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

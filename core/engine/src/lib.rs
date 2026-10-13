@@ -6188,6 +6188,25 @@ impl Session {
                 // against stale surroundings, is discarded. The reach is a
                 // document-space figure, so it scales with the view too.
                 let pad = (chitrakar_render::filter_reach(&self.doc) as f32 * scale).ceil() as u32;
+                // And what lies past the window's own edge has to be drawn
+                // too, as far as anything inside the window could read it:
+                // a filter's reach, and twice the furthest any effect is
+                // drawn from what casts it (twice, since a cut at the reach
+                // itself meets the last of a blur's tail). A window drawn
+                // only to its own edge cut whatever was past it out of
+                // every shadow and outline and blur inside it — a shadow
+                // that came and went as the window was panned. Never more
+                // than a margin no layer a person draws needs, since a
+                // reach can come from a file saying anything.
+                const PAST_THE_WINDOW: u32 = 1024;
+                let effects = chitrakar_render::effects_reach(&self.doc) * scale;
+                let past = if effects > 0.0 {
+                    ((effects * 2.0).ceil() as u32).saturating_add(2)
+                } else {
+                    0
+                }
+                .max(pad)
+                .min(PAST_THE_WINDOW);
                 // Less than the page: one layer on its own, or the
                 // picture under the work. Neither has a filter stack
                 // left under it to reach across, so neither wants the
@@ -6202,20 +6221,37 @@ impl Session {
                         self.showing,
                     )?;
                     self.pixels_recomputed += clip.area();
-                } else if pad == 0 {
+                } else if past == 0 {
                     let cache = self.cache.as_mut().unwrap();
                     chitrakar_render::render_region_at(&self.doc, cache, clip, view)?;
                     self.pixels_recomputed += clip.area();
                 } else {
+                    // A scratch surface the window's size and `past` more
+                    // on every side, the view moved over by `past` to
+                    // match, so the region and the ring round it — past
+                    // the window's edge too — are worked out together and
+                    // only the region is kept. The page's own edge still
+                    // stops what is drawn: past it there is nothing.
+                    let (sw, sh) = (w + 2 * past, h + 2 * past);
+                    if self.scratch.as_ref().map(|s| (s.width, s.height)) != Some((sw, sh)) {
+                        self.scratch = Some(Surface::new(sw, sh));
+                    }
+                    let scratch = self.scratch.as_mut().unwrap();
+                    let shifted = Transform::translation(past as f32, past as f32).compose(view);
                     let compute = ClipRect {
-                        x0: clip.x0.saturating_sub(pad),
-                        y0: clip.y0.saturating_sub(pad),
-                        x1: (clip.x1 + pad).min(w),
-                        y1: (clip.y1 + pad).min(h),
+                        x0: clip.x0,
+                        y0: clip.y0,
+                        x1: clip.x1 + 2 * past,
+                        y1: clip.y1 + 2 * past,
                     };
-                    let scratch = self.scratch.get_or_insert_with(|| Surface::new(w, h));
-                    chitrakar_render::render_region_at(&self.doc, scratch, compute, view)?;
-                    self.cache.as_mut().unwrap().copy_region_from(scratch, clip);
+                    chitrakar_render::render_region_at(&self.doc, scratch, compute, shifted)?;
+                    let cache = self.cache.as_mut().unwrap();
+                    for y in clip.y0..clip.y1 {
+                        let from = (((y + past) * sw + clip.x0 + past) as usize)
+                            ..(((y + past) * sw + clip.x1 + past) as usize);
+                        let to = ((y * w + clip.x0) as usize)..((y * w + clip.x1) as usize);
+                        cache.pixels[to].copy_from_slice(&scratch.pixels[from]);
+                    }
                     self.pixels_recomputed += compute.area();
                 }
                 Ok((self.cache.as_ref().unwrap(), Some(clip)))
@@ -7933,6 +7969,87 @@ mod tests {
         assert_eq!(s.get(50, 50).a, 1.0, "and the page itself is painted");
         assert_eq!(s.get(19, 40).a, 0.0, "the page's left edge is respected");
         assert_eq!(s.get(21, 40).a, 1.0, "just inside it, painted");
+    }
+
+    /// A window shows the page's own pixels, effects and all: a shape
+    /// running off the window's edge throws its shadow and its outline
+    /// back into the window from the part of it past the edge, as it does
+    /// on the page. Drawn only to its own edge, the window cut that part
+    /// out of them, and a shadow came and went as the window was panned
+    /// across it.
+    #[test]
+    fn a_window_shows_the_effects_of_what_is_past_its_edge() {
+        let mut session = Session::new(60, 40, ColorMode::Rgb);
+        let id = add_rect(&mut session, "bar", 30.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(28.0, 6.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetEffects {
+                id,
+                effects: vec![
+                    chitrakar_doc::Effect::DropShadow {
+                        dx: -6.0,
+                        dy: 8.0,
+                        blur: 1.5,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 0.8,
+                    },
+                    chitrakar_doc::Effect::Outline {
+                        width: 3.0,
+                        color: AuthoredColor::Srgb {
+                            r: 0.9,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        },
+                        opacity: 1.0,
+                    },
+                ],
+            })
+            .unwrap();
+        for scale in [1.0f32, 2.0] {
+            // The whole page at this scale, the reference.
+            let (pw, ph) = ((60.0 * scale) as u32, (40.0 * scale) as u32);
+            let mut page = Surface::new(pw, ph);
+            chitrakar_render::render_region_at(
+                session.document(),
+                &mut page,
+                chitrakar_render::ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: pw,
+                    y1: ph,
+                },
+                Transform {
+                    a: scale,
+                    d: scale,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            // A window onto it, panned so the bar runs off its right edge.
+            let (wx, ww) = ((10.0 * scale) as u32, (25.0 * scale) as u32);
+            session.set_viewport(scale, -(wx as f32), 0.0, ww, ph);
+            let (frame, _) = session.render_cached().unwrap();
+            for y in 0..ph {
+                for x in 0..ww {
+                    let (a, b) = (frame.get(x, y), page.get(x + wx, y));
+                    assert!(
+                        (a.r - b.r).abs() < 1e-4 && (a.a - b.a).abs() < 1e-4,
+                        "at {scale}x the window at ({x}, {y}) shows {a:?} where the page has {b:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
